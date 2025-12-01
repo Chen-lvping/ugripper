@@ -1,3 +1,0 @@
-/home/radxa/proj/dm_imu_alone/build/CMakeFiles/dm_imu.dir
-/home/radxa/proj/dm_imu_alone/build/CMakeFiles/edit_cache.dir
-/home/radxa/proj/dm_imu_alone/build/CMakeFiles/rebuild_cache.dir

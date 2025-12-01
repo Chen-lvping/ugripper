@@ -1,1 +1,0 @@
-/usr/bin/c++ CMakeFiles/dm_imu.dir/src/main.cpp.o CMakeFiles/dm_imu.dir/src/imu_driver.cpp.o CMakeFiles/dm_imu.dir/src/bsp_crc.cpp.o -o dm_imu  -lserialport -lpthread 
