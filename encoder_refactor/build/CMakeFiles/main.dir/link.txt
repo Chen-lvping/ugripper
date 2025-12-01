@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/main.dir/src/main.cpp.o CMakeFiles/main.dir/src/bsp_crc.cpp.o CMakeFiles/main.dir/src/encoder_driver.cpp.o -o main  /usr/lib/aarch64-linux-gnu/libserialport.so 

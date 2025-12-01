@@ -1,0 +1,1 @@
+/usr/bin/c++ CMakeFiles/crc_test.dir/test/crc_test.cpp.o CMakeFiles/crc_test.dir/src/bsp_crc.cpp.o -o crc_test 

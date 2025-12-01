@@ -1,0 +1,4 @@
+/home/radxa/proj/encoder_refactor/build/CMakeFiles/main.dir
+/home/radxa/proj/encoder_refactor/build/CMakeFiles/crc_test.dir
+/home/radxa/proj/encoder_refactor/build/CMakeFiles/edit_cache.dir
+/home/radxa/proj/encoder_refactor/build/CMakeFiles/rebuild_cache.dir
