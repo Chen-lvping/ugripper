@@ -245,14 +245,29 @@ class TripleCameraRecorder:
 def main():
     parser = argparse.ArgumentParser(description='三相机同步录制工具 (PyAV版)')
     parser.add_argument('-d', '--duration', type=int, required=True, help='录制时长(秒)')
-    parser.add_argument('-o', '--output', type=str, default='triple_camera_videos', help='输出目录')
+    parser.add_argument('-o', '--output', type=str, default='raw_data', help='输出目录')
+    parser.add_argument('--device-id', type=str, default='ugripper_001', help='设备ID')
     
     args = parser.parse_args()
     
-    # 生成带时间戳的输出目录
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    output_dir = os.path.join(args.output, timestamp)
+    # 生成 episode 目录: episode_<date>_<deviceid>_<id>
+    date_str = datetime.now().strftime('%Y%m%d')
     
+    # 自动获取下一个 episode ID
+    os.makedirs(args.output, exist_ok=True)
+    existing = [d for d in os.listdir(args.output) 
+               if d.startswith('episode_') and os.path.isdir(os.path.join(args.output, d))]
+    episode_id = 0
+    for d in existing:
+        parts = d.split('_')
+        if len(parts) >= 4:
+            try:
+                episode_id = max(episode_id, int(parts[-1]) + 1)
+            except ValueError:
+                pass
+    
+    output_dir = os.path.join(args.output, f'episode_{date_str}_{args.device_id}_{episode_id:04d}')
+
     # 相机配置
     configs = [
         {
@@ -260,21 +275,24 @@ def main():
             'width': 1920,
             'height': 1080,
             'fps': 60,
-            'output': os.path.join(output_dir, f'camera0_1080p_{timestamp}.mkv')
+            'name': 'cam',
+            'output': os.path.join(output_dir, 'cam.mkv')
         },
         {
             'index': 2,
             'width': 640,
             'height': 480,
             'fps': 120,
-            'output': os.path.join(output_dir, f'camera2_480p_{timestamp}.mkv')
+            'name': 'tact_left',
+            'output': os.path.join(output_dir, 'tact_left.mkv')
         },
         {
             'index': 4,
             'width': 640,
             'height': 480,
             'fps': 120,
-            'output': os.path.join(output_dir, f'camera4_480p_{timestamp}.mkv')
+            'name': 'tact_right',
+            'output': os.path.join(output_dir, 'tact_right.mkv')
         }
     ]
     
