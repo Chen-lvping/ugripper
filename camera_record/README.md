@@ -10,36 +10,45 @@ sudo cp 99-fixed-usb-map.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
+
 # 1. 定义变量
 DEVICE="/dev/data_disk"
 MOUNT_POINT="/mnt/data_disk"
-# defaults: 默认权限
-# nofail: 启动时如果没有插U盘，不要报错卡死系统
-# x-systemd.automount: 关键参数，实现按需自动挂载
-# x-systemd.device-timeout=1: 查找设备超时时间设短一点，避免拖慢系统
-FSTAB_OPTS="defaults,nofail,x-systemd.automount,x-systemd.device-timeout=1"
+
+# 关键修改：
+# umask=000: 对于 FAT/exFAT/NTFS，允许所有用户读写 (777 权限)
+# rw: 显式指定读写
+# users: 允许非 root 用户挂载/卸载
+# nosuid,nodev: 安全选项，防止U盘上的可执行文件提权
+FSTAB_OPTS="defaults,nofail,x-systemd.automount,x-systemd.device-timeout=1,umask=000,rw,users,nosuid,nodev"
 FSTAB_LINE="$DEVICE $MOUNT_POINT auto $FSTAB_OPTS 0 0"
 
-# 2. 创建挂载点目录 (如果不存在)
+# 2. 创建挂载点目录 (如果不存在) 并放宽目录权限
 sudo mkdir -p "$MOUNT_POINT"
+sudo chmod 777 "$MOUNT_POINT"
 
-# 3. 修改 fstab (带防重复检查)
-# grep -qF: 查找固定字符串，-q表示静默模式
-# 如果 /etc/fstab 中找不到 DEVICE 字符串，则执行写入
-if ! grep -qF "$DEVICE" /etc/fstab; then
-    echo "正在添加配置到 /etc/fstab ..."
-    echo "$FSTAB_LINE" | sudo tee -a /etc/fstab
-else
-    echo "检测到 /etc/fstab 已存在该配置，跳过修改。"
+# 3. 清理旧配置 (防止重复或保留了旧的错误权限)
+# 使用 sed 删除所有包含 /mnt/data_disk 的行，确保干净
+if grep -qF "$MOUNT_POINT" /etc/fstab; then
+    echo "发现旧配置，正在清理..."
+    sudo sed -i "\|${MOUNT_POINT}|d" /etc/fstab
 fi
 
-# 4. 通知 systemd 重载配置
+# 4. 写入新配置
+echo "正在添加带写权限的配置到 /etc/fstab ..."
+echo "$FSTAB_LINE" | sudo tee -a /etc/fstab
+
+# 5. 重载 Systemd
+echo "重载系统配置..."
 sudo systemctl daemon-reload
 
-# 5. 重启相关挂载单元 (确保立即生效)
-sudo systemctl restart local-fs.target
+# 6. 重启挂载单元
+# 注意：如果设备正忙，这一步可能会报错，但不影响下次插入
+sudo systemctl restart local-fs.target 2>/dev/null || true
 
-echo "配置完成！"
+# 7. 强制重置 Automount (解决缓存问题)
+MOUNT_UNIT=$(systemd-escape -p --suffix=automount "$MOUNT_POINT")
+sudo systemctl restart "$MOUNT_UNIT"
 
 ```
 
