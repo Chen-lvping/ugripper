@@ -25,4 +25,4 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", \
 # 这里假设我们针对插在该口的设备生成的第一个分区 (sdX1)
 
 # 创建设备名软链接: /dev/usb_fixed_disk
-SUBSYSTEM=="block", KERNELS=="4-1", ENV{DEVTYPE}=="partition", SYMLINK+="data_disk", RUN+="/usr/local/bin/auto_mount_usb.sh %k"
+SUBSYSTEM=="block", KERNELS=="4-1", ENV{DEVTYPE}=="partition", SYMLINK+="data_disk"
