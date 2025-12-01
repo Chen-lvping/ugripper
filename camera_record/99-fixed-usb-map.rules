@@ -1,0 +1,28 @@
+# ========================
+# 1. 摄像头映射 (创建软链接)
+# ========================
+# 摄像头通常会生成两个节点(videoN, videoN+1)，我们通常只需要N
+# ===== Right Camera (Bus1 Port4) =====
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4:1.0", \
+  ATTR{name}=="N160MU2: N160MU2", \
+  SYMLINK+="right_tcam"
+
+# ===== Left Camera (Bus3 Port2) =====
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="3-1.2:1.0", \
+  ATTR{name}=="N160MU2: N160MU2", \
+  SYMLINK+="left_tcam"
+
+# ====================== THIRD CAMERA ======================
+# Any camera that is not N160MU2
+SUBSYSTEM=="video4linux", KERNEL=="video*", \
+  ATTR{name}!="N160MU2: N160MU2", \
+  SYMLINK+="third_cam"
+
+# ========================
+# 2. 存储设备映射 (U盘/硬盘)
+# ========================
+# 匹配指定端口上的块设备 (sd*)，并排除分区 (sd*1)，只针对主设备或特定分区
+# 这里假设我们针对插在该口的设备生成的第一个分区 (sdX1)
+
+# 创建设备名软链接: /dev/usb_fixed_disk
+SUBSYSTEM=="block", KERNELS=="4-1", ENV{DEVTYPE}=="partition", SYMLINK+="data_disk", RUN+="/usr/local/bin/auto_mount_usb.sh %k"

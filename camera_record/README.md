@@ -4,6 +4,7 @@
 
 ```bash
 pip install av
+sudo cp 99-fixed-usb-map.rules /etc/udev/rules.d/
 ```
 
 ## 使用方法
