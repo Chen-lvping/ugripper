@@ -134,88 +134,116 @@ int EncoderDriver::readDataNonBlocking(uint8_t *buffer, size_t bufferSize)
     }
 }
 
-void EncoderDriver::parseReceivedData(uint8_t *data, size_t size)
+int EncoderDriver::parseReceivedData(uint8_t *data, size_t size)
 {
-    uint8_t temp_frame[ENC_FRAME_MAX_LENGTH] = {0};
-    size_t index = 0;
-    int need_read = size - ENC_FRAME_MIN_LENGTH + 1;
+    // 成功解析的帧数量
+    int parsedFrames = 0;
 
-    // std::cout << "serial  exec ----------------------------------------------------------------------" << std::endl;
+    // 1. 追加到接收缓冲区
+    rxBuffer_.insert(rxBuffer_.end(), data, data + size);
 
-    while (need_read > 0)
+    // 2. 循环解析，直到 rxBuffer_ 不够一帧
+    while (rxBuffer_.size() >= ENC_FRAME_MIN_LENGTH)
     {
-        if ((data[index] == ENCODER_DEFAULT_ADDR) && (data[index + 1] == ENCODER_FUNC_RD))
+        // (1) 同步帧头 —— 地址必须匹配
+        if (rxBuffer_[0] != ENCODER_DEFAULT_ADDR)
         {
-            uint8_t len = data[index + 2];
+            rxBuffer_.erase(rxBuffer_.begin());
+            continue;
+        }
 
+        // (2) 功能码：RD / WR
+        uint8_t func = rxBuffer_[1];
+        if (func != ENCODER_FUNC_RD && func != ENCODER_FUNC_WR)
+        {
+            rxBuffer_.erase(rxBuffer_.begin());
+            continue;
+        }
+
+        // (3) Len
+        uint8_t len = rxBuffer_[2];
+
+        size_t frame_len = 0;
+
+        // 读取数据帧（pos/speed）
+        if (func == ENCODER_FUNC_RD)
+        {
+            if (!(len == 0x02 || len == 0x04))
+            {
+                rxBuffer_.erase(rxBuffer_.begin());
+                continue;
+            }
+
+            frame_len = len + 5; // addr + func + len + payload + crc(2)
+        }
+        // 写配置响应帧（固定 8 字节）
+        else if (func == ENCODER_FUNC_WR)
+        {
+            frame_len = 8;
+        }
+
+        // (4) 不够一帧 → 等下一次 read
+        if (rxBuffer_.size() < frame_len)
+            return parsedFrames;
+
+        // (5) CRC 校验
+        if (func == ENCODER_FUNC_RD)
+        {
+            if (!verifyCRC16(rxBuffer_.data(), 3 + len,
+                             rxBuffer_[3 + len], rxBuffer_[4 + len]))
+            {
+                rxBuffer_.erase(rxBuffer_.begin());
+                continue;
+            }
+        }
+
+        // ------------------ 解析有效帧 ------------------
+
+        if (func == ENCODER_FUNC_RD)
+        {
             if (len == 0x02)
             {
-                if (index + len + 5 <= size)
-                {
-                    memcpy(temp_frame, data + index, len + 5);
+                // Position
+                int16_t raw_pos = (rxBuffer_[3] << 8) | rxBuffer_[4];
+                int32_t pos = (raw_pos > ENCODER_PRECISION_HALF)
+                                  ? (raw_pos - ENCODER_PRECISION)
+                                  : raw_pos;
 
-                    if (verifyCRC16(temp_frame, 3 + len, temp_frame[3 + len], temp_frame[4 + len]))
-                    {
-                        int32_t temp_pos = (temp_frame[3] << 8) | temp_frame[4];
-
-                        std::lock_guard<std::mutex> lock(stateMutex_);
-                        currentState_.currentPosition = (temp_pos > ENCODER_PRECISION_HALF) ? (temp_pos - ENCODER_PRECISION) : temp_pos;
-                        currentState_.currentPositionRad = static_cast<float>(currentState_.currentPosition) *
-                                                           M_PI * 2.0f / ENCODER_PRECISION;
-
-                        need_read -= (4 + len);
-                        index += (4 + len);
-                        continue;
-                    }
-                    else
-                    {
-                        std::cout << "crc failed" << std::endl;
-                    }
-                }
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                currentState_.currentPosition = pos;
+                currentState_.currentPositionRad =
+                    pos * (2.0 * M_PI / ENCODER_PRECISION);
             }
             else if (len == 0x04)
             {
-                if (index + len + 5 <= size)
-                {
-                    memcpy(temp_frame, data + index, len + 5);
+                // Speed
+                int32_t raw_speed = 0;
+                memcpy(&raw_speed, &rxBuffer_[3], 4);
+                raw_speed = SW32(raw_speed);
 
-                    if (verifyCRC16(temp_frame, 3 + len, temp_frame[3 + len], temp_frame[4 + len]))
-                    {
-                        int32_t temp_data_32 = 0;
-                        memcpy(&temp_data_32, temp_frame + 3, sizeof(int32_t));
-
-                        std::lock_guard<std::mutex> lock(stateMutex_);
-                        currentState_.currentSpeed = SW32(temp_data_32) / 100;
-                        currentState_.currentSpeedRad = static_cast<float>(currentState_.currentSpeed) *
-                                                        M_PI * 2.0f / 60.0f;
-
-                        need_read -= (4 + len);
-                        index += (4 + len);
-                        continue;
-                    }
-                }
+                std::lock_guard<std::mutex> lock(stateMutex_);
+                currentState_.currentSpeed = raw_speed / 100.0f;
+                currentState_.currentSpeedRad =
+                    currentState_.currentSpeed * (2.0f * M_PI / 60.0f);
             }
         }
-        else if ((data[index] == ENCODER_DEFAULT_ADDR) &&
-                 (data[index + 1] == ENCODER_FUNC_WR) &&
-                 (data[index + 2] == 0x00))
+        else if (func == ENCODER_FUNC_WR)
         {
-            // Configuration response - log for debugging
-            if (index + 8 <= size)
-            {
-                memcpy(temp_frame, data + index, 8);
-                std::cout << "EncoderDriver " << name_ << " config response: ";
-                for (int i = 0; i < 8; i++)
-                {
-                    printf("%02x ", temp_frame[i]);
-                }
-                printf("\n");
-            }
+            // 写配置响应帧打印
+            std::cout << "EncoderDriver " << name_ << " config response: ";
+            for (size_t i = 0; i < frame_len; ++i)
+                printf("%02X ", rxBuffer_[i]);
+            printf("\n");
         }
 
-        index++;
-        need_read--;
+        // 解析成功 → 计数 +1
+        parsedFrames++;
+
+        // 删除已解析的帧
+        rxBuffer_.erase(rxBuffer_.begin(), rxBuffer_.begin() + frame_len);
     }
+
+    return parsedFrames;
 }
 
 bool EncoderDriver::getEncoderPosition()

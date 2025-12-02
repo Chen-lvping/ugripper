@@ -112,7 +112,7 @@ public:
 
     // Data reception parsing
     int readDataNonBlocking(uint8_t *buffer, size_t bufferSize);
-    void parseReceivedData(uint8_t *data, size_t size);
+    int parseReceivedData(uint8_t *data, size_t size);
 
     // Getters
     std::string getName() const { return name_; }
@@ -145,6 +145,7 @@ private:
     std::atomic<bool> isActive_{false};
 
     int debugCounter_ = 0;
+    std::vector<uint8_t> rxBuffer_;
 };
 
 #endif // ENCODER_DRIVER_HPP

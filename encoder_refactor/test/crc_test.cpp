@@ -1,6 +1,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cassert>
+#include "bsp_crc.h"
 
 // 测试数据
 const uint8_t test_data1[] = {0x01, 0x02, 0x03, 0x04, 0x05};
