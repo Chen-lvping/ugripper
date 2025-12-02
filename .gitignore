@@ -1,1 +1,28 @@
+# 子文件夹构建产物
 */build/
+# uv 虚拟环境
+.venv/
+# uv 缓存
+.uv/
+# 构建产物
+dist/
+build/
+*.egg-info/
+# Python 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+# 测试覆盖率报告
+.coverage
+htmlcov/
+# IDE 配置
+.idea/
+.vscode/
+*.swp
+*.swo
+# 环境变量文件（可选，若用 .env）
+.env
+# 文档构建产物
+docs/_site/
+checks.json
+.python-version
