@@ -120,13 +120,13 @@ void DmImu::sendCmd(const uint8_t *data, size_t len)
         sp_blocking_write(port_, data, len, 50);
 
         // 打印指令内容
-        std::cout << "[IMU] Sent command: ";
-        for (size_t j = 0; j < len; ++j)
-        {
-            std::cout << std::hex << std::uppercase << std::setw(2)
-                      << std::setfill('0') << static_cast<int>(data[j]) << " ";
-        }
-        std::cout << std::dec << std::endl; // 恢复十进制输出
+        // std::cout << "[IMU] Sent command: ";
+        // for (size_t j = 0; j < len; ++j)
+        // {
+        //     std::cout << std::hex << std::uppercase << std::setw(2)
+        //               << std::setfill('0') << static_cast<int>(data[j]) << " ";
+        // }
+        // std::cout << std::dec << std::endl; // 恢复十进制输出
         // 打印指令内容 end
 
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
