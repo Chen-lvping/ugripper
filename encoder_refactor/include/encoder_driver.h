@@ -79,6 +79,13 @@ struct EncoderData
     LifeStatus linkSta;
 };
 
+enum class ConnectStatus
+{
+    SUCCESS,     // 编码器成功响应
+    SERIAL_FAIL, // 串口打开失败
+    NO_RESPONSE  // 编码器未响应
+};
+
 class EncoderDriver
 {
 public:
@@ -88,8 +95,9 @@ public:
     ~EncoderDriver();
 
     // Connection management
-    bool connect();
+    ConnectStatus connect();
     void disconnect();
+    void resetBaudrate(uint32_t baudrate);
     bool isConnected() const { return isConnected_; }
 
     // Device reset
@@ -103,7 +111,7 @@ public:
     // Configuration methods
     bool setRefactory();
     bool setRestart();
-    bool setBaudrate(uint16_t baudrate);
+    bool setBaudrate(uint32_t baudrate);
     bool setDeviceAddress(uint8_t addr);
     bool setRotationDirection(bool isInverted);
     bool setCurrentAsZero();

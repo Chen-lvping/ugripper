@@ -16,18 +16,16 @@ EncoderDriver::~EncoderDriver()
     disconnect();
 }
 
-bool EncoderDriver::connect()
+ConnectStatus EncoderDriver::connect()
 {
     if (isConnected_)
-    {
-        return true;
-    }
+        return ConnectStatus::SUCCESS;
 
     sp_return result = sp_get_port_by_name(port_.c_str(), &serialPort_);
     if (result != SP_OK)
     {
         std::cerr << "EncoderDriver: Cannot find port " << port_ << std::endl;
-        return false;
+        return ConnectStatus::SERIAL_FAIL;
     }
 
     result = sp_open(serialPort_, SP_MODE_READ_WRITE);
@@ -36,7 +34,7 @@ bool EncoderDriver::connect()
         std::cerr << "EncoderDriver: Cannot open port " << port_ << std::endl;
         sp_free_port(serialPort_);
         serialPort_ = nullptr;
-        return false;
+        return ConnectStatus::SERIAL_FAIL;
     }
 
     // Configure serial port
@@ -49,8 +47,25 @@ bool EncoderDriver::connect()
     isConnected_ = true;
     isActive_ = true;
 
-    std::cout << "EncoderDriver: Connected to " << port_ << " at " << baudrate_ << " baud" << std::endl;
-    return true;
+    std::cout << "EncoderDriver: Serial port opened at " << baudrate_ << " baud. Verifying encoder..." << std::endl;
+
+    // --- 验证编码器是否有响应 ---
+    uint8_t buf[256];
+    requestState(false);                                        // 发送请求指令
+    std::this_thread::sleep_for(std::chrono::milliseconds(50)); // 等待回复
+
+    int n = readDataNonBlocking(buf, sizeof(buf));
+
+    if (n == 7) // 根据你的指令帧长度判断
+    {
+        std::cout << "EncoderDriver: Encoder responded successfully." << std::endl;
+        return ConnectStatus::SUCCESS;
+    }
+    else
+    {
+        std::cerr << "EncoderDriver: No response from encoder." << std::endl;
+        return ConnectStatus::NO_RESPONSE;
+    }
 }
 
 void EncoderDriver::disconnect()
@@ -63,6 +78,11 @@ void EncoderDriver::disconnect()
     }
     isConnected_ = false;
     isActive_ = false;
+}
+
+void EncoderDriver::resetBaudrate(uint32_t baudrate)
+{
+    baudrate_ = baudrate;
 }
 
 bool EncoderDriver::sendToEncoder(uint8_t *data, uint8_t len)
@@ -324,13 +344,32 @@ bool EncoderDriver::setDeviceAddress(uint8_t addr)
     return setRestart();
 }
 
-bool EncoderDriver::setBaudrate(uint16_t baudrate)
+bool EncoderDriver::setBaudrate(uint32_t baudrate)
 {
-    uint8_t type = 4; // 115200 baud
-    // Add baudrate to type mapping as needed
+    uint8_t type = 0xFF; // 默认无效
 
-    if (type >= 5)
+    switch (baudrate)
     {
+    case 9600:
+        type = 0x00;
+        break;
+    case 19200:
+        type = 0x01;
+        break;
+    case 38400:
+        type = 0x02;
+        break;
+    case 57600:
+        type = 0x03;
+        break;
+    case 115200:
+        type = 0x04;
+        break;
+    case 1000000:
+        type = 0x07;
+        break;
+    default:
+        std::cerr << "Unsupported baudrate: " << baudrate << std::endl;
         return false;
     }
 
