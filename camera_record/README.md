@@ -11,44 +11,51 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger
 
 
-# 1. 定义变量
 DEVICE="/dev/data_disk"
 MOUNT_POINT="/mnt/data_disk"
 
-# 关键修改：
-# umask=000: 对于 FAT/exFAT/NTFS，允许所有用户读写 (777 权限)
-# rw: 显式指定读写
-# users: 允许非 root 用户挂载/卸载
-# nosuid,nodev: 安全选项，防止U盘上的可执行文件提权
-FSTAB_OPTS="defaults,nofail,x-systemd.automount,x-systemd.device-timeout=1,umask=000,rw,users,nosuid,nodev"
+# 挂载选项
+# umask=000: FAT/exFAT/NTFS 允许所有用户读写
+# rw: 显式读写
+# users: 普通用户可以挂载/卸载
+# nosuid,nodev: 防止 U 盘上可执行文件提权
+# x-systemd.automount: 使用 systemd 自动挂载
+# x-systemd.device-timeout=5s: 等待设备就绪
+# x-systemd.idle-timeout=10s: 空闲 10 秒自动卸载
+FSTAB_OPTS="defaults,nofail,x-systemd.automount,x-systemd.device-timeout=5s,x-systemd.idle-timeout=5s,umask=000,rw,users,nosuid,nodev"
+
+# 拼接 fstab 行
 FSTAB_LINE="$DEVICE $MOUNT_POINT auto $FSTAB_OPTS 0 0"
 
-# 2. 创建挂载点目录 (如果不存在) 并放宽目录权限
+echo "=== 配置挂载点 ==="
+# 创建挂载点目录并设置权限
 sudo mkdir -p "$MOUNT_POINT"
 sudo chmod 777 "$MOUNT_POINT"
 
-# 3. 清理旧配置 (防止重复或保留了旧的错误权限)
-# 使用 sed 删除所有包含 /mnt/data_disk 的行，确保干净
+echo "=== 清理旧配置 ==="
+# 删除旧的 /mnt/data_disk 配置行
 if grep -qF "$MOUNT_POINT" /etc/fstab; then
-    echo "发现旧配置，正在清理..."
     sudo sed -i "\|${MOUNT_POINT}|d" /etc/fstab
 fi
 
-# 4. 写入新配置
-echo "正在添加带写权限的配置到 /etc/fstab ..."
+echo "=== 添加新配置到 /etc/fstab ==="
 echo "$FSTAB_LINE" | sudo tee -a /etc/fstab
 
-# 5. 重载 Systemd
-echo "重载系统配置..."
+echo "=== 重载 systemd 配置 ==="
 sudo systemctl daemon-reload
 
-# 6. 重启挂载单元
-# 注意：如果设备正忙，这一步可能会报错，但不影响下次插入
+echo "=== 重启挂载单元 ==="
+# 先重启 local-fs.target 以加载新的 fstab（安全起见）
 sudo systemctl restart local-fs.target 2>/dev/null || true
 
-# 7. 强制重置 Automount (解决缓存问题)
+# 重启 automount 单元，确保 idle-timeout 生效
 MOUNT_UNIT=$(systemd-escape -p --suffix=automount "$MOUNT_POINT")
 sudo systemctl restart "$MOUNT_UNIT"
+
+echo "=== 检查自动卸载设置 ==="
+systemctl show "$MOUNT_UNIT" | grep -E 'Idle|Timeout'
+
+echo "挂载配置完成。请插入设备并测试自动挂载与自动卸载功能。"
 
 ```
 
