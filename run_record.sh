@@ -89,7 +89,7 @@ trap cleanup SIGINT
 # 6. 启动程序并传递路径
 # 启动相机 (后台运行 &)
 echo "Starting Camera..."
-uv run ./camera_record/triple_camera_record.py
+uv run ./camera_record/triple_camera_record.py --output-dir "$TARGET_DIR" &
 PID_CAM=$!
 
 # 启动 Encoder (后台运行 &)
