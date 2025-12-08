@@ -132,7 +132,7 @@ int main(int argc, char *argv[])
 
     // 5. 初始化 IMU
     // 注意：根据你的实际波特率调整，这里保留原代码的 921600
-    dmbot_serial::DmImu imu("/dev/ttyS0", 921600, dmbot_serial::DmImu::ProtocolType::RS485);
+    dmbot_serial::DmImu imu("/dev/ttyS2", 921600, dmbot_serial::DmImu::ProtocolType::RS485);
     imu.start();
 
     std::cout << "Starting IMU monitoring (1kHz logging)... Press Ctrl+C to stop." << std::endl;
