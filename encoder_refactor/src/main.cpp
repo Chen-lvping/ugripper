@@ -25,9 +25,9 @@ void signalHandler(int signum)
 void encoderReadThreadFunc(EncoderDriver *encoder)
 {
     uint8_t readBuf[256];
+    int dataCount = 0;
 #ifdef DEBUG_READ_FREQ
     auto lastTime = std::chrono::steady_clock::now();
-    int dataCount = 0;
 #endif
     while (!g_stopFlag.load())
     {
