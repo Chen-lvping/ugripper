@@ -6,6 +6,10 @@
 - 使用 mjpeg_rkmpp 硬件解码
 - 使用 hevc_rkmpp 硬件编码
 - 文件体积减少 90%+，CPU 占用极低
+
+停止方式:
+- 外部信号: kill -2 <PID> 或 kill -15 <PID>
+- 指定时长: -d 参数
 """
 
 import argparse
@@ -68,13 +72,16 @@ class FFmpegHardwareEncoder:
         try:
             self.process.stdin.write(bytes(packet))
         except BrokenPipeError:
-            print(f"[{os.getpid()}] 错误: 编码器管道已断开")
+            pass  # 静默处理，避免退出时报错
 
     def close(self):
         """关闭编码器"""
         if self.process:
             if self.process.stdin:
-                self.process.stdin.close()
+                try:
+                    self.process.stdin.close()
+                except:
+                    pass
             self.process.wait()
             print(f"[{os.getpid()}] 硬件编码器已关闭")
 
@@ -88,6 +95,13 @@ def _record_camera_process(config, barrier, start_event, stop_event, first_frame
     duration = config["duration"]
     output_file = config["output"]
     csv_file = os.path.splitext(output_file)[0] + ".csv"
+
+    # 子进程也需要处理信号，设置 stop_event
+    def child_signal_handler(signum, frame):
+        stop_event.set()
+
+    signal.signal(signal.SIGINT, child_signal_handler)
+    signal.signal(signal.SIGTERM, child_signal_handler)
 
     print(f"[{cam_name}] 初始化 ({device_path})...")
 
@@ -154,7 +168,7 @@ def _record_camera_process(config, barrier, start_event, stop_event, first_frame
 
         # === 主录制循环 ===
         for packet in input_container.demux(input_stream):
-            # 检查退出标志
+            # 检查退出标志 (响应外部信号)
             if stop_event.is_set():
                 break
 
@@ -246,12 +260,13 @@ class TripleCameraRecorder:
 
         self.global_start_time = 0.0
 
-        # 信号处理: 捕获 Shell 脚本发送的 kill -2 (SIGINT)
+        # 信号处理: 捕获 Shell 脚本发送的 kill -2 (SIGINT) 或 kill -15 (SIGTERM)
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
     def _signal_handler(self, signum, frame):
-        print(f"\n[Camera] 收到信号 {signum}，正在安全停止录制...")
+        sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+        print(f"\n[Camera] 收到 {sig_name} 信号，正在安全停止录制...")
         self.stop_event.set()
 
     def start_all(self, configs: list, duration: int = 0):
@@ -260,6 +275,11 @@ class TripleCameraRecorder:
         print("三相机同步录制系统 (H.265 硬件加速)")
         print("=" * 70)
         print(f"输出目录: {self.output_dir}")
+        print(f"主进程 PID: {os.getpid()}  (Shell可用 kill -2 {os.getpid()} 停止)")
+        if duration > 0:
+            print(f"录制时长: {duration} 秒")
+        else:
+            print("录制时长: 无限制 (等待外部信号停止)")
         print("=" * 70)
 
         for config in configs:
@@ -296,8 +316,8 @@ class TripleCameraRecorder:
                     p.terminate()
             return
 
-        print("主进程: 清空缓冲区 (2秒)...")
-        time.sleep(2)
+        print("主进程: 清空缓冲区 (0.5秒)...")
+        time.sleep(0.5)
 
         self.global_start_time = time.time()
         self.start_event.set()
@@ -308,7 +328,7 @@ class TripleCameraRecorder:
             while any(p.is_alive() for p in self.processes):
                 elapsed = time.time() - self.global_start_time
 
-                # 检查是否要求停止
+                # 检查是否要求停止 (外部信号触发)
                 if self.stop_event.is_set():
                     break
 
@@ -318,7 +338,7 @@ class TripleCameraRecorder:
                     self.stop_event.set()
                     break
 
-                time.sleep(0.5)
+                time.sleep(0.1)  # 更快响应信号
 
         except KeyboardInterrupt:
             print("\n主进程捕获中断...")
@@ -382,7 +402,6 @@ class TripleCameraRecorder:
                 print(
                     f"  {cam_name:<12}: 平均间隔={avg:.0f}us (目标{expected:.0f}), 抖动={jitter:.2f}%"
                 )
-                print(f"  {cam_name}: 数据已保存至 {csv_file}")
 
 
 def main():
@@ -390,9 +409,14 @@ def main():
         description="三相机同步录制工具 (H.265 硬件加速版)"
     )
 
-    # 必须参数: 录制时长
+    # 可选参数: 录制时长 (不指定则无限录制，等待外部信号停止)
     parser.add_argument(
-        "-d", "--duration", type=int, required=False, default=0, help="录制时长(秒)"
+        "-d",
+        "--duration",
+        type=int,
+        required=False,
+        default=0,
+        help="录制时长(秒)，0表示无限制",
     )
 
     # 必须参数: 输出目录 (由 Shell 脚本传入完整路径)
