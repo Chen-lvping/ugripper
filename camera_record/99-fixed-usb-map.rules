@@ -15,9 +15,10 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="3-1.2:1.0", \
   SYMLINK+="left_tcam"
 
 # ====================== THIRD CAMERA ======================
-# Any camera that is not N160MU2
+# USB Camera3 (Realtek Semiconductor Corp.)
+# Vendor ID: 0bda, Product ID: 5858
 SUBSYSTEM=="video4linux", KERNEL=="video*", \
-  ATTR{name}!="N160MU2: N160MU2", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5858", \
   ATTR{index}=="0", \
   SYMLINK+="third_cam"
 
