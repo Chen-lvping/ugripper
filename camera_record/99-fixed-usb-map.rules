@@ -23,10 +23,11 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", \
   SYMLINK+="third_cam"
 
 # ========================
-# 2. 存储设备映射 (U盘/硬盘)
+# 2. 存储设备映射 (U盘 / 硬盘)
 # ========================
-# 匹配指定端口上的块设备 (sd*)，并排除分区 (sd*1)，只针对主设备或特定分区
-# 这里假设我们针对插在该口的设备生成的第一个分区 (sdX1)
+# 固定 USB 物理端口：4-1
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", \
+KERNELS=="4-1", ENV{ID_FS_USAGE}=="filesystem", \
+RUN+="/bin/sh -c '/usr/bin/systemctl reset-failed mnt-data_disk.mount; /usr/bin/systemd-mount --no-block --collect -o uid=1000,gid=1000,noatime $devnode /mnt/data_disk'"
 
-# 创建设备名软链接: /dev/data_disk
-SUBSYSTEM=="block", KERNELS=="4-1", ENV{DEVTYPE}=="partition", SYMLINK+="data_disk"
+
