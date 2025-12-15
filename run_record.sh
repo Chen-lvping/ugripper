@@ -89,7 +89,7 @@ start_recording() {
     echo "Starting processes..."
     
     # 启动相机
-    uv run ./camera_record/triple_camera_record.py --output-dir "$TARGET_DIR" &
+    uv run ./camera_record/triple_camera_record_h265.py --output-dir "$TARGET_DIR" &
     PID_CAM=$!
     
     # 启动 Encoder
