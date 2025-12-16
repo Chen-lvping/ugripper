@@ -26,3 +26,7 @@ htmlcov/
 docs/_site/
 checks.json
 .python-version
+
+#模型及数据集文件
+ASA/model/
+ASA/audio/
