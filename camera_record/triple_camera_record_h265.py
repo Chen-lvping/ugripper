@@ -56,11 +56,11 @@ def _record_direct_nv12(config, barrier, start_event, stop_event, first_frame_in
         "-i",
         device_path,
         "-vf",
-        "showinfo",  # <--- 关键：showinfo 会把 PTS 打印到日志
+        "fps=60,showinfo",  # <--- 关键：showinfo 会把 PTS 打印到日志
         "-c:v",
         "hevc_rkmpp",
         "-rc_mode",
-        "AVBR",
+        "VBR",
         "-b:v",
         NORMALRATE_1080p,
         "-minrate",
