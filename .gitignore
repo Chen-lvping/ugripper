@@ -28,5 +28,5 @@ checks.json
 .python-version
 
 #模型及数据集文件
-ASA/model/
-ASA/audio/
+ASR/model/
+ASR/audio/
