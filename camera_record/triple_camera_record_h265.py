@@ -25,25 +25,134 @@ from multiprocessing import Barrier, Event, Manager, Process
 import av
 
 MINRATE_1080p = "4M"
-NORMALRATE_1080p = "10M"
-MAXRATE_1080p = "30M"
+NORMALRATE_1080p = "40M"
+MAXRATE_1080p = "60M"
+NORMALRATE_480p = "10"
+MAXRATE_480p = "20M"
 
-MAXRATE_480p = "8M"
+BOOT_TIME_OFFSET_US = int((time.time() - time.monotonic()) * 1_000_000)
+
+
+def get_precise_system_time(pts_us):
+    """
+    将 FFmpeg 的整数 PTS (微秒)(monotonic_time) 转换为高精度系统时间戳
+    """
+    return BOOT_TIME_OFFSET_US + pts_us
+
+
+# 通用日志解析函数
+def parse_ffmpeg_log_loop(process, cam_name, start_event, stop_event, first_frame_info):
+    """
+    统一的 FFmpeg 日志解析循环
+    只解析整数 PTS，确保微秒级精度
+    """
+    # 匹配整数 PTS: "pts: 12345678"
+    # 示例: [Parsed_showinfo...] n: 1 pts: 352213 pts_time:0.352213 ...
+    pts_pattern = re.compile(r"pts:\s*(\d+)\s+pts_time:")
+
+    first_pts_recorded = False
+    frames_count = 0
+
+    while not stop_event.is_set():
+        if process.poll() is not None:
+            print(f"[{cam_name}] 错误: FFmpeg 进程意外退出")
+            break
+
+        line = process.stderr.readline()
+        if not line:
+            if process.poll() is not None:
+                break
+            continue
+
+        if "showinfo" in line:
+            match = pts_pattern.search(line)
+            if match:
+                kernel_pts_abs_us = int(match.group(1))
+                # print(f"[{cam_name}] 捕获帧 PTS: {kernel_pts_abs_us} (us)")
+
+                frames_count += 1
+                # 首帧锁定逻辑
+                if not first_pts_recorded:
+                    current_time = (
+                        get_precise_system_time(kernel_pts_abs_us) / 1000000.0
+                    )
+                    # 触发全局开始信号
+                    start_event.set()
+                    first_frame_info[cam_name] = {
+                        "kernel_pts_us": kernel_pts_abs_us,
+                        "dropped": 0,
+                        "sys_time_str": datetime.fromtimestamp(current_time).strftime(
+                            "%H:%M:%S.%f"
+                        ),
+                    }
+                    first_pts_recorded = True
+                    print(
+                        f"[{cam_name}] 首帧锁定: PTS={kernel_pts_abs_us} (us) | Sys={current_time:.6f}"
+                    )
+
+    return frames_count
 
 
 # ================================================================
-# 模式 A: 针对主相机 (NV12 Direct Mode + Log Parsing)
+# 通用进程执行器
+# ================================================================
+def _run_ffmpeg_process(
+    cmd, config, barrier, start_event, stop_event, first_frame_info
+):
+    cam_name = config["name"]
+    print(f"[{cam_name}] 启动 FFmpeg (CMD模式)...")
+
+    # 信号忽略，由 stop_event 控制
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+    process = None
+    try:
+        # 同步等待
+        print(f"[{cam_name}] 等待同步...")
+        if barrier:
+            try:
+                barrier.wait()
+            except Exception:
+                return
+
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1,
+        )
+        print(f"[{cam_name}] 录制中 (PID: {process.pid})")
+
+        # 进入统一的日志解析循环
+        frames = parse_ffmpeg_log_loop(
+            process, cam_name, start_event, stop_event, first_frame_info
+        )
+        print(f"[{cam_name}] 录制结束，总帧数: {frames}")
+
+    except Exception as e:
+        print(f"[{cam_name}] 异常: {e}")
+    finally:
+        if process:
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=3)
+            except:
+                process.kill()
+        print(f"[{cam_name}] 退出")
+
+
+# ================================================================
+# 模式 A: 主相机 (NV12) - 保持 FFmpeg Direct
 # ================================================================
 def _record_direct_nv12(config, barrier, start_event, stop_event, first_frame_info):
-    """
-    由于pyav打不开mipi相机，在这里专门处理主相机。
-    不使用 PyAV，直接运行 FFmpeg，通过分析 stderr 日志获取 PTS 写 CSV。
-    """
-    cam_name = config["name"]
-    device_path = config["device"]
     output_file = config["output"]
-    csv_file = os.path.splitext(output_file)[0] + ".csv"
+    device_path = config["device"]
 
+    # 注意滤镜顺序: 先 showinfo 获取原始 PTS，后 fps 重采样
     cmd = [
         "ffmpeg",
         "-f",
@@ -56,7 +165,7 @@ def _record_direct_nv12(config, barrier, start_event, stop_event, first_frame_in
         "-i",
         device_path,
         "-vf",
-        "fps=60,showinfo",  # <--- 关键：showinfo 会把 PTS 打印到日志
+        "showinfo,fps=60",  # <--- 关键：showinfo 会把 PTS 打印到日志,顺序不能错，不然pts会被覆盖
         "-c:v",
         "hevc_rkmpp",
         "-rc_mode",
@@ -75,366 +184,50 @@ def _record_direct_nv12(config, barrier, start_event, stop_event, first_frame_in
         "-y",
     ]
 
-    print(f"[{cam_name}] 启动 Direct FFmpeg (NV12)...")
-
-    # 信号处理
-    def child_signal_handler(signum, frame):
-        stop_event.set()
-
-    signal.signal(signal.SIGINT, child_signal_handler)
-    signal.signal(signal.SIGTERM, child_signal_handler)
-
-    process = None
-    csv_f = None
-
-    # 正则表达式匹配 FFmpeg showinfo 输出
-    # 示例: [Parsed_showinfo...] n:   1 pts:     72533 pts_time:1.20888 ...
-    pts_pattern = re.compile(r"n:\s*(\d+)\s*pts:\s*(\d+)\s*pts_time:\s*([\d\.]+)")
-
-    try:
-        # 1. 打开 CSV
-        csv_f = open(csv_file, "w", newline="", buffering=1)
-        csv_writer = csv.writer(csv_f)
-        csv_writer.writerow(
-            [
-                "frame_id",
-                "kernel_pts_us",  # 实际存储的是相对时间 (Rel PTS)
-                "kernel_pts_absolute_us",  # 绝对时间 (Abs PTS)
-                "kernel_interval_us",  # 帧间隔
-                "system_time",  # 抓取时的系统时间
-            ]
-        )
-
-        # 2. 同步等待
-        print(f"[{cam_name}] 就绪，等待同步...")
-        if barrier:
-            try:
-                barrier.wait()
-            except Exception as e:
-                if type(e).__name__ == "BrokenBarrierError":
-                    print("Barrier broken")
-                else:
-                    raise
-                return
-
-        # 3. 等待其他相机启动
-        time.sleep(0.5)
-
-        # 4. 启动进程 (捕获 stderr)
-        process = subprocess.Popen(
-            cmd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,  # 必须捕获 stderr
-            universal_newlines=True,  # 文本模式
-            bufsize=1,  # 行缓冲
-        )
-        print(f"[{cam_name}] 录制开始 (PID: {process.pid})")
-
-        # 5. 循环读取日志并提取 PTS
-        # 状态变量初始化
-        first_pts_recorded = False
-        first_kernel_pts_us = 0
-        last_rel_pts_us = 0
-        frames_count = 0
-
-        # 循环读取日志
-        while not stop_event.is_set():
-            if process.poll() is not None:
-                print(f"[{cam_name}] 错误: FFmpeg 进程意外退出")
-                break
-
-            line = process.stderr.readline()
-            if not line:
-                if process.poll() is not None:
-                    break
-                continue
-
-            if "showinfo" in line:
-                match = pts_pattern.search(line)
-                if match:
-                    # 解析数据
-                    # frame_n_raw = match.group(1) # FFmpeg 内部计数，可能不连续，建议用自己的计数器
-                    frames_count += 1
-                    kernel_pts_abs_us = int(match.group(2))
-                    # pts_time_sec = float(match.group(3))
-
-                    current_time = pts_to_system_time(kernel_pts_abs_us)
-
-                    # 首帧锁定逻辑
-                    if not first_pts_recorded:
-                        global_start_time = time.time()
-                        start_event.set()
-                        print(
-                            f"录制开始! 系统时间: {datetime.fromtimestamp(global_start_time)}"
-                        )
-                        first_kernel_pts_us = kernel_pts_abs_us
-                        first_frame_info[cam_name] = {
-                            "kernel_pts_us": kernel_pts_abs_us,
-                            "dropped": 0,
-                        }
-                        first_pts_recorded = True
-                        print(f"[{cam_name}] 首帧锁定: PTS={kernel_pts_abs_us}")
-
-                    # 计算相对时间 (Rel PTS)
-                    rel_pts_us = kernel_pts_abs_us - first_kernel_pts_us
-
-                    # 计算帧间隔 (Interval)
-                    if rel_pts_us == 0:
-                        interval_us = 0
-                    else:
-                        interval_us = rel_pts_us - last_rel_pts_us
-
-                    # 3. 写入统一格式的数据行
-                    # [frame_id, rel_pts, abs_pts, interval, sys_time]
-                    csv_writer.writerow(
-                        [
-                            match.group(
-                                1
-                            ),  # frame_id (从 ffmpeg 日志获取，可能会因为丢弃帧而不连续）也可以用frames_count
-                            rel_pts_us,  # kernel_pts_us
-                            kernel_pts_abs_us,  # kernel_pts_absolute_us
-                            interval_us,  # kernel_interval_us
-                            f"{current_time:.6f}",
-                        ]
-                    )
-
-                    last_rel_pts_us = rel_pts_us
-
-    except Exception as e:
-        print(f"[{cam_name}] 异常: {e}")
-    finally:
-        if csv_f:
-            csv_f.close()
-        if process and process.poll() is None:
-            print(f"[{cam_name}] 录制结束，总帧数: {frames_count}")
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutError:
-                process.kill()
-        print(f"[{cam_name}] 结束")
+    _run_ffmpeg_process(cmd, config, barrier, start_event, stop_event, first_frame_info)
 
 
 # ================================================================
-# 模式 B: 针对触觉相机 (MJPEG PyAV + Pipe Mode)
+# 模式 B: 触觉相机 (MJPEG) - [重构] 改为 FFmpeg Direct
 # ================================================================
-class FFmpegPipeEncoder:
-    """模式 B 专用的 Pipe 编码器"""
-
-    def __init__(self, output_file, config):
-        width, height, fps = config["width"], config["height"], config["fps"]
-        # 触觉相机码率
-        bitrate = MAXRATE_480p
-
-        self.cmd = [
-            "ffmpeg",
-            "-y",
-            "-r",
-            str(fps),
-            "-c:v",
-            "mjpeg_rkmpp",
-            "-f",
-            "mjpeg",
-            "-i",
-            "pipe:0",
-            "-c:v",
-            "hevc_rkmpp",
-            "-b:v",
-            bitrate,
-            "-maxrate",
-            bitrate,
-            "-bufsize",
-            str(int(bitrate[:-1]) * 2) + "M",
-            "-r",
-            str(fps),
-            output_file,
-        ]
-
-        self.process = subprocess.Popen(
-            self.cmd, stdin=subprocess.PIPE, stderr=subprocess.DEVNULL
-        )
-        print(f"[{os.getpid()}] 硬件编码器已启动: HEVC (H.265)")
-
-    def write(self, packet):
-        """写入原始 MJPEG 数据包"""
-        try:
-            self.process.stdin.write(bytes(packet))
-        except BrokenPipeError:
-            pass  # 静默处理，避免退出时报错
-
-    def close(self):
-        """关闭编码器"""
-        if self.process:
-            if self.process.stdin:
-                try:
-                    self.process.stdin.close()
-                except:
-                    pass
-            self.process.wait()
-            print(f"[{os.getpid()}] 硬件编码器已关闭")
-
-
-def _record_via_pyav_pipe(config, barrier, start_event, stop_event, first_frame_info):
+def _record_direct_mjpeg(config, barrier, start_event, stop_event, first_frame_info):
     """
-    触觉相机的原有逻辑: PyAV -> Pipe -> FFmpeg
+    使用 FFmpeg 硬件 MJPEG 解码 + H.265 硬件编码，直接从 MJPEG 到 H.265
+    不输出 NV12，减少 CPU 负担和延迟
     """
-    cam_name = config["name"]
-    device_path = config["device"]
-    width, height = config["width"], config["height"]
-    fps = config["fps"]
-    duration = config["duration"]
     output_file = config["output"]
-    csv_file = os.path.splitext(output_file)[0] + ".csv"
+    device_path = config["device"]
+    fps = config.get("fps", 120)
 
-    # 信号处理
-    def child_signal_handler(signum, frame):
-        stop_event.set()
-
-    signal.signal(signal.SIGINT, child_signal_handler)
-    signal.signal(signal.SIGTERM, child_signal_handler)
-
-    print(f"[{cam_name}] 初始化 ({device_path})...")
-
-    input_container = None
-    encoder = None
-    csv_f = None
-
-    try:
-        # 打开摄像头 (V4L2 + MJPEG)
-        input_container = av.open(
-            device_path,
-            format="v4l2",
-            options={
-                "framerate": str(fps),
-                "video_size": f"{width}x{height}",
-                "input_format": "mjpeg",
-            },
-        )
-        input_stream = input_container.streams.video[0]
-        time_base = float(input_stream.time_base)
-
-        # 检查实际分辨率
-        if input_stream.width != width or input_stream.height != height:
-            print(
-                f"[{cam_name}] 警告: 请求 {width}x{height}, 实际 {input_stream.width}x{input_stream.height}"
-            )
-
-        # 创建硬件编码器
-        encoder = FFmpegPipeEncoder(output_file, config)
-
-        csv_f = open(csv_file, "w", newline="", buffering=1)
-        csv_writer = csv.writer(csv_f)
-        csv_writer.writerow(
-            [
-                "frame_id",
-                "kernel_pts_us",
-                "kernel_pts_absolute_us",
-                "kernel_interval_us",
-                "system_time",
-            ]
-        )
-
-        print(f"[{cam_name}] 就绪，等待同步...")
-
-        # 同步屏障
-        if barrier:
-            try:
-                barrier.wait()
-            except Exception as e:
-                if type(e).__name__ == "BrokenBarrierError":
-                    print("Barrier broken")
-                else:
-                    raise
-                return
-
-        # 录制状态变量
-        frames_count = 0
-        first_kernel_pts_us = None
-        last_rel_pts_us = 0
-        dropped_frames = 0
-
-        # 新鲜帧检测参数
-        expected_interval_us = 1_000_000 // fps
-        min_fresh_interval_us = expected_interval_us * 0.5
-        last_system_time = None
-        found_fresh = False
-
-        # === 主录制循环 ===
-        for packet in input_container.demux(input_stream):
-            # 检查退出标志 (响应外部信号)
-            if stop_event.is_set():
-                break
-
-            if packet.pts is None:
-                continue
-
-            # 等待全局启动信号 (清空缓冲区阶段)
-            if not start_event.is_set():
-                continue
-
-            kernel_pts_us = int(packet.pts * time_base * 1_000_000)
-            current_time = pts_to_system_time(kernel_pts_us)
-
-            # --- 新鲜帧检测逻辑 ---
-            if not found_fresh:
-                if last_system_time is not None:
-                    sys_interval_us = (current_time - last_system_time) * 1_000_000
-                    if sys_interval_us >= min_fresh_interval_us:
-                        found_fresh = True
-                        first_kernel_pts_us = kernel_pts_us
-                        first_frame_info[cam_name] = {
-                            "kernel_pts_us": first_kernel_pts_us,
-                            "dropped": dropped_frames,
-                        }
-                        print(f"[{cam_name}] 首帧锁定: PTS={first_kernel_pts_us}")
-                    else:
-                        dropped_frames += 1
-                last_system_time = current_time
-                if not found_fresh:
-                    continue
-
-            rel_pts_us = kernel_pts_us - first_kernel_pts_us
-            interval_us = rel_pts_us - last_rel_pts_us if frames_count > 0 else 0
-
-            # 检查录制时长 (仅当 duration > 0 时)
-            if duration > 0 and rel_pts_us > duration * 1_000_000:
-                break
-
-            # 写入视频帧 (硬件编码)
-            encoder.write(packet)
-
-            # 写入 CSV
-            csv_writer.writerow(
-                [
-                    frames_count,
-                    rel_pts_us,
-                    kernel_pts_us,
-                    interval_us,
-                    f"{current_time:.6f}",
-                ]
-            )
-
-            last_rel_pts_us = rel_pts_us
-            frames_count += 1
-
-        print(f"[{cam_name}] 录制结束，总帧数: {frames_count}")
-
-    except Exception as e:
-        print(f"[{cam_name}] 错误: {e}")
-        import traceback
-
-        traceback.print_exc()
-        if barrier:
-            barrier.abort()
-    finally:
-        if csv_f:
-            csv_f.close()
-        if input_container:
-            input_container.close()
-        if encoder:
-            encoder.close()
-        print(f"[{cam_name}] 结束")
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-thread_queue_size",
+        "512",  # 输入队列缓冲
+        "-f",
+        "v4l2",
+        "-input_format",
+        "mjpeg",
+        "-framerate",
+        str(fps),
+        "-video_size",
+        f"{config['width']}x{config['height']}",
+        "-copyts",
+        "-i",
+        device_path,
+        "-vf",
+        f"showinfo,fps={fps}",
+        "-c:v",
+        "hevc_rkmpp",
+        "-rc_mode",
+        "VBR",
+        "-b:v",
+        MAXRATE_480p,
+        "-maxrate",
+        MAXRATE_480p,
+        output_file,
+    ]
+    _run_ffmpeg_process(cmd, config, barrier, start_event, stop_event, first_frame_info)
 
 
 # ================================================================
@@ -448,27 +241,7 @@ def _process_dispatch(config, barrier, start_event, stop_event, first_frame_info
         _record_direct_nv12(config, barrier, start_event, stop_event, first_frame_info)
     else:
         # 触觉相机: PyAV + Pipe
-        _record_via_pyav_pipe(
-            config, barrier, start_event, stop_event, first_frame_info
-        )
-
-
-def pts_to_system_time(kernel_pts_us):
-    """
-    将内核 PTS (微秒) 转换为 系统时间戳 (秒)
-    """
-    # 1. 获取当前时刻的 时间基准偏移量 (Offset)
-    # 原理: 当前系统时间 (Realtime) - 当前单调时间 (Monotonic) = 系统启动时刻的系统时间
-    # 注意: 在 Linux 上 V4L2 的 PTS 通常对应 time.monotonic()
-    boot_time_offset = time.time() - time.monotonic()
-
-    # 2. 将帧的内核 PTS 转换为秒
-    frame_monotonic_sec = kernel_pts_us / 1_000_000.0
-
-    # 3. 计算该帧的绝对系统时间
-    frame_system_time = frame_monotonic_sec + boot_time_offset
-
-    return frame_system_time
+        _record_direct_mjpeg(config, barrier, start_event, stop_event, first_frame_info)
 
 
 class TripleCameraRecorder:
@@ -602,36 +375,6 @@ class TripleCameraRecorder:
                     print(
                         f"  {cam_name:<12}: 延迟 +{offset_ms:.2f}ms (丢弃旧帧: {info['dropped']})"
                     )
-
-        print("\n【帧间隔稳定性】")
-        print("-" * 50)
-        for config in configs:
-            cam_name = config["name"]
-            fps = config["fps"]
-            csv_file = os.path.splitext(config["output"])[0] + ".csv"
-
-            if not os.path.exists(csv_file):
-                continue
-
-            intervals = []
-            try:
-                with open(csv_file, "r") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        val = int(row["kernel_interval_us"])
-                        if val > 0:
-                            intervals.append(val)
-            except Exception:
-                continue
-
-            if intervals:
-                avg = statistics.mean(intervals)
-                std = statistics.stdev(intervals) if len(intervals) > 1 else 0
-                expected = 1_000_000 / fps
-                jitter = (std / expected) * 100
-                print(
-                    f"  {cam_name:<12}: 平均间隔={avg:.0f}us (目标{expected:.0f}), 抖动={jitter:.2f}%"
-                )
 
 
 def main():
