@@ -7,7 +7,7 @@ cd "$script_dir" || exit 1
 # ================= 配置部分 =================
 CONFIG_FILE="./config/config.txt"
 DISK_DIR="/mnt/data_disk"
-DATA_ROOT="/mnt/data_disk/raw_data"
+DATA_ROOT="/mnt/data_disk/raw_data" 
 
 # GPIO 配置 (请根据实际情况修改)
 PIN_HIGH="PIN_32"   # 输出高电平,电源引脚不够了，用IO输出凑合一下
@@ -30,6 +30,10 @@ if [ -z "$device_id" ]; then
     exit 1
 fi
 
+DEVICE_MODEL=$(echo "$device_id" | awk -F_ '{print $1}')
+DEVICE_NUM=$(echo "$device_id" | awk -F_ '{print $2}')
+COLLECTOR=${collector:-"default_user"} # 缺省采集人员
+
 # 2. 检查硬盘挂载
 if ! mountpoint -q "$DISK_DIR"; then
     echo "Error: $DISK_DIR is NOT mounted!"
@@ -37,6 +41,83 @@ if ! mountpoint -q "$DISK_DIR"; then
 else
     echo "Disk OK: $DISK_DIR is mounted."
 fi
+
+# ================= 目录结构与元数据初始化 =================
+echo "Initializing Data Structure..."
+
+DIR_META="$DATA_ROOT/metadata"
+DIR_CALIB="$DATA_ROOT/calibration"
+DIR_DATA="$DATA_ROOT/data"
+
+mkdir -p "$DIR_META"
+mkdir -p "$DIR_CALIB"
+mkdir -p "$DIR_DATA"
+
+# 1. 生成 metadata
+META_FILE="$DIR_META/info.txt"
+if [ ! -f "$META_FILE" ]; then
+    echo "device_type: UMI" > "$META_FILE"
+    echo "device_model: $DEVICE_MODEL" >> "$META_FILE"
+    echo "device_id: $DEVICE_NUM" >> "$META_FILE"
+    echo "collector: $COLLECTOR" >> "$META_FILE"
+    echo "Metadata generated."
+fi
+
+# 2. 拷贝 calibration 文件
+# 从 ./config/fake*Calib.yaml 拷贝到 calibration/xxx.yaml
+if [ -f "./config/fakeCamCalib.yaml" ]; then
+    cp "./config/fakeCamCalib.yaml" "$DIR_CALIB/cam.yaml"
+fi
+if [ -f "./config/fakeEncoderCalib.yaml" ]; then
+    cp "./config/fakeEncoderCalib.yaml" "$DIR_CALIB/encoder.yaml"
+fi
+if [ -f "./config/fakeIMUCalib.yaml" ]; then
+    cp "./config/fakeIMUCalib.yaml" "$DIR_CALIB/imu.yaml"
+fi
+echo "Calibration files synced."
+
+# ================= 硬件序列号校验 (新增) =================
+check_camera_hardware() {
+    local dev_node=$1
+    local name=$2
+    local yaml_file="$DIR_CALIB/cam.yaml"
+    
+    echo "Checking $name ($dev_node)..."
+    
+    if [ ! -e "$dev_node" ]; then
+        echo "WARNING: Device $dev_node not found!"
+        return
+    fi
+
+    # 使用 udevadm 查找父级 USB 设备的 serial
+    # 逻辑：查找SUBSYSTEMS=="usb" 且 DRIVERS=="usb" 下的 ATTRS{serial}
+    # 注意：udevadm 输出是层级的，我们取第一个匹配到的 USB serial
+    local usb_serial=$(udevadm info --attribute-walk --name="$dev_node" | \
+                       grep -Pzo "(?s)SUBSYSTEMS==\"usb\".*?DRIVERS==\"usb\".*?ATTRS{serial}==\".*?\"" | \
+                       grep "ATTRS{serial}" | head -n 1 | awk -F'"' '{print $2}')
+
+    if [ -z "$usb_serial" ]; then
+        echo "WARNING: Could not read USB serial for $dev_node"
+        return
+    fi
+
+    # 读取 cam.yaml 中的序列号
+    # 暂时直接读取 yaml 里是否有该序列号字符串
+    
+    local yaml_serial_match=$(grep "$usb_serial" "$yaml_file")
+    
+    # 获取 yaml 里对应的预期 serial (这里简化处理，需根据实际yaml结构完善)
+    # 假设我们只检查 yaml 里是否存在这个序列号
+    if [ -z "$yaml_serial_match" ]; then
+        echo "WARNING: Serial $usb_serial for $dev_node NOT FOUND in $yaml_file!"
+    else
+        echo "  - Serial match OK: $usb_serial"
+    fi
+}
+
+# 执行校验
+check_camera_hardware "/dev/left_tcam" "Left Tactile"
+check_camera_hardware "/dev/right_tcam" "Right Tactile"
 
 # ================= GPIO 初始化 =================
 echo "Initializing GPIO..."
@@ -65,18 +146,22 @@ TARGET_DIR=""
 # 函数：计算新路径并创建文件夹
 prepare_directory() {
     local date_str=$(date +%Y%m%d)
-    mkdir -p "$DATA_ROOT"
-    
-    # 搜索最大ID
-    local last_id=$(ls "$DATA_ROOT" 2>/dev/null | grep "episode_${date_str}_${device_id}_" | awk -F_ '{print $NF}' | sort -n | tail -1)
-    
-    local new_id=0
+
+    # 搜索当天的最大序号（只根据日期前缀）
+    local last_id=$(find "$DIR_DATA" -maxdepth 1 -type d \
+        -name "episode_${date_str}_*" \
+        -printf "%f\n" | \
+        awk -F_ '{print $NF}' | \
+        grep -E '^[0-9]+$' | \
+        sort -n | tail -1)
+
+    local new_id=1
     if [ -n "$last_id" ]; then
         new_id=$((10#$last_id + 1))
     fi
-    
+
     local id_str=$(printf "%04d" "$new_id")
-    TARGET_DIR="${DATA_ROOT}/episode_${date_str}_${device_id}_${id_str}"
+    TARGET_DIR="${DIR_DATA}/episode_${date_str}_${id_str}"
     mkdir -p "$TARGET_DIR"
     
     echo "New recording session: $TARGET_DIR"
@@ -107,8 +192,8 @@ start_recording() {
 # 函数：停止所有录制进程
 stop_recording() {
     echo "Stopping processes..."
-    
-    # 发送 SIGINT (Ctrl+C) 信号
+
+    # 发送 SIGINT (Ctrl+C) 信号    
     if [ -n "$PID_CAM" ] && kill -0 $PID_CAM 2>/dev/null; then kill -2 $PID_CAM; fi
     if [ -n "$PID_ENC" ] && kill -0 $PID_ENC 2>/dev/null; then kill -2 $PID_ENC; fi
     if [ -n "$PID_IMU" ] && kill -0 $PID_IMU 2>/dev/null; then kill -2 $PID_IMU; fi
@@ -129,17 +214,17 @@ stop_recording() {
 cleanup() {
     echo ""
     echo "System exit requested."
-    
+
     if [ "$IS_RECORDING" = true ]; then
         stop_recording
     fi
-    
+
     # 关闭 输出置高 (杀掉 gpioset 进程，电平通常会恢复默认或输入态，视硬件而定)
     if [ -n "$PID_GPIO_HIGH" ]; then
         kill $PID_GPIO_HIGH 2>/dev/null
         echo "GPIO HIGH released."
     fi
-    
+
     exit 0
 }
 
