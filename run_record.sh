@@ -9,40 +9,78 @@ CONFIG_FILE="./config/config.txt"
 DISK_DIR="/mnt/data_disk"
 DATA_ROOT="/mnt/data_disk/raw_data" 
 
-# GPIO 配置 (请根据实际情况修改)
-PIN_HIGH="PIN_32"   # 输出高电平,电源引脚不够了，用IO输出凑合一下
-PIN_BTN="PIN_36"   # 按钮输入
-BTN_ACTIVE_LEVEL=1 # 0表示按下(低电平有效/上拉)，1表示按下(高电平有效/下拉)
-# 去抖参数
-DEBOUNCE_MS=0.03 # 30ms 去抖
-# ===========================================
+# --- LED 控制配置 (新增) ---
+LED_SCRIPT="./led_manager.py"
+LED_PIPE="/tmp/umi_led_pipe"
+
+# --- GPIO 配置 ---
+PIN_HIGH="PIN_32"   # 3.3V 输出
+PIN_BTN="PIN_36"    # 按钮输入
+BTN_ACTIVE_LEVEL=1  # 1表示按下
+DEBOUNCE_MS=0.03    # 30ms
+
+# ================= 状态机与 LED 通信模块 =================
+
+# 1. 创建命名管道 (如果不存在)
+if [ ! -p "$LED_PIPE" ]; then
+    mkfifo "$LED_PIPE"
+fi
+
+# 2. 启动 Python LED 管理器 (后台运行)
+if [ -f "$LED_SCRIPT" ]; then
+    echo "Starting LED Manager..."
+    python3 "$LED_SCRIPT" &
+    PID_LED_SCRIPT=$!
+    # 给 Python 一点时间初始化
+    sleep 0.5
+else
+    echo "Warning: LED script not found at $LED_SCRIPT"
+fi
+
+# 3. 定义发送状态的函数
+# 可选状态: INIT (蓝), READY (绿呼吸), RECORDING (红闪), ERROR (红快闪), EXIT (关)
+set_state() {
+    local state=$1
+    # 仅当管道存在时写入，& 放入后台防止阻塞 Bash
+    if [ -p "$LED_PIPE" ]; then
+        echo "$state" > "$LED_PIPE" &
+    fi
+}
+
+# 设置初始状态：初始化中
+set_state "INIT"
+
+# ================= 业务配置检查 =================
 
 # 1. 读取 Device ID
 if [ -f "$CONFIG_FILE" ]; then
     source "$CONFIG_FILE"
 else
     echo "Error: Configuration file $CONFIG_FILE not found!"
+    set_state "ERROR"
     exit 1
 fi
 
 if [ -z "$device_id" ]; then
     echo "Error: device_id not defined in config file."
+    set_state "ERROR"
     exit 1
 fi
 
 DEVICE_MODEL=$(echo "$device_id" | awk -F_ '{print $1}')
 DEVICE_NUM=$(echo "$device_id" | awk -F_ '{print $2}')
-COLLECTOR=${collector:-"default_user"} # 缺省采集人员
+COLLECTOR=${collector:-"default_user"}
 
 # 2. 检查硬盘挂载
 if ! mountpoint -q "$DISK_DIR"; then
     echo "Error: $DISK_DIR is NOT mounted!"
+    set_state "ERROR"
     exit 1
 else
     echo "Disk OK: $DISK_DIR is mounted."
 fi
 
-# ================= 目录结构与元数据初始化 =================
+# ================= 目录结构与元数据 =================
 echo "Initializing Data Structure..."
 
 DIR_META="$DATA_ROOT/metadata"
@@ -76,7 +114,7 @@ if [ -f "./config/fakeIMUCalib.yaml" ]; then
 fi
 echo "Calibration files synced."
 
-# ================= 硬件序列号校验 (新增) =================
+# ================= 硬件序列号校验 =================
 check_camera_hardware() {
     local dev_node=$1
     local name=$2
@@ -124,12 +162,12 @@ echo "Initializing GPIO..."
 
 # 获取引脚的控制器和偏移量
 if [ -z "$(gpiofind "$PIN_HIGH")" ] || [ -z "$(gpiofind "$PIN_BTN")" ]; then
-    echo "Error: Could not find GPIO pins. Check gpiofind."
+    echo "Error: Could not find GPIO pins."
+    set_state "ERROR"
     exit 1
 fi
 
-# 设置 输出引脚 高电平 (后台运行以保持电平)
-# 使用 -m signal (或 --mode=signal) 让 gpioset 等待信号而不立即退出，从而保持电平
+# 设置输出高电平
 gpioset -m signal $(gpiofind "$PIN_HIGH")=1 &
 PID_GPIO_HIGH=$!
 echo "GPIO $PIN_HIGH set to HIGH (PID: $PID_GPIO_HIGH)"
@@ -163,7 +201,7 @@ prepare_directory() {
     local id_str=$(printf "%04d" "$new_id")
     TARGET_DIR="${DIR_DATA}/episode_${date_str}_${id_str}"
     mkdir -p "$TARGET_DIR"
-    
+
     echo "New recording session: $TARGET_DIR"
 }
 
@@ -186,6 +224,10 @@ start_recording() {
     PID_IMU=$!
     
     IS_RECORDING=true
+    
+    # === 切换状态灯：录制中 (红闪) ===
+    set_state "RECORDING"
+    
     echo ">>> RECORDING STARTED [ PIDs: Cam=$PID_CAM Enc=$PID_ENC Imu=$PID_IMU ]"
 }
 
@@ -193,7 +235,7 @@ start_recording() {
 stop_recording() {
     echo "Stopping processes..."
 
-    # 发送 SIGINT (Ctrl+C) 信号    
+    # 发送 SIGINT (Ctrl+C) 信号
     if [ -n "$PID_CAM" ] && kill -0 $PID_CAM 2>/dev/null; then kill -2 $PID_CAM; fi
     if [ -n "$PID_ENC" ] && kill -0 $PID_ENC 2>/dev/null; then kill -2 $PID_ENC; fi
     if [ -n "$PID_IMU" ] && kill -0 $PID_IMU 2>/dev/null; then kill -2 $PID_IMU; fi
@@ -202,39 +244,55 @@ stop_recording() {
     wait $PID_CAM $PID_ENC $PID_IMU 2>/dev/null
     
     IS_RECORDING=false
+    
+    # === 切换状态灯：待机 (绿呼吸) ===
+    set_state "READY"
+    
     echo ">>> RECORDING STOPPED. Saved to $TARGET_DIR"
     
-    # 重置 PID
     PID_CAM=""
     PID_ENC=""
     PID_IMU=""
 }
 
-# 函数：清理并退出 (Ctrl+C 触发)
 cleanup() {
     echo ""
     echo "System exit requested."
 
+    # 1. 停止录制业务
     if [ "$IS_RECORDING" = true ]; then
         stop_recording
     fi
 
-    # 关闭 输出置高 (杀掉 gpioset 进程，电平通常会恢复默认或输入态，视硬件而定)
+    # 2. 释放 GPIO
     if [ -n "$PID_GPIO_HIGH" ]; then
         kill $PID_GPIO_HIGH 2>/dev/null
-        echo "GPIO HIGH released."
     fi
 
+    # 3. 关闭 LED (发送退出指令)
+    set_state "EXIT"
+    
+    # 确保 Python 脚本退出
+    if [ -n "$PID_LED_SCRIPT" ]; then
+        # 给它一点时间处理 EXIT 命令
+        sleep 0.2
+        kill $PID_LED_SCRIPT 2>/dev/null
+    fi
+
+    echo "Cleanup done."
     exit 0
 }
 
 # 捕获脚本自身的退出信号
 trap cleanup SIGINT SIGTERM
 
-# ================= 主循环 (按钮扫描) =================
+# ================= 主循环 =================
+
+# 初始化全部完成后，设为 READY (绿灯呼吸)
+set_state "READY"
 
 echo "=========================================="
-echo "System Ready. Press button on $PIN_BTN to Start/Stop."
+echo "System Ready. Press button to Start/Stop."
 echo "=========================================="
 
 while true; do
