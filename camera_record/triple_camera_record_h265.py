@@ -2,8 +2,8 @@
 """
 三相机同步录制工具 (H.265 硬件加速版 - 混合架构适配)
 
-- 触觉相机 (MJPEG): PyAV 读取 -> Pipe -> FFmpeg
-- 主相机 (NV12): 直接调用 FFmpeg (带 showinfo 滤镜) -> Python 正则抓取日志获取 PTS -> CSV
+- 触觉相机 (MJPEG): 直接调用 FFmpeg
+- 主相机 (NV12): 直接调用 FFmpeg
 
 停止方式:
 - 外部信号: kill -2 <PID> 或 kill -15 <PID>
@@ -25,9 +25,9 @@ from multiprocessing import Barrier, Event, Manager, Process
 import av
 
 MINRATE_1080p = "4M"
-NORMALRATE_1080p = "40M"
-MAXRATE_1080p = "60M"
-NORMALRATE_480p = "10"
+NORMALRATE_1080p = "8M"
+MAXRATE_1080p = "50M"
+NORMALRATE_480p = "4M"
 MAXRATE_480p = "20M"
 
 BOOT_TIME_OFFSET_US = int((time.time() - time.monotonic()) * 1_000_000)
@@ -169,13 +169,17 @@ def _record_direct_nv12(config, barrier, start_event, stop_event, first_frame_in
         "-c:v",
         "hevc_rkmpp",
         "-rc_mode",
-        "VBR",
-        "-b:v",
-        NORMALRATE_1080p,
-        "-minrate",
-        MINRATE_1080p,
-        "-maxrate",
-        MAXRATE_1080p,
+        "CQP",
+        "-qp_init",
+        "30",
+        "-qp_max",
+        "35",
+        "-qp_min",
+        "20",
+        "-qp_max_i",
+        "35",
+        "-qp_min_i",
+        "18",
         "-profile:v",
         "main",
         "-level",
@@ -220,11 +224,17 @@ def _record_direct_mjpeg(config, barrier, start_event, stop_event, first_frame_i
         "-c:v",
         "hevc_rkmpp",
         "-rc_mode",
-        "VBR",
-        "-b:v",
-        MAXRATE_480p,
-        "-maxrate",
-        MAXRATE_480p,
+        "CQP",
+        "-qp_init",
+        "30",
+        "-qp_max",
+        "38",
+        "-qp_min",
+        "24",
+        "-qp_max_i",
+        "38",
+        "-qp_min_i",
+        "20",
         output_file,
     ]
     _run_ffmpeg_process(cmd, config, barrier, start_event, stop_event, first_frame_info)
