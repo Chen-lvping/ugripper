@@ -25,6 +25,8 @@ DEBOUNCE_MS=0.03    # 30ms
 
 # 长按检测阈值（秒）
 LONG_PRESS_THRESHOLD=1.0
+# 双击检测窗口（秒）- 新增
+DOUBLE_CLICK_THRESHOLD=0.4
 
 # ================= 状态机与 LED 通信模块 =================
 
@@ -184,7 +186,7 @@ check_camera_hardware() {
 
     # 读取 cam.yaml 中的序列号
     # 暂时直接读取 yaml 里是否有该序列号字符串
-    
+
     local yaml_serial_match=$(grep "$usb_serial" "$yaml_file")
     
     # 获取 yaml 里对应的预期 serial (这里简化处理，需根据实际yaml结构完善)
@@ -247,32 +249,50 @@ prepare_directory() {
 }
 
 # 函数：启动音频录制
+# 参数1: audio_type ("pre" 或 "post")
+# 参数2: mode ("hold" 表示按住录音, "latch" 表示点击停止)
 record_audio() {
-    local audio_type=$1  # "pre" 或 "post"
+    local audio_type=$1
+    local mode=${2:-"hold"} # 默认为按住模式
     local timestamp=$(date +%Y%m%d_%H%M%S)
     local temp_file="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}.wav"
     
-    echo "Starting $audio_type audio recording..."
+    echo "Starting $audio_type audio recording (Mode: $mode)..."
     
-    # 播放开始录制提示音
     notify_audio "audio_recording_start"
     
-    # 开始录制
     arecord -D hw:rockchipes8388,0 -f cd -r 44100 -c 2 -t wav "$temp_file.raw" &
     local arecord_pid=$!
     
-    echo "Recording... (Hold button, release to stop)"
-    
-    # 循环检测按钮状态，直到松开
-    while kill -0 $arecord_pid 2>/dev/null; do
-        # 检查按钮是否松开
-        if [ "$(gpioget $(gpiofind "$PIN_BTN"))" -ne "$BTN_ACTIVE_LEVEL" ]; then
-            # 按钮松开，停止录音
-            kill -SIGINT $arecord_pid 2>/dev/null
-            break
-        fi
-        sleep 0.05  # 降低CPU占用
-    done
+    if [ "$mode" = "hold" ]; then
+        echo "Recording... (Release button to stop)"
+        # Hold模式：循环直到按钮松开
+        while kill -0 $arecord_pid 2>/dev/null; do
+            if [ "$(gpioget $(gpiofind "$PIN_BTN"))" -ne "$BTN_ACTIVE_LEVEL" ]; then
+                kill -SIGINT $arecord_pid 2>/dev/null
+                break
+            fi
+            sleep 0.05
+        done
+    elif [ "$mode" = "latch" ]; then
+        echo "Recording... (Press button again to stop)"
+        # Latch模式：循环直到按钮再次按下
+        # 首先等待按钮松开（防止误触）
+        while [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; do sleep 0.05; done
+        
+        # 然后等待按钮按下
+        while kill -0 $arecord_pid 2>/dev/null; do
+            if [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                # 按下后去抖，并停止
+                sleep $DEBOUNCE_MS
+                kill -SIGINT $arecord_pid 2>/dev/null
+                break
+            fi
+            sleep 0.05
+        done
+        # 等待停止时的按键释放，避免退出后立即触发其他逻辑
+        while [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; do sleep 0.05; done
+    fi
     
     # 等待录音进程完全结束
     wait $arecord_pid 2>/dev/null
@@ -285,10 +305,10 @@ record_audio() {
         echo "Warning: No audio data recorded"
         return 1
     fi
-    
+
     # 播放录制完成提示音
     notify_audio "audio_recording_stop"
-    
+
     # 根据音频类型处理
     if [ "$audio_type" = "pre" ]; then
         PRE_AUDIO_FILE="$temp_file"
@@ -316,23 +336,22 @@ start_recording() {
     fi
     
     echo "Starting processes..."
-    
-    # 启动相机
+
+    # 启动相机    
     uv run ./camera_record/triple_camera_record_h265.py --output-dir "$TARGET_DIR" &
     PID_CAM=$!
-    
+
     # 启动 Encoder
     ./encoder_refactor/build/main "$TARGET_DIR" &
     PID_ENC=$!
-    
-    # 启动 IMU
+
+    # 启动 IMU    
     ./dm_imu_alone/build/dm_imu "$TARGET_DIR" &
     PID_IMU=$!
     
     IS_RECORDING=true
     LAST_EPISODE_DIR="$TARGET_DIR"  # 更新上次录制目录
     
-    # === 切换状态灯：录制中 (红闪) ===
     set_state "RECORDING"
     notify_audio "recording_start"
     
@@ -409,78 +428,93 @@ trap cleanup SIGINT SIGTERM
 
 # ================= 主循环 =================
 
-# 初始化全部完成后，设为 READY (绿灯呼吸)
+# 初始化全部完成后，设为 READY (黄绿灯呼吸)
 set_state "READY"
 
 echo "=========================================="
-echo "System Ready. Press button to Start/Stop."
-echo "Long press for audio recording (pre/post)."
+echo "System Ready."
+echo " - Click: Start/Stop Camera"
+echo " - Long Press: Record Pre-Audio (Hold)"
+echo " - Double Click: Record Post-Audio (Latch)"
 echo "=========================================="
 
 while true; do
-    # 读取按钮电平 (输出 0 或 1)
     BTN_VAL=$(gpioget $(gpiofind "$PIN_BTN"))
     
-    # 检查是否按下 (根据 BTN_ACTIVE_LEVEL 判断)
     if [ "$BTN_VAL" -eq "$BTN_ACTIVE_LEVEL" ]; then
-        # 1. 检测到触发，先去抖 (睡眠)
+        # 1. 物理去抖
         sleep $DEBOUNCE_MS
         
         # 2. 再次读取确认
-        BTN_VAL_CHECK=$(gpioget $(gpiofind "$PIN_BTN"))
-        
-        if [ "$BTN_VAL_CHECK" -eq "$BTN_ACTIVE_LEVEL" ]; then
-            # === 检测长按 ===
+        if [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; then
             press_start=$(date +%s.%N)
             is_long_press=false
             
-            # 等待达到长按阈值或按钮释放
+            # === 阶段1：判断长按 ===
             while [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; do
                 current_time=$(date +%s.%N)
                 elapsed=$(echo "$current_time - $press_start" | bc)
                 
-                # 如果长按超过阈值
+                # 如果超过长按阈值
                 if (( $(echo "$elapsed >= $LONG_PRESS_THRESHOLD" | bc -l) )); then
                     is_long_press=true
+                    echo "Long press detected. Recording PRE audio..."
                     
-                    # 长按确认：立即开始录音（record_audio会阻塞直到松开）
-                    echo "Long press detected. Starting audio recording..."
-                    
-                    # 判断是pre还是post录制
+                    # 只有不在录制状态才建议录制Pre音频，或者根据需求调整
                     if [ "$IS_RECORDING" = false ]; then
-                        # 录制pre音频（为下次录制准备）
-                        record_audio "pre"
+                        record_audio "pre" "hold"
                     else
-                        # 录制post音频（为当前录制追加）
-                        record_audio "post"
+                        echo "Ignored: Cannot record pre-audio while recording data."
+                        # 等待释放
+                        while [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; do sleep 0.1; done
                     fi
                     
-                    echo "Audio recording complete."
-                    break
+                    break # 长按处理结束
                 fi
                 sleep 0.05
             done
             
-            # 如果不是长按（按钮在阈值内释放），则执行短按操作
+            # === 阶段2：短按释放后的判断（单击 vs 双击）===
             if [ "$is_long_press" = false ]; then
-                # === 短按：录制控制 ===
-                echo "Short press detected. Toggling recording state..."
+                # 按钮已经松开，现在等待是否有第二次按下
+                is_double_click=false
                 
-                if [ "$IS_RECORDING" = false ]; then
-                    start_recording
+                # 在窗口期内轮询检查第二次按下
+                # Bash 循环大概模拟窗口时间，0.05s * 8 ≈ 0.4s
+                steps=$(echo "$DOUBLE_CLICK_THRESHOLD / 0.05" | bc)
+                for ((i=0; i<steps; i++)); do
+                    sleep 0.05
+                    if [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                        is_double_click=true
+                        break
+                    fi
+                done
+                
+                if [ "$is_double_click" = true ]; then
+                    # === 双击逻辑：录制 Post 音频 ===
+                    echo "Double click detected. Recording POST audio..."
+                    # 使用 latch 模式：再次点击停止
+                    # 此时第二次点击尚未松开，record_audio 中的 latch 逻辑会先等待松开
+                    
+                    if [ "$IS_RECORDING" = false ]; then
+                         record_audio "post" "latch"
+                    else
+                         echo "Warning: Ignored double click while camera is recording."
+                    fi
                 else
-                    stop_recording
+                    # === 单击逻辑：开始/停止 录像 ===
+                    echo "Single click detected."
+                    if [ "$IS_RECORDING" = false ]; then
+                        start_recording
+                    else
+                        stop_recording
+                    fi
                 fi
             fi
             
-            # 3. 确保按钮完全释放
-            while [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; do
-                sleep 0.1
-            done
-            
-            # 短延时，防止误触发
-            sleep 0.3
-            
+            # 短延时，防止连续误触发
+            sleep 0.2
+
             echo "Waiting for next command..."
         fi
     fi
