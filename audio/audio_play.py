@@ -1,16 +1,80 @@
 #!/usr/bin/env python3
 import os
+import re
+import subprocess
 import time
 import pygame
 
 
+def find_alsa_card_by_name(target: str):
+    """
+    Parse `aplay -l` and return card number for the sound card whose name contains `target`.
+    Example line:
+      card 1: rockchipes8388 [rockchip-es8388], device 0: ...
+    """
+    try:
+        out = subprocess.check_output(["aplay", "-l"], stderr=subprocess.STDOUT, text=True)
+    except Exception as e:
+        print(f"ERROR: failed to run aplay -l: {e}")
+        return None
+
+    # match "card <n>: <name> ["
+    for line in out.splitlines():
+        m = re.search(r"^card\s+(\d+):\s*([^\[]+)\[", line.strip())
+        if m:
+            card_num = int(m.group(1))
+            card_name = m.group(2).strip()
+            if target.lower() in card_name.lower():
+                return card_num
+
+    # fallback: also try matching whole output
+    m2 = re.search(rf"^card\s+(\d+):.*{re.escape(target)}", out, re.IGNORECASE | re.MULTILINE)
+    if m2:
+        return int(m2.group(1))
+
+    return None
+
+
+def setup_audio_device():
+    # 强制 SDL 走 ALSA（避免默认走 pulse/pipewire 导致 Host is down）
+    os.environ["SDL_AUDIODRIVER"] = "alsa"
+
+    # 按声卡名找 card 编号
+    target = "rockchipes8388"
+    card = find_alsa_card_by_name(target)
+
+    if card is None:
+        # 找不到就退回 default
+        print(f"WARNING: ALSA card '{target}' not found, fallback to default")
+        return
+
+    # 选设备 0
+    dev = f"plughw:{card},0"
+    os.environ["AUDIODEV"] = dev
+    print(f"Using ALSA device: {dev} (matched card name: {target})")
+    # 设置 PCM 音量为 70%
+    try:
+        subprocess.run(
+            ["amixer", "-c", str(card), "set", "PCM", "70%", "unmute"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        print(f"ALSA PCM volume set to 70% on card {card}")
+    except subprocess.CalledProcessError:
+        print("WARNING: Failed to set PCM volume (control may not exist)")
+
+
 class AudioPlayer:
     def __init__(self):
-        pygame.mixer.init()
-        self.pipe_path = "/tmp/umi_audio_pipe"
-        self.audio_dir = "./audio"
+        setup_audio_device()
 
-        # 预加载音频文件
+        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+
+        self.pipe_path = "/tmp/umi_audio_pipe"
+        self.audio_dir = os.path.dirname(os.path.abspath(__file__))
+        self.volume = 1.0
+
         self.sounds = {
             "ready": self.load_sound("ready.wav"),
             "audio_recording_start": self.load_sound("audio_recording_start.wav"),
@@ -20,26 +84,25 @@ class AudioPlayer:
             "error": self.load_sound("error.wav"),
         }
 
-        # 确保管道存在
         if not os.path.exists(self.pipe_path):
             os.mkfifo(self.pipe_path)
 
         print("Audio Player Ready. Waiting for commands...")
 
     def load_sound(self, filename):
-        """加载音频文件"""
         filepath = os.path.join(self.audio_dir, filename)
         if os.path.exists(filepath):
             try:
-                return pygame.mixer.Sound(filepath)
+                sound = pygame.mixer.Sound(filepath)
+                sound.set_volume(self.volume)
+                return sound
             except Exception as e:
                 print(f"Warning: Could not load {filename}: {e}")
         else:
-            print(f"Warning: Audio file not found: {filename}")
+            print(f"Warning: Audio file not found: {filepath}")
         return None
 
     def play_sound(self, sound_name):
-        """播放指定声音"""
         if sound_name in self.sounds and self.sounds[sound_name]:
             try:
                 self.sounds[sound_name].play()
@@ -50,7 +113,6 @@ class AudioPlayer:
             print(f"Sound not available: {sound_name}")
 
     def run(self):
-        """主循环，监听管道"""
         while True:
             try:
                 with open(self.pipe_path, "r", buffering=1) as pipe:

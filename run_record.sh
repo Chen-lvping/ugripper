@@ -14,13 +14,11 @@ LED_SCRIPT="./led_manager.py"
 LED_PIPE="/tmp/umi_led_pipe"
 
 # --- 音频配置---
-AUDIO_RECORD_SCRIPT="./audio/audio_record.py"
 AUDIO_PLAY_SCRIPT="./audio/audio_play.py"
 AUDIO_TEMP_DIR="/tmp/umi_audio"
 AUDIO_PIPE="/tmp/umi_audio_pipe"
 
 # --- GPIO 配置 ---
-PIN_HIGH="PIN_32"   # 3.3V 输出
 PIN_BTN="PIN_36"    # 按钮输入
 BTN_ACTIVE_LEVEL=1  # 1表示按下
 DEBOUNCE_MS=0.03    # 30ms
@@ -68,6 +66,8 @@ notify_audio() {
 set_state "INIT"
 
 # ================= 音频系统初始化 =================
+amixer -c rockchipes8388 sset 'ALC Capture Function' Stereo
+amixer -c rockchipes8388  sset 'ALC Capture Max PGA' 7
 
 # 创建音频管道
 if [ ! -p "$AUDIO_PIPE" ]; then
@@ -204,17 +204,12 @@ check_camera_hardware "/dev/right_tcam" "Right Tactile"
 echo "Initializing GPIO..."
 
 # 获取引脚的控制器和偏移量
-if [ -z "$(gpiofind "$PIN_HIGH")" ] || [ -z "$(gpiofind "$PIN_BTN")" ]; then
+if [ -z "$(gpiofind "$PIN_BTN")" ]; then
     echo "Error: Could not find GPIO pins."
     set_state "ERROR"
     notify_audio "error"
     exit 1
 fi
-
-# 设置输出高电平
-gpioset -m signal $(gpiofind "$PIN_HIGH")=1 &
-PID_GPIO_HIGH=$!
-echo "GPIO $PIN_HIGH set to HIGH (PID: $PID_GPIO_HIGH)"
 
 # ================= 全局变量 =================
 IS_RECORDING=false
@@ -263,7 +258,7 @@ record_audio() {
     notify_audio "audio_recording_start"
     
     # 开始录制
-    arecord -D hw:1,0 -f cd -r 48000 -c 2 -t wav "$temp_file.raw" 2>/dev/null &
+    arecord -D hw:rockchipes8388,0 -f cd -r 44100 -c 2 -t wav "$temp_file.raw" &
     local arecord_pid=$!
     
     echo "Recording... (Hold button, release to stop)"
@@ -284,8 +279,8 @@ record_audio() {
     
     # 降噪处理
     if [ -f "$temp_file.raw" ]; then
-        sox "$temp_file.raw" "$temp_file" noisered "./audio/noise.prof" 0.15 remix 2 2 norm 2>/dev/null
-        rm -f "$temp_file.raw"
+        sox "$temp_file.raw" "$temp_file" noisered "$script_dir/audio/noise.prof" 0.15 remix 2 2 norm 
+        #rm -f "$temp_file.raw"
     else
         echo "Warning: No audio data recorded"
         return 1
@@ -428,8 +423,6 @@ while true; do
     
     # 检查是否按下 (根据 BTN_ACTIVE_LEVEL 判断)
     if [ "$BTN_VAL" -eq "$BTN_ACTIVE_LEVEL" ]; then
-    echo "test"
-        
         # 1. 检测到触发，先去抖 (睡眠)
         sleep $DEBOUNCE_MS
         
