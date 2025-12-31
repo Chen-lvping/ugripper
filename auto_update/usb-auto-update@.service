@@ -1,0 +1,10 @@
+[Unit]
+Description=USB Auto Update for /dev/%I
+# 等设备节点就绪
+BindsTo=dev-%i.device
+After=dev-%i.device
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/usb_auto_update.sh /dev/%I

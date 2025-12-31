@@ -7,3 +7,11 @@
 - 硬件接口说明
 - 使用文档与示例
 sensor
+
+# 安装依赖
+sudo apt install -y sox libsox-fmt-all
+
+sudo systemctl stop ugripper.service 
+sudo systemctl restart ugripper.service 
+sudo systemctl status ugripper.service
+

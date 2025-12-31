@@ -1,0 +1,9 @@
+Package: {{APP_NAME}}
+Version: {{VERSION}}
+Section: utils
+Priority: optional
+Architecture: {{ARCH}}
+Maintainer: Your Name <your@email.com>
+Description: Ugripper Control System
+ Automated recording and gripper control system.
+ Includes USB auto-update and auto-start features.

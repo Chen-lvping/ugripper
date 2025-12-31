@@ -1,0 +1,25 @@
+#!/bin/bash
+set -e
+
+APP_DIR="{{INSTALL_DIR}}"
+SERVICE_NAME="{{APP_NAME}}.service"
+
+# 1) 设置执行权限
+chmod +x /usr/local/bin/usb_auto_update.sh
+chmod +x "$APP_DIR/run_record.sh"
+
+# 按需：权限不要太宽的话建议用 755/775，你现在用 777 我照旧保留
+chmod -R 777 "$APP_DIR"
+
+# 2) 重新加载 systemd unit + udev 规则，并触发一次 udev（让规则生效）
+systemctl daemon-reload
+
+udevadm control --reload-rules
+udevadm trigger --subsystem-match=block --action=add || true
+
+# 3) 启用并启动业务服务
+systemctl enable "$SERVICE_NAME"
+systemctl restart "$SERVICE_NAME"
+
+echo "[$SERVICE_NAME] Installed and Started successfully."
+exit 0
