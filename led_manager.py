@@ -5,6 +5,7 @@ import math
 import sys
 import select
 import errno
+import signal
 
 # ================= 配置部分 =================
 PWM_CONFIG = {
@@ -82,7 +83,7 @@ class PwmChannel:
 
     def shutdown(self):
         try:
-            self.set_level(0)
+            self.set_level(0) # 关灯
         except:
             pass
 
@@ -121,17 +122,28 @@ class LedStateMachine:
         self.led = RgbLed()
         self.state = "INIT"
         self.tick = 0
+        self.running = True
 
         # 确保管道存在
         if not os.path.exists(PIPE_PATH):
-            os.mkfifo(PIPE_PATH)
+            try:
+                os.mkfifo(PIPE_PATH)
+            except OSError as e:
+                print(f"Failed to create fifo: {e}")
 
         # 非阻塞方式打开管道
-        self.pipe_fd = os.open(PIPE_PATH, os.O_RDONLY | os.O_NONBLOCK)
-        print(f"LED Controller Started. Listening on {PIPE_PATH}")
+        try:
+            self.pipe_fd = os.open(PIPE_PATH, os.O_RDONLY | os.O_NONBLOCK)
+            print(f"LED Controller Started. Listening on {PIPE_PATH}")
+        except Exception as e:
+            print(f"Failed to open pipe: {e}")
+            self.pipe_fd = None
 
     def read_command(self):
         """尝试从管道读取最新的状态命令"""
+        if self.pipe_fd is None:
+            return
+
         try:
             # 读取缓冲区所有数据，取最后一行非空行
             data = os.read(self.pipe_fd, 1024).decode().strip()
@@ -152,22 +164,31 @@ class LedStateMachine:
                 print(f"Pipe error: {e}")
 
     def run(self):
-        try:
-            while True:
-                self.read_command()
-                self.update_effect()
+        while self.running:
+            self.read_command()
+            self.update_effect()
 
-                if self.state == "EXIT":
-                    break
+            if self.state == "EXIT":
+                print("EXIT command received via pipe.")
+                self.running = False
+                break
 
-                time.sleep(0.02)  # 50Hz 刷新率
-                self.tick += 1
-        except KeyboardInterrupt:
-            pass
-        finally:
-            os.close(self.pipe_fd)
+            time.sleep(0.02)  # 50Hz 刷新率
+            self.tick += 1
+
+    def cleanup(self):
+        """清理资源并关闭灯光"""
+        print("Cleaning up resources...")
+        self.running = False
+        if self.pipe_fd is not None:
+            try:
+                os.close(self.pipe_fd)
+                self.pipe_fd = None
+            except:
+                pass
+        
+        if hasattr(self, 'led'):
             self.led.close()
-            # 注意：不删除管道文件，留给 Bash 脚本处理或下次复用
 
     def update_effect(self):
         """根据当前状态渲染灯效"""
@@ -223,6 +244,29 @@ class LedStateMachine:
             self.led.set_rgb(0, 0, 0)
 
 
+# ================= 全局实例与信号处理 =================
+app = None
+
+def signal_handler(signum, frame):
+    """处理系统信号 (SIGINT, SIGTERM)"""
+    sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
+    print(f"\nReceived signal: {sig_name}. Shutting down...")
+    
+    if app:
+        app.cleanup()
+    
+    sys.exit(0)
+
 if __name__ == "__main__":
-    app = LedStateMachine()
-    app.run()
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+
+    try:
+        app = LedStateMachine()
+        app.run()
+    except Exception as e:
+        print(f"Main Loop Error: {e}")
+    finally:
+        # 兜底清理，防止异常退出时没关灯
+        if app:
+            app.cleanup()
