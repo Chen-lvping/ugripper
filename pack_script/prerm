@@ -4,8 +4,10 @@ set -e
 SERVICE_NAME="{{APP_NAME}}.service"
 INTERFACE_NAME="end0"
 NM_CONN_ID="${INTERFACE_NAME}-{{APP_NAME}}"
-NM_DIR="/etc/NetworkManager/system-connections"
-NM_CONN_FILE="${NM_DIR}/${INTERFACE_NAME}-{{APP_NAME}}.nmconnection"
+
+# PTP 相关服务名称
+PTP_SERVICE="ptp4l.service"
+PHC_SERVICE="phc2sys.service"
 
 # --------------------------------------------------
 # 1) 停止并禁用服务
@@ -14,14 +16,47 @@ systemctl stop "$SERVICE_NAME" || true
 systemctl disable "$SERVICE_NAME" || true
 
 # --------------------------------------------------
-# 2) 移除 NetworkManager 配置（仅移除本包创建的）
+# 2) 停止并清理 PTP 服务 (新增逻辑)
+# --------------------------------------------------
+echo "Stopping and removing PTP services configuration..."
+
+# 停止服务
+systemctl stop "$PHC_SERVICE" || true
+systemctl stop "$PTP_SERVICE" || true
+
+# 禁用服务
+systemctl disable "$PHC_SERVICE" || true
+systemctl disable "$PTP_SERVICE" || true
+
+# 清理 postinst 中生成的 systemd unit 文件
+# 注意：这移除了我们在 /etc/systemd/system/ 下创建的自定义配置
+# 从而避免残留文件影响系统或后续重装
+rm -f "/etc/systemd/system/$PHC_SERVICE"
+rm -f "/etc/systemd/system/$PTP_SERVICE"
+
+# 清理生成的配置文件
+rm -f "/etc/linuxptp/ptp4l.conf"
+
+# 重载 systemd 以感知文件删除
+systemctl daemon-reload
+
+# --------------------------------------------------
+# 3) 移除 NetworkManager 配置
 # --------------------------------------------------
 if command -v nmcli >/dev/null 2>&1; then
     nmcli connection delete "$NM_CONN_ID" || true
 fi
 
 # --------------------------------------------------
-# 3) udev reload
+# 4) 恢复默认时间同步设置
+# --------------------------------------------------
+# 在安装时(Left模式)可能关闭了网络授时。
+# 卸载时，恢复为开启状态，让系统恢复默认行为。
+echo "Restoring default NTP setting..."
+timedatectl set-ntp true || true
+
+# --------------------------------------------------
+# 5) udev reload
 # --------------------------------------------------
 udevadm control --reload-rules || true
 

@@ -11,6 +11,10 @@ IP_LEFT="192.168.1.101"
 NM_DIR="/etc/NetworkManager/system-connections"
 NM_CONN_FILE="${NM_DIR}/${INTERFACE_NAME}-{{APP_NAME}}.nmconnection"
 
+# PTP 配置目录和文件
+PTP_CONF_DIR="/etc/linuxptp"
+PTP_CONF_FILE="${PTP_CONF_DIR}/ptp4l.conf"
+
 # --------------------------------------------------
 # 0) 读取 DEVICE_SIDE
 # --------------------------------------------------
@@ -21,7 +25,7 @@ if [ -f /etc/environment ]; then
 fi
 
 if [ -z "$DEVICE_SIDE" ]; then
-    echo "DEVICE_SIDE not set, skip network configuration"
+    echo "DEVICE_SIDE not set, skip network/PTP configuration"
 else
     case "$(echo "$DEVICE_SIDE" | tr '[:upper:]' '[:lower:]')" in
         right)
@@ -31,14 +35,14 @@ else
             TARGET_IP="$IP_LEFT"
             ;;
         *)
-            echo "Unknown DEVICE_SIDE: $DEVICE_SIDE, skip network configuration"
+            echo "Unknown DEVICE_SIDE: $DEVICE_SIDE, skip configuration"
             TARGET_IP=""
             ;;
     esac
 fi
 
 # --------------------------------------------------
-# 1) 写 NetworkManager 静态 IP（仅当合法）
+# 1) 写 NetworkManager 静态 IP
 # --------------------------------------------------
 if [ -n "$TARGET_IP" ] && [ -d "$NM_DIR" ]; then
     echo "Configuring NetworkManager for $INTERFACE_NAME ($DEVICE_SIDE → $TARGET_IP)"
@@ -65,13 +69,137 @@ method=ignore
 EOF
 
     chmod 600 "$NM_CONN_FILE"
-
+    
     nmcli connection reload || true
     nmcli connection up "${INTERFACE_NAME}-{{APP_NAME}}" || true
 fi
 
 # --------------------------------------------------
-# 2) 配置服务权限及启动
+# 2) 配置 PTP 时间同步 (linuxptp)
+# --------------------------------------------------
+# 依赖: linuxptp (ptp4l, phc2sys)
+# Right (Master): System Clock -> PHC (NIC) -> Network
+# Left  (Slave) : Network -> PHC (NIC) -> System Clock
+# --------------------------------------------------
+
+if [ -n "$DEVICE_SIDE" ]; then
+    # 确保配置目录存在
+    mkdir -p "$PTP_CONF_DIR"
+    
+    # 停止旧的 PTP 服务以应用新配置
+    systemctl stop ptp4l phc2sys 2>/dev/null || true
+
+    case "$(echo "$DEVICE_SIDE" | tr '[:upper:]' '[:lower:]')" in
+        left)
+            echo "Configuring PTP for LEFT (Slave)..."
+            
+            # 1. 关闭普通网络授时 (NTP), 避免与 PTP 冲突
+            timedatectl set-ntp false || true
+            
+            # 2. 生成 ptp4l 配置文件 (Slave Mode)
+            # slaveOnly 1: 强制作为从钟
+            cat <<EOF > "$PTP_CONF_FILE"
+[global]
+slaveOnly              1
+priority1              255
+priority2              255
+domainNumber           0
+# 硬件时间戳过滤器
+time_stamping          hardware
+# 接口
+[$INTERFACE_NAME]
+EOF
+            
+            # 3. 创建/重写 phc2sys 服务 (PHC -> System Clock)
+            # -s $INTERFACE_NAME: 源是网卡时钟
+            # -c CLOCK_REALTIME: 目标是系统时钟
+            # -w: 等待 ptp4l 同步
+            cat <<EOF > /etc/systemd/system/phc2sys.service
+[Unit]
+Description=Synchronize system clock or PTP hardware clock (PHC)
+After=ptp4l.service
+Requires=ptp4l.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/phc2sys -s $INTERFACE_NAME -c CLOCK_REALTIME -w -O 0
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            ;;
+
+        right)
+            echo "Configuring PTP for RIGHT (Master)..."
+            
+            # 1. 保留网络授时 (NTP) 以获取互联网时间作为基准
+            timedatectl set-ntp true || true
+            
+            # 2. 生成 ptp4l 配置文件 (Master Mode)
+            # priority1 10: 优先级高，确保成为 Master (默认是 128)
+            cat <<EOF > "$PTP_CONF_FILE"
+[global]
+priority1              10
+priority2              10
+domainNumber           0
+time_stamping          hardware
+[$INTERFACE_NAME]
+EOF
+
+            # 3. 创建/重写 phc2sys 服务 (System Clock -> PHC)
+            # -s CLOCK_REALTIME: 源是系统时钟 (由 NTP 维护)
+            # -c $INTERFACE_NAME: 目标是网卡 PHC
+            # -w: 等待 ptp4l
+            cat <<EOF > /etc/systemd/system/phc2sys.service
+[Unit]
+Description=Synchronize system clock or PTP hardware clock (PHC)
+After=ptp4l.service
+Requires=ptp4l.service
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/phc2sys -s CLOCK_REALTIME -c $INTERFACE_NAME -w -O 0
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+            ;;
+    esac
+
+    # --------------------------------------------------
+    # 通用 PTP 服务配置 (ptp4l)
+    # --------------------------------------------------
+    # 创建/确保 ptp4l 服务使用我们生成的配置文件
+    cat <<EOF > /etc/systemd/system/ptp4l.service
+[Unit]
+Description=Precision Time Protocol (PTP) service
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/ptp4l -f $PTP_CONF_FILE -i $INTERFACE_NAME
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # 重新加载 Systemd 并启动 PTP 服务
+    systemctl daemon-reload
+    
+    # 启用并启动服务
+    echo "Starting PTP services..."
+    systemctl enable ptp4l phc2sys || true
+    systemctl restart ptp4l phc2sys || true
+    
+    # 检查状态 (可选)
+    # systemctl status ptp4l --no-pager
+fi
+
+# --------------------------------------------------
+# 3) 配置应用服务权限及启动
 # --------------------------------------------------
 chmod +x /usr/local/bin/usb_auto_update.sh
 chmod +x "$APP_DIR/run_record.sh"
