@@ -8,12 +8,18 @@ NM_CONN_ID="${INTERFACE_NAME}-{{APP_NAME}}"
 # PTP 相关服务名称
 PTP_SERVICE="ptp4l.service"
 PHC_SERVICE="phc2sys.service"
+# 网线监测服务名称
+NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 
 # --------------------------------------------------
 # 1) 停止并禁用服务
 # --------------------------------------------------
 systemctl stop "$SERVICE_NAME" || true
 systemctl disable "$SERVICE_NAME" || true
+
+# 网线监测服务
+systemctl stop "$NETWORK_MONITOR_SERVICE" || true
+systemctl disable "$NETWORK_MONITOR_SERVICE" || true
 
 # --------------------------------------------------
 # 2) 停止并清理 PTP 服务 (新增逻辑)

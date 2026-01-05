@@ -217,5 +217,9 @@ udevadm trigger --subsystem-match=block --action=add || true
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 
+# 网线监测服务
+systemctl enable ugripper-network-monitor.service
+systemctl restart ugripper-network-monitor.service
+
 echo "[$SERVICE_NAME] Installed and Started successfully."
 exit 0

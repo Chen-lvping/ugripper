@@ -123,11 +123,7 @@ start_helpers() {
 
 stop_helpers() {
     echo "Stopping helper processes..."
-    
-    # 1. 发送退出状态（通知逻辑层）
-    set_state "EXIT"
-    
-    # 2. 使用 PID 递归清理进程
+    # 使用 PID 递归清理进程
     if [ -n "$PID_LED_SHELL" ]; then
         echo "Stopping LED process tree..."
         kill_tree "$PID_LED_SHELL"
@@ -137,8 +133,6 @@ stop_helpers() {
         echo "Stopping Audio process tree..."
         kill_tree "$PID_AUDIO_SHELL"
     fi
-    
-    rm -f "$LED_PIPE" "$AUDIO_PIPE"
 }
 
 # ================= 异常捕获 =================
