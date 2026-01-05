@@ -9,7 +9,7 @@
 sensor
 
 # 安装依赖
-sudo apt install -y sox libsox-fmt-all
+sudo apt install -y sox libsox-fmt-all netcat-openbsd linuxptp
 
 sudo systemctl stop ugripper.service 
 sudo systemctl restart ugripper.service 

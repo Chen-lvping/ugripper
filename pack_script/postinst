@@ -21,7 +21,11 @@ PTP_CONF_FILE="${PTP_CONF_DIR}/ptp4l.conf"
 DEVICE_SIDE=""
 
 if [ -f /etc/environment ]; then
-    DEVICE_SIDE=$(grep -E '^DEVICE_SIDE=' /etc/environment | cut -d= -f2 | tr -d '"')
+    DEVICE_SIDE=$(grep -E '^DEVICE_SIDE=' /etc/environment \
+        | head -n1 \
+        | cut -d= -f2- \
+        | tr -d '"' \
+        | xargs)
 fi
 
 if [ -z "$DEVICE_SIDE" ]; then

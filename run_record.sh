@@ -9,6 +9,24 @@ CONFIG_FILE="./config/config.txt"
 DISK_DIR="/mnt/data_disk"
 DATA_ROOT="/mnt/data_disk/raw_data" 
 
+# --- 网络配置 (双臂协同) ---
+# 通过环境变量/etc/environment获取当前设备角色，默认为 Right (Master)
+DEVICE_SIDE=""
+
+if [ -f /etc/environment ]; then
+    DEVICE_SIDE=$(grep -E '^DEVICE_SIDE=' /etc/environment \
+        | head -n1 \
+        | cut -d= -f2- \
+        | tr -d '"' \
+        | xargs)
+fi
+
+CURRENT_SIDE=${DEVICE_SIDE:-Right}
+
+IP_RIGHT="192.168.1.100"
+IP_LEFT="192.168.1.101"
+SYNC_PORT=12345
+
 # --- LED 控制配置 ---
 LED_SCRIPT="./led_manager.py"
 LED_PIPE="/tmp/umi_led_pipe"
@@ -25,7 +43,7 @@ DEBOUNCE_MS=0.03    # 30ms
 
 # 长按检测阈值（秒）
 LONG_PRESS_THRESHOLD=1.0
-# 双击检测窗口（秒）- 新增
+# 双击检测窗口（秒）
 DOUBLE_CLICK_THRESHOLD=0.4
 
 # ================= 状态机与 LED 通信模块 =================
@@ -89,9 +107,6 @@ fi
 # 创建临时音频目录
 mkdir -p "$AUDIO_TEMP_DIR"
 
-# 播放准备就绪提示音
-notify_audio "ready"
-
 # ================= 业务配置检查 =================
 
 # 1. 读取 Device ID
@@ -115,15 +130,24 @@ DEVICE_MODEL=$(echo "$device_id" | awk -F_ '{print $1}')
 DEVICE_NUM=$(echo "$device_id" | awk -F_ '{print $2}')
 COLLECTOR=${collector:-"default_user"}
 
-# 2. 检查硬盘挂载
-if ! mountpoint -q "$DISK_DIR"; then
-    echo "Error: $DISK_DIR is NOT mounted!"
+# 2. 检查硬盘挂载 (改为循环等待模式)
+echo "Checking Disk Mount..."
+while ! mountpoint -q "$DISK_DIR"; do
+    echo "Error: $DISK_DIR is NOT mounted! Waiting for disk..."
+    
+    # 设置为错误状态 (红灯快闪)
     set_state "ERROR"
     notify_audio "error"
-    exit 1
-else
-    echo "Disk OK: $DISK_DIR is mounted."
-fi
+    
+    # 等待 3 秒再次检查
+    sleep 3
+done
+
+echo "Disk OK: $DISK_DIR is mounted."
+
+# 硬盘检查通过，恢复为初始化状态(蓝灯)，准备后续硬件检查
+set_state "INIT"
+
 
 # ================= 目录结构与元数据 =================
 echo "Initializing Data Structure..."
@@ -143,7 +167,7 @@ if [ ! -f "$META_FILE" ]; then
     echo "device_model: $DEVICE_MODEL" >> "$META_FILE"
     echo "device_id: $DEVICE_NUM" >> "$META_FILE"
     echo "collector: $COLLECTOR" >> "$META_FILE"
-    echo "Metadata generated."
+    echo "device_side: $CURRENT_SIDE" >> "$META_FILE"
 fi
 
 # 2. 拷贝 calibration 文件
@@ -202,15 +226,15 @@ check_camera_hardware() {
 check_camera_hardware "/dev/left_tcam" "Left Tactile"
 check_camera_hardware "/dev/right_tcam" "Right Tactile"
 
-# ================= GPIO 初始化 =================
-echo "Initializing GPIO..."
-
-# 获取引脚的控制器和偏移量
-if [ -z "$(gpiofind "$PIN_BTN")" ]; then
-    echo "Error: Could not find GPIO pins."
-    set_state "ERROR"
-    notify_audio "error"
-    exit 1
+# ================= GPIO 初始化 (仅 Right 需要) =================
+if [ "$CURRENT_SIDE" == "Right" ]; then
+    echo "Initializing GPIO for Master (Right)..."
+    if [ -z "$(gpiofind "$PIN_BTN")" ]; then
+        echo "Error: Could not find GPIO pins."
+        set_state "ERROR"; notify_audio "error"; exit 1
+    fi
+else
+    echo "GPIO initialization skipped for Slave (Left)."
 fi
 
 # ================= 全局变量 =================
@@ -224,46 +248,73 @@ PRE_AUDIO_FILE=""    # 存储预录制音频文件路径
 
 # ================= 函数定义 =================
 
+# 函数：发送网络命令 (仅 Right 调用)
+send_network_command() {
+    local cmd=$1
+    local arg=$2
+    # 使用 netcat 发送 UDP 包或者 TCP 连接，这里使用 TCP 并设置超时
+    # 格式: COMMAND|ARGUMENT
+    echo "${cmd}|${arg}" | nc -w 1 "$IP_LEFT" "$SYNC_PORT" 2>/dev/null
+    echo "Sent to Left: ${cmd}|${arg}"
+}
+
 # 函数：计算新路径并创建文件夹
+# 修改：支持传入指定的文件夹名 (用于 Left 同步 Right 的命名)
 prepare_directory() {
-    local date_str=$(date +%Y%m%d)
+    local specified_name=$1
+    
+    if [ -n "$specified_name" ]; then
+        # [Slave 模式] 使用 Master 指定的名字
+        TARGET_DIR="${DIR_DATA}/${specified_name}"
+    else
+        # [Master 模式] 自动生成名字
+        local date_str=$(date +%Y%m%d)
 
-    # 搜索当天的最大序号（只根据日期前缀）
-    local last_id=$(find "$DIR_DATA" -maxdepth 1 -type d \
-        -name "episode_${date_str}_*" \
-        -printf "%f\n" | \
-        awk -F_ '{print $NF}' | \
-        grep -E '^[0-9]+$' | \
-        sort -n | tail -1)
+        # 搜索当天的最大序号（只根据日期前缀）
+        local last_id=$(find "$DIR_DATA" -maxdepth 1 -type d \
+            -name "episode_${date_str}_*" \
+            -printf "%f\n" | \
+            awk -F_ '{print $NF}' | \
+            grep -E '^[0-9]+$' | \
+            sort -n | tail -1)
 
-    local new_id=1
-    if [ -n "$last_id" ]; then
-        new_id=$((10#$last_id + 1))
+        local new_id=1
+        if [ -n "$last_id" ]; then
+            new_id=$((10#$last_id + 1))
+        fi
+
+        local id_str=$(printf "%04d" "$new_id")
+        
+        # 仅返回文件夹的基础名称，不含全路径
+        local dirname="episode_${date_str}_${id_str}"
+        TARGET_DIR="${DIR_DATA}/${dirname}"
     fi
 
-    local id_str=$(printf "%04d" "$new_id")
-    TARGET_DIR="${DIR_DATA}/episode_${date_str}_${id_str}"
     mkdir -p "$TARGET_DIR"
 
     echo "New recording session: $TARGET_DIR"
 }
 
 # 函数：启动音频录制
-# 参数1: audio_type ("pre" 或 "post")
-# 参数2: mode ("hold" 表示按住录音, "latch" 表示点击停止)
 record_audio() {
+    # 如果是 Left (Slave)，直接禁用录音功能
+    if [ "$CURRENT_SIDE" == "Left" ]; then
+        echo "Audio recording disabled on Slave (Left) side."
+        return
+    fi
+
     local audio_type=$1
-    local mode=${2:-"hold"} # 默认为按住模式
+    local mode=${2:-"hold"}
     local timestamp=$(date +%Y%m%d_%H%M%S)
     local temp_file="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}.wav"
     
     echo "Starting $audio_type audio recording (Mode: $mode)..."
-    
     notify_audio "audio_recording_start"
     
     arecord -D hw:rockchipes8388,0 -f cd -r 44100 -c 2 -t wav "$temp_file.raw" &
     local arecord_pid=$!
     
+    # 按键检测逻辑 (仅在 Right 有效)
     if [ "$mode" = "hold" ]; then
         echo "Recording... (Release button to stop)"
         # Hold模式：循环直到按钮松开
@@ -325,13 +376,24 @@ record_audio() {
 }
 
 # 函数：启动所有录制进程
+# 参数1 (可选): 强制指定的目录名 (用于 Slave)
 start_recording() {
-    prepare_directory
+    local sync_dir_name=$1
+
+    # 1. 准备目录
+    prepare_directory "$sync_dir_name"
     
-    # 如果存在预录制音频，移动到当前episode
-    if [ -n "$PRE_AUDIO_FILE" ] && [ -f "$PRE_AUDIO_FILE" ]; then
+    # 2. 如果是 Master，需要通知 Slave
+    if [ "$CURRENT_SIDE" == "Right" ]; then
+        # 获取纯文件夹名
+        local dirname=$(basename "$TARGET_DIR")
+        # 发送 START 指令和文件夹名
+        send_network_command "START" "$dirname"
+    fi
+
+    # 3. 处理预录制音频 (仅 Master)
+    if [ "$CURRENT_SIDE" == "Right" ] && [ -n "$PRE_AUDIO_FILE" ] && [ -f "$PRE_AUDIO_FILE" ]; then
         mv "$PRE_AUDIO_FILE" "$TARGET_DIR/audio_pre.wav"
-        echo "Pre-audio moved to episode: $TARGET_DIR/audio_pre.wav"
         PRE_AUDIO_FILE=""
     fi
     
@@ -360,7 +422,12 @@ start_recording() {
 
 # 函数：停止所有录制进程
 stop_recording() {
-    echo "Stopping processes..."
+    # 1. 如果是 Master，先通知 Slave 停止
+    if [ "$CURRENT_SIDE" == "Right" ]; then
+        send_network_command "STOP" "0"
+    fi
+
+    echo "Stopping processes on $CURRENT_SIDE..."
 
     # 发送 SIGINT (Ctrl+C) 信号
     if [ -n "$PID_CAM" ] && kill -0 $PID_CAM 2>/dev/null; then kill -2 $PID_CAM; fi
@@ -392,30 +459,26 @@ cleanup() {
         stop_recording
     fi
 
-    # 2. 释放 GPIO
-    if [ -n "$PID_GPIO_HIGH" ]; then
-        kill $PID_GPIO_HIGH 2>/dev/null
+    # 2. 停止音频播放
+    # 优先停止音频，防止报错音一直响
+    notify_audio "exit"
+    if [ -n "$PID_AUDIO_PLAY" ]; then
+        sleep 0.1
+        kill $PID_AUDIO_PLAY 2>/dev/null
     fi
 
-    # 3. 关闭 LED (发送退出指令)
+    # 3. 关闭/复原 LED 状态
+    # 发送 EXIT 状态给 Python 脚本，令其熄灭灯光
     set_state "EXIT"
     
-    # 4. 停止音频播放
-    notify_audio "exit"
-    
-    # 5. 确保 Python 脚本退出
+    # 4. 确保 Python 脚本退出
     if [ -n "$PID_LED_SCRIPT" ]; then
-        # 给它一点时间处理 EXIT 命令
-        sleep 0.2
+        # 给 Python 脚本 0.5秒 时间处理 "EXIT" 信号并关闭灯光硬件
+        sleep 0.5
         kill $PID_LED_SCRIPT 2>/dev/null
     fi
     
-    if [ -n "$PID_AUDIO_PLAY" ]; then
-        sleep 0.2
-        kill $PID_AUDIO_PLAY 2>/dev/null
-    fi
-    
-    # 6. 清理临时文件
+    # 5. 清理临时文件
     rm -rf "$AUDIO_TEMP_DIR"
     rm -f "$LED_PIPE" "$AUDIO_PIPE"
 
@@ -423,102 +486,166 @@ cleanup() {
     exit 0
 }
 
-# 捕获脚本自身的退出信号
-trap cleanup SIGINT SIGTERM
+# 捕获 信号 和 退出(EXIT)
+# 注意：增加 EXIT 捕获可以确保脚本因任何原因退出时都尝试关灯
+trap cleanup SIGINT SIGTERM EXIT
 
-# ================= 主循环 =================
+# ================= 逻辑分流：Master (Right) vs Slave (Left) =================
 
-# 初始化全部完成后，设为 READY (黄绿灯呼吸)
 set_state "READY"
+# 播放准备就绪提示音
+notify_audio "ready"
 
-echo "=========================================="
-echo "System Ready."
-echo " - Click: Start/Stop Camera"
-echo " - Long Press: Record Pre-Audio (Hold)"
-echo " - Double Click: Record Post-Audio (Latch)"
-echo "=========================================="
+if [ "$CURRENT_SIDE" == "Left" ]; then
+    # ================= Slave (Left) 逻辑 =================
+    echo "=========================================="
+    echo "RUNNING AS SLAVE (LEFT)"
+    echo " - Physical buttons DISABLED"
+    echo " - Audio recording DISABLED"
+    echo " - Waiting for commands from RIGHT ($IP_RIGHT)..."
+    echo "=========================================="
 
-while true; do
-    BTN_VAL=$(gpioget $(gpiofind "$PIN_BTN"))
-    
-    if [ "$BTN_VAL" -eq "$BTN_ACTIVE_LEVEL" ]; then
-        # 1. 物理去抖
-        sleep $DEBOUNCE_MS
+    # 1. 网络检查
+    echo "Checking connection to Master..."
+    ping -c 1 -W 2 "$IP_RIGHT" > /dev/null
+    if [ $? -eq 0 ]; then
+        echo "Master ($IP_RIGHT) is reachable."
+        # 播放两次声音表示连接成功
+        notify_audio "ready"
+    else
+        echo "WARNING: Master ($IP_RIGHT) is NOT reachable."
+        set_state "ERROR" # 亮红灯警告
+    fi
+
+    # 2. 网络监听循环 (使用 netcat 监听端口)
+    while true; do
+        # 监听 TCP 端口，收到数据后退出 nc
+        # 格式: START|episode_xxxx 或 STOP|0
+        raw_msg=$(nc -l -p "$SYNC_PORT" -w 5)
         
-        # 2. 再次读取确认
-        if [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; then
-            press_start=$(date +%s.%N)
-            is_long_press=false
+        if [ -n "$raw_msg" ]; then
+            cmd=$(echo "$raw_msg" | awk -F'|' '{print $1}')
+            arg=$(echo "$raw_msg" | awk -F'|' '{print $2}')
             
-            # === 阶段1：判断长按 ===
-            while [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; do
-                current_time=$(date +%s.%N)
-                elapsed=$(echo "$current_time - $press_start" | bc)
-                
-                # 如果超过长按阈值
-                if (( $(echo "$elapsed >= $LONG_PRESS_THRESHOLD" | bc -l) )); then
-                    is_long_press=true
-                    echo "Long press detected. Recording PRE audio..."
-                    
-                    # 只有不在录制状态才建议录制Pre音频，或者根据需求调整
+            echo "Received Network Command: $cmd Args: $arg"
+
+            case "$cmd" in
+                "START")
                     if [ "$IS_RECORDING" = false ]; then
-                        record_audio "pre" "hold"
+                        echo "Trigger: Start Recording (Sync Dir: $arg)"
+                        start_recording "$arg"
                     else
-                        echo "Ignored: Cannot record pre-audio while recording data."
-                        # 等待释放
-                        while [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; do sleep 0.1; done
+                        echo "Ignored: Already recording."
                     fi
-                    
-                    break # 长按处理结束
-                fi
-                sleep 0.05
-            done
+                    ;;
+                "STOP")
+                    if [ "$IS_RECORDING" = true ]; then
+                        echo "Trigger: Stop Recording"
+                        stop_recording
+                    else
+                        echo "Ignored: Not recording."
+                    fi
+                    ;;
+                *)
+                    echo "Unknown command: $cmd"
+                    ;;
+            esac
+        fi
+        
+        # 防止空转过快
+        sleep 0.1
+    done
+
+else
+    # ================= Master (Right) 逻辑 =================
+    echo "=========================================="
+    echo "RUNNING AS MASTER (RIGHT)"
+    echo " - Click: Start/Stop Camera (Triggers Left)"
+    echo " - Long Press: Record Pre-Audio"
+    echo " - Double Click: Record Post-Audio"
+    echo "=========================================="
+    
+    while true; do
+        BTN_VAL=$(gpioget $(gpiofind "$PIN_BTN"))
+        
+        if [ "$BTN_VAL" -eq "$BTN_ACTIVE_LEVEL" ]; then
+            # 1. 物理去抖
+            sleep $DEBOUNCE_MS
             
-            # === 阶段2：短按释放后的判断（单击 vs 双击）===
-            if [ "$is_long_press" = false ]; then
-                # 按钮已经松开，现在等待是否有第二次按下
-                is_double_click=false
+            # 2. 再次读取确认
+            if [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                press_start=$(date +%s.%N)
+                is_long_press=false
                 
-                # 在窗口期内轮询检查第二次按下
-                # Bash 循环大概模拟窗口时间，0.05s * 8 ≈ 0.4s
-                steps=$(echo "$DOUBLE_CLICK_THRESHOLD / 0.05" | bc)
-                for ((i=0; i<steps; i++)); do
-                    sleep 0.05
-                    if [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; then
-                        is_double_click=true
-                        break
+                # === 阶段1：判断长按 ===
+                while [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; do
+                    current_time=$(date +%s.%N)
+                    elapsed=$(echo "$current_time - $press_start" | bc)
+
+                    # 如果超过长按阈值
+                    if (( $(echo "$elapsed >= $LONG_PRESS_THRESHOLD" | bc -l) )); then
+                        is_long_press=true
+                        echo "Long press detected. Recording PRE audio..."
+                    
+                        # 只有不在录制状态才建议录制Pre音频，或者根据需求调整
+                        if [ "$IS_RECORDING" = false ]; then
+                            record_audio "pre" "hold"
+                        else
+                            echo "Ignored: Cannot record pre-audio while recording data."
+                            # 等待释放
+                            while [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; do sleep 0.1; done
+                        fi
+                        
+                        break # 长按处理结束
                     fi
+                    sleep 0.05
                 done
                 
-                if [ "$is_double_click" = true ]; then
-                    # === 双击逻辑：录制 Post 音频 ===
-                    echo "Double click detected. Recording POST audio..."
-                    # 使用 latch 模式：再次点击停止
-                    # 此时第二次点击尚未松开，record_audio 中的 latch 逻辑会先等待松开
+                # === 阶段2：短按释放后的判断（单击 vs 双击）===
+                if [ "$is_long_press" = false ]; then
+                    # 按钮已经松开，现在等待是否有第二次按下
+                    is_double_click=false
                     
-                    if [ "$IS_RECORDING" = false ]; then
-                         record_audio "post" "latch"
+                    # 在窗口期内轮询检查第二次按下
+                    # Bash 循环大概模拟窗口时间，0.05s * 8 ≈ 0.4s
+                    steps=$(echo "$DOUBLE_CLICK_THRESHOLD / 0.05" | bc)
+                    for ((i=0; i<steps; i++)); do
+                        sleep 0.05
+                        if [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                            is_double_click=true
+                            break
+                        fi
+                    done
+                    
+                    if [ "$is_double_click" = true ]; then
+                        # === 双击逻辑：录制 Post 音频 ===
+                        echo "Double click detected. Recording POST audio..."
+                        # 使用 latch 模式：再次点击停止
+                        # 此时第二次点击尚未松开，record_audio 中的 latch 逻辑会先等待松开
+                        if [ "$IS_RECORDING" = false ]; then
+                             record_audio "post" "latch"
+                        else
+                            echo "Warning: Ignored double click while camera is recording."
+                        fi
                     else
-                         echo "Warning: Ignored double click while camera is recording."
-                    fi
-                else
-                    # === 单击逻辑：开始/停止 录像 ===
-                    echo "Single click detected."
-                    if [ "$IS_RECORDING" = false ]; then
-                        start_recording
-                    else
-                        stop_recording
+                        # === 单击逻辑：开始/停止 录像 ===
+                        echo "Single click detected."
+                        if [ "$IS_RECORDING" = false ]; then
+                            start_recording
+                        else
+                            stop_recording
+                        fi
                     fi
                 fi
-            fi
-            
-            # 短延时，防止连续误触发
-            sleep 0.2
+                
+                # 短延时，防止连续误触发
+                sleep 0.2
 
-            echo "Waiting for next command..."
+                echo "Waiting for next command..."
+            fi
         fi
-    fi
-    
-    # 循环延时，降低 CPU 占用
-    sleep $DEBOUNCE_MS
-done
+        
+        # 循环延时，降低 CPU 占用
+        sleep $DEBOUNCE_MS
+    done
+fi

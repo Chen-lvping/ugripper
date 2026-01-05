@@ -16,7 +16,7 @@
 
 // --- 全局控制变量 ---
 std::atomic<bool> g_stopFlag(false);
-#define VIEW_IMU_LOG
+//#define VIEW_IMU_LOG
 
 // --- 信号处理函数 ---
 void signalHandler(int signum)
