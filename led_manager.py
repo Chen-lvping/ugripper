@@ -6,7 +6,7 @@ import sys
 import select
 import errno
 
-# ================= 配置部分 (复用原逻辑) =================
+# ================= 配置部分 =================
 PWM_CONFIG = {
     "red": {"chip": "pwmchip1", "channel": "0"},
     "green": {"chip": "pwmchip0", "channel": "0"},
@@ -107,24 +107,11 @@ class RgbLed:
         self.leds["green"].set_level(g / 255.0)
         self.leds["blue"].set_level(b / 255.0)
 
-    # ================= 新增接口 =================
     def set_scaled_rgb(self, r, g, b, scale):
-        """
-        设置 RGB 颜色并根据 scale 系数缩放亮度。
-        :param r: 红色基础值 (0-255)
-        :param g: 绿色基础值 (0-255)
-        :param b: 蓝色基础值 (0-255)
-        :param scale: 亮度系数 (0.0 - 1.0)，用于呼吸灯效果
-        """
-        # 限制 scale 范围在 0.0 到 1.0 之间
         valid_scale = max(0.0, min(1.0, scale))
-
-        # 计算缩放后的颜色值
-        # 注意：这里不需要转 int，因为 set_rgb 内部会除以 255.0 转为 float
         scaled_r = r * valid_scale
         scaled_g = g * valid_scale
         scaled_b = b * valid_scale
-
         self.set_rgb(scaled_r, scaled_g, scaled_b)
 
 
@@ -133,7 +120,6 @@ class LedStateMachine:
     def __init__(self):
         self.led = RgbLed()
         self.state = "INIT"
-        self.last_state = ""
         self.tick = 0
 
         # 确保管道存在
@@ -152,7 +138,11 @@ class LedStateMachine:
             if data:
                 lines = data.split("\n")
                 new_cmd = lines[-1].strip().upper()
-                if new_cmd in ["INIT", "READY", "RECORDING", "ERROR", "EXIT"]:
+                valid_states = [
+                    "INIT", "READY", "RECORDING", "ERROR", "EXIT",
+                    "CALIB_PRE", "CALIB_RUN", "CALIB_DONE"
+                ]
+                if new_cmd in valid_states:
                     self.state = new_cmd
                     print(f"State switched to: {self.state}")
         except OSError as e:
@@ -192,7 +182,6 @@ class LedStateMachine:
             # 使用 sin 函数生成 0.0 到 1.0 的平滑曲线
             brightness = (math.sin(t * 0.04) + 1) / 2
 
-            # === 使用新接口 ===
             self.led.set_scaled_rgb(255, 200, 0, brightness)
 
         elif self.state == "RECORDING":
@@ -206,6 +195,27 @@ class LedStateMachine:
             # 红色急促快闪
             if (t % 10) < 5:
                 self.led.set_rgb(255, 0, 0)
+            else:
+                self.led.set_rgb(0, 0, 0)
+
+        elif self.state == "CALIB_PRE":
+            # 准备校准: 黄灯慢闪 (1Hz)
+            if (t % 50) < 25:
+                self.led.set_rgb(255, 200, 0) # 黄色
+            else:
+                self.led.set_rgb(0, 0, 0)
+
+        elif self.state == "CALIB_RUN":
+            # 校准中: 黄灯快闪 (5Hz)
+            if (t % 10) < 5:
+                self.led.set_rgb(255, 200, 0) # 黄色
+            else:
+                self.led.set_rgb(0, 0, 0)
+
+        elif self.state == "CALIB_DONE":
+            # 校准完成: 绿灯闪烁 (1Hz)
+            if (t % 50) < 25:
+                self.led.set_rgb(0, 255, 0) # 纯绿
             else:
                 self.led.set_rgb(0, 0, 0)
 

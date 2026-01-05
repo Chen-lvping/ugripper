@@ -9,8 +9,6 @@ import pygame
 def find_alsa_card_by_name(target: str):
     """
     Parse `aplay -l` and return card number for the sound card whose name contains `target`.
-    Example line:
-      card 1: rockchipes8388 [rockchip-es8388], device 0: ...
     """
     try:
         out = subprocess.check_output(["aplay", "-l"], stderr=subprocess.STDOUT, text=True)
@@ -82,6 +80,9 @@ class AudioPlayer:
             "recording_start": self.load_sound("recording_start.wav"),
             "recording_stop": self.load_sound("recording_stop.wav"),
             "error": self.load_sound("error.wav"),
+            "calib_start": self.load_sound("calib_start.wav"),  # "准备进入校准"
+            "calibrating": self.load_sound("calibrating.wav"),  # "正在校准中"
+            "calib_done": self.load_sound("calib_done.wav"),    # "校准完成"
         }
 
         if not os.path.exists(self.pipe_path):

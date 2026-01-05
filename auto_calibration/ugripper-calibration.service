@@ -1,0 +1,16 @@
+[Unit]
+Description=Ugripper Hardware Calibration Task
+After=network.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/opt/ugripper
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+ExecStart=/bin/bash /opt/ugripper/auto_calibration/run_calibration.sh
+
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target

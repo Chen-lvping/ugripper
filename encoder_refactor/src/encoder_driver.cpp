@@ -404,7 +404,8 @@ bool EncoderDriver::setCurrentAsMiddle()
     };
 
     calculateCRC16(sendBuf, 6, &sendBuf[6], &sendBuf[7]);
-    return sendConfigToEncoder(sendBuf, sizeof(sendBuf));
+    sendConfigToEncoder(sendBuf, sizeof(sendBuf));
+    return setConfigStore();
 }
 
 bool EncoderDriver::setCurrentAsZero()
@@ -421,7 +422,8 @@ bool EncoderDriver::setCurrentAsZero()
     };
 
     calculateCRC16(sendBuf, 6, &sendBuf[6], &sendBuf[7]);
-    return sendConfigToEncoder(sendBuf, sizeof(sendBuf));
+    sendConfigToEncoder(sendBuf, sizeof(sendBuf));
+    return setConfigStore();
 }
 
 bool EncoderDriver::setRotationDirection(bool isInverted)

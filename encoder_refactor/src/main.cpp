@@ -163,11 +163,12 @@ int main(int argc, char *argv[])
         std::cout << "Encoder ready at 1Mbps." << std::endl;
     }
 
-    if (!encoder.setCurrentAsZero())
+    /* if (!encoder.setCurrentAsZero())
     {
         // TODO: 归零逻辑还没写
         std::cerr << "Failed to set zero position" << std::endl;
-    }
+    } */
+    // 已迁移到单独的归零程序
 
     // 打开文件
     std::ofstream csvFile(filename);
@@ -193,6 +194,24 @@ int main(int argc, char *argv[])
     // 主循环：固定 1 kHz 写入 CSV
     auto next_time = std::chrono::steady_clock::now();
     auto writePeriod = std::chrono::microseconds(1000); // 1 ms = 1 kHz
+
+    int wait_counts = 0;
+    while (!g_stopFlag.load())//预热
+    {
+        EncoderData state = encoder.getState();
+
+        // 只要读到的值不是 65535，说明读取线程已经工作并更新了数据
+        if (state.currentPosition != 65535) {break;}
+
+        // 超时保护：如果等了 1秒 (100次 * 10ms) 还没数据，也强行开始，避免死锁
+        if (wait_counts++ > 100) {
+            std::cerr << "Warning: No valid data received after 1s. Starting anyway." << std::endl;
+            break;
+        }
+
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
     while (!g_stopFlag.load())
     {
         try

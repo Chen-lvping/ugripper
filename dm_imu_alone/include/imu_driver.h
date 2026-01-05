@@ -126,6 +126,10 @@ namespace dmbot_serial
         void start();
         void stop();
 
+        void enterGyroCalib();
+        void enterAccelCalib();
+        void restoreFactorySettings();
+
         ProtocolType getProtocolType();
 
         IMU_Data getData();
@@ -157,8 +161,6 @@ namespace dmbot_serial
         void turnOffQuat();
         void setOutputHZ(FreqMode freq_mode);
         void setOutputInterface(OutputInterface iface);
-        void enterGyroCalib();
-        void enterAccelCalib();
         void saveImuPara();
         void exitSettingMode();
         void restartImu();

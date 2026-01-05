@@ -80,6 +80,8 @@ echo "=== [4/5] 处理配置脚本与变量替换 ==="
 # 1. 拷贝 Systemd Service
 cp "$PACK_SCRIPT_DIR/ugripper.service" "$BUILD_ROOT/etc/systemd/system/${APP_NAME}.service"
 cp "auto_update/usb-auto-update@.service" "$BUILD_ROOT/etc/systemd/system/usb-auto-update@.service"
+cp "auto_calibration/ugripper-calibration.service" "$BUILD_ROOT/etc/systemd/system/ugripper-calibration.service"
+cp "auto_calibration/ugripper-network-monitor.service" "$BUILD_ROOT/etc/systemd/system/ugripper-network-monitor.service"
 
 # 2. 拷贝 DEBIAN 控制文件
 cp "$PACK_SCRIPT_DIR/control"  "$BUILD_ROOT/DEBIAN/"

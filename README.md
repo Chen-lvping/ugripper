@@ -15,3 +15,6 @@ sudo systemctl stop ugripper.service
 sudo systemctl restart ugripper.service 
 sudo systemctl status ugripper.service
 
+# 使用说明
+触发自动校准脚本：
+当网线插入时，自动触发校准脚本 `run_calibration.sh`，按住按键可进入校准模式，无按键按下则会自动恢复采集模式。

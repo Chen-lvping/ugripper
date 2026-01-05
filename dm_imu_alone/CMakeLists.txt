@@ -23,3 +23,15 @@ target_link_libraries(dm_imu
     ${LIBSERIALPORT_LIBRARIES}
     pthread
 )
+
+add_executable(imu_calib
+    src/imu_calibration.cpp
+    src/imu_driver.cpp
+    src/bsp_crc.cpp
+)
+
+target_link_libraries(imu_calib
+    ${LIBSERIALPORT_LIBRARIES}
+    pthread
+)
+    

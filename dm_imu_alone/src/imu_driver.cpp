@@ -39,10 +39,10 @@ DmImu::DmImu(const std::string &port_name, int baudrate, ProtocolType protocol)
     }
     else if (protocol_type_ == ProtocolType::RS485)
     {
-        setOutputHZ(FreqMode::HZ500);
+        setOutputHZ(FreqMode::HZ1000);
         setOutputInterface(OutputInterface::RS485);
         setActiveMode();
-        saveImuPara();
+        //saveImuPara(); //由于半双工，不默认激活主动发送，防止配置指令和返回的数据报文冲突，保留重新上电后的配置能力。
     }
 
     // 等待IMU完全初始化
@@ -129,7 +129,7 @@ void DmImu::sendCmd(const uint8_t *data, size_t len)
         // std::cout << std::dec << std::endl; // 恢复十进制输出
         // 打印指令内容 end
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        std::this_thread::sleep_for(std::chrono::microseconds(10200));
     }
 }
 
@@ -271,6 +271,19 @@ void DmImu::enterAccelCalib()
     else if (protocol_type_ == ProtocolType::RS485)
     {
         send485Cmd(4, 1);
+    }
+}
+
+void DmImu::restoreFactorySettings()
+{
+    if (protocol_type_ == ProtocolType::USB_TTY)
+    {
+        uint8_t c[4] = {0xAA, 0x0B, 0x01, 0x0D};
+        sendCmd(c, 4);
+    }
+    else
+    {
+        send485Cmd(5, 1);
     }
 }
 

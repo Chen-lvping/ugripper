@@ -2,12 +2,27 @@
 set -e
 
 SERVICE_NAME="{{APP_NAME}}.service"
+INTERFACE_NAME="end0"
+NM_CONN_ID="${INTERFACE_NAME}-{{APP_NAME}}"
+NM_DIR="/etc/NetworkManager/system-connections"
+NM_CONN_FILE="${NM_DIR}/${INTERFACE_NAME}-{{APP_NAME}}.nmconnection"
 
-# 停止并禁用业务服务
+# --------------------------------------------------
+# 1) 停止并禁用服务
+# --------------------------------------------------
 systemctl stop "$SERVICE_NAME" || true
 systemctl disable "$SERVICE_NAME" || true
 
-# 卸载时如果包会移除 udev 规则文件，可在这里 reload（即使文件还没删也无害）
+# --------------------------------------------------
+# 2) 移除 NetworkManager 配置（仅移除本包创建的）
+# --------------------------------------------------
+if command -v nmcli >/dev/null 2>&1; then
+    nmcli connection delete "$NM_CONN_ID" || true
+fi
+
+# --------------------------------------------------
+# 3) udev reload
+# --------------------------------------------------
 udevadm control --reload-rules || true
 
 exit 0

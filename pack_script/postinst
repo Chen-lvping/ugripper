@@ -4,20 +4,84 @@ set -e
 APP_DIR="{{INSTALL_DIR}}"
 SERVICE_NAME="{{APP_NAME}}.service"
 
-# 1) 设置执行权限
+INTERFACE_NAME="end0"
+IP_RIGHT="192.168.1.100"
+IP_LEFT="192.168.1.101"
+
+NM_DIR="/etc/NetworkManager/system-connections"
+NM_CONN_FILE="${NM_DIR}/${INTERFACE_NAME}-{{APP_NAME}}.nmconnection"
+
+# --------------------------------------------------
+# 0) 读取 DEVICE_SIDE
+# --------------------------------------------------
+DEVICE_SIDE=""
+
+if [ -f /etc/environment ]; then
+    DEVICE_SIDE=$(grep -E '^DEVICE_SIDE=' /etc/environment | cut -d= -f2 | tr -d '"')
+fi
+
+if [ -z "$DEVICE_SIDE" ]; then
+    echo "DEVICE_SIDE not set, skip network configuration"
+else
+    case "$(echo "$DEVICE_SIDE" | tr '[:upper:]' '[:lower:]')" in
+        right)
+            TARGET_IP="$IP_RIGHT"
+            ;;
+        left)
+            TARGET_IP="$IP_LEFT"
+            ;;
+        *)
+            echo "Unknown DEVICE_SIDE: $DEVICE_SIDE, skip network configuration"
+            TARGET_IP=""
+            ;;
+    esac
+fi
+
+# --------------------------------------------------
+# 1) 写 NetworkManager 静态 IP（仅当合法）
+# --------------------------------------------------
+if [ -n "$TARGET_IP" ] && [ -d "$NM_DIR" ]; then
+    echo "Configuring NetworkManager for $INTERFACE_NAME ($DEVICE_SIDE → $TARGET_IP)"
+
+    rm -f "$NM_CONN_FILE"
+
+    UUID=$(cat /proc/sys/kernel/random/uuid)
+
+    cat <<EOF > "$NM_CONN_FILE"
+[connection]
+id=${INTERFACE_NAME}-{{APP_NAME}}
+uuid=$UUID
+type=ethernet
+interface-name=${INTERFACE_NAME}
+
+[ethernet]
+
+[ipv4]
+method=manual
+address1=${TARGET_IP}/24
+
+[ipv6]
+method=ignore
+EOF
+
+    chmod 600 "$NM_CONN_FILE"
+
+    nmcli connection reload || true
+    nmcli connection up "${INTERFACE_NAME}-{{APP_NAME}}" || true
+fi
+
+# --------------------------------------------------
+# 2) 配置服务权限及启动
+# --------------------------------------------------
 chmod +x /usr/local/bin/usb_auto_update.sh
 chmod +x "$APP_DIR/run_record.sh"
-
-# 按需：权限不要太宽的话建议用 755/775，你现在用 777 我照旧保留
 chmod -R 777 "$APP_DIR"
 
-# 2) 重新加载 systemd unit + udev 规则，并触发一次 udev（让规则生效）
 systemctl daemon-reload
 
 udevadm control --reload-rules
 udevadm trigger --subsystem-match=block --action=add || true
 
-# 3) 启用并启动业务服务
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 

@@ -14,7 +14,7 @@ if(NOT SERIALPORT_LIB)
 endif()
 
 # -----------------------------
-# 公共源码（给 main 用）
+# 公共源码
 # -----------------------------
 set(ENCODER_SOURCES
     src/bsp_crc.cpp
@@ -22,7 +22,7 @@ set(ENCODER_SOURCES
 )
 
 # -----------------------------
-# 编译主程序 main
+# 编译主程序 main (记录数据用)
 # -----------------------------
 add_executable(main
     src/main.cpp
@@ -30,6 +30,16 @@ add_executable(main
 )
 
 target_link_libraries(main PRIVATE ${SERIALPORT_LIB})
+
+# -----------------------------
+# 编译归零程序 zeroing
+# -----------------------------
+add_executable(zeroing
+    src/zeroing.cpp
+    ${ENCODER_SOURCES}
+)
+
+target_link_libraries(zeroing PRIVATE ${SERIALPORT_LIB})
 
 # -----------------------------
 # 编译 CRC 单元测试

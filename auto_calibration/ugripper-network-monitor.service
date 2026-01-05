@@ -1,0 +1,13 @@
+[Unit]
+Description=Monitor end0 cable insertion
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/bin/bash /opt/ugripper/auto_calibration/monitor_network.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
