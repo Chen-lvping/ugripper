@@ -65,6 +65,7 @@ cp dm_imu_alone/build/dm_imu "$BUILD_ROOT/$INSTALL_DIR/dm_imu_alone/build/"
 
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build"
 cp encoder_refactor/build/main "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/"
+cp encoder_refactor/build/zeroing "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/"
 
 # 3. 部署自动更新脚本到系统路径
 cp auto_update/usb_auto_update.sh "$BUILD_ROOT/usr/local/bin/usb_auto_update.sh"
