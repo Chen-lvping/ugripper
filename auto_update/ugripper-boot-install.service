@@ -1,0 +1,15 @@
+[Unit]
+Description=Check and Install ugripper on Boot
+# 在文件系统和基础服务就绪后运行
+After=local-fs.target
+ConditionPathExists=/usr/local/bin/boot_check_install.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/boot_check_install.sh
+# 运行完即退出，不需要常驻
+RemainAfterExit=no
+User=root
+
+[Install]
+WantedBy=multi-user.target

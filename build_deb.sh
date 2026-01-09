@@ -67,20 +67,14 @@ mkdir -p "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build"
 cp encoder_refactor/build/main "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/"
 cp encoder_refactor/build/zeroing "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/"
 
-# 3. 部署自动更新脚本到系统路径
-cp auto_update/usb_auto_update.sh "$BUILD_ROOT/usr/local/bin/usb_auto_update.sh"
-chmod +x "$BUILD_ROOT/usr/local/bin/usb_auto_update.sh"
-
 # 4. 部署 Udev 规则
 cp camera_record/99-fixed-usb-map.rules "$BUILD_ROOT/etc/udev/rules.d/"
 cp encoder_refactor/99-serial.rules "$BUILD_ROOT/etc/udev/rules.d/"
-cp auto_update/99-usb-auto-update.rules "$BUILD_ROOT/etc/udev/rules.d/"
+
 
 echo "=== [4/5] 处理配置脚本与变量替换 ==="
-
 # 1. 拷贝 Systemd Service
 cp "$PACK_SCRIPT_DIR/ugripper.service" "$BUILD_ROOT/etc/systemd/system/${APP_NAME}.service"
-cp "auto_update/usb-auto-update@.service" "$BUILD_ROOT/etc/systemd/system/usb-auto-update@.service"
 cp "auto_calibration/ugripper-calibration.service" "$BUILD_ROOT/etc/systemd/system/ugripper-calibration.service"
 cp "auto_calibration/ugripper-network-monitor.service" "$BUILD_ROOT/etc/systemd/system/ugripper-network-monitor.service"
 

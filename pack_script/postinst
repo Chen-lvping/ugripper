@@ -212,6 +212,9 @@ chmod -R 777 "$APP_DIR"
 systemctl daemon-reload
 
 udevadm control --reload-rules
+#加载触觉传感器相关规则
+udevadm trigger
+#强制加载mount相关规则
 udevadm trigger --subsystem-match=block --action=add || true
 
 systemctl enable "$SERVICE_NAME"
