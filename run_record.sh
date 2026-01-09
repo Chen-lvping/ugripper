@@ -145,6 +145,54 @@ done
 
 echo "Disk OK: $DISK_DIR is mounted."
 
+# ================= 日志系统 =================
+# 1. 定义路径
+LOG_FILE_LOCAL="/tmp/umi_sys_${CURRENT_SIDE}_$(date +%Y%m%d).log"
+LOG_FILE_DISK="$DISK_DIR/logs/umi_sys_${CURRENT_SIDE}_$(date +%Y%m%d).log"
+
+# 2. 重定向到【本地临时文件】
+echo "Logging locally to: $LOG_FILE_LOCAL"
+exec > >(tee -a "$LOG_FILE_LOCAL") 2>&1
+
+# 3. 定义后台同步函数
+# 作用：定期检查硬盘是否在，如果在，就把新增日志搬运过去
+sync_logs_to_disk() {
+    local src="$1"
+    local dest="$2"
+    local last_pos=0
+    
+    while true; do
+        # 仅当源文件存在且有大小变化时才尝试写入
+        if [ -f "$src" ]; then
+            local curr_size=$(stat -c%s "$src" 2>/dev/null || echo 0)
+            
+            if [ "$curr_size" -gt "$last_pos" ]; then
+                # 关键：检查挂载点是否存活，避免往 broken pipe 写
+                if mountpoint -q "$DISK_DIR"; then
+                    # 确保目标目录存在
+                    mkdir -p "$(dirname "$dest")" 2>/dev/null
+                    
+                    # 计算增量并追加到硬盘 (tail -c +N 从第N个字节开始输出)
+                    # 只追加新内容，写完立即释放文件句柄
+                    tail -c +$((last_pos + 1)) "$src" >> "$dest" 2>/dev/null
+                    
+                    # 只有写入成功才更新游标，防止数据丢失
+                    if [ $? -eq 0 ]; then
+                        last_pos=$curr_size
+                    fi
+                fi
+            fi
+        fi
+        # 每 5 秒同步一次，降低 IO 压力
+        sleep 5
+    done
+}
+
+# 4. 启动后台同步进程并记录 PID
+sync_logs_to_disk "$LOG_FILE_LOCAL" "$LOG_FILE_DISK" &
+PID_LOG_SYNC=$!
+
+
 # 硬盘检查通过，恢复为初始化状态(蓝灯)，准备后续硬件检查
 set_state "INIT"
 
@@ -199,9 +247,11 @@ check_camera_hardware() {
     # 使用 udevadm 查找父级 USB 设备的 serial
     # 逻辑：查找SUBSYSTEMS=="usb" 且 DRIVERS=="usb" 下的 ATTRS{serial}
     # 注意：udevadm 输出是层级的，我们取第一个匹配到的 USB serial
-    local usb_serial=$(udevadm info --attribute-walk --name="$dev_node" | \
-                       grep -Pzo "(?s)SUBSYSTEMS==\"usb\".*?DRIVERS==\"usb\".*?ATTRS{serial}==\".*?\"" | \
-                       grep "ATTRS{serial}" | head -n 1 | awk -F'"' '{print $2}')
+    local usb_serial=$(udevadm info --attribute-walk --name="$dev_node" \
+            | grep -Pzo '(?s)SUBSYSTEMS=="usb".*?DRIVERS=="usb".*?ATTRS{serial}=="(?!xhci-)[^"]+"' \
+            | tr '\0' '\n' \
+            | sed -n 's/.*ATTRS{serial}=="\([^"]*\)".*/\1/p' \
+            | head -n 1)
 
     if [ -z "$usb_serial" ]; then
         echo "WARNING: Could not read USB serial for $dev_node"
@@ -247,6 +297,53 @@ LAST_EPISODE_DIR=""  # 记录上次录制的目录（用于post音频）
 PRE_AUDIO_FILE=""    # 存储预录制音频文件路径
 
 # ================= 函数定义 =================
+
+# 硬件健康监测函数
+monitor_system_health() {
+    # 如果正在录制，不要执行检查，以免争抢 IO 导致丢帧
+    if [ "$IS_RECORDING" = true ]; then return; fi
+
+    local has_error=false
+    local error_msg=""
+
+    # 1. 检查硬盘
+    if ! mountpoint -q "$DISK_DIR"; then
+        has_error=true
+        error_msg="${error_msg} Disk not mounted;"
+    fi
+
+    # 2. 检查相机节点 (根据左右臂区分)
+    if [ "$CURRENT_SIDE" == "Right" ]; then
+        if [ ! -e "/dev/right_tcam" ]; then
+            has_error=true
+            error_msg="${error_msg} Right Cam lost"
+        fi
+    elif [ "$CURRENT_SIDE" == "Left" ]; then
+        if [ ! -e "/dev/left_tcam" ]; then
+            has_error=true
+            error_msg="${error_msg} Left Cam lost"
+        fi
+    fi
+
+    # 3. 状态切换处理
+    if [ "$has_error" = true ]; then
+        # 仅当状态改变时才触发报警，防止日志刷屏
+        if [ "$SYSTEM_HEALTH_STATUS" != "ERROR" ]; then
+            echo "[$(date)] MONITOR ERROR: $error_msg"
+            set_state "ERROR"
+            notify_audio "error"
+            SYSTEM_HEALTH_STATUS="ERROR"
+        fi
+    else
+        # 如果之前是 ERROR，现在恢复了
+        if [ "$SYSTEM_HEALTH_STATUS" == "ERROR" ]; then
+            echo "[$(date)] MONITOR RECOVERED: System is back online."
+            set_state "READY"
+            notify_audio "ready"
+            SYSTEM_HEALTH_STATUS="OK"
+        fi
+    fi
+}
 
 # 函数：发送网络命令 (仅 Right 调用)
 send_network_command() {
@@ -477,6 +574,11 @@ cleanup() {
         sleep 0.5
         kill $PID_LED_SCRIPT 2>/dev/null
     fi
+
+    # 停止日志同步
+    if [ -n "$PID_LOG_SYNC" ]; then
+        kill $PID_LOG_SYNC 2>/dev/null
+    fi
     
     # 5. 清理临时文件
     rm -rf "$AUDIO_TEMP_DIR"
@@ -495,6 +597,10 @@ trap cleanup SIGINT SIGTERM EXIT
 set_state "READY"
 # 播放准备就绪提示音
 notify_audio "ready"
+
+
+LAST_CHECK_TIME=$(date +%s)
+CHECK_INTERVAL=1  # 检查间隔（秒）
 
 if [ "$CURRENT_SIDE" == "Left" ]; then
     # ================= Slave (Left) 逻辑 =================
@@ -551,7 +657,14 @@ if [ "$CURRENT_SIDE" == "Left" ]; then
                     ;;
             esac
         fi
-        
+    
+        # 定时检查逻辑 (非阻塞)
+        CURRENT_TIME=$(date +%s)
+        if [ $((CURRENT_TIME - LAST_CHECK_TIME)) -ge $CHECK_INTERVAL ]; then
+            monitor_system_health
+            LAST_CHECK_TIME=$CURRENT_TIME
+        fi
+
         # 防止空转过快
         sleep 0.1
     done
@@ -564,8 +677,15 @@ else
     echo " - Long Press: Record Pre-Audio"
     echo " - Double Click: Record Post-Audio"
     echo "=========================================="
-    
+
     while true; do
+        # 定时检查逻辑 (非阻塞)
+        CURRENT_TIME=$(date +%s)
+        if [ $((CURRENT_TIME - LAST_CHECK_TIME)) -ge $CHECK_INTERVAL ]; then
+            monitor_system_health
+            LAST_CHECK_TIME=$CURRENT_TIME
+        fi
+        
         BTN_VAL=$(gpioget $(gpiofind "$PIN_BTN"))
         
         if [ "$BTN_VAL" -eq "$BTN_ACTIVE_LEVEL" ]; then
