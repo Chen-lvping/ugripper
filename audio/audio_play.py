@@ -80,6 +80,7 @@ class AudioPlayer:
             "recording_start": self.load_sound("recording_start.wav"),
             "recording_stop": self.load_sound("recording_stop.wav"),
             "error": self.load_sound("error.wav"),
+            "validation_failed": self.load_sound("validation_failed.wav"),
             "calib_start": self.load_sound("calib_start.wav"),  # "准备进入校准"
             "calibrating": self.load_sound("calibrating.wav"),  # "正在校准中"
             "calib_done": self.load_sound("calib_done.wav"),    # "校准完成"

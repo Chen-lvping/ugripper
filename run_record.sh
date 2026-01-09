@@ -7,7 +7,15 @@ cd "$script_dir" || exit 1
 # ================= 配置部分 =================
 CONFIG_FILE="./config/config.txt"
 DISK_DIR="/mnt/data_disk"
-DATA_ROOT="/mnt/data_disk/raw_data" 
+DEVICE_SN=""
+if [ -f /etc/environment ]; then
+    DEVICE_SN=$(grep -E '^DEVICE_SN=' /etc/environment \
+        | head -n1 \
+        | cut -d= -f2- \
+        | tr -d '"' \
+        | xargs)
+fi
+DATA_ROOT="/mnt/data_disk/${DEVICE_SN:-NonameDevice}" 
 
 # --- 网络配置 (双臂协同) ---
 # 通过环境变量/etc/environment获取当前设备角色，默认为 Right (Master)
@@ -312,17 +320,14 @@ monitor_system_health() {
         error_msg="${error_msg} Disk not mounted;"
     fi
 
-    # 2. 检查相机节点 (根据左右臂区分)
-    if [ "$CURRENT_SIDE" == "Right" ]; then
-        if [ ! -e "/dev/right_tcam" ]; then
-            has_error=true
-            error_msg="${error_msg} Right Cam lost"
-        fi
-    elif [ "$CURRENT_SIDE" == "Left" ]; then
-        if [ ! -e "/dev/left_tcam" ]; then
-            has_error=true
-            error_msg="${error_msg} Left Cam lost"
-        fi
+    # 2. 检查相机节点
+    if [ ! -e "/dev/right_tcam" ]; then
+        has_error=true
+        error_msg="${error_msg} Right Cam lost"
+    fi
+    if [ ! -e "/dev/left_tcam" ]; then
+        has_error=true
+        error_msg="${error_msg} Left Cam lost"
     fi
 
     # 3. 状态切换处理
@@ -517,6 +522,76 @@ start_recording() {
     echo ">>> RECORDING STARTED [ PIDs: Cam=$PID_CAM Enc=$PID_ENC Imu=$PID_IMU ]"
 }
 
+# ================= 数据校验函数 =================
+validate_recording() {
+    local dir=$1
+    local validation_pass=true
+    local error_details=""
+
+    echo "Validating data in: $dir"
+
+    # --- 1. 检查 MKV 文件大小 ---
+    # 检查 cam.mkv, tact_left.mkv, tact_right.mkv 是否存在且大小不为 0
+    # 注意：根据实际生成的文件名可能需要调整，这里假设文件名如下
+    local mkv_files=("cam.mkv" "tact_left.mkv" "tact_right.mkv")
+    
+    for fname in "${mkv_files[@]}"; do
+        local fpath="$dir/$fname"
+        # 检查文件是否存在
+        if [ ! -f "$fpath" ]; then
+             echo "Warning: $fname missing (might be optional based on config)."
+        else
+            local fsize=$(stat -c%s "$fpath" 2>/dev/null || echo 0)
+            if [ "$fsize" -eq 0 ]; then
+                validation_pass=false
+                error_details="${error_details} Zero-byte file: $fname;"
+                echo "FAIL: $fname is 0 bytes."
+            fi
+        fi
+    done
+
+    # --- 2. 检查 Encoder CSV 数据 (检查 65535) ---
+    # 假设 encoder 生成的 csv 包含 "encoder" 字样或者就是唯一的 csv
+    local csv_file=$(find "$dir" -name "*encoder*.csv" -o -name "*.csv" | head -n 1)
+    
+    if [ -f "$csv_file" ]; then
+        # 统计第二列 (currentPosition) 等于 65535 的行数
+        # awk 逻辑：以逗号分隔，如果$2是65535，计数器加1
+        local bad_rows=$(awk -F, '$2 == 65535 {count++} END {print count+0}' "$csv_file")
+        
+        # 设定阈值，例如超过 50 行数据异常就报错（防止启动瞬间的一两帧干扰）
+        local threshold=50
+        
+        if [ "$bad_rows" -gt "$threshold" ]; then
+            validation_pass=false
+            error_details="${error_details} Encoder Init Fail ($bad_rows rows of 65535);"
+            echo "FAIL: Encoder CSV has $bad_rows rows of 65535 (Threshold: $threshold)."
+        else
+            echo "PASS: Encoder CSV check ok (Bad rows: $bad_rows)."
+        fi
+    else
+        echo "Warning: No CSV file found to validate."
+    fi
+
+    # --- 3. 结果处理 ---
+    if [ "$validation_pass" = false ]; then
+        echo ">>> VALIDATION FAILED: $error_details"
+        # 触发报错灯光和声音
+        set_state "ERROR"
+        notify_audio "validation_failed"
+        
+        # 将文件夹重命名，标记为坏数据
+        local new_dir="${dir}_BAD"
+        mv "$dir" "$new_dir"
+        echo "Renamed $dir -> $new_dir"
+        
+        # 强制让灯光保持 Error 状态一小段时间，避免马上被 monitor 覆盖
+        sleep 3
+    else
+        echo ">>> VALIDATION PASSED."
+    fi
+}
+
 # 函数：停止所有录制进程
 stop_recording() {
     # 1. 如果是 Master，先通知 Slave 停止
@@ -533,15 +608,25 @@ stop_recording() {
     
     # 等待退出
     wait $PID_CAM $PID_ENC $PID_IMU 2>/dev/null
-    
+
+    # 强制同步数据到磁盘
+    echo "Syncing data to disk..."
+    set_state "INIT"  # 临时切换状态指示sync
+    sync "$DISK_DIR"
+
     IS_RECORDING=false
-    
-    # === 切换状态灯：待机 (绿呼吸) ===
+    echo ">>> RECORDING STOPPED. Processes terminated."
+
+    # 先默认回 READY，如果校验失败，校验函数会覆盖为 ERROR
     set_state "READY"
     notify_audio "recording_stop"
-    
-    echo ">>> RECORDING STOPPED. Saved to $TARGET_DIR"
-    
+
+    # 再运行校验 (如果失败，它会把灯变红)
+    if [ -d "$TARGET_DIR" ]; then
+        validate_recording "$TARGET_DIR"
+    fi
+
+    # 清空 PID
     PID_CAM=""
     PID_ENC=""
     PID_IMU=""
@@ -616,18 +701,23 @@ if [ "$CURRENT_SIDE" == "Left" ]; then
     ping -c 1 -W 2 "$IP_RIGHT" > /dev/null
     if [ $? -eq 0 ]; then
         echo "Master ($IP_RIGHT) is reachable."
-        # 播放两次声音表示连接成功
         notify_audio "ready"
     else
         echo "WARNING: Master ($IP_RIGHT) is NOT reachable."
         set_state "ERROR" # 亮红灯警告
     fi
 
-    # 2. 网络监听循环 (使用 netcat 监听端口)
+    # 2. 网络监听循环
     while true; do
+        # === 优先执行：硬件健康检查 ===
+        # 将检查放在循环开头，确保每次循环都覆盖
+        # 移除时间间隔判断，或者保持很短的间隔，确保拔盘即红灯
+        monitor_system_health
+        
+        # === 网络监听 ===
         # 监听 TCP 端口，收到数据后退出 nc
         # 格式: START|episode_xxxx 或 STOP|0
-        raw_msg=$(nc -l -p "$SYNC_PORT" -w 5)
+        raw_msg=$(nc -l -p "$SYNC_PORT" -w 1)
         
         if [ -n "$raw_msg" ]; then
             cmd=$(echo "$raw_msg" | awk -F'|' '{print $1}')
@@ -657,16 +747,7 @@ if [ "$CURRENT_SIDE" == "Left" ]; then
                     ;;
             esac
         fi
-    
-        # 定时检查逻辑 (非阻塞)
-        CURRENT_TIME=$(date +%s)
-        if [ $((CURRENT_TIME - LAST_CHECK_TIME)) -ge $CHECK_INTERVAL ]; then
-            monitor_system_health
-            LAST_CHECK_TIME=$CURRENT_TIME
-        fi
-
-        # 防止空转过快
-        sleep 0.1
+        
     done
 
 else
