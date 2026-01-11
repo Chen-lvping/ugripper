@@ -1,0 +1,66 @@
+{
+    "metadata": {
+        "format_version": "1.0",
+        "generation_date": "2025-01-09",
+        "description": "Camera calibration parameters",
+        "calibration_status": "uncalibrated"
+    },
+    "observation.images.{{CAM_MAIN}}": {
+        "shape": [
+            1080,
+            1920,
+            3
+        ],
+        "names": [
+            "height",
+            "width",
+            "channels"
+        ],
+        "info": null,
+        "intrinsics": {
+            "1920x1080": {
+                "fx": 1000.0,
+                "fy": 1000.0,
+                "ppx": 960.0,
+                "ppy": 540.0
+            }
+        },
+        "dtype": "video",
+        "fps": 60
+    },
+    "observation.tactile.gripper_left_tactile": {
+        "shape": [
+            480,
+            640,
+            1
+        ],
+        "names": [
+            "height",
+            "width",
+            "channels"
+        ],
+        "info": null,
+        "dtype": "tactile",
+        "serial": "{{TACTILE_LEFT_SERIAL}}"
+    },
+    "observation.tactile.gripper_right_tactile": {
+        "shape": [
+            480,
+            640,
+            1
+        ],
+        "names": [
+            "height",
+            "width",
+            "channels"
+        ],
+        "info": null,
+        "dtype": "tactile",
+        "serial": "{{TACTILE_RIGHT_SERIAL}}"
+    },
+    "calibration_info": {
+        "calibration_date": "2025-01-09",
+        "calibration_status": "uncalibrated",
+        "notes": "Replace {{CAM_MAIN}} with actual camera name (e.g., cam_left or cam_right) and {{TACTILE_LEFT_SERIAL}}/{{TACTILE_RIGHT_SERIAL}} with USB serial numbers"
+    }
+}

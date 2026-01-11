@@ -5,7 +5,6 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir" || exit 1
 
 # ================= 配置部分 =================
-CONFIG_FILE="./config/config.txt"
 DISK_DIR="/mnt/data_disk"
 DEVICE_SN=""
 if [ -f /etc/environment ]; then
@@ -116,29 +115,7 @@ fi
 mkdir -p "$AUDIO_TEMP_DIR"
 
 # ================= 业务配置检查 =================
-
-# 1. 读取 Device ID
-if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
-else
-    echo "Error: Configuration file $CONFIG_FILE not found!"
-    set_state "ERROR"
-    notify_audio "error"
-    exit 1
-fi
-
-if [ -z "$device_id" ]; then
-    echo "Error: device_id not defined in config file."
-    set_state "ERROR"
-    notify_audio "error"
-    exit 1
-fi
-
-DEVICE_MODEL=$(echo "$device_id" | awk -F_ '{print $1}')
-DEVICE_NUM=$(echo "$device_id" | awk -F_ '{print $2}')
-COLLECTOR=${collector:-"default_user"}
-
-# 2. 检查硬盘挂载 (改为循环等待模式)
+# 检查硬盘挂载 (改为循环等待模式)
 echo "Checking Disk Mount..."
 while ! mountpoint -q "$DISK_DIR"; do
     echo "Error: $DISK_DIR is NOT mounted! Waiting for disk..."
@@ -217,33 +194,71 @@ mkdir -p "$DIR_CALIB"
 mkdir -p "$DIR_DATA"
 
 # 1. 生成 metadata
-META_FILE="$DIR_META/info.txt"
+META_FILE="$DIR_META/info.json"
 if [ ! -f "$META_FILE" ]; then
-    echo "device_type: UMI" > "$META_FILE"
-    echo "device_model: $DEVICE_MODEL" >> "$META_FILE"
-    echo "device_id: $DEVICE_NUM" >> "$META_FILE"
-    echo "collector: $COLLECTOR" >> "$META_FILE"
-    echo "device_side: $CURRENT_SIDE" >> "$META_FILE"
+    # 使用 cat 生成 JSON 内容
+    # 注意：DEVICE_SN 来源于脚本开头的 /etc/environment 读取
+    cat <<EOF > "$META_FILE"
+{
+    "device_type": "UMI",
+    "device_model": "ugripper",
+    "device_id": "${DEVICE_SN}",
+    "collector": "default_user",
+    "device_side": "${CURRENT_SIDE}",
+    "data_path": "data/episode_{date:08d}_{episode_index:04d}"
+}
+EOF
+    echo "Metadata info.json created."
 fi
 
 # 2. 拷贝 calibration 文件
-# 从 ./config/fake*Calib.yaml 拷贝到 calibration/xxx.yaml
-if [ -f "./config/fakeCamCalib.yaml" ]; then
-    cp "./config/fakeCamCalib.yaml" "$DIR_CALIB/cam.yaml"
+# 从 ./config/fake*Calib.json 拷贝到 calibration/xxx.json
+if [ -f "./config/fakeCamCalib.json" ]; then
+    cp -n "./config/fakeCamCalib.json" "$DIR_CALIB/cam.json"
 fi
-if [ -f "./config/fakeEncoderCalib.yaml" ]; then
-    cp "./config/fakeEncoderCalib.yaml" "$DIR_CALIB/encoder.yaml"
+if [ -f "./config/fakeEncoderCalib.json" ]; then
+    cp -n "./config/fakeEncoderCalib.json" "$DIR_CALIB/encoder.json"
 fi
-if [ -f "./config/fakeIMUCalib.yaml" ]; then
-    cp "./config/fakeIMUCalib.yaml" "$DIR_CALIB/imu.yaml"
+if [ -f "./config/fakeIMUCalib.json" ]; then
+    cp -n "./config/fakeIMUCalib.json" "$DIR_CALIB/imu.json"
 fi
 echo "Calibration files synced."
 
-# ================= 硬件序列号校验 =================
+# ================= 全局占位符处理 (CAM_MAIN) =================
+handle_global_placeholders() {
+    local json_file="$DIR_CALIB/cam.json"
+    
+    if [ ! -f "$json_file" ]; then return; fi
+
+    # 1. 初始化 {{CAM_MAIN}}
+    # 根据环境变量 CURRENT_SIDE (Left/Right) 决定 cam_left 或 cam_right
+    if grep -q "{{CAM_MAIN}}" "$json_file"; then
+        local cam_name=""
+        # ${CURRENT_SIDE,,} 将变量转为小写 (需要 Bash 4.0+)
+        if [[ "${CURRENT_SIDE,,}" == "left" ]]; then
+            cam_name="cam_left"
+        elif [[ "${CURRENT_SIDE,,}" == "right" ]]; then
+            cam_name="cam_right"
+        else
+            echo "WARNING: CURRENT_SIDE='$CURRENT_SIDE' is invalid. Skipping {{CAM_MAIN}} init."
+        fi
+
+        if [ -n "$cam_name" ]; then
+            echo "Initializing {{CAM_MAIN}} key to $cam_name in $json_file..."
+            # 直接使用 sed 替换 key 字符串
+            sed -i "s/{{CAM_MAIN}}/$cam_name/g" "$json_file"
+        fi
+    fi
+}
+
+# 立即执行一次全局占位符处理
+handle_global_placeholders
+
+# ================= 硬件序列号校验与初始化 =================
 check_camera_hardware() {
     local dev_node=$1
     local name=$2
-    local yaml_file="$DIR_CALIB/cam.yaml"
+    local json_file="$DIR_CALIB/cam.json"
     
     echo "Checking $name ($dev_node)..."
     
@@ -266,19 +281,68 @@ check_camera_hardware() {
         return
     fi
 
-    # 读取 cam.yaml 中的序列号
-    # 暂时直接读取 yaml 里是否有该序列号字符串
-
-    local yaml_serial_match=$(grep "$usb_serial" "$yaml_file")
+    # 判断左右 (根据 device node 名称)
+    local side=""
+    local side_upper=""
+    if [[ "$dev_node" == *"left"* ]]; then
+        side="left"
+        side_upper="LEFT"
+    elif [[ "$dev_node" == *"right"* ]]; then
+        side="right"
+        side_upper="RIGHT"
+    fi
     
-    # 获取 yaml 里对应的预期 serial (这里简化处理，需根据实际yaml结构完善)
-    # 假设我们只检查 yaml 里是否存在这个序列号
-    if [ -z "$yaml_serial_match" ]; then
-        echo "WARNING: Serial $usb_serial for $dev_node NOT FOUND in $yaml_file!"
+    if [ -z "$side" ]; then
+        echo "WARNING: Could not determine side from device node $dev_node, skipping check."
+        return
+    fi
+    
+    # 构造占位符字符串，例如 {{TACTILE_LEFT_SERIAL}}
+    local placeholder="{{TACTILE_${side_upper}_SERIAL}}"
+
+    # 检查 jq
+    if ! command -v jq &> /dev/null; then
+        echo "ERROR: 'jq' command not found. Please install jq."
+        return
+    fi
+
+    if [ ! -f "$json_file" ]; then
+        echo "WARNING: $json_file not found."
+        return
+    fi
+
+    # --- 逻辑分支 ---
+    
+    # 1. 检查是否存在占位符（初始化模式）
+    if grep -q "$placeholder" "$json_file"; then
+        echo "  - Found placeholder $placeholder. Initializing to $usb_serial..."
+        # 使用 sed 直接替换占位符（最安全的方式，无需关心 JSON 深度）
+        sed -i "s/$placeholder/$usb_serial/g" "$json_file"
+        echo "  - Initialization complete."
+        return
+    fi
+
+    # 2. 占位符不存在，进行校验（Verify 模式）
+    # 构造 JSON 查询路径：.observation.tactile.gripper_left_tactile.serial
+    # 注意：这里的 gripper_${side}_tactile 必须匹配 JSON 中的实际 key 名
+    local json_path=".observation.tactile.gripper_${side}_tactile.serial"
+    
+    local serial_in_json=$(jq -r "$json_path // empty" "$json_file")
+    
+    if [ -z "$serial_in_json" ]; then
+        echo "WARNING: Could not find serial at '$json_path' in $json_file."
+    elif [ "$serial_in_json" != "$usb_serial" ]; then
+        # 序列号不匹配 -> 仅警告
+        echo "WARNING: Serial mismatch for $side side!"
+        echo "  - Configured (JSON): $serial_in_json"
+        echo "  - Detected (HW)    : $usb_serial"
+        echo "  - ACTION: Keeping existing configuration (Manual intervention required if hardware changed)."
     else
         echo "  - Serial match OK: $usb_serial"
     fi
 }
+
+
 
 # 执行校验
 check_camera_hardware "/dev/left_tcam" "Left Tactile"

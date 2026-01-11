@@ -11,8 +11,7 @@
 """
 
 import argparse
-import csv
-import multiprocessing
+import json
 import os
 import signal
 import statistics
@@ -288,6 +287,29 @@ class TripleCameraRecorder:
         print("=" * 70)
         print(f"输出目录: {self.output_dir}")
         print(f"主进程 PID: {os.getpid()}  (Shell可用 kill -2 {os.getpid()} 停止)")
+
+        # =================================================================
+        # 写入开机时间偏移量到 info.json
+        # 偏移量 = 当前Unix时间 - 系统运行时间(Monotonic)
+        # 后续可用公式: 真实时间 = 视频PTS(如果为Monotonic) + offset
+        # =================================================================
+        try:
+            offset = time.time() - time.monotonic()
+            info_path = os.path.join(self.output_dir, "info.json")
+            
+            data = {
+                "boot_time_offset": offset,                # 秒 (浮点数)
+                "boot_time_offset_us": int(offset * 1e6),  # 微秒 (整数)
+            }
+            
+            with open(info_path, "w") as f:
+                json.dump(data, f, indent=4)
+            print(f"[Info] 开机时间偏移量已写入: {info_path}")
+            
+        except Exception as e:
+            print(f"[Error] 写入 info.json 失败: {e}")
+        # =================================================================
+
         if duration > 0:
             print(f"录制时长: {duration} 秒")
         else:
@@ -297,6 +319,7 @@ class TripleCameraRecorder:
         for config in configs:
             config["duration"] = duration
 
+        # ... (后续代码保持不变: barrier初始化, 进程启动循环等) ...
         self.barrier = Barrier(len(configs) + 1)
         self.start_event.clear()
         self.first_frame_info.clear()
