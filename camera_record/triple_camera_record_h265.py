@@ -117,7 +117,7 @@ def _run_ffmpeg_process(
 
         process = subprocess.Popen(
             cmd,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE,
             universal_newlines=True,
@@ -136,12 +136,29 @@ def _run_ffmpeg_process(
     finally:
         if process:
             if process.poll() is None:
-                process.terminate()
-            try:
-                process.wait(timeout=3)
-            except:
-                process.kill()
+                # 1) 优雅退出：发 q
+                try:
+                    if process.stdin:
+                        process.stdin.write("q\n")
+                        process.stdin.flush()
+                except Exception:
+                    pass
+
+                # 2) 等待 ffmpeg 正常写尾
+                try:
+                    process.wait(timeout=10)   # mkv 建议给长一点
+                except subprocess.TimeoutExpired:
+                    # 3) 再用 terminate
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        # 4) 最后 kill
+                        process.kill()
+                        process.wait()
+
         print(f"[{cam_name}] 退出")
+
 
 
 # ================================================================
@@ -183,8 +200,8 @@ def _record_direct_nv12(config, barrier, start_event, stop_event, first_frame_in
         "main",
         "-level",
         "5.1",
-        output_file,
         "-y",
+        output_file,
     ]
 
     _run_ffmpeg_process(cmd, config, barrier, start_event, stop_event, first_frame_info)

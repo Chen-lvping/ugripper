@@ -14,7 +14,9 @@ if [ -f /etc/environment ]; then
         | tr -d '"' \
         | xargs)
 fi
-DATA_ROOT="/mnt/data_disk/${DEVICE_SN:-NonameDevice}" 
+DEVICE_SN_LOWER="${DEVICE_SN,,}"
+
+DATA_ROOT="/mnt/data_disk/${DEVICE_SN_LOWER:-noname_device}" 
 
 # --- 网络配置 (双臂协同) ---
 # 通过环境变量/etc/environment获取当前设备角色，默认为 Right (Master)
@@ -29,6 +31,7 @@ if [ -f /etc/environment ]; then
 fi
 
 CURRENT_SIDE=${DEVICE_SIDE:-Right}
+CURRENT_SIDE_LOWER="${CURRENT_SIDE,,}"
 
 IP_RIGHT="192.168.1.100"
 IP_LEFT="192.168.1.101"
@@ -122,20 +125,46 @@ while ! mountpoint -q "$DISK_DIR"; do
     
     # 设置为错误状态 (红灯快闪)
     set_state "ERROR"
-    notify_audio "error"
+    #notify_audio "error"
     
-    # 等待 3 秒再次检查
-    sleep 3
+    # 等待 1 秒再次检查
+    sleep 1
 done
 
 echo "Disk OK: $DISK_DIR is mounted."
 
 # ================= 日志系统 =================
-# 1. 定义路径
-LOG_FILE_LOCAL="/tmp/umi_sys_${CURRENT_SIDE}_$(date +%Y%m%d).log"
-LOG_FILE_DISK="$DISK_DIR/logs/umi_sys_${CURRENT_SIDE}_$(date +%Y%m%d).log"
+# -------------------------
+# 日志路径
+# -------------------------
+LOG_DIR_LOCAL="/tmp"
+LOG_DIR_DISK="$DISK_DIR/logs"
+TODAY=$(date +%Y%m%d)
 
-# 2. 重定向到【本地临时文件】
+LOG_FILE_LOCAL="$LOG_DIR_LOCAL/umi_sys_${DEVICE_SN_LOWER}_${TODAY}.log"
+LOG_FILE_DISK="$LOG_DIR_DISK/umi_sys_${DEVICE_SN_LOWER}_${TODAY}.log"
+
+# -------------------------
+# 清理旧日志（非今天的）
+# -------------------------
+cleanup_old_logs() {
+    for dir in "$LOG_DIR_LOCAL" "$LOG_DIR_DISK"; do
+        [ -d "$dir" ] || continue
+        for file in "$dir"/umi_sys_"${DEVICE_SN_LOWER}"_*.log; do
+            # 如果文件名中不包含今天日期，就删除
+            if [[ "$file" != *"${TODAY}.log" ]]; then
+                echo "Deleting old log: $file"
+                rm -f "$file"
+            fi
+        done
+    done
+}
+
+cleanup_old_logs
+
+# -------------------------
+# 重定向日志到本地临时文件，同时输出到屏幕
+# -------------------------
 echo "Logging locally to: $LOG_FILE_LOCAL"
 exec > >(tee -a "$LOG_FILE_LOCAL") 2>&1
 
@@ -204,7 +233,7 @@ if [ ! -f "$META_FILE" ]; then
     "device_model": "ugripper",
     "device_id": "${DEVICE_SN}",
     "collector": "default_user",
-    "device_side": "${CURRENT_SIDE}",
+    "device_side": "${DEVICE_SIDE:-Right}",
     "data_path": "data/episode_{date:08d}_{episode_index:04d}"
 }
 EOF
@@ -231,16 +260,15 @@ handle_global_placeholders() {
     if [ ! -f "$json_file" ]; then return; fi
 
     # 1. 初始化 {{CAM_MAIN}}
-    # 根据环境变量 CURRENT_SIDE (Left/Right) 决定 cam_left 或 cam_right
+    # 根据环境变量 CURRENT_SIDE_LOWER (left/right) 决定 cam_left 或 cam_right
     if grep -q "{{CAM_MAIN}}" "$json_file"; then
         local cam_name=""
-        # ${CURRENT_SIDE,,} 将变量转为小写 (需要 Bash 4.0+)
-        if [[ "${CURRENT_SIDE,,}" == "left" ]]; then
+        if [[ "${CURRENT_SIDE_LOWER}" == "left" ]]; then
             cam_name="cam_left"
-        elif [[ "${CURRENT_SIDE,,}" == "right" ]]; then
+        elif [[ "${CURRENT_SIDE_LOWER}" == "right" ]]; then
             cam_name="cam_right"
         else
-            echo "WARNING: CURRENT_SIDE='$CURRENT_SIDE' is invalid. Skipping {{CAM_MAIN}} init."
+            echo "WARNING: CURRENT_SIDE='$CURRENT_SIDE_LOWER' is invalid. Skipping {{CAM_MAIN}} init."
         fi
 
         if [ -n "$cam_name" ]; then
@@ -349,7 +377,7 @@ check_camera_hardware "/dev/left_tcam" "Left Tactile"
 check_camera_hardware "/dev/right_tcam" "Right Tactile"
 
 # ================= GPIO 初始化 (仅 Right 需要) =================
-if [ "$CURRENT_SIDE" == "Right" ]; then
+if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
     echo "Initializing GPIO for Master (Right)..."
     if [ -z "$(gpiofind "$PIN_BTN")" ]; then
         echo "Error: Could not find GPIO pins."
@@ -372,9 +400,6 @@ PRE_AUDIO_FILE=""    # 存储预录制音频文件路径
 
 # 硬件健康监测函数
 monitor_system_health() {
-    # 如果正在录制，不要执行检查，以免争抢 IO 导致丢帧
-    if [ "$IS_RECORDING" = true ]; then return; fi
-
     local has_error=false
     local error_msg=""
 
@@ -412,6 +437,17 @@ monitor_system_health() {
             SYSTEM_HEALTH_STATUS="OK"
         fi
     fi
+}
+
+monitor_loop() {
+    while true; do
+        # 如果正在录制，不检查，避免争抢 IO
+        if [ "$IS_RECORDING" = false ]; then
+            monitor_system_health
+        fi
+
+        sleep 0.05  # 控制检查频率
+    done
 }
 
 # 函数：发送网络命令 (仅 Right 调用)
@@ -464,7 +500,7 @@ prepare_directory() {
 # 函数：启动音频录制
 record_audio() {
     # 如果是 Left (Slave)，直接禁用录音功能
-    if [ "$CURRENT_SIDE" == "Left" ]; then
+    if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
         echo "Audio recording disabled on Slave (Left) side."
         return
     fi
@@ -550,7 +586,7 @@ start_recording() {
     prepare_directory "$sync_dir_name"
     
     # 2. 如果是 Master，需要通知 Slave
-    if [ "$CURRENT_SIDE" == "Right" ]; then
+    if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
         # 获取纯文件夹名
         local dirname=$(basename "$TARGET_DIR")
         # 发送 START 指令和文件夹名
@@ -558,7 +594,7 @@ start_recording() {
     fi
 
     # 3. 处理预录制音频 (仅 Master)
-    if [ "$CURRENT_SIDE" == "Right" ] && [ -n "$PRE_AUDIO_FILE" ] && [ -f "$PRE_AUDIO_FILE" ]; then
+    if [ "$CURRENT_SIDE_LOWER" == "right" ] && [ -n "$PRE_AUDIO_FILE" ] && [ -f "$PRE_AUDIO_FILE" ]; then
         mv "$PRE_AUDIO_FILE" "$TARGET_DIR/audio_pre.wav"
         PRE_AUDIO_FILE=""
     fi
@@ -659,16 +695,46 @@ validate_recording() {
 # 函数：停止所有录制进程
 stop_recording() {
     # 1. 如果是 Master，先通知 Slave 停止
-    if [ "$CURRENT_SIDE" == "Right" ]; then
+    if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
         send_network_command "STOP" "0"
     fi
 
-    echo "Stopping processes on $CURRENT_SIDE..."
+    echo "Stopping processes on $CURRENT_SIDE_LOWER..."
 
-    # 发送 SIGINT (Ctrl+C) 信号
-    if [ -n "$PID_CAM" ] && kill -0 $PID_CAM 2>/dev/null; then kill -2 $PID_CAM; fi
-    if [ -n "$PID_ENC" ] && kill -0 $PID_ENC 2>/dev/null; then kill -2 $PID_ENC; fi
-    if [ -n "$PID_IMU" ] && kill -0 $PID_IMU 2>/dev/null; then kill -2 $PID_IMU; fi
+    # 发送 SIGINT
+    for pid in "$PID_CAM" "$PID_ENC" "$PID_IMU"; do
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+            kill -2 "$pid"
+        fi
+    done
+
+    # 最多等待 5 秒
+    TIMEOUT=5
+    start_ts=$(date +%s)
+
+    while :; do
+        alive=0
+        for pid in "$PID_CAM" "$PID_ENC" "$PID_IMU"; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                alive=1
+            fi
+        done
+
+        [ "$alive" -eq 0 ] && break
+
+        now=$(date +%s)
+        if [ $((now - start_ts)) -ge "$TIMEOUT" ]; then
+            echo "WARN: timeout, force killing remaining processes"
+            for pid in "$PID_CAM" "$PID_ENC" "$PID_IMU"; do
+                if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                    kill -9 "$pid"
+                fi
+            done
+            break
+        fi
+
+        sleep 0.1
+    done
     
     # 等待退出
     wait $PID_CAM $PID_ENC $PID_IMU 2>/dev/null
@@ -676,7 +742,8 @@ stop_recording() {
     # 强制同步数据到磁盘
     echo "Syncing data to disk..."
     set_state "INIT"  # 临时切换状态指示sync
-    sync "$DISK_DIR"
+    sync -f "$DISK_DIR"
+    sync
 
     IS_RECORDING=false
     echo ">>> RECORDING STOPPED. Processes terminated."
@@ -724,6 +791,11 @@ cleanup() {
         kill $PID_LED_SCRIPT 2>/dev/null
     fi
 
+    # 5.停止硬件监控
+    if [ -n "$MONITOR_PID" ]; then
+        kill $MONITOR_PID 2>/dev/null
+    fi
+
     # 停止日志同步
     if [ -n "$PID_LOG_SYNC" ]; then
         kill $PID_LOG_SYNC 2>/dev/null
@@ -747,11 +819,12 @@ set_state "READY"
 # 播放准备就绪提示音
 notify_audio "ready"
 
+monitor_loop &        # 后台运行硬件监控
+MONITOR_PID=$!
 
-LAST_CHECK_TIME=$(date +%s)
-CHECK_INTERVAL=1  # 检查间隔（秒）
+echo "Hardware monitor PID: $MONITOR_PID"
 
-if [ "$CURRENT_SIDE" == "Left" ]; then
+if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
     # ================= Slave (Left) 逻辑 =================
     echo "=========================================="
     echo "RUNNING AS SLAVE (LEFT)"
@@ -760,7 +833,7 @@ if [ "$CURRENT_SIDE" == "Left" ]; then
     echo " - Waiting for commands from RIGHT ($IP_RIGHT)..."
     echo "=========================================="
 
-    # 1. 网络检查
+    # 1. 网络检查 拔网线会触发umount，导致硬件报错（方便安全拔盘），所以仅在开机时检查一次即可
     echo "Checking connection to Master..."
     ping -c 1 -W 2 "$IP_RIGHT" > /dev/null
     if [ $? -eq 0 ]; then
@@ -773,10 +846,7 @@ if [ "$CURRENT_SIDE" == "Left" ]; then
 
     # 2. 网络监听循环
     while true; do
-        # === 优先执行：硬件健康检查 ===
-        # 将检查放在循环开头，确保每次循环都覆盖
-        # 移除时间间隔判断，或者保持很短的间隔，确保拔盘即红灯
-        monitor_system_health
+        # 会阻塞执行
         
         # === 网络监听 ===
         # 监听 TCP 端口，收到数据后退出 nc
@@ -824,13 +894,6 @@ else
     echo "=========================================="
 
     while true; do
-        # 定时检查逻辑 (非阻塞)
-        CURRENT_TIME=$(date +%s)
-        if [ $((CURRENT_TIME - LAST_CHECK_TIME)) -ge $CHECK_INTERVAL ]; then
-            monitor_system_health
-            LAST_CHECK_TIME=$CURRENT_TIME
-        fi
-        
         BTN_VAL=$(gpioget $(gpiofind "$PIN_BTN"))
         
         if [ "$BTN_VAL" -eq "$BTN_ACTIVE_LEVEL" ]; then
