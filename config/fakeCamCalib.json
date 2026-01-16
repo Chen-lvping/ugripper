@@ -28,11 +28,11 @@
         "dtype": "video",
         "fps": 60
     },
-    "observation.tactile.gripper_left_tactile": {
+    "observation.images.gripper_left_tactile": {
         "shape": [
             480,
             640,
-            1
+            3
         ],
         "names": [
             "height",
@@ -40,14 +40,14 @@
             "channels"
         ],
         "info": null,
-        "dtype": "tactile",
+        "dtype": "video",
         "serial": "{{TACTILE_LEFT_SERIAL}}"
     },
-    "observation.tactile.gripper_right_tactile": {
+    "observation.images.gripper_right_tactile": {
         "shape": [
             480,
             640,
-            1
+            3
         ],
         "names": [
             "height",
@@ -55,7 +55,7 @@
             "channels"
         ],
         "info": null,
-        "dtype": "tactile",
+        "dtype": "video",
         "serial": "{{TACTILE_RIGHT_SERIAL}}"
     },
     "calibration_info": {

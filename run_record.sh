@@ -107,7 +107,8 @@ fi
 # 启动音频播放管理器
 if [ -f "$AUDIO_PLAY_SCRIPT" ]; then
     echo "Starting Audio Play Manager..."
-    uv run "$AUDIO_PLAY_SCRIPT" &
+    uv run "$AUDIO_PLAY_SCRIPT" \
+        > /dev/null 2>&1 &
     PID_AUDIO_PLAY=$!
     sleep 0.2
 else
@@ -223,7 +224,7 @@ mkdir -p "$DIR_CALIB"
 mkdir -p "$DIR_DATA"
 
 # 1. 生成 metadata
-META_FILE="$DIR_META/info.json"
+META_FILE="$DIR_META/metadata.json"
 if [ ! -f "$META_FILE" ]; then
     # 使用 cat 生成 JSON 内容
     # 注意：DEVICE_SN 来源于脚本开头的 /etc/environment 读取
@@ -283,7 +284,7 @@ handle_global_placeholders() {
 handle_global_placeholders
 
 # ================= 硬件序列号校验与初始化 =================
-check_camera_hardware() {
+check_tactile_hardware() {
     local dev_node=$1
     local name=$2
     local json_file="$DIR_CALIB/cam.json"
@@ -328,53 +329,45 @@ check_camera_hardware() {
     # 构造占位符字符串，例如 {{TACTILE_LEFT_SERIAL}}
     local placeholder="{{TACTILE_${side_upper}_SERIAL}}"
 
-    # 检查 jq
-    if ! command -v jq &> /dev/null; then
-        echo "ERROR: 'jq' command not found. Please install jq."
-        return
-    fi
-
-    if [ ! -f "$json_file" ]; then
-        echo "WARNING: $json_file not found."
-        return
-    fi
-
-    # --- 逻辑分支 ---
-    
-    # 1. 检查是否存在占位符（初始化模式）
+    # =========================
+    # 初始化模式：检测占位符
+    # =========================
     if grep -q "$placeholder" "$json_file"; then
         echo "  - Found placeholder $placeholder. Initializing to $usb_serial..."
-        # 使用 sed 直接替换占位符（最安全的方式，无需关心 JSON 深度）
-        sed -i "s/$placeholder/$usb_serial/g" "$json_file"
+
+        # 直接字符串替换，占位符安全
+        sed -i "s|$placeholder|$usb_serial|g" "$json_file"
+
         echo "  - Initialization complete."
         return
     fi
 
-    # 2. 占位符不存在，进行校验（Verify 模式）
-    # 构造 JSON 查询路径：.observation.tactile.gripper_left_tactile.serial
-    # 注意：这里的 gripper_${side}_tactile 必须匹配 JSON 中的实际 key 名
-    local json_path=".observation.tactile.gripper_${side}_tactile.serial"
-    
-    local serial_in_json=$(jq -r "$json_path // empty" "$json_file")
-    
+    # =========================
+    # 校验模式：Verify
+    # =========================
+    local json_path=".\"observation.images.gripper_${side}_tactile\".serial"
+
+    local serial_in_json
+    serial_in_json=$(jq -r "$json_path // empty" "$json_file")
+
     if [ -z "$serial_in_json" ]; then
-        echo "WARNING: Could not find serial at '$json_path' in $json_file."
+        echo "WARNING: Could not find serial at $json_path in $json_file."
+
     elif [ "$serial_in_json" != "$usb_serial" ]; then
-        # 序列号不匹配 -> 仅警告
-        echo "WARNING: Serial mismatch for $side side!"
+        echo "WARNING: Serial mismatch for $side tactile camera!"
         echo "  - Configured (JSON): $serial_in_json"
         echo "  - Detected (HW)    : $usb_serial"
         echo "  - ACTION: Keeping existing configuration (Manual intervention required if hardware changed)."
+
     else
         echo "  - Serial match OK: $usb_serial"
     fi
 }
 
-
-
+# --- 逻辑分支 ---
 # 执行校验
-check_camera_hardware "/dev/left_tcam" "Left Tactile"
-check_camera_hardware "/dev/right_tcam" "Right Tactile"
+check_tactile_hardware "/dev/left_tcam" "Left Tactile"
+check_tactile_hardware "/dev/right_tcam" "Right Tactile"
 
 # ================= GPIO 初始化 (仅 Right 需要) =================
 if [ "$CURRENT_SIDE_LOWER" == "right" ]; then

@@ -4,7 +4,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ================= 变量定义区域 =================
 APP_NAME="ugripper"
-VERSION="1.0.4"       # 每次发布前修改这里
+VERSION="1.0.5"       # 每次发布前修改这里
 ARCH="arm64"
 INSTALL_DIR="/opt/${APP_NAME}"
 BUILD_ROOT="build_deb_temp"
