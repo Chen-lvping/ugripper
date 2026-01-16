@@ -33,15 +33,45 @@ PIN_BTN="PIN_36"    # 按钮输入
 BTN_ACTIVE_LEVEL=1  # 1表示按下
 DEBOUNCE_MS=0.03    # 30ms
 
+# --- 硬盘检测配置 ---
+USB_LINK="/dev/usb_update_stick"
+MOUNT_POINT="/mnt/usb_calib"
 
 # 停止业务服务，防止占用
 echo "Stopping ugripper.service..."
 systemctl stop ugripper.service
-sleep 5
+sleep 3
+
+
+# ================= 升级硬盘及文件检测 =================
+echo "Checking USB trigger conditions..."
+
+if [ ! -b "$USB_LINK" ]; then
+    echo "Error: USB update stick ($USB_LINK) not found. Exiting."
+    systemctl start ugripper.service
+    exit 1
+fi
+
+mkdir -p "$MOUNT_POINT"
+if ! mount -o ro "$USB_LINK" "$MOUNT_POINT" 2>/dev/null; then
+    echo "Error: Failed to mount USB stick."
+    systemctl start ugripper.service
+    exit 1
+fi
+
+if [ ! -f "$MOUNT_POINT/calibration.txt" ]; then
+    echo "Error: calibration.txt not found in USB root. Exiting."
+    umount "$MOUNT_POINT" 2>/dev/null
+    systemctl start ugripper.service    
+    exit 1
+fi
+
+echo "USB Check Passed: calibration.txt detected."
 
 # ================= 检查按钮状态 =================
 if [ -z "$(gpiofind "$PIN_BTN")" ]; then
     echo "Error: Could not find GPIO pin $PIN_BTN."
+    systemctl start ugripper.service
     exit 1
 fi
 
@@ -138,12 +168,15 @@ stop_helpers() {
 # ================= 异常捕获 =================
 
 on_exit_cleanup() {
-    # 防止重复执行清理
     trap '' EXIT SIGINT SIGTERM
-    
     echo ""
     echo ">>> Trapped signal or exit. Cleaning up..."
     
+    if mountpoint -q "$MOUNT_POINT"; then
+        umount "$MOUNT_POINT" 2>/dev/null
+        echo "USB unmounted."
+    fi
+
     stop_helpers
     
     if ! systemctl is-active --quiet ugripper.service; then
