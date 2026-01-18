@@ -15,6 +15,14 @@ fi
 
 echo "Network Monitor Started for $INTERFACE. Initial State: $LAST_STATE"
 
+# ================= 信号处理 =================
+cleanup() {
+    echo "Network Monitor: Received stop signal. Exiting..."
+    exit 0
+}
+trap cleanup SIGTERM SIGINT
+
+# ================= 主循环 =================
 while true; do
     if [ -f "$CARRIER_PATH" ]; then
         CURRENT_STATE=$(cat "$CARRIER_PATH")

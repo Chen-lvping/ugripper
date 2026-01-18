@@ -4,6 +4,8 @@ import re
 import subprocess
 import time
 import pygame
+import signal
+import sys
 
 
 def find_alsa_card_by_name(target: str):
@@ -50,21 +52,25 @@ def setup_audio_device():
     dev = f"plughw:{card},0"
     os.environ["AUDIODEV"] = dev
     print(f"Using ALSA device: {dev} (matched card name: {target})")
-    # 设置 PCM 音量为 100%
+    # 设置 PCM 音量为 85%
     try:
         subprocess.run(
-            ["amixer", "-c", str(card), "set", "PCM", "100%", "unmute"],
+            ["amixer", "-c", str(card), "set", "PCM", "85%", "unmute"],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        print(f"ALSA PCM volume set to 100% on card {card}")
+        print(f"ALSA PCM volume set to 85% on card {card}")
     except subprocess.CalledProcessError:
         print("WARNING: Failed to set PCM volume (control may not exist)")
 
 
 class AudioPlayer:
     def __init__(self):
+        # 注册信号处理，捕获 SIGINT 和 SIGTERM 以便正常退出
+        signal.signal(signal.SIGINT, self.shutdown)
+        signal.signal(signal.SIGTERM, self.shutdown)
+
         setup_audio_device()
 
         pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
@@ -90,6 +96,11 @@ class AudioPlayer:
             os.mkfifo(self.pipe_path)
 
         print("Audio Player Ready. Waiting for commands...")
+
+    def shutdown(self, signum, frame):
+        """处理退出信号，避免子进程卡死"""
+        print(f"Received signal {signum}, audio player exiting...")
+        sys.exit(0)
 
     def load_sound(self, filename):
         filepath = os.path.join(self.audio_dir, filename)
