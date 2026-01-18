@@ -50,15 +50,15 @@ def setup_audio_device():
     dev = f"plughw:{card},0"
     os.environ["AUDIODEV"] = dev
     print(f"Using ALSA device: {dev} (matched card name: {target})")
-    # 设置 PCM 音量为 70%
+    # 设置 PCM 音量为 100%
     try:
         subprocess.run(
-            ["amixer", "-c", str(card), "set", "PCM", "70%", "unmute"],
+            ["amixer", "-c", str(card), "set", "PCM", "100%", "unmute"],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        print(f"ALSA PCM volume set to 70% on card {card}")
+        print(f"ALSA PCM volume set to 100% on card {card}")
     except subprocess.CalledProcessError:
         print("WARNING: Failed to set PCM volume (control may not exist)")
 
