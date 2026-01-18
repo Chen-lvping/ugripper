@@ -7,7 +7,7 @@ SRC_DIR="./auto_update"
 
 # 软件包信息
 PKG_NAME="ugripper-usb-updater"
-PKG_VERSION="1.0.0"
+PKG_VERSION="1.0.1"
 ARCH="all"
 MAINTAINER="User <user@example.com>"
 DESC="Auto update ugripper via USB and Boot Check"
@@ -145,5 +145,5 @@ dpkg-deb --build "$BUILD_DIR" "${PKG_DIR}.deb"
 
 echo "========================================"
 echo "构建完成！"
-ls -lh "${BUILD_DIR}.deb"
+ls -lh "${PKG_DIR}.deb"
 echo "========================================"

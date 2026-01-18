@@ -5,14 +5,17 @@ set -euo pipefail
 # 如果你想只允许固定 USB 口触发（强校验），填你的 by-path（推荐）
 USB_DEV_PATH="/dev/disk/by-path/platform-xhci-hcd.1.auto-usb-0:1.3:1.0-scsi-0:0:0:0-part1"
 
+# 业务主程序包前缀
 DEB_PREFIX="ugripper_*_arm64"
-MOUNT_POINT="/mnt/usb_updater_tmp"
+# Updater 自身更新包前缀
+UPDATER_PREFIX="ugripper-usb-updater*"
 
+MOUNT_POINT="/mnt/usb_updater_tmp"
 LOG_FILE="/var/log/ugripper/usb_auto_update.log"
 LOCK_FILE="/run/usb_auto_update.lock"
 
 # 是否强制要求 “触发设备 == 固定口 by-path”
-ENFORCE_BY_PATH="0"   # 1=强制校验；0=不校验（任何U盘都可触发）
+ENFORCE_BY_PATH="0"   # 1=强制校验；0=不校验
 # ===========================================
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -81,7 +84,29 @@ else
   exit 1
 fi
 
-# 查找 deb
+# ========================================================
+# 1. 优先检查并更新自身 (Self-Update)
+# ========================================================
+UPDATER_DEB="$(find "$MOUNT_POINT" -maxdepth 1 -type f -name "${UPDATER_PREFIX}.deb" | head -n 1 || true)"
+
+if [ -n "${UPDATER_DEB:-}" ]; then
+  log "发现 Updater 自身更新包：$UPDATER_DEB，开始自我更新..."
+  
+  # 注意：在 Linux 中，Bash 脚本运行时文件被删除或替换（dpkg 会做原子替换），
+  # 当前运行的进程仍持有旧文件的 inode 句柄，因此会继续执行旧脚本剩下的逻辑直到结束。
+  # 这是安全的，新逻辑将在下一次触发时生效。
+  if dpkg -i --force-overwrite "$UPDATER_DEB"; then
+    log "Updater 自我更新成功。"
+  else
+    log "Updater 自我更新失败 (dpkg error)，将尝试继续后续业务更新。"
+  fi
+else
+  log "未发现自身更新包 ($UPDATER_PREFIX.deb)，跳过自我更新。"
+fi
+
+# ========================================================
+# 2. 检查并更新业务主程序 (ugripper)
+# ========================================================
 DEB_FILE="$(find "$MOUNT_POINT" -maxdepth 1 -type f -name "${DEB_PREFIX}*.deb" | head -n 1 || true)"
 if [ -z "${DEB_FILE:-}" ]; then
   log "未发现更新包（匹配 ${DEB_PREFIX}*.deb），跳过。"
@@ -94,14 +119,6 @@ if dpkg -i --force-overwrite "$DEB_FILE"; then
 else
   log "dpkg 安装失败。"
   exit 1
-fi
-
-# 更新后尝试重启 ugripper.service 应用新版本
-if systemctl list-unit-files | awk '{print $1}' | grep -qx "ugripper.service"; then
-  log "尝试重启 ugripper.service..."
-  systemctl try-restart ugripper.service || log "警告：ugripper.service 重启失败，请检查。"
-else
-  log "未发现 ugripper.service，跳过重启。"
 fi
 
 log "usb_auto_update done."
