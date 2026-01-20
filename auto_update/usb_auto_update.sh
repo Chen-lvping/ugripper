@@ -91,11 +91,14 @@ UPDATER_DEB="$(find "$MOUNT_POINT" -maxdepth 1 -type f -name "${UPDATER_PREFIX}.
 
 if [ -n "${UPDATER_DEB:-}" ]; then
   log "发现 Updater 自身更新包：$UPDATER_DEB，开始自我更新..."
-  
+  # 停止应用 方便指示灯显示
+  systemctl stop ugripper.service || true
+
   # 注意：在 Linux 中，Bash 脚本运行时文件被删除或替换（dpkg 会做原子替换），
   # 当前运行的进程仍持有旧文件的 inode 句柄，因此会继续执行旧脚本剩下的逻辑直到结束。
   # 这是安全的，新逻辑将在下一次触发时生效。
   if dpkg -i --force-overwrite "$UPDATER_DEB"; then
+    systemctl start ugripper.service || true
     log "Updater 自我更新成功。"
   else
     log "Updater 自我更新失败 (dpkg error)，将尝试继续后续业务更新。"
@@ -114,6 +117,9 @@ if [ -z "${DEB_FILE:-}" ]; then
 fi
 
 log "发现更新包：$DEB_FILE，开始安装..."
+# 停止应用
+systemctl stop ugripper.service || true
+# 安装更新包
 if dpkg -i --force-overwrite "$DEB_FILE"; then
   log "安装/更新成功。"
 else

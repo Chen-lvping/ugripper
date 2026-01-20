@@ -4,7 +4,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ================= 变量定义区域 =================
 APP_NAME="ugripper"
-VERSION="1.0.5"       # 每次发布前修改这里
+VERSION="1.0.6"       # 每次发布前修改这里
 ARCH="arm64"
 INSTALL_DIR="/opt/${APP_NAME}"
 BUILD_ROOT="build_deb_temp"
@@ -136,6 +136,8 @@ echo "=== [4/5] 处理配置脚本与变量替换 ==="
 cp "$PACK_SCRIPT_DIR/ugripper.service" "$BUILD_ROOT/etc/systemd/system/${APP_NAME}.service"
 cp "auto_calibration/ugripper-calibration.service" "$BUILD_ROOT/etc/systemd/system/ugripper-calibration.service"
 cp "auto_calibration/ugripper-network-monitor.service" "$BUILD_ROOT/etc/systemd/system/ugripper-network-monitor.service"
+cp "time_sync/ugripper-ntp-sync.service" "$BUILD_ROOT/etc/systemd/system/ugripper-ntp-sync.service"
+cp "time_sync/ugripper-ptp-monitor.service" "$BUILD_ROOT/etc/systemd/system/ugripper-ptp-monitor.service"
 
 # 2. 拷贝 DEBIAN 控制文件
 cp "$PACK_SCRIPT_DIR/control"  "$BUILD_ROOT/DEBIAN/"

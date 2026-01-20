@@ -56,6 +56,19 @@ LONG_PRESS_THRESHOLD=1.0
 # 双击检测窗口（秒）
 DOUBLE_CLICK_THRESHOLD=0.4
 
+
+# ================= 全局变量 =================
+IS_RECORDING=false
+PID_CAM=""
+PID_ENC=""
+PID_IMU=""
+TARGET_DIR=""
+LAST_EPISODE_DIR=""  # 记录上次录制的目录（用于post音频）
+PRE_AUDIO_FILE=""    # 存储预录制音频文件路径
+RECORDING_LOCK_FILE="/tmp/umi_recording.lock" # 录制锁文件
+# 启动直接释放锁文件，防止断电导致残留
+rm -f "$RECORDING_LOCK_FILE"
+
 # ================= 状态机与 LED 通信模块 =================
 
 # 1. 创建命名管道 (如果不存在)
@@ -121,16 +134,19 @@ mkdir -p "$AUDIO_TEMP_DIR"
 # ================= 业务配置检查 =================
 # 检查硬盘挂载 (改为循环等待模式)
 echo "Checking Disk Mount..."
+disk_error_reported=false
+
 while ! mountpoint -q "$DISK_DIR"; do
-    echo "Error: $DISK_DIR is NOT mounted! Waiting for disk..."
-    
-    # 设置为错误状态 (红灯快闪)
-    set_state "ERROR"
-    #notify_audio "error"
-    
-    # 等待 1 秒再次检查
+    if [ "$disk_error_reported" = false ]; then
+        echo "Error: $DISK_DIR is NOT mounted! Waiting for disk..."
+        set_state "ERROR"       # 设置红灯快闪
+        # notify_audio "error"  # 可选播放提示音
+        disk_error_reported=true
+    fi
+
     sleep 1
 done
+disk_error_reported=false
 
 echo "Disk OK: $DISK_DIR is mounted."
 
@@ -380,15 +396,6 @@ else
     echo "GPIO initialization skipped for Slave (Left)."
 fi
 
-# ================= 全局变量 =================
-IS_RECORDING=false
-PID_CAM=""
-PID_ENC=""
-PID_IMU=""
-TARGET_DIR=""
-LAST_EPISODE_DIR=""  # 记录上次录制的目录（用于post音频）
-PRE_AUDIO_FILE=""    # 存储预录制音频文件路径
-
 # ================= 函数定义 =================
 
 # 硬件健康监测函数
@@ -412,7 +419,15 @@ monitor_system_health() {
         error_msg="${error_msg} Left Cam lost"
     fi
 
-    # 3. 状态切换处理
+    # 3. 如果是left gripper 检查连接
+    if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
+        if ! ping -c 1 -W 1 "$IP_RIGHT" >/dev/null 2>&1; then
+            has_error=true
+            error_msg="${error_msg} Right device unreachable;"
+        fi
+    fi
+
+    # 4. 状态切换处理
     if [ "$has_error" = true ]; then
         # 仅当状态改变时才触发报警，防止日志刷屏
         if [ "$SYSTEM_HEALTH_STATUS" != "ERROR" ]; then
@@ -575,10 +590,13 @@ record_audio() {
 start_recording() {
     local sync_dir_name=$1
 
-    # 1. 准备目录
+    # 1. 创建锁 (防止 NTP 在录制期间运行)
+    touch "$RECORDING_LOCK_FILE"
+
+    # 2. 准备目录
     prepare_directory "$sync_dir_name"
     
-    # 2. 如果是 Master，需要通知 Slave
+    # 3. 如果是 Master，需要通知 Slave
     if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
         # 获取纯文件夹名
         local dirname=$(basename "$TARGET_DIR")
@@ -586,12 +604,24 @@ start_recording() {
         send_network_command "START" "$dirname"
     fi
 
-    # 3. 处理预录制音频 (仅 Master)
+    # 4. 处理预录制音频 (仅 Master)
     if [ "$CURRENT_SIDE_LOWER" == "right" ] && [ -n "$PRE_AUDIO_FILE" ] && [ -f "$PRE_AUDIO_FILE" ]; then
         mv "$PRE_AUDIO_FILE" "$TARGET_DIR/audio_pre.wav"
         PRE_AUDIO_FILE=""
     fi
     
+    # --- 记录时间同步状态 (仅打印到控制台) ---
+    if [ -f "/dev/shm/umi_ptp_status" ]; then
+        ptp_state=$(jq -r '.state // "UNKNOWN"' /dev/shm/umi_ptp_status)
+        ptp_offset=$(jq -r '.offset // 0' /dev/shm/umi_ptp_status)
+
+        echo "  - PTP State: $ptp_state"
+        echo "  - PTP Offset: ${ptp_offset} ns"
+    else
+        echo "  - WARNING: PTP status file (/dev/shm/umi_ptp_status) not found."
+    fi
+    # -----------------------------------------------
+
     echo "Starting processes..."
 
     # 启动相机    
@@ -754,9 +784,13 @@ stop_recording() {
     PID_CAM=""
     PID_ENC=""
     PID_IMU=""
+
+    # 删除录制锁文件
+    rm -f "$RECORDING_LOCK_FILE"
 }
 
 cleanup() {
+    #TODO:好像失败了，没有进来
     echo ""
     echo "System exit requested."
 
@@ -797,6 +831,7 @@ cleanup() {
     # 5. 清理临时文件
     rm -rf "$AUDIO_TEMP_DIR"
     rm -f "$LED_PIPE" "$AUDIO_PIPE"
+    rm -f "$RECORDING_LOCK_FILE"
 
     echo "Cleanup done."
     exit 0
@@ -826,18 +861,7 @@ if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
     echo " - Waiting for commands from RIGHT ($IP_RIGHT)..."
     echo "=========================================="
 
-    # 1. 网络检查 拔网线会触发umount，导致硬件报错（方便安全拔盘），所以仅在开机时检查一次即可
-    echo "Checking connection to Master..."
-    ping -c 1 -W 2 "$IP_RIGHT" > /dev/null
-    if [ $? -eq 0 ]; then
-        echo "Master ($IP_RIGHT) is reachable."
-        notify_audio "ready"
-    else
-        echo "WARNING: Master ($IP_RIGHT) is NOT reachable."
-        set_state "ERROR" # 亮红灯警告
-    fi
-
-    # 2. 网络监听循环
+    # 网络监听循环
     while true; do
         # 会阻塞执行
         
