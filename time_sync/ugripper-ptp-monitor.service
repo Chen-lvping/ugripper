@@ -1,0 +1,17 @@
+[Unit]
+Description=UMI PTP Status Monitor Service
+# 必须在 PTP 服务启动后运行
+After=ptp4l.service phc2sys.service
+Requires=ptp4l.service
+
+[Service]
+Type=simple
+ExecStart=/opt/ugripper/time_sync/ptp_monitor.sh
+Restart=always
+RestartSec=2
+# 以 root 运行以访问 pmc socket，但输出文件已设为 666
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target

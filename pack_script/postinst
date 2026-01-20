@@ -15,6 +15,15 @@ NM_CONN_FILE="${NM_DIR}/${INTERFACE_NAME}-{{APP_NAME}}.nmconnection"
 PTP_CONF_DIR="/etc/linuxptp"
 PTP_CONF_FILE="${PTP_CONF_DIR}/ptp4l.conf"
 
+# PTP 监控脚本路径
+MONITOR_SCRIPT="${APP_DIR}/time_sync/ptp_monitor.sh"
+MONITOR_SERVICE="ugripper-ptp-monitor.service"
+
+# NTP 同步服务路径
+NTP_SYNC_SCRIPT="${APP_DIR}/time_sync/safe_ntp_sync.sh"
+NTP_SYNC_SERVICE="ugripper-ntp-sync.service"
+
+
 # --------------------------------------------------
 # 0) 读取 DEVICE_SIDE
 # --------------------------------------------------
@@ -67,6 +76,7 @@ interface-name=${INTERFACE_NAME}
 [ipv4]
 method=manual
 address1=${TARGET_IP}/24
+gateway=0.0.0.0
 
 [ipv6]
 method=ignore
@@ -108,8 +118,11 @@ slaveOnly              1
 priority1              255
 priority2              255
 domainNumber           0
-# 硬件时间戳过滤器
 time_stamping          hardware
+# 允许正常运行中超过 0.2秒则跳变
+step_threshold         0.2
+# 第一次同步时，只要误差超过 0.00002秒 (20us) 就立刻跳变，实现快速启动
+first_step_threshold   0.0002
 # 接口
 [$INTERFACE_NAME]
 EOF
@@ -118,6 +131,7 @@ EOF
             # -s $INTERFACE_NAME: 源是网卡时钟
             # -c CLOCK_REALTIME: 目标是系统时钟
             # -w: 等待 ptp4l 同步
+            # 加入 -S 0.0 (Step threshold)
             cat <<EOF > /etc/systemd/system/phc2sys.service
 [Unit]
 Description=Synchronize system clock or PTP hardware clock (PHC)
@@ -126,7 +140,7 @@ Requires=ptp4l.service
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/phc2sys -s $INTERFACE_NAME -c CLOCK_REALTIME -w -O 0
+ExecStart=/usr/sbin/phc2sys -s $INTERFACE_NAME -c CLOCK_REALTIME -w -O 0 -S 0.0
 Restart=always
 
 [Install]
@@ -136,9 +150,9 @@ EOF
 
         right)
             echo "Configuring PTP for RIGHT (Master)..."
-            
-            # 1. 保留网络授时 (NTP) 以获取互联网时间作为基准
-            timedatectl set-ntp true || true
+        
+            # 1. 关闭普通网络授时 (NTP), 会使用单独的ntpservice做one shot逻辑，获取互联网时间作为基准
+            timedatectl set-ntp false || true
             
             # 2. 生成 ptp4l 配置文件 (Master Mode)
             # priority1 10: 优先级高，确保成为 Master (默认是 128)
@@ -163,7 +177,7 @@ Requires=ptp4l.service
 
 [Service]
 Type=simple
-ExecStart=/usr/sbin/phc2sys -s CLOCK_REALTIME -c $INTERFACE_NAME -w -O 0
+ExecStart=/usr/sbin/phc2sys -s CLOCK_REALTIME -c $INTERFACE_NAME -w -O 0 -S 1.0
 Restart=always
 
 [Install]
@@ -205,7 +219,8 @@ fi
 # --------------------------------------------------
 # 3) 配置应用服务权限及启动
 # --------------------------------------------------
-chmod +x /usr/local/bin/usb_auto_update.sh
+chmod +x "$NTP_SYNC_SCRIPT"
+chmod +x "$MONITOR_SCRIPT"
 chmod +x "$APP_DIR/run_record.sh"
 chmod -R 777 "$APP_DIR"
 
@@ -217,12 +232,24 @@ udevadm trigger
 #强制加载mount相关规则
 udevadm trigger --subsystem-match=block --action=add || true
 
-systemctl enable "$SERVICE_NAME"
-systemctl restart "$SERVICE_NAME"
-
 # 网线监测服务
 systemctl enable ugripper-network-monitor.service
 systemctl restart ugripper-network-monitor.service
+
+# NTP 同步服务（仅right启动）
+if [ "$(echo "$DEVICE_SIDE" | tr '[:upper:]' '[:lower:]')" == "right" ]; then
+    systemctl enable "$NTP_SYNC_SERVICE"
+    #不能重启，ntp服务不会立即返回，会有很长的超时，会导致安装卡住
+fi
+
+# PTP 监控服务
+systemctl enable "$MONITOR_SERVICE"
+systemctl restart "$MONITOR_SERVICE"
+
+# 主应用服务
+systemctl enable "$SERVICE_NAME"
+systemctl restart "$SERVICE_NAME"
+
 
 echo "[$SERVICE_NAME] Installed and Started successfully."
 exit 0

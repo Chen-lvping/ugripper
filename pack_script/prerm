@@ -5,34 +5,44 @@ SERVICE_NAME="{{APP_NAME}}.service"
 INTERFACE_NAME="end0"
 NM_CONN_ID="${INTERFACE_NAME}-{{APP_NAME}}"
 
-# PTP 相关服务名称
+# 定义所有涉及的服务名称
 PTP_SERVICE="ptp4l.service"
 PHC_SERVICE="phc2sys.service"
-# 网线监测服务名称
+MONITOR_SERVICE="ugripper-ptp-monitor.service"
+NTP_SYNC_SERVICE="ugripper-ntp-sync.service"
 NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
+
+echo "Removing {{APP_NAME}} configuration..."
 
 # --------------------------------------------------
 # 1) 停止并禁用服务
 # --------------------------------------------------
-systemctl stop "$SERVICE_NAME" || true
+# 先停业务
+#systemctl stop --no-block "$SERVICE_NAME" || true
 systemctl disable "$SERVICE_NAME" || true
 
-# 网线监测服务
-systemctl stop "$NETWORK_MONITOR_SERVICE" || true
+# 停辅助监控
+#systemctl stop --no-block "$NETWORK_MONITOR_SERVICE" || true
 systemctl disable "$NETWORK_MONITOR_SERVICE" || true
 
-# --------------------------------------------------
-# 2) 停止并清理 PTP 服务 (新增逻辑)
-# --------------------------------------------------
-echo "Stopping and removing PTP services configuration..."
+# 停 NTP/PTP 监控
+#systemctl stop --no-block "$NTP_SYNC_SERVICE" || true
+systemctl disable "$NTP_SYNC_SERVICE" || true
 
-# 停止服务
-systemctl stop "$PHC_SERVICE" || true
-systemctl stop "$PTP_SERVICE" || true
+#systemctl stop --no-block "$MONITOR_SERVICE" || true
+systemctl disable "$MONITOR_SERVICE" || true
 
-# 禁用服务
+# 停 PTP 核心
+#systemctl stop --no-block "$PHC_SERVICE" || true
 systemctl disable "$PHC_SERVICE" || true
+
+#systemctl stop --no-block "$PTP_SERVICE" || true
 systemctl disable "$PTP_SERVICE" || true
+
+# --------------------------------------------------
+# 2) 清理生成的文件
+# --------------------------------------------------
+echo "Cleaning up systemd units and configs..."
 
 # 清理 postinst 中生成的 systemd unit 文件
 # 注意：这移除了我们在 /etc/systemd/system/ 下创建的自定义配置
@@ -43,27 +53,32 @@ rm -f "/etc/systemd/system/$PTP_SERVICE"
 # 清理生成的配置文件
 rm -f "/etc/linuxptp/ptp4l.conf"
 
-# 重载 systemd 以感知文件删除
-systemctl daemon-reload
+# 清理共享内存中的临时状态文件 (PTP Monitor 产生的)
+rm -f "/dev/shm/umi_ptp_status"
 
 # --------------------------------------------------
-# 3) 移除 NetworkManager 配置
+# 3) 移除网络配置
 # --------------------------------------------------
 if command -v nmcli >/dev/null 2>&1; then
     nmcli connection delete "$NM_CONN_ID" || true
 fi
 
 # --------------------------------------------------
-# 4) 恢复默认时间同步设置
+# 4) 恢复系统默认行为
 # --------------------------------------------------
-# 在安装时(Left模式)可能关闭了网络授时。
-# 卸载时，恢复为开启状态，让系统恢复默认行为。
-echo "Restoring default NTP setting..."
-timedatectl set-ntp true || true
+# 恢复默认的时间同步设置，避免卸载后系统时间不再同步
+echo "Restoring default NTP behavior..."
+# 后台恢复
+systemd-run --no-block --unit=ugripper-restore-ntp \
+    /usr/bin/timedatectl set-ntp true
+
+# 重载 daemon
+systemctl daemon-reload
 
 # --------------------------------------------------
 # 5) udev reload
 # --------------------------------------------------
 udevadm control --reload-rules || true
 
+echo "{{APP_NAME}} cleanup finished."
 exit 0

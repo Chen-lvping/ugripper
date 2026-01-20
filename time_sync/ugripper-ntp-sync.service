@@ -1,0 +1,13 @@
+# /etc/systemd/system/umi-ntp-sync.service
+[Unit]
+Description=UMI Safe NTP Sync (timedatectl)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/ugripper/time_sync/safe_ntp_sync.sh
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target
