@@ -612,11 +612,17 @@ start_recording() {
     
     # --- 记录时间同步状态 (仅打印到控制台) ---
     if [ -f "/dev/shm/umi_ptp_status" ]; then
-        ptp_state=$(jq -r '.state // "UNKNOWN"' /dev/shm/umi_ptp_status)
-        ptp_offset=$(jq -r '.offset // 0' /dev/shm/umi_ptp_status)
+        # 读取状态文件
+        ptp_data=$(cat /dev/shm/umi_ptp_status)
+        
+        # 解析各个字段
+        ptp_state=$(echo "$ptp_data" | jq -r '.state // "UNKNOWN"')
+        ptp_offset=$(echo "$ptp_data" | jq -r '.offset // 0')
+        sys_offset=$(echo "$ptp_data" | jq -r '.sys_offset // 0')
 
         echo "  - PTP State: $ptp_state"
         echo "  - PTP Offset: ${ptp_offset} ns"
+        echo "  - Sys Offset: ${sys_offset} ns"
     else
         echo "  - WARNING: PTP status file (/dev/shm/umi_ptp_status) not found."
     fi
@@ -662,7 +668,8 @@ validate_recording() {
         local fpath="$dir/$fname"
         # 检查文件是否存在
         if [ ! -f "$fpath" ]; then
-             echo "Warning: $fname missing (might be optional based on config)."
+            echo "ERROR: $fname missing (might be optional based on config)."
+            validation_pass=false
         else
             local fsize=$(stat -c%s "$fpath" 2>/dev/null || echo 0)
             if [ "$fsize" -eq 0 ]; then
@@ -703,10 +710,8 @@ validate_recording() {
         set_state "ERROR"
         notify_audio "validation_failed"
         
-        # 将文件夹重命名，标记为坏数据
-        local new_dir="${dir}_BAD"
-        mv "$dir" "$new_dir"
-        echo "Renamed $dir -> $new_dir"
+        # 在数据文件夹中写入一个错误日志
+        echo "Validation failed at $(date): $error_details" > "$dir/validation_error.log"
         
         # 强制让灯光保持 Error 状态一小段时间，避免马上被 monitor 覆盖
         sleep 3
@@ -747,12 +752,8 @@ stop_recording() {
 
         now=$(date +%s)
         if [ $((now - start_ts)) -ge "$TIMEOUT" ]; then
-            echo "WARN: timeout, force killing remaining processes"
-            for pid in "$PID_CAM" "$PID_ENC" "$PID_IMU"; do
-                if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                    kill -9 "$pid"
-                fi
-            done
+            set_state "ERROR"
+            echo "Warning: Timeout waiting for processes to stop."
             break
         fi
 

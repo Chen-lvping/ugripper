@@ -55,37 +55,29 @@ else
 fi
 
 # --------------------------------------------------
-# 1) 写 NetworkManager 静态 IP
+# 1) 配置 NetworkManager 静态 IP (使用 nmcli)
 # --------------------------------------------------
-if [ -n "$TARGET_IP" ] && [ -d "$NM_DIR" ]; then
+if [ -n "$TARGET_IP" ]; then
     echo "Configuring NetworkManager for $INTERFACE_NAME ($DEVICE_SIDE → $TARGET_IP)"
-
-    rm -f "$NM_CONN_FILE"
-
-    UUID=$(cat /proc/sys/kernel/random/uuid)
-
-    cat <<EOF > "$NM_CONN_FILE"
-[connection]
-id=${INTERFACE_NAME}-{{APP_NAME}}
-uuid=$UUID
-type=ethernet
-interface-name=${INTERFACE_NAME}
-
-[ethernet]
-
-[ipv4]
-method=manual
-address1=${TARGET_IP}/24
-gateway=0.0.0.0
-
-[ipv6]
-method=ignore
-EOF
-
-    chmod 600 "$NM_CONN_FILE"
     
-    nmcli connection reload || true
-    nmcli connection up "${INTERFACE_NAME}-{{APP_NAME}}" || true
+    CONN_NAME="${INTERFACE_NAME}-{{APP_NAME}}"
+
+    # 1. 如果连接已存在，先删除，确保配置干净
+    if nmcli connection show "$CONN_NAME" >/dev/null 2>&1; then
+        nmcli connection delete "$CONN_NAME"
+    fi
+
+    # 2. 添加新连接
+    nmcli connection add \
+        type ethernet \
+        con-name "$CONN_NAME" \
+        ifname "$INTERFACE_NAME" \
+        ipv4.method manual \
+        ipv4.addresses "${TARGET_IP}/24" \
+        ipv6.method ignore
+
+    # 3. 确保连接启动
+    nmcli connection up "$CONN_NAME" || true
 fi
 
 # --------------------------------------------------
