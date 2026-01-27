@@ -123,6 +123,7 @@ class LedStateMachine:
         self.state = "INIT"
         self.tick = 0
         self.running = True
+        self.sync_progress = 0.0  # 0.0 ~ 1.0
 
         # 确保管道存在
         if not os.path.exists(PIPE_PATH):
@@ -140,26 +141,53 @@ class LedStateMachine:
             self.pipe_fd = None
 
     def read_command(self):
-        """尝试从管道读取最新的状态命令"""
+        """尝试从管道读取最新的状态命令（支持 CALIB_RUN:progress）"""
         if self.pipe_fd is None:
             return
 
         try:
-            # 读取缓冲区所有数据，取最后一行非空行
             data = os.read(self.pipe_fd, 1024).decode().strip()
-            if data:
-                lines = data.split("\n")
-                new_cmd = lines[-1].strip().upper()
-                valid_states = [
-                    "INIT", "READY", "RECORDING", "ERROR", "EXIT",
-                    "CALIB_PRE", "CALIB_RUN", "CALIB_DONE"
-                ]
-                if new_cmd in valid_states:
-                    self.state = new_cmd
-                    print(f"State switched to: {self.state}")
+            if not data:
+                return
+
+            # 取最后一条非空命令
+            lines = [l.strip() for l in data.split("\n") if l.strip()]
+            if not lines:
+                return
+
+            raw_cmd = lines[-1]
+            cmd = raw_cmd.upper()
+
+            valid_states = {
+                "INIT", "READY", "RECORDING", "ERROR", "EXIT",
+                "CALIB_PRE", "CALIB_RUN", "CALIB_DONE"
+            }
+
+            # --- CALIB_RUN:progress ---
+            if cmd.startswith("CALIB_RUN"):
+                parts = raw_cmd.split(":", 1)
+                self.state = "CALIB_RUN"
+
+                if len(parts) == 2:
+                    try:
+                        p = float(parts[1])
+                        self.sync_progress = max(0.0, min(1.0, p))
+                    except ValueError:
+                        pass  # 忽略非法进度
+                else:
+                    self.sync_progress = 1
+
+                print(f"State switched to: CALIB_RUN (progress={self.sync_progress:.2f})")
+                return
+
+            # --- 普通状态 ---
+            if cmd in valid_states:
+                self.state = cmd
+                print(f"State switched to: {self.state}")
+
         except OSError as e:
-            if e.errno == errno.EAGAIN or e.errno == errno.EWOULDBLOCK:
-                pass  # 没有数据
+            if e.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                pass
             else:
                 print(f"Pipe error: {e}")
 
@@ -222,14 +250,18 @@ class LedStateMachine:
         elif self.state == "CALIB_PRE":
             # 准备校准: 黄灯慢闪 (1Hz)
             if (t % 50) < 25:
-                self.led.set_rgb(255, 200, 0) # 黄色
+                self.led.set_rgb(255, 30, 0) # 黄色
             else:
                 self.led.set_rgb(0, 0, 0)
 
         elif self.state == "CALIB_RUN":
-            # 校准中: 黄灯快闪 (5Hz)
-            if (t % 10) < 5:
-                self.led.set_rgb(255, 200, 0) # 黄色
+            # 同步中：黄灯，随进度加快闪烁
+            # 进度 0.0 -> 1Hz，1.0 -> 8Hz
+            freq = 1.0 + self.sync_progress * 7.0
+            period_ticks = max(1, int(50 / freq))
+
+            if (t % period_ticks) < (period_ticks // 2):
+                self.led.set_rgb(255, 30, 0)
             else:
                 self.led.set_rgb(0, 0, 0)
 

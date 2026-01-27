@@ -69,6 +69,12 @@ RECORDING_LOCK_FILE="/tmp/umi_recording.lock" # 录制锁文件
 # 启动直接释放锁文件，防止断电导致残留
 rm -f "$RECORDING_LOCK_FILE"
 
+# PTP状态参数
+PTP_WAIT_START_TS=0
+PTP_WAIT_TIMEOUT=60    # 最多等待 60 秒
+PTP_OFFSET_THRESHOLD_NS=100000000  # 100ms
+PTP_OFFSET_MAX_NS=1000000000  # 1000ms
+
 # ================= 状态机与 LED 通信模块 =================
 
 # 1. 创建命名管道 (如果不存在)
@@ -397,53 +403,98 @@ else
 fi
 
 # ================= 函数定义 =================
-
-# 硬件健康监测函数
+# 函数：系统健康监测与状态管理
 monitor_system_health() {
     local has_error=false
     local error_msg=""
 
-    # 1. 检查硬盘
+    # ===============================
+    # 1. 硬件 / 连接错误检测（最高优先级）
+    # ===============================
+
+    # 硬盘
     if ! mountpoint -q "$DISK_DIR"; then
         has_error=true
-        error_msg="${error_msg} Disk not mounted;"
+        error_msg+=" Disk not mounted;"
     fi
 
-    # 2. 检查相机节点
-    if [ ! -e "/dev/right_tcam" ]; then
-        has_error=true
-        error_msg="${error_msg} Right Cam lost"
-    fi
-    if [ ! -e "/dev/left_tcam" ]; then
-        has_error=true
-        error_msg="${error_msg} Left Cam lost"
-    fi
+    # 相机
+    [ ! -e "/dev/right_tcam" ] && has_error=true && error_msg+=" Right Cam lost;"
+    [ ! -e "/dev/left_tcam"  ] && has_error=true && error_msg+=" Left Cam lost;"
 
-    # 3. 如果是left gripper 检查连接
+    # 对端连接
     if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
         if ! ping -c 1 -W 1 "$IP_RIGHT" >/dev/null 2>&1; then
             has_error=true
-            error_msg="${error_msg} Right device unreachable;"
+            error_msg+=" Right device unreachable;"
         fi
     fi
 
-    # 4. 状态切换处理
+    # ===============================
+    # 2. 若存在 ERROR，立刻进入 ERROR
+    # ===============================
     if [ "$has_error" = true ]; then
-        # 仅当状态改变时才触发报警，防止日志刷屏
         if [ "$SYSTEM_HEALTH_STATUS" != "ERROR" ]; then
-            echo "[$(date)] MONITOR ERROR: $error_msg"
+            echo "[$(date)] MONITOR ERROR:$error_msg"
             set_state "ERROR"
             notify_audio "error"
             SYSTEM_HEALTH_STATUS="ERROR"
         fi
-    else
-        # 如果之前是 ERROR，现在恢复了
-        if [ "$SYSTEM_HEALTH_STATUS" == "ERROR" ]; then
-            echo "[$(date)] MONITOR RECOVERED: System is back online."
-            set_state "READY"
-            notify_audio "ready"
-            SYSTEM_HEALTH_STATUS="OK"
+        return
+    fi
+
+    # ===============================
+    # 3. 无 ERROR → 检查 PTP 同步
+    # ===============================
+    if [ "$CURRENT_SIDE_LOWER" == "left" ] && [ -f "/dev/shm/umi_ptp_status" ]; then
+        ptp_state=$(jq -r '.state // "UNKNOWN"' /dev/shm/umi_ptp_status)
+        ptp_offset=$(jq -r '.offset // 0' /dev/shm/umi_ptp_status | awk '{print ($1<0)?-$1:$1}')
+
+        if [ "$ptp_state" != "SLAVE" ] || [ "$ptp_offset" -ge "$PTP_OFFSET_THRESHOLD_NS" ]; then
+            now_ts=$(date +%s)
+            [ "$PTP_WAIT_START_TS" -eq 0 ] && {
+                PTP_WAIT_START_TS=$now_ts
+                echo "PTP first enter abnormal state: state=$ptp_state offset=$ptp_offset"
+            }
+
+            wait_elapsed=$((now_ts - PTP_WAIT_START_TS))
+
+            if [ "$wait_elapsed" -ge "$PTP_WAIT_TIMEOUT" ]; then
+                echo "[$(date)] MONITOR ERROR: PTP sync timeout"
+                set_state "ERROR"
+                notify_audio "error"
+                SYSTEM_HEALTH_STATUS="ERROR"
+                return
+            fi
+
+            # --- 同步进度 ---
+            progress=$(awk -v off="$ptp_offset" -v max="$PTP_OFFSET_MAX_NS" '
+                BEGIN {
+                    p = 1.0 - (off / max)
+                    if (p < 0) p = 0
+                    if (p > 1) p = 1
+                    printf "%.2f", p
+                }')
+
+            if [ -p "$LED_PIPE" ]; then
+                echo "CALIB_RUN:$progress" > "$LED_PIPE"
+            fi
+
+            SYSTEM_HEALTH_STATUS="WAITING"
+            return
+        elif [ "$PTP_WAIT_START_TS" -ne 0 ]; then
+            # --- PTP 已同步 ---
+            PTP_WAIT_START_TS=0
         fi
+    fi
+
+    # ===============================
+    # 4. 全部正常 → READY
+    # ===============================
+    if [ "$SYSTEM_HEALTH_STATUS" != "OK" ]; then
+        set_state "READY"
+        notify_audio "ready"
+        SYSTEM_HEALTH_STATUS="OK"
     fi
 }
 
