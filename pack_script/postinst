@@ -106,6 +106,7 @@ if [ -n "$DEVICE_SIDE" ]; then
             # slaveOnly 1: 强制作为从钟
             cat <<EOF > "$PTP_CONF_FILE"
 [global]
+tx_timestamp_timeout   50
 slaveOnly              1
 priority1              255
 priority2              255
@@ -150,6 +151,7 @@ EOF
             # priority1 10: 优先级高，确保成为 Master (默认是 128)
             cat <<EOF > "$PTP_CONF_FILE"
 [global]
+tx_timestamp_timeout   50
 priority1              10
 priority2              10
 domainNumber           0
