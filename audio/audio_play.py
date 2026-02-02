@@ -130,12 +130,15 @@ class AudioPlayer:
             try:
                 with open(self.pipe_path, "r", buffering=1) as pipe:
                     while True:
-                        line = pipe.readline().strip()
-                        if line:
-                            if line == "exit":
-                                print("Audio Player exiting...")
-                                return
-                            self.play_sound(line)
+                        raw_line = pipe.readline()
+                        if raw_line == "":
+                            break  # EOF reached, reopen pipe
+
+                        line = raw_line.strip()
+                        if line == "exit":
+                            print("Audio Player exiting...")
+                            return
+                        self.play_sound(line)
             except Exception as e:
                 print(f"Pipe error: {e}, reopening in 1 second...")
                 time.sleep(1)
