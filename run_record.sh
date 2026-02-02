@@ -84,13 +84,13 @@ fi
 
 # 2. 启动 Python LED 管理器 (后台运行)
 if [ -f "$LED_SCRIPT" ]; then
-    echo "Starting LED Manager..."
+    echo "[INFO]:Starting LED Manager..."
     uv run "$LED_SCRIPT" &
     PID_LED_SCRIPT=$!
     # 给 Python 一点时间初始化
     sleep 0.2
 else
-    echo "Warning: LED script not found at $LED_SCRIPT"
+    echo "[Warning]:LED script not found at $LED_SCRIPT"
 fi
 
 # 3. 定义发送状态的函数
@@ -125,13 +125,13 @@ fi
 
 # 启动音频播放管理器
 if [ -f "$AUDIO_PLAY_SCRIPT" ]; then
-    echo "Starting Audio Play Manager..."
+    echo "[INFO]:Starting Audio Play Manager..."
     uv run "$AUDIO_PLAY_SCRIPT" \
         > /dev/null 2>&1 &
     PID_AUDIO_PLAY=$!
     sleep 0.2
 else
-    echo "Warning: Audio play script not found at $AUDIO_PLAY_SCRIPT"
+    echo "[Warning]:Audio play script not found at $AUDIO_PLAY_SCRIPT"
 fi
 
 # 创建临时音频目录
@@ -139,12 +139,11 @@ mkdir -p "$AUDIO_TEMP_DIR"
 
 # ================= 业务配置检查 =================
 # 检查硬盘挂载 (改为循环等待模式)
-echo "Checking Disk Mount..."
 disk_error_reported=false
 
 while ! mountpoint -q "$DISK_DIR"; do
     if [ "$disk_error_reported" = false ]; then
-        echo "Error: $DISK_DIR is NOT mounted! Waiting for disk..."
+        echo "[ERROR]:$DISK_DIR is NOT mounted! Waiting for disk..."
         set_state "ERROR"       # 设置红灯快闪
         # notify_audio "error"  # 可选播放提示音
         disk_error_reported=true
@@ -154,7 +153,7 @@ while ! mountpoint -q "$DISK_DIR"; do
 done
 disk_error_reported=false
 
-echo "Disk OK: $DISK_DIR is mounted."
+echo "[INFO]:Disk OK: $DISK_DIR is mounted."
 
 # ================= 日志系统 =================
 # -------------------------
@@ -176,7 +175,7 @@ cleanup_old_logs() {
         for file in "$dir"/umi_sys_"${DEVICE_SN_LOWER}"_*.log; do
             # 如果文件名中不包含今天日期，就删除
             if [[ "$file" != *"${TODAY}.log" ]]; then
-                echo "Deleting old log: $file"
+                echo "[INFO]:Deleting old log: $file"
                 rm -f "$file"
             fi
         done
@@ -188,7 +187,7 @@ cleanup_old_logs
 # -------------------------
 # 重定向日志到本地临时文件，同时输出到屏幕
 # -------------------------
-echo "Logging locally to: $LOG_FILE_LOCAL"
+echo "[INFO]:Logging locally to: $LOG_FILE_LOCAL"
 exec > >(tee -a "$LOG_FILE_LOCAL") 2>&1
 
 # 3. 定义后台同步函数
@@ -235,7 +234,7 @@ set_state "INIT"
 
 
 # ================= 目录结构与元数据 =================
-echo "Initializing Data Structure..."
+echo "[INFO]:Initializing Data Structure..."
 
 DIR_META="$DATA_ROOT/metadata"
 DIR_CALIB="$DATA_ROOT/calibration"
@@ -260,7 +259,7 @@ if [ ! -f "$META_FILE" ]; then
     "data_path": "data/episode_{date:08d}_{episode_index:04d}"
 }
 EOF
-    echo "Metadata info.json created."
+    echo "[INFO]:Metadata info.json created."
 fi
 
 # 2. 拷贝 calibration 文件
@@ -274,7 +273,7 @@ fi
 if [ -f "./config/fakeIMUCalib.json" ]; then
     cp -n "./config/fakeIMUCalib.json" "$DIR_CALIB/imu.json"
 fi
-echo "Calibration files synced."
+echo "[INFO]:Calibration files synced."
 
 # ================= 全局占位符处理 (CAM_MAIN) =================
 handle_global_placeholders() {
@@ -291,11 +290,11 @@ handle_global_placeholders() {
         elif [[ "${CURRENT_SIDE_LOWER}" == "right" ]]; then
             cam_name="cam_right"
         else
-            echo "WARNING: CURRENT_SIDE='$CURRENT_SIDE_LOWER' is invalid. Skipping {{CAM_MAIN}} init."
+            echo "[WARNING]:CURRENT_SIDE='$CURRENT_SIDE_LOWER' is invalid. Skipping {{CAM_MAIN}} init."
         fi
 
         if [ -n "$cam_name" ]; then
-            echo "Initializing {{CAM_MAIN}} key to $cam_name in $json_file..."
+            echo "[INFO]:Initializing {{CAM_MAIN}} key to $cam_name in $json_file..."
             # 直接使用 sed 替换 key 字符串
             sed -i "s/{{CAM_MAIN}}/$cam_name/g" "$json_file"
         fi
@@ -311,10 +310,10 @@ check_tactile_hardware() {
     local name=$2
     local json_file="$DIR_CALIB/cam.json"
     
-    echo "Checking $name ($dev_node)..."
+    echo "[INFO]:Checking $name ($dev_node)..."
     
     if [ ! -e "$dev_node" ]; then
-        echo "WARNING: Device $dev_node not found!"
+        echo "[WARNING]:Device $dev_node not found!"
         return
     fi
 
@@ -328,7 +327,7 @@ check_tactile_hardware() {
             | head -n 1)
 
     if [ -z "$usb_serial" ]; then
-        echo "WARNING: Could not read USB serial for $dev_node"
+        echo "[WARNING]:Could not read USB serial for $dev_node"
         return
     fi
 
@@ -344,7 +343,7 @@ check_tactile_hardware() {
     fi
     
     if [ -z "$side" ]; then
-        echo "WARNING: Could not determine side from device node $dev_node, skipping check."
+        echo "[WARNING]:Could not determine side from device node $dev_node, skipping check."
         return
     fi
     
@@ -355,12 +354,12 @@ check_tactile_hardware() {
     # 初始化模式：检测占位符
     # =========================
     if grep -q "$placeholder" "$json_file"; then
-        echo "  - Found placeholder $placeholder. Initializing to $usb_serial..."
+        echo "[INFO]:Found placeholder $placeholder. Initializing to $usb_serial..."
 
         # 直接字符串替换，占位符安全
         sed -i "s|$placeholder|$usb_serial|g" "$json_file"
 
-        echo "  - Initialization complete."
+        echo "[INFO]:Initialization complete."
         return
     fi
 
@@ -373,16 +372,16 @@ check_tactile_hardware() {
     serial_in_json=$(jq -r "$json_path // empty" "$json_file")
 
     if [ -z "$serial_in_json" ]; then
-        echo "WARNING: Could not find serial at $json_path in $json_file."
+        echo "[WARNING]:Could not find serial at $json_path in $json_file."
 
     elif [ "$serial_in_json" != "$usb_serial" ]; then
-        echo "WARNING: Serial mismatch for $side tactile camera!"
+        echo "[WARNING]:Serial mismatch for $side tactile camera!"
         echo "  - Configured (JSON): $serial_in_json"
         echo "  - Detected (HW)    : $usb_serial"
         echo "  - ACTION: Keeping existing configuration (Manual intervention required if hardware changed)."
 
     else
-        echo "  - Serial match OK: $usb_serial"
+        echo "[INFO]:  - Serial match OK: $usb_serial"
     fi
 }
 
@@ -393,13 +392,13 @@ check_tactile_hardware "/dev/right_tcam" "Right Tactile"
 
 # ================= GPIO 初始化 (仅 Right 需要) =================
 if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
-    echo "Initializing GPIO for Master (Right)..."
+    echo "[INFO]:Initializing GPIO for Master (Right)..."
     if [ -z "$(gpiofind "$PIN_BTN")" ]; then
-        echo "Error: Could not find GPIO pins."
+        echo "[ERROR]:Could not find GPIO pins."
         set_state "ERROR"; notify_audio "error"; exit 1
     fi
 else
-    echo "GPIO initialization skipped for Slave (Left)."
+    echo "[INFO]:GPIO initialization skipped for Slave (Left)."
 fi
 
 # ================= 函数定义 =================
@@ -435,7 +434,7 @@ monitor_system_health() {
     # ===============================
     if [ "$has_error" = true ]; then
         if [ "$SYSTEM_HEALTH_STATUS" != "ERROR" ]; then
-            echo "[$(date)] MONITOR ERROR:$error_msg"
+            echo "[ERROR]:[$(date)] MONITOR ERROR:$error_msg"
             set_state "ERROR"
             notify_audio "error"
             SYSTEM_HEALTH_STATUS="ERROR"
@@ -454,13 +453,13 @@ monitor_system_health() {
             now_ts=$(date +%s)
             [ "$PTP_WAIT_START_TS" -eq 0 ] && {
                 PTP_WAIT_START_TS=$now_ts
-                echo "PTP first enter abnormal state: state=$ptp_state offset=$ptp_offset"
+                echo "[WARNING]:PTP first enter abnormal state: state=$ptp_state offset=$ptp_offset"
             }
 
             wait_elapsed=$((now_ts - PTP_WAIT_START_TS))
 
             if [ "$wait_elapsed" -ge "$PTP_WAIT_TIMEOUT" ]; then
-                echo "[$(date)] MONITOR ERROR: PTP sync timeout"
+                echo "[ERROR]:[$(date)] MONITOR ERROR: PTP sync timeout"
                 set_state "ERROR"
                 notify_audio "error"
                 SYSTEM_HEALTH_STATUS="ERROR"
@@ -477,7 +476,7 @@ monitor_system_health() {
                 }')
 
             if [ -p "$LED_PIPE" ]; then
-                echo "CALIB_RUN:$progress" > "$LED_PIPE"
+                echo "[INFO]:CALIB_RUN:$progress" > "$LED_PIPE"
             fi
 
             SYSTEM_HEALTH_STATUS="WAITING"
@@ -553,14 +552,14 @@ prepare_directory() {
 
     mkdir -p "$TARGET_DIR"
 
-    echo "New recording session: $TARGET_DIR"
+    echo "[INFO]:New recording session: $TARGET_DIR"
 }
 
 # 函数：启动音频录制
 record_audio() {
     # 如果是 Left (Slave)，直接禁用录音功能
     if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
-        echo "Audio recording disabled on Slave (Left) side."
+        echo "[INFO]:Audio recording disabled on Slave (Left) side."
         return
     fi
 
@@ -569,7 +568,7 @@ record_audio() {
     local timestamp=$(date +%Y%m%d_%H%M%S)
     local temp_file="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}.wav"
     
-    echo "Starting $audio_type audio recording (Mode: $mode)..."
+    echo "[INFO]:Starting $audio_type audio recording (Mode: $mode)..."
     notify_audio "audio_recording_start"
     
     arecord -D hw:rockchipes8388,0 -f cd -r 44100 -c 2 -t wav "$temp_file.raw" &
@@ -577,7 +576,7 @@ record_audio() {
     
     # 按键检测逻辑 (仅在 Right 有效)
     if [ "$mode" = "hold" ]; then
-        echo "Recording... (Release button to stop)"
+        echo "[INFO]:Recording... (Release button to stop)"
         # Hold模式：循环直到按钮松开
         while kill -0 $arecord_pid 2>/dev/null; do
             if [ "$(gpioget $(gpiofind "$PIN_BTN"))" -ne "$BTN_ACTIVE_LEVEL" ]; then
@@ -587,7 +586,7 @@ record_audio() {
             sleep 0.05
         done
     elif [ "$mode" = "latch" ]; then
-        echo "Recording... (Press button again to stop)"
+        echo "[INFO]:Recording... (Press button again to stop)"
         # Latch模式：循环直到按钮再次按下
         # 首先等待按钮松开（防止误触）
         while [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; do sleep 0.05; done
@@ -614,7 +613,7 @@ record_audio() {
         sox "$temp_file.raw" "$temp_file" noisered "$script_dir/audio/noise.prof" 0.15 remix 2 2 norm 
         #rm -f "$temp_file.raw"
     else
-        echo "Warning: No audio data recorded"
+        echo "[WARNING]:No audio data recorded"
         return 1
     fi
 
@@ -624,13 +623,13 @@ record_audio() {
     # 根据音频类型处理
     if [ "$audio_type" = "pre" ]; then
         PRE_AUDIO_FILE="$temp_file"
-        echo "Pre-audio stored for next episode"
+        echo "[INFO]:Pre-audio stored for next episode"
     elif [ "$audio_type" = "post" ]; then
         if [ -n "$LAST_EPISODE_DIR" ] && [ -d "$LAST_EPISODE_DIR" ]; then
             mv "$temp_file" "$LAST_EPISODE_DIR/audio_post.wav"
-            echo "Post-audio moved to last episode: $LAST_EPISODE_DIR"
+            echo "[INFO]:Post-audio moved to last episode: $LAST_EPISODE_DIR"
         else
-            echo "Warning: No previous episode found for post-audio"
+            echo "[WARNING]:No previous episode found for post-audio"
             rm -f "$temp_file"
         fi
     fi
@@ -679,7 +678,8 @@ start_recording() {
     fi
     # -----------------------------------------------
 
-    echo "Starting processes..."
+    time_stamp=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "[INFO]:Recording started at: $time_stamp"
 
     # 启动相机    
     uv run ./camera_record/triple_camera_record_h265.py --output-dir "$TARGET_DIR" &
@@ -698,8 +698,6 @@ start_recording() {
     
     set_state "RECORDING"
     notify_audio "recording_start"
-    
-    echo ">>> RECORDING STARTED [ PIDs: Cam=$PID_CAM Enc=$PID_ENC Imu=$PID_IMU ]"
 }
 
 # ================= 数据校验函数 =================
@@ -708,7 +706,7 @@ validate_recording() {
     local validation_pass=true
     local error_details=""
 
-    echo "Validating data in: $dir"
+    echo "[INFO]:Validating data in: $dir"
 
     # --- 1. 检查 MKV 文件大小 ---
     # 检查 cam.mkv, tact_left.mkv, tact_right.mkv 是否存在且大小不为 0
@@ -719,14 +717,14 @@ validate_recording() {
         local fpath="$dir/$fname"
         # 检查文件是否存在
         if [ ! -f "$fpath" ]; then
-            echo "ERROR: $fname missing (might be optional based on config)."
+            echo "[ERROR]:$fname missing (might be optional based on config)."
             validation_pass=false
         else
             local fsize=$(stat -c%s "$fpath" 2>/dev/null || echo 0)
             if [ "$fsize" -eq 0 ]; then
                 validation_pass=false
                 error_details="${error_details} Zero-byte file: $fname;"
-                echo "FAIL: $fname is 0 bytes."
+                echo "[ERROR]:$fname is 0 bytes."
             fi
         fi
     done
@@ -746,12 +744,12 @@ validate_recording() {
         if [ "$bad_rows" -gt "$threshold" ]; then
             validation_pass=false
             error_details="${error_details} Encoder Init Fail ($bad_rows rows of 65535);"
-            echo "FAIL: Encoder CSV has $bad_rows rows of 65535 (Threshold: $threshold)."
+            echo "[ERROR]:FAIL: Encoder CSV has $bad_rows rows of 65535 (Threshold: $threshold)."
         else
-            echo "PASS: Encoder CSV check ok (Bad rows: $bad_rows)."
+            echo "[INFO]:PASS: Encoder CSV check ok (Bad rows: $bad_rows)."
         fi
     else
-        echo "Warning: No CSV file found to validate."
+        echo "[WARNING]:No CSV file found to validate."
     fi
 
     # --- 3. 结果处理 ---
@@ -778,7 +776,8 @@ stop_recording() {
         send_network_command "STOP" "0"
     fi
 
-    echo "Stopping processes on $CURRENT_SIDE_LOWER..."
+    time_stamp=$(date +"%Y-%m-%d %H:%M:%S")
+    echo "[INFO]:Recording stopping at: $time_stamp on $CURRENT_SIDE_LOWER"
 
     # 发送 SIGINT
     for pid in "$PID_CAM" "$PID_ENC" "$PID_IMU"; do
@@ -804,7 +803,7 @@ stop_recording() {
         now=$(date +%s)
         if [ $((now - start_ts)) -ge "$TIMEOUT" ]; then
             set_state "ERROR"
-            echo "Warning: Timeout waiting for processes to stop."
+            echo "[ERROR]:Timeout waiting for processes to stop."
             break
         fi
 
@@ -815,13 +814,14 @@ stop_recording() {
     wait $PID_CAM $PID_ENC $PID_IMU 2>/dev/null
 
     # 强制同步数据到磁盘
-    echo "Syncing data to disk..."
+    echo "[INFO]:Syncing data to disk..."
     set_state "INIT"  # 临时切换状态指示sync
     sync -f "$DISK_DIR"
-    sync
+    #sync 全盘sync好像有概率等待很久，改为只sync数据盘目录
+    blockdev --flushbufs "$(findmnt -n -o SOURCE --target "$DISK_DIR")"
 
     IS_RECORDING=false
-    echo ">>> RECORDING STOPPED. Processes terminated."
+    echo "[INFO]:>>> RECORDING STOPPED. Processes terminated."
 
     # 先默认回 READY，如果校验失败，校验函数会覆盖为 ERROR
     set_state "READY"
@@ -843,8 +843,7 @@ stop_recording() {
 
 cleanup() {
     #TODO:好像失败了，没有进来
-    echo ""
-    echo "System exit requested."
+    echo "[INFO]:System exit requested."
 
     # 1. 停止录制业务
     if [ "$IS_RECORDING" = true ]; then
@@ -885,7 +884,7 @@ cleanup() {
     rm -f "$LED_PIPE" "$AUDIO_PIPE"
     rm -f "$RECORDING_LOCK_FILE"
 
-    echo "Cleanup done."
+    echo "[INFO]:Cleanup done."
     exit 0
 }
 
@@ -902,7 +901,7 @@ notify_audio "ready"
 monitor_loop &        # 后台运行硬件监控
 MONITOR_PID=$!
 
-echo "Hardware monitor PID: $MONITOR_PID"
+echo "[INFO]:Hardware monitor PID: $MONITOR_PID"
 
 if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
     # ================= Slave (Left) 逻辑 =================
@@ -926,27 +925,27 @@ if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
             cmd=$(echo "$raw_msg" | awk -F'|' '{print $1}')
             arg=$(echo "$raw_msg" | awk -F'|' '{print $2}')
             
-            echo "Received Network Command: $cmd Args: $arg"
+            echo "[INFO]:Received Network Command: $cmd Args: $arg"
 
             case "$cmd" in
                 "START")
                     if [ "$IS_RECORDING" = false ]; then
-                        echo "Trigger: Start Recording (Sync Dir: $arg)"
+                        echo "[INFO]:Trigger: Start Recording (Sync Dir: $arg)"
                         start_recording "$arg"
                     else
-                        echo "Ignored: Already recording."
+                        echo "[WARNING]:Ignored: Already recording."
                     fi
                     ;;
                 "STOP")
                     if [ "$IS_RECORDING" = true ]; then
-                        echo "Trigger: Stop Recording"
+                        echo "[INFO]:Trigger: Stop Recording"
                         stop_recording
                     else
-                        echo "Ignored: Not recording."
+                        echo "[WARNING]:Ignored: Not recording."
                     fi
                     ;;
                 *)
-                    echo "Unknown command: $cmd"
+                    echo "[WARNING]:Unknown command: $cmd"
                     ;;
             esac
         fi
@@ -982,13 +981,13 @@ else
                     # 如果超过长按阈值
                     if (( $(echo "$elapsed >= $LONG_PRESS_THRESHOLD" | bc -l) )); then
                         is_long_press=true
-                        echo "Long press detected. Recording PRE audio..."
+                        echo "[INFO]:Long press detected. Recording PRE audio..."
                     
                         # 只有不在录制状态才建议录制Pre音频，或者根据需求调整
                         if [ "$IS_RECORDING" = false ]; then
                             record_audio "pre" "hold"
                         else
-                            echo "Ignored: Cannot record pre-audio while recording data."
+                            echo "[WARNING]:Ignored: Cannot record pre-audio while recording data."
                             # 等待释放
                             while [ "$(gpioget $(gpiofind "$PIN_BTN"))" -eq "$BTN_ACTIVE_LEVEL" ]; do sleep 0.1; done
                         fi
@@ -1016,17 +1015,17 @@ else
                     
                     if [ "$is_double_click" = true ]; then
                         # === 双击逻辑：录制 Post 音频 ===
-                        echo "Double click detected. Recording POST audio..."
+                        echo "[INFO]:Double click detected. Recording POST audio..."
                         # 使用 latch 模式：再次点击停止
                         # 此时第二次点击尚未松开，record_audio 中的 latch 逻辑会先等待松开
                         if [ "$IS_RECORDING" = false ]; then
                              record_audio "post" "latch"
                         else
-                            echo "Warning: Ignored double click while camera is recording."
+                            echo "[WARNING]: Ignored double click while camera is recording."
                         fi
                     else
                         # === 单击逻辑：开始/停止 录像 ===
-                        echo "Single click detected."
+                        echo "[INFO]:Single click detected."
                         if [ "$IS_RECORDING" = false ]; then
                             start_recording
                         else
@@ -1038,7 +1037,7 @@ else
                 # 短延时，防止连续误触发
                 sleep 0.2
 
-                echo "Waiting for next command..."
+                echo "[INFO]:Waiting for next command..."
             fi
         fi
         
