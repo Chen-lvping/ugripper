@@ -610,8 +610,8 @@ record_audio() {
     
     # 降噪处理
     if [ -f "$temp_file.raw" ]; then
-        sox "$temp_file.raw" "$temp_file" noisered "$script_dir/audio/noise.prof" 0.15 remix 2 2 norm 
-        #rm -f "$temp_file.raw"
+        sox "$temp_file.raw" "$temp_file" remix 2 noisered "$script_dir/audio/noise.prof" 0.15 remix 1 1 norm
+        rm -f "$temp_file.raw"
     else
         echo "[WARNING]:No audio data recorded"
         return 1
