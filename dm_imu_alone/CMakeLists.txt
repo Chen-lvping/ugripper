@@ -22,6 +22,7 @@ add_executable(dm_imu
 target_link_libraries(dm_imu
     ${LIBSERIALPORT_LIBRARIES}
     pthread
+    mcap
 )
 
 add_executable(imu_calib
@@ -34,4 +35,3 @@ target_link_libraries(imu_calib
     ${LIBSERIALPORT_LIBRARIES}
     pthread
 )
-    

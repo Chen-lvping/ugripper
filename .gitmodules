@@ -1,3 +1,0 @@
-[submodule "src/third_party/mcap"]
-	path = src/third_party/mcap
-	url = https://github.com/foxglove/mcap.git

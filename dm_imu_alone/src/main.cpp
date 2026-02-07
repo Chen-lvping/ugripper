@@ -11,8 +11,8 @@
 #include <chrono>
 #include <atomic>
 #include <vector>
-#include <fstream>
 #include <csignal>
+#include <mcap/writer.hpp>
 
 // --- 全局控制变量 ---
 std::atomic<bool> g_stopFlag(false);
@@ -59,6 +59,25 @@ struct __attribute__((packed)) ImuPacket
     float w, x, y, z;
 };
 
+std::string create_imu_json(long timestamp_ns, const auto& d) {
+    // 使用 snprintf 保证格式化速度和安全性
+    char buffer[512];
+
+    snprintf(buffer, sizeof(buffer), 
+        "{"
+            "\"frame_id\":\"imu_link\","
+            "\"orientation\":{\"x\":%.6f,\"y\":%.6f,\"z\":%.6f,\"w\":%.6f},"
+            "\"angular_velocity\":{\"x\":%.6f,\"y\":%.6f,\"z\":%.6f},"
+            "\"linear_acceleration\":{\"x\":%.6f,\"y\":%.6f,\"z\":%.6f}"
+        "}",
+        d.quat_x, d.quat_y, d.quat_z, d.quat_w,
+        d.gyrox, d.gyroy, d.gyroz,
+        d.accx, d.accy, d.accz
+    );
+    
+    return std::string(buffer);
+}
+
 int main(int argc, char *argv[])
 {
     // 1. 注册信号处理
@@ -66,26 +85,14 @@ int main(int argc, char *argv[])
     std::signal(SIGTERM, signalHandler);
 
     // 2. 参数解析
-    // 优先获取输出目录，其次检查是否开启可视化
     std::string outputDir = ".";
     bool enable_vis = false;
 
-    // 简单的参数处理逻辑
     if (argc > 1)
     {
-        // 假设第一个参数是路径（如果不是 -view）
-        if (std::string(argv[1]) != "-view")
-        {
-            outputDir = argv[1];
-        }
-
-        // 遍历查找 -view
-        for (int i = 1; i < argc; ++i)
-        {
-            if (std::strcmp(argv[i], "-view") == 0)
-            {
-                enable_vis = true;
-            }
+        if (std::string(argv[1]) != "-view") outputDir = argv[1];
+        for (int i = 1; i < argc; ++i) {
+            if (std::strcmp(argv[i], "-view") == 0) enable_vis = true;
         }
     }
     else
@@ -93,28 +100,62 @@ int main(int argc, char *argv[])
         std::cout << "Warning: No output directory provided, using current directory." << std::endl;
     }
 
-    // 路径处理
-    if (outputDir.back() != '/')
-    {
-        outputDir += "/";
-    }
-    std::string filename = outputDir + "imu_data.csv";
+    if (outputDir.back() != '/') outputDir += "/";
+    std::string filename = outputDir + "imu_data.mcap";
 
-    // 3. 初始化 CSV
-    std::ofstream csvFile(filename);
-    if (!csvFile.is_open())
+    // 3. 初始化 MCAP Writer
+    mcap::McapWriter writer;
+    mcap::McapWriterOptions options("");
+    options.compression = mcap::Compression::Lz4; // 建议开启压缩
+
+    auto status = writer.open(filename, options);
+    if (!status.ok())
     {
-        std::cerr << "Failed to open file for logging: " << filename << std::endl;
+        std::cerr << "Failed to open MCAP file: " << filename << std::endl;
         return -1;
     }
-    else
-    {
-        // 写入表头
-        csvFile << "Timestamp_us,Acc_X,Acc_Y,Acc_Z,Gyro_X,Gyro_Y,Gyro_Z,Quat_X,Quat_Y,Quat_Z,Quat_W" << std::endl;
-        std::cout << "Logging IMU data to " << filename << std::endl;
-    }
 
-    // 4. 初始化 UDP (如果需要)
+    // 注册 Schema (使用 Foxglove 标准 IMU 格式，以便自动可视化)
+    mcap::Schema schema("foxglove.Imu", "jsonschema", R"({
+        "type": "object",
+        "properties": {
+            "frame_id": { "type": "string" },
+            "orientation": {
+                "type": "object",
+                "properties": {
+                    "x": { "type": "number" },
+                    "y": { "type": "number" },
+                    "z": { "type": "number" },
+                    "w": { "type": "number" }
+                }
+            },
+            "angular_velocity": {
+                "type": "object",
+                "properties": {
+                    "x": { "type": "number" },
+                    "y": { "type": "number" },
+                    "z": { "type": "number" }
+                }
+            },
+            "linear_acceleration": {
+                "type": "object",
+                "properties": {
+                    "x": { "type": "number" },
+                    "y": { "type": "number" },
+                    "z": { "type": "number" }
+                }
+            }
+        }
+    })");
+    writer.addSchema(schema);
+
+    // 注册 Channel
+    mcap::Channel channel("imu_raw", "json", schema.id);
+    writer.addChannel(channel);
+
+    std::cout << "Logging IMU data to " << filename << " (MCAP format)" << std::endl;
+
+    // 4. 初始化 UDP
     int sock = -1;
     struct sockaddr_in addr;
     if (enable_vis)
@@ -131,15 +172,11 @@ int main(int argc, char *argv[])
     }
 
     // 5. 初始化 IMU
-    // 注意：根据你的实际波特率调整，这里保留原代码的 921600
     dmbot_serial::DmImu imu("/dev/ttyS2", 921600, dmbot_serial::DmImu::ProtocolType::RS485);
     imu.start();
 
     std::cout << "Starting IMU monitoring (1kHz logging)... Press Ctrl+C to stop." << std::endl;
-
-    // 设置输出格式
     std::cout << std::fixed << std::setprecision(3);
-    std::cout.setf(std::ios::unitbuf);
 
     // 6. 主循环控制变量
     auto next_time = std::chrono::steady_clock::now();
@@ -148,30 +185,42 @@ int main(int argc, char *argv[])
     // 用于降低打印频率的计数器 (1000Hz loop / 50 = 20Hz print)
     int printDivisor = 0;
     const int printThreshold = 50;
+    uint32_t seq = 0; // 序列号
 
     while (!g_stopFlag.load())
     {
         next_time += loopPeriod; // 设定下一次唤醒时间点
 
         // --- 获取数据 ---
-        // 假设 imu.getData() 获取的是最新缓存的数据
         auto d = imu.getData();
 
-        // --- 获取时间戳 ---
+        // 获取时间戳
         auto now = std::chrono::system_clock::now();
-        auto timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        auto timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                 now.time_since_epoch())
                                 .count();
 
-        // --- 写入 CSV (1kHz) ---
-        if (csvFile.is_open())
+        // --- 写入 MCAP (1kHz) ---
         {
-            csvFile << timestamp_us << ","
-                    << d.accx << "," << d.accy << "," << d.accz << ","
-                    << d.gyrox << "," << d.gyroy << "," << d.gyroz << ","
-                    << d.quat_x << "," << d.quat_y << "," << d.quat_z << "," << d.quat_w
-                    << std::endl;
+            // 构建 Payload
+            std::string payload = create_imu_json(timestamp_ns, d);
+
+            // 构建消息
+            mcap::Message msg;
+            msg.channelId = channel.id;
+            msg.sequence = seq++;
+            msg.logTime = timestamp_ns;
+            msg.publishTime = timestamp_ns;
+            msg.data = reinterpret_cast<const std::byte*>(payload.data());
+            msg.dataSize = payload.size();
+
+            // 写入
+            auto writeStatus = writer.write(msg);
+            if (!writeStatus.ok()) {
+                std::cerr << "Error writing MCAP: " << writeStatus.message << std::endl;
+            }
         }
+
 
         // --- 终端打印与UDP (降频处理: 20Hz) ---
         // 频繁打印 IO 会阻塞线程，导致无法维持 1kHz 记录频率，所以必须降频
@@ -216,18 +265,11 @@ int main(int argc, char *argv[])
 
     // --- 清理资源 ---
     std::cout << "Shutting down IMU..." << std::endl;
+    
+    writer.close(); // 关闭 MCAP
+    std::cout << "MCAP log saved." << std::endl;
 
-    if (csvFile.is_open())
-    {
-        csvFile.close();
-        std::cout << "CSV log saved." << std::endl;
-    }
-
-    if (sock >= 0)
-        close(sock);
-
-    // 假设 imu 析构函数会处理关闭串口，如果需要显式停止：
-    // imu.stop();
+    if (sock >= 0) close(sock);
 
     return 0;
 }
