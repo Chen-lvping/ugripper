@@ -21,8 +21,8 @@ endif()
 set(MCAP_TAG "releases/cpp/v${VERSION}")
 FetchContent_Declare(
   mcap
-  URL https://github.com/foxglove/mcap/archive/refs/tags/${MCAP_TAG}.tar.gz
-  ${DOWNLOAD_EXTRACT_TIMESTAMP_ARG}
+  GIT_REPOSITORY  ssh://git@gitlab.dmrobot.com:2222/data-acquisition/third-party/mcap.git
+  GIT_TAG         main
 )
 FetchContent_MakeAvailable(mcap)
 set(MCAP_INCLUDE_DIR ${mcap_SOURCE_DIR}/cpp/mcap/include/)
