@@ -21,7 +21,7 @@ endif()
 set(MCAP_TAG "releases/cpp/v${VERSION}")
 FetchContent_Declare(
   mcap
-  GIT_REPOSITORY  ssh://git@gitlab.dmrobot.com:2222/data-acquisition/third-party/mcap.git
+  GIT_REPOSITORY  http://gitlab.dmrobot.com/data-acquisition/third-party/mcap.git
   GIT_TAG         main
 )
 FetchContent_MakeAvailable(mcap)
