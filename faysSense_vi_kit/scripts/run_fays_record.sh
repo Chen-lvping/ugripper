@@ -93,7 +93,8 @@ if [ -f "$EXECUTABLE" ]; then
         echo "Error: OUTPUT_DIR is empty!"
         exit 1
     fi
-    "$EXECUTABLE" "$CONFIG_FILE" "$OUTPUT_DIR"
+    # Use exec to replace shell process with the binary, so signals are forwarded correctly
+    exec "$EXECUTABLE" "$CONFIG_FILE" "$OUTPUT_DIR"
 else
     echo "Error: Executable '$EXECUTABLE' not found. Did you run cmake & make?"
     exit 1
