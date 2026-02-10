@@ -62,6 +62,7 @@ IS_RECORDING=false
 PID_CAM=""
 PID_ENC=""
 PID_IMU=""
+PID_FAYS=""
 TARGET_DIR=""
 LAST_EPISODE_DIR=""  # 记录上次录制的目录（用于post音频）
 PRE_AUDIO_FILE=""    # 存储预录制音频文件路径
@@ -686,12 +687,17 @@ start_recording() {
     PID_CAM=$!
 
     # 启动 Encoder
-    ./encoder_refactor/build/main "$TARGET_DIR" &
+    ./build/encoder_refactor/main "$TARGET_DIR" &
     PID_ENC=$!
 
     # 启动 IMU    
-    ./dm_imu_alone/build/dm_imu "$TARGET_DIR" &
+    ./build/dm_imu_alone/dm_imu "$TARGET_DIR" &
     PID_IMU=$!
+
+    # 启动 FaysSense VIO
+    echo "[INFO]:Starting FaysSense VIO recording at $TARGET_DIR"
+    ./build/faysSense_vi_kit/scripts/run_fays_record.sh "$TARGET_DIR" &
+    PID_FAYS=$!
     
     IS_RECORDING=true
     LAST_EPISODE_DIR="$TARGET_DIR"  # 更新上次录制目录
@@ -711,7 +717,7 @@ validate_recording() {
     # --- 1. 检查 MKV 文件大小 ---
     # 检查 cam.mkv, tact_left.mkv, tact_right.mkv 是否存在且大小不为 0
     # 注意：根据实际生成的文件名可能需要调整，这里假设文件名如下
-    local mkv_files=("cam.mkv" "tact_left.mkv" "tact_right.mkv")
+    local mkv_files=("cam.mkv" "tact_left.mkv" "tact_right.mkv" "fays_stereo_output.mkv")
     
     for fname in "${mkv_files[@]}"; do
         local fpath="$dir/$fname"
@@ -780,7 +786,7 @@ stop_recording() {
     echo "[INFO]:Recording stopping at: $time_stamp on $CURRENT_SIDE_LOWER"
 
     # 发送 SIGINT
-    for pid in "$PID_CAM" "$PID_ENC" "$PID_IMU"; do
+    for pid in "$PID_CAM" "$PID_ENC" "$PID_IMU" "$PID_FAYS"; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             kill -2 "$pid"
         fi
@@ -792,7 +798,7 @@ stop_recording() {
 
     while :; do
         alive=0
-        for pid in "$PID_CAM" "$PID_ENC" "$PID_IMU"; do
+        for pid in "$PID_CAM" "$PID_ENC" "$PID_IMU" "$PID_FAYS"; do
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
                 alive=1
             fi
@@ -811,7 +817,7 @@ stop_recording() {
     done
     
     # 等待退出
-    wait $PID_CAM $PID_ENC $PID_IMU 2>/dev/null
+    wait $PID_CAM $PID_ENC $PID_IMU $PID_FAYS 2>/dev/null
 
     # 强制同步数据到磁盘
     echo "[INFO]:Syncing data to disk..."
@@ -836,6 +842,7 @@ stop_recording() {
     PID_CAM=""
     PID_ENC=""
     PID_IMU=""
+    PID_FAYS=""
 
     # 删除录制锁文件
     rm -f "$RECORDING_LOCK_FILE"

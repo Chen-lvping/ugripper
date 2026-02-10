@@ -7,24 +7,6 @@ BUILD_DIR="$(dirname "$SCRIPT_DIR")"
 # 配置文件路径
 CONFIG_FILE="$BUILD_DIR/config/fays_vikit.yaml"
 
-# Find source directory: from BUILD_DIR (build/faysSense_vi_kit/) go up to project root
-# BUILD_DIR/../.. should give us the project root (ugripper/)
-PROJECT_ROOT="$(cd "$BUILD_DIR/../.." 2>/dev/null && pwd)"
-if [ -z "$PROJECT_ROOT" ] || [ ! -d "$PROJECT_ROOT/libs" ]; then
-    # Fallback: try to find by searching upward from BUILD_DIR
-    SEARCH_DIR="$BUILD_DIR"
-    while [ "$SEARCH_DIR" != "/" ] && [ ! -d "$SEARCH_DIR/libs" ]; do
-        SEARCH_DIR="$(dirname "$SEARCH_DIR")"
-    done
-    if [ -d "$SEARCH_DIR/libs" ]; then
-        PROJECT_ROOT="$SEARCH_DIR"
-    else
-        # Last resort: assume current directory structure
-        PROJECT_ROOT="$(cd "$BUILD_DIR/../.." && pwd)"
-    fi
-fi
-SOURCE_DIR="$PROJECT_ROOT/faysSense_vi_kit"
-
 # 设置 OpenCV 库路径 (OpenCV 已安装到 /usr/local)
 # 注意：确保架构名称(aarch64)与你的实际目录一致
 if [ -d "/usr/local/opencv-4.2.0-linux-aarch64/lib" ]; then
@@ -92,17 +74,26 @@ fi
 
 # --- 检查并安装 FTDI 驱动库 ---
 # Libraries are now in PROJECT_ROOT/libs/ instead of SOURCE_DIR/thirdparty/
-if [ ! -f /usr/lib/libft602.so ] && [ -d "$PROJECT_ROOT/libs/ft602-linux-$(uname -m)" ]; then
-    echo "Installing libft602.so to /usr/lib/..."
-    cp "$PROJECT_ROOT/libs/ft602-linux-$(uname -m)/libft602.so" /usr/lib/
-    cp "$PROJECT_ROOT/libs/ft602-linux-$(uname -m)/libft602.so.1.0.17" /usr/lib/
-fi
+# if [ ! -f /usr/lib/libft602.so ] && [ -d "$PROJECT_ROOT/libs/ft602-linux-$(uname -m)" ]; then
+#     echo "Installing libft602.so to /usr/lib/..."
+#     cp "$PROJECT_ROOT/libs/ft602-linux-$(uname -m)/libft602.so" /usr/lib/
+#     cp "$PROJECT_ROOT/libs/ft602-linux-$(uname -m)/libft602.so.1.0.17" /usr/lib/
+# fi
+
+OUTPUT_DIR="${1:-}"
 
 # --- 启动录制程序 ---
 EXECUTABLE="$BUILD_DIR/fays_record_example"
 if [ -f "$EXECUTABLE" ]; then
     echo "Starting Fays Recording Example..."
-    "$EXECUTABLE" "$CONFIG_FILE"
+    echo "  Config file: $CONFIG_FILE"
+    echo "  Output directory: $OUTPUT_DIR"
+    # Ensure OUTPUT_DIR is set and not empty
+    if [ -z "$OUTPUT_DIR" ]; then
+        echo "Error: OUTPUT_DIR is empty!"
+        exit 1
+    fi
+    "$EXECUTABLE" "$CONFIG_FILE" "$OUTPUT_DIR"
 else
     echo "Error: Executable '$EXECUTABLE' not found. Did you run cmake & make?"
     exit 1

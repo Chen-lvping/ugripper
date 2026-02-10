@@ -13,8 +13,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir/../" || exit 1
 
 # ================= 配置部分 =================
-IMU_CALIB_BIN="./dm_imu_alone/build/imu_calib"
-ENCODER_CALIB_BIN="./encoder_refactor/build/zeroing"
+IMU_CALIB_BIN="./build/dm_imu_alone/imu_calib"
+ENCODER_CALIB_BIN="./build/encoder_refactor/zeroing"
 
 # --- LED 控制配置 ---
 LED_SCRIPT="./led_manager.py"

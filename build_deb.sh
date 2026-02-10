@@ -58,29 +58,19 @@ mkdir -p "$BUILD_ROOT/usr/local/bin"
 mkdir -p "$BUILD_ROOT/etc/systemd/system"
 mkdir -p "$BUILD_ROOT/etc/udev/rules.d"
 
-echo "=== [2/5] 编译 C++ 模块 ==="
+echo "=== [2/5] 编译 C++ 模块 (统一构建) ==="
 
 if [ "$QUICK_MODE" = true ]; then
     echo "--> [SKIP] Skipping C++ compilation."
-    if [ ! -f "dm_imu_alone/build/dm_imu" ] || [ ! -f "encoder_refactor/build/main" ]; then
+    if [ ! -f "build/dm_imu_alone/dm_imu" ] || [ ! -f "build/encoder_refactor/main" ] || [ ! -f "build/faysSense_vi_kit/fays_record_example" ]; then
         echo "⚠️  警告: 二进制文件缺失！打包可能不可用。"
     fi
 else
-    # 编译 dm_imu_alone
-    echo "--> Building dm_imu_alone..."
-    cd dm_imu_alone
-    rm -rf build && mkdir build && cd build
+    echo "--> Building all C++ modules from top-level CMakeLists.txt..."
+    mkdir -p build && cd build
     cmake .. -DCMAKE_BUILD_TYPE=Release
     make -j$(nproc)
-    cd ../..
-
-    # 编译 encoder_refactor
-    echo "--> Building encoder_refactor..."
-    cd encoder_refactor
-    rm -rf build && mkdir build && cd build
-    cmake .. -DCMAKE_BUILD_TYPE=Release
-    make -j$(nproc)
-    cd ../..
+    cd ..
 fi
 
 echo "=== [3/5] 组装文件资源 ==="
@@ -95,6 +85,8 @@ EXCLUDE_LIST=(
     --exclude="$BUILD_ROOT"
     --exclude='dm_imu_alone'
     --exclude='encoder_refactor'
+    --exclude='faysSense_vi_kit'
+    --exclude='build'
     --exclude='*.deb'
 )
 
@@ -118,14 +110,20 @@ fi
 echo "--> Copying project files..."
 rsync -av "${EXCLUDE_LIST[@]}" . "$BUILD_ROOT/$INSTALL_DIR/"
 
-# 2. 手动补回编译好的二进制文件
+# 2. 手动补回编译好的二进制文件 (from unified build/ directory)
 echo "--> Restoring compiled binaries..."
-mkdir -p "$BUILD_ROOT/$INSTALL_DIR/dm_imu_alone/build"
-cp dm_imu_alone/build/dm_imu "$BUILD_ROOT/$INSTALL_DIR/dm_imu_alone/build/" || true
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/dm_imu_alone"
+cp build/dm_imu_alone/dm_imu "$BUILD_ROOT/$INSTALL_DIR/build/dm_imu_alone/" || true
 
-mkdir -p "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build"
-cp encoder_refactor/build/main "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/" || true
-cp encoder_refactor/build/zeroing "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/" || true
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/encoder_refactor"
+cp build/encoder_refactor/main "$BUILD_ROOT/$INSTALL_DIR/build/encoder_refactor/" || true
+cp build/encoder_refactor/zeroing "$BUILD_ROOT/$INSTALL_DIR/build/encoder_refactor/" || true
+
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts"
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/config"
+cp build/faysSense_vi_kit/fays_record_example "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/" || true
+cp build/faysSense_vi_kit/scripts/*.sh "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts/" || true
+cp build/faysSense_vi_kit/config/*.yaml "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/config/" || true
 
 # 4. 部署 Udev 规则
 cp camera_record/99-fixed-usb-map.rules "$BUILD_ROOT/etc/udev/rules.d/" || true

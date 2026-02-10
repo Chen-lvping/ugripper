@@ -234,16 +234,13 @@ public:
     FaysRecorder(const char* configPath, const std::string& outputDir = ".")
         : mptrHandle_{nullptr}, mbIsRunning_{true}, outputDir_(outputDir)
     {
-        // 确保输出目录以 '/' 结尾
-        if (!outputDir_.empty() && outputDir_.back() != '/') {
-            outputDir_ += "/";
-        }
-        
         // 分配内存
         mImgData_.data = new uchar[FAYS_ATRAK_MONO_MAX_BYTES * 3]; // 预留足够空间
         
         // 创建句柄
         FAYS_VIK_CreateHandleWithConfig(&mptrHandle_, configPath);
+        std::cout << "[FaysRecorder] Created handle with config: " << configPath << std::endl;
+        std::cout << "[FaysRecorder] Output directory: " << outputDir_ << std::endl;
 
         // 启动 IMU 和 Stereo 图像线程
         mptrImuThr_ = std::thread(&FaysRecorder::ImuOnlineCapture, this);
@@ -379,6 +376,10 @@ int main(int argc, char** argv) {
         outputDir = argv[2];
     } else {
         std::cout << "Warning: No output directory provided, using current directory." << std::endl;
+    }
+     // 确保输出目录以 '/' 结尾
+     if (!outputDir.empty() && outputDir.back() != '/') {
+        outputDir += "/";
     }
 
     // Register signal handlers
