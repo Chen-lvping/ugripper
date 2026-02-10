@@ -301,7 +301,7 @@ private:
         long frameIndex = 0;
 
         // 打开 CSV 文件
-        if (!mCsvLogger_.Open("timestamps.csv")) {
+        if (!mCsvLogger_.Open(outputDir_ + "fays_stereo_timestamp.csv")) {
             std::cerr << "Error: Could not create timestamp CSV file." << std::endl;
         }
 
@@ -320,7 +320,7 @@ private:
                     std::cout << "[Record] Input Info: " << img.cols << "x" << img.rows 
                               << " Channels: " << img.channels() << std::endl;
                     
-                    if (mRecorder_.Start("stereo_output.mkv", img.cols, img.rows, RECORD_FPS, isColor)) {
+                    if (mRecorder_.Start(outputDir_ + "fays_stereo_output.mkv", img.cols, img.rows, RECORD_FPS, isColor)) {
                         isInitialized = true;
                     }
                 }
@@ -392,8 +392,8 @@ int main(int argc, char** argv) {
 
     std::cout << "========================================" << std::endl;
     std::cout << "   Stereo Recorder (Headless) Started" << std::endl;
-    std::cout << "   Video: " << outputDir << "stereo_output.mkv" << std::endl;
-    std::cout << "   Time : " << outputDir << "timestamps.csv" << std::endl;
+    std::cout << "   Video: " << outputDir << "fays_stereo_output.mkv" << std::endl;
+    std::cout << "   Time : " << outputDir << "fays_stereo_timestamp.csv" << std::endl;
     std::cout << "   IMU  : " << outputDir << "fays_imu_data.mcap" << std::endl;
     std::cout << "   Press Ctrl+C to stop recording" << std::endl;
     std::cout << "========================================" << std::endl;
