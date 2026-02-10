@@ -9,9 +9,9 @@ import signal
 
 # ================= 配置部分 =================
 PWM_CONFIG = {
-    "red": {"chip": "pwmchip1", "channel": "0"},
-    "green": {"chip": "pwmchip0", "channel": "0"},
-    "blue": {"chip": "pwmchip3", "channel": "0"},
+    "green": {"chip": "pwmchip1", "channel": "0"},
+    "blue": {"chip": "pwmchip0", "channel": "0"},
+    "red": {"chip": "pwmchip3", "channel": "0"},
 }
 PWM_BASE_PATH = "/sys/class/pwm"
 PIPE_PATH = "/tmp/umi_led_pipe"  # 通信管道路径
