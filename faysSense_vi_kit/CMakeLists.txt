@@ -15,7 +15,7 @@ set(Record_SRC_CPP
 
 # opencv
 # Use libs directory from project root (CMAKE_SOURCE_DIR when building from root)
-set(OPENCV_LOCAL_DIR "${CMAKE_SOURCE_DIR}/libs/opencv-4.2.0-linux-${CMAKE_SYSTEM_PROCESSOR}")
+set(OPENCV_LOCAL_DIR "/usr/local/opencv-4.2.0-linux-${CMAKE_SYSTEM_PROCESSOR}")
 set(OpenCV_DIR "${OPENCV_LOCAL_DIR}/lib/cmake/opencv4")
 message(STATUS "OpenCV_DIR: ${OpenCV_DIR}")
 find_package(OpenCV REQUIRED PATHS ${OpenCV_DIR} NO_DEFAULT_PATH)

@@ -25,15 +25,12 @@ if [ -z "$PROJECT_ROOT" ] || [ ! -d "$PROJECT_ROOT/libs" ]; then
 fi
 SOURCE_DIR="$PROJECT_ROOT/faysSense_vi_kit"
 
-# 设置 OpenCV 库路径 (解决 libtbb.so.2 等依赖问题)
+# 设置 OpenCV 库路径 (OpenCV 已安装到 /usr/local)
 # 注意：确保架构名称(aarch64)与你的实际目录一致
-# Libraries are now in PROJECT_ROOT/libs/ instead of SOURCE_DIR/thirdparty/
-if [ -d "$PROJECT_ROOT/libs/opencv-4.2.0-linux-aarch64/lib" ]; then
-    export LD_LIBRARY_PATH="$PROJECT_ROOT/libs/opencv-4.2.0-linux-aarch64/lib:$LD_LIBRARY_PATH"
-    # Debug output (can be removed later)
-    # echo "DEBUG: Using OpenCV lib path: $PROJECT_ROOT/libs/opencv-4.2.0-linux-aarch64/lib"
+if [ -d "/usr/local/opencv-4.2.0-linux-aarch64/lib" ]; then
+    export LD_LIBRARY_PATH="/usr/local/opencv-4.2.0-linux-aarch64/lib:$LD_LIBRARY_PATH"
 else
-    echo "Warning: OpenCV library directory not found at $PROJECT_ROOT/libs/opencv-4.2.0-linux-aarch64/lib"
+    echo "Warning: OpenCV library directory not found at /usr/local/opencv-4.2.0-linux-aarch64/lib"
 fi
 
 # --- 设备自动发现与配置修改 (复用原逻辑) ---
