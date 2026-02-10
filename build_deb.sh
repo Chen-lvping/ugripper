@@ -62,7 +62,7 @@ echo "=== [2/5] 编译 C++ 模块 ==="
 
 if [ "$QUICK_MODE" = true ]; then
     echo "--> [SKIP] Skipping C++ compilation."
-    if [ ! -f "dm_imu_alone/build/dm_imu" ] || [ ! -f "encoder_refactor/build/main" ]; then
+    if [ ! -f "build/im648_imu_alone/im648_imu" ] || [ ! -f "build/encoder_refactor/main" ]; then
         echo "⚠️  警告: 二进制文件缺失！打包可能不可用。"
     fi
 else
@@ -121,11 +121,11 @@ rsync -av "${EXCLUDE_LIST[@]}" . "$BUILD_ROOT/$INSTALL_DIR/"
 # 2. 手动补回编译好的二进制文件
 echo "--> Restoring compiled binaries..."
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/dm_imu_alone/build"
-cp dm_imu_alone/build/dm_imu "$BUILD_ROOT/$INSTALL_DIR/dm_imu_alone/build/" || true
+cp build/im648_imu_alone/im648_imu "$BUILD_ROOT/$INSTALL_DIR/im648_imu_alone/build/" || true
 
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build"
-cp encoder_refactor/build/main "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/" || true
-cp encoder_refactor/build/zeroing "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/" || true
+cp build/encoder_refactor/main "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/" || true
+cp build/encoder_refactor/zeroing "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/" || true
 
 # 4. 部署 Udev 规则
 cp camera_record/99-fixed-usb-map.rules "$BUILD_ROOT/etc/udev/rules.d/" || true

@@ -690,7 +690,7 @@ start_recording() {
     PID_ENC=$!
 
     # 启动 IMU    
-    ./dm_imu_alone/build/dm_imu "$TARGET_DIR" &
+    ./im648_imu_alone/build/im648_imu "$TARGET_DIR" &
     PID_IMU=$!
     
     IS_RECORDING=true
