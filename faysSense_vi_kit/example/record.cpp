@@ -15,7 +15,12 @@
 #include "fays_atrak/fays_atrak_types.h"
 #include "fays_atrak/fays_atrak_vimod.h"
 
-// --- JSON Payload 生成函数（无 orientation） ---
+// --- IMU recording switches ---
+#define ENABLE_IMU_MCAP  1  // Set to 0 to disable IMU MCAP recording
+#define ENABLE_IMU_CSV   0  // Set to 0 to disable IMU CSV recording
+
+// --- JSON Payload generation (without orientation) ---
+#if ENABLE_IMU_MCAP
 std::string create_imu_json(uint64_t timestamp_ns, const AtrakIMU& imuData) {
     char buffer[512];
     snprintf(buffer, sizeof(buffer), 
@@ -29,6 +34,7 @@ std::string create_imu_json(uint64_t timestamp_ns, const AtrakIMU& imuData) {
     );
     return std::string(buffer);
 }
+#endif
 
 // --- CSV 日志记录器 ---
 class TimestampLogger {
@@ -64,6 +70,7 @@ private:
 };
 
 // --- IMU MCAP 日志记录器 ---
+#if ENABLE_IMU_MCAP
 class ImuLogger {
 public:
     ImuLogger() : writer_(), is_open_(false), seq_(0) {}
@@ -151,6 +158,45 @@ private:
     mcap::ChannelId channel_id_;
     uint32_t seq_;
 };
+#endif
+
+// --- IMU CSV Logger ---
+#if ENABLE_IMU_CSV
+class ImuCsvLogger {
+public:
+    ImuCsvLogger() {}
+    ~ImuCsvLogger() { if (file_.is_open()) file_.close(); }
+
+    bool Open(const std::string& path) {
+        file_.open(path);
+        if (!file_.is_open()) {
+            std::cerr << "[IMU CSV] Failed to open " << path << " for writing!" << std::endl;
+            return false;
+        }
+        // Write header
+        file_ << "timestamp_ns,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z" << std::endl;
+        return true;
+    }
+
+    void Log(const AtrakIMU& imuData) {
+        if (file_.is_open()) {
+            file_ << imuData.timestamp << ","
+                  << imuData.acc[0] << "," << imuData.acc[1] << "," << imuData.acc[2] << ","
+                  << imuData.gyro[0] << "," << imuData.gyro[1] << "," << imuData.gyro[2]
+                  << "\n";
+        }
+    }
+
+    void Flush() {
+        if (file_.is_open()) {
+            file_.flush();
+        }
+    }
+
+private:
+    std::ofstream file_;
+};
+#endif
 
 // --- FFmpeg 录制器 ---
 class FFmpegRecorder {
@@ -254,7 +300,12 @@ public:
 
         // Flush CSV files to ensure data is written to disk
         mCsvLogger_.Flush();
+#if ENABLE_IMU_MCAP
         mImuLogger_.Flush();
+#endif
+#if ENABLE_IMU_CSV
+        mImuCsvLogger_.Flush();
+#endif
 
         if (mptrImgThr_.joinable()) mptrImgThr_.join();
         if (mptrImuThr_.joinable()) mptrImuThr_.join();
@@ -271,19 +322,35 @@ public:
 
 private:
     void ImuOnlineCapture() {
-        // IMU 线程保持空转以消耗数据
-        
+        // IMU thread: consume and log IMU data
+
+#if ENABLE_IMU_MCAP
         std::string mcapPath = outputDir_ + "fays_imu_data.mcap";
         if (!mImuLogger_.Open(mcapPath)) {
             std::cerr << "Error: Could not create IMU MCAP file: " << mcapPath << std::endl;
         } else {
             std::cout << "[IMU MCAP] Logging to " << mcapPath << std::endl;
         }
-        
+#endif
+
+#if ENABLE_IMU_CSV
+        std::string csvPath = outputDir_ + "fays_imu_data.csv";
+        if (!mImuCsvLogger_.Open(csvPath)) {
+            std::cerr << "Error: Could not create IMU CSV file: " << csvPath << std::endl;
+        } else {
+            std::cout << "[IMU CSV] Logging to " << csvPath << std::endl;
+        }
+#endif
+
         AtrakIMU imuData;
         while (mbIsRunning_) {
             if (FAYS_VIK_GetImuData(mptrHandle_, &imuData) == EXIT_SUCCESS) {
+#if ENABLE_IMU_MCAP
                 mImuLogger_.Log(imuData);
+#endif
+#if ENABLE_IMU_CSV
+                mImuCsvLogger_.Log(imuData);
+#endif
                 std::this_thread::sleep_for(std::chrono::nanoseconds(100));
             }
         }
@@ -351,7 +418,12 @@ private:
 
     FFmpegRecorder mRecorder_;
     TimestampLogger mCsvLogger_;
+#if ENABLE_IMU_MCAP
     ImuLogger mImuLogger_;
+#endif
+#if ENABLE_IMU_CSV
+    ImuCsvLogger mImuCsvLogger_;
+#endif
 };
 
 // Signal handler function implementation
@@ -395,7 +467,12 @@ int main(int argc, char** argv) {
     std::cout << "   Stereo Recorder (Headless) Started" << std::endl;
     std::cout << "   Video: " << outputDir << "fays_stereo_output.mkv" << std::endl;
     std::cout << "   Time : " << outputDir << "fays_stereo_timestamp.csv" << std::endl;
-    std::cout << "   IMU  : " << outputDir << "fays_imu_data.mcap" << std::endl;
+#if ENABLE_IMU_MCAP
+    std::cout << "   IMU MCAP: " << outputDir << "fays_imu_data.mcap" << std::endl;
+#endif
+#if ENABLE_IMU_CSV
+    std::cout << "   IMU CSV : " << outputDir << "fays_imu_data.csv" << std::endl;
+#endif
     std::cout << "   Press Ctrl+C to stop recording" << std::endl;
     std::cout << "========================================" << std::endl;
 
