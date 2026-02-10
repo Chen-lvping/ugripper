@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.12)
 project(fays_vikit)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(FAYS_ATRAK_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib/fays_atrak/${CMAKE_SYSTEM_PROCESSOR}/Release" CACHE PATH "Path to fays_atrak libraries")
@@ -56,6 +56,7 @@ target_link_libraries(fays_record_example
     Threads::Threads
     ${OpenCV_LIBS}
     ${FTD3XX_LIBRARY}
+    mcap
 )
 
 # --- Copy config files and scripts to build directory ---

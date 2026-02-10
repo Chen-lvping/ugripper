@@ -8,8 +8,27 @@
 #include <mutex>
 #include <cstdio>
 #include <csignal>
+#include <chrono>
+#include <iomanip>
+#include <cstddef>
+#include <mcap/writer.hpp>
 #include "fays_atrak/fays_atrak_types.h"
 #include "fays_atrak/fays_atrak_vimod.h"
+
+// --- JSON Payload 生成函数（无 orientation） ---
+std::string create_imu_json(uint64_t timestamp_ns, const AtrakIMU& imuData) {
+    char buffer[512];
+    snprintf(buffer, sizeof(buffer), 
+        "{"
+            "\"frame_id\":\"imu_link\","
+            "\"angular_velocity\":{\"x\":%.6f,\"y\":%.6f,\"z\":%.6f},"
+            "\"linear_acceleration\":{\"x\":%.6f,\"y\":%.6f,\"z\":%.6f}"
+        "}",
+        imuData.gyro[0], imuData.gyro[1], imuData.gyro[2],
+        imuData.acc[0], imuData.acc[1], imuData.acc[2]
+    );
+    return std::string(buffer);
+}
 
 // --- CSV 日志记录器 ---
 class TimestampLogger {
@@ -44,40 +63,93 @@ private:
     std::ofstream file_;
 };
 
-// --- IMU CSV 日志记录器 ---
+// --- IMU MCAP 日志记录器 ---
 class ImuLogger {
 public:
-    ImuLogger() {}
-    ~ImuLogger() { if (file_.is_open()) file_.close(); }
+    ImuLogger() : writer_(), is_open_(false), seq_(0) {}
+    
+    ~ImuLogger() { 
+        if (is_open_) {
+            writer_.close();
+        }
+    }
 
     bool Open(const std::string& path) {
-        file_.open(path);
-        if (!file_.is_open()) {
-            std::cerr << "[IMU CSV] Failed to open " << path << " for writing!" << std::endl;
+        if (is_open_) {
+            std::cerr << "[IMU MCAP] Already open, closing previous file." << std::endl;
+            writer_.close();
+        }
+
+        mcap::McapWriterOptions options("");
+        options.compression = mcap::Compression::Lz4; // 开启压缩
+
+        auto status = writer_.open(path, options);
+        if (!status.ok()) {
+            std::cerr << "[IMU MCAP] Failed to open MCAP writer: " << status.message << std::endl;
             return false;
         }
-        // Write CSV header
-        file_ << "timestamp_ns,acc_x,acc_y,acc_z,gyro_x,gyro_y,gyro_z" << std::endl;
+
+        // 注册 Foxglove IMU Schema（无 orientation）
+        std::string schemaJson = R"({
+            "type": "object",
+            "properties": {
+                "frame_id": { "type": "string" },
+                "angular_velocity": {
+                    "type": "object",
+                    "properties": { "x": {"type":"number"}, "y": {"type":"number"}, "z": {"type":"number"} }
+                },
+                "linear_acceleration": {
+                    "type": "object",
+                    "properties": { "x": {"type":"number"}, "y": {"type":"number"}, "z": {"type":"number"} }
+                }
+            }
+        })";
+        mcap::Schema schema("foxglove.Imu", "jsonschema", schemaJson);
+        writer_.addSchema(schema);
+
+        // 注册 Channel
+        mcap::Channel channel("imu_raw", "json", schema.id);
+        writer_.addChannel(channel);
+        channel_id_ = channel.id;
+
+        is_open_ = true;
+        seq_ = 0;
         return true;
     }
 
     void Log(const AtrakIMU& imuData) {
-        if (file_.is_open()) {
-            file_ << imuData.timestamp << ","
-                  << imuData.acc[0] << "," << imuData.acc[1] << "," << imuData.acc[2] << ","
-                  << imuData.gyro[0] << "," << imuData.gyro[1] << "," << imuData.gyro[2]
-                  << "\n";
+        if (!is_open_) return;
+
+        // 构建 JSON Payload
+        std::string payload = create_imu_json(imuData.timestamp, imuData);
+
+        // 构建并写入消息
+        mcap::Message msg;
+        msg.channelId = channel_id_;
+        msg.sequence = seq_++;
+        msg.logTime = imuData.timestamp;
+        msg.publishTime = imuData.timestamp;
+        msg.data = reinterpret_cast<const std::byte*>(payload.data());
+        msg.dataSize = payload.size();
+
+        auto writeStatus = writer_.write(msg);
+        if (!writeStatus.ok()) {
+            std::cerr << "[IMU MCAP] Error writing frame: " << writeStatus.message << std::endl;
         }
     }
 
     void Flush() {
-        if (file_.is_open()) {
-            file_.flush();
+        // MCAP Writer 会自动处理刷新，但我们可以显式调用
+        if (is_open_) {
+            // MCAP 的 flush 操作在 close 时自动执行
         }
     }
 
 private:
-    std::ofstream file_;
+    mcap::McapWriter writer_;
+    bool is_open_;
+    mcap::ChannelId channel_id_;
+    uint32_t seq_;
 };
 
 // --- FFmpeg 录制器 ---
@@ -159,9 +231,14 @@ void signalHandler(int signal);
 // --- 主业务类 ---
 class FaysRecorder {
 public:
-    FaysRecorder(const char* configPath)
-        : mptrHandle_{nullptr}, mbIsRunning_{true} 
+    FaysRecorder(const char* configPath, const std::string& outputDir = ".")
+        : mptrHandle_{nullptr}, mbIsRunning_{true}, outputDir_(outputDir)
     {
+        // 确保输出目录以 '/' 结尾
+        if (!outputDir_.empty() && outputDir_.back() != '/') {
+            outputDir_ += "/";
+        }
+        
         // 分配内存
         mImgData_.data = new uchar[FAYS_ATRAK_MONO_MAX_BYTES * 3]; // 预留足够空间
         
@@ -199,13 +276,16 @@ private:
     void ImuOnlineCapture() {
         // IMU 线程保持空转以消耗数据
         
-        if (!mImuLogger_.Open("fays_imu_data.csv")) {
-            std::cerr << "Error: Could not create IMU CSV file." << std::endl;
+        std::string mcapPath = outputDir_ + "fays_imu_data.mcap";
+        if (!mImuLogger_.Open(mcapPath)) {
+            std::cerr << "Error: Could not create IMU MCAP file: " << mcapPath << std::endl;
+        } else {
+            std::cout << "[IMU MCAP] Logging to " << mcapPath << std::endl;
         }
+        
         AtrakIMU imuData;
         while (mbIsRunning_) {
             if (FAYS_VIK_GetImuData(mptrHandle_, &imuData) == EXIT_SUCCESS) {
-            
                 mImuLogger_.Log(imuData);
                 std::this_thread::sleep_for(std::chrono::nanoseconds(100));
             }
@@ -270,6 +350,7 @@ private:
 
     AtrakImage mImgData_;
     std::atomic<bool> mbIsRunning_;
+    std::string outputDir_;
 
     FFmpegRecorder mRecorder_;
     TimestampLogger mCsvLogger_;
@@ -286,24 +367,34 @@ void signalHandler(int signal) {
 
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: ./app <config_path>" << std::endl;
+        std::cerr << "Usage: ./app <config_path> [output_directory]" << std::endl;
+        std::cerr << "  - config_path: Path to configuration YAML file" << std::endl;
+        std::cerr << "  - output_directory: (Optional) Output directory for data files (default: current directory)" << std::endl;
         return 1;
+    }
+
+    // Parse output directory argument
+    std::string outputDir = ".";
+    if (argc > 2) {
+        outputDir = argv[2];
+    } else {
+        std::cout << "Warning: No output directory provided, using current directory." << std::endl;
     }
 
     // Register signal handlers
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
-    FaysRecorder recorder(argv[1]);
+    FaysRecorder recorder(argv[1], outputDir);
     
     // Set global pointer for signal handler access
     g_recorder = &recorder;
 
     std::cout << "========================================" << std::endl;
     std::cout << "   Stereo Recorder (Headless) Started" << std::endl;
-    std::cout << "   Video: stereo_output.mkv" << std::endl;
-    std::cout << "   Time : timestamps.csv" << std::endl;
-    std::cout << "   IMU  : fays_imu_data.csv" << std::endl;
+    std::cout << "   Video: " << outputDir << "stereo_output.mkv" << std::endl;
+    std::cout << "   Time : " << outputDir << "timestamps.csv" << std::endl;
+    std::cout << "   IMU  : " << outputDir << "fays_imu_data.mcap" << std::endl;
     std::cout << "   Press Ctrl+C to stop recording" << std::endl;
     std::cout << "========================================" << std::endl;
 
