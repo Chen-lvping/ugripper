@@ -16,8 +16,8 @@
 #include "fays_atrak/fays_atrak_vimod.h"
 
 // --- IMU recording switches ---
-#define ENABLE_IMU_MCAP  1  // Set to 0 to disable IMU MCAP recording
-#define ENABLE_IMU_CSV   0  // Set to 0 to disable IMU CSV recording
+#define ENABLE_IMU_MCAP  0  // Set to 0 to disable IMU MCAP recording
+#define ENABLE_IMU_CSV   1  // Set to 0 to disable IMU CSV recording
 
 // --- JSON Payload generation (without orientation) ---
 #if ENABLE_IMU_MCAP
@@ -180,7 +180,8 @@ public:
 
     void Log(const AtrakIMU& imuData) {
         if (file_.is_open()) {
-            file_ << imuData.timestamp << ","
+            file_ << std::fixed << std::setprecision(9)
+                  << imuData.timestamp << ","
                   << imuData.acc[0] << "," << imuData.acc[1] << "," << imuData.acc[2] << ","
                   << imuData.gyro[0] << "," << imuData.gyro[1] << "," << imuData.gyro[2]
                   << "\n";
@@ -349,12 +350,20 @@ private:
             if (FAYS_VIK_GetImuData(mptrHandle_, &imuData) == EXIT_SUCCESS) {
                 // Check time gap between consecutive IMU frames
                 if (lastImuTimestamp_ != 0) {
-                    uint64_t timeDiff = imuData.timestamp - lastImuTimestamp_;
-                    if (timeDiff > IMU_THRESHOLD_NS) {
-                        double timeDiffMs = timeDiff / 1e6;
-                        std::cout << "[IMU] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Time gap detected: " << std::fixed << std::setprecision(3) 
-                                  << timeDiffMs << " ms (prev: " << lastImuTimestamp_ 
-                                  << ", curr: " << imuData.timestamp << ")" << std::endl;
+                    // Check for timestamp rollback (out-of-order)
+                    if (imuData.timestamp < lastImuTimestamp_) {
+                        std::cout << "[IMU] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Timestamp rollback detected: "
+                                  << "prev: " << lastImuTimestamp_ 
+                                  << ", curr: " << imuData.timestamp 
+                                  << " (diff: " << (static_cast<int64_t>(imuData.timestamp) - static_cast<int64_t>(lastImuTimestamp_)) << " ns)" << std::endl;
+                    } else {
+                        uint64_t timeDiff = imuData.timestamp - lastImuTimestamp_;
+                        if (timeDiff > IMU_THRESHOLD_NS) {
+                            double timeDiffMs = timeDiff / 1e6;
+                            std::cout << "[IMU] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Time gap detected: " << std::fixed << std::setprecision(3) 
+                                      << timeDiffMs << " ms (prev: " << lastImuTimestamp_ 
+                                      << ", curr: " << imuData.timestamp << ")" << std::endl;
+                        }
                     }
                 }
                 lastImuTimestamp_ = imuData.timestamp;
@@ -390,12 +399,20 @@ private:
             if (EXIT_SUCCESS == FAYS_VIK_GetStereoFrames(mptrHandle_, &mImgData_)) {
                 // Check time gap between consecutive video frames
                 if (lastImgTimestamp_ != 0) {
-                    uint64_t timeDiff = mImgData_.timestamp - lastImgTimestamp_;
-                    if (timeDiff > VIDEO_THRESHOLD_NS) {
-                        double timeDiffMs = timeDiff / 1e6;
-                        std::cout << "[Video] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Time gap detected: " << std::fixed << std::setprecision(3) 
-                                  << timeDiffMs << " ms (prev: " << lastImgTimestamp_ 
-                                  << ", curr: " << mImgData_.timestamp << ", expected: ~20ms)" << std::endl;
+                    // Check for timestamp rollback (out-of-order)
+                    if (mImgData_.timestamp < lastImgTimestamp_) {
+                        std::cout << "[Video] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Timestamp rollback detected: "
+                                  << "prev: " << lastImgTimestamp_ 
+                                  << ", curr: " << mImgData_.timestamp 
+                                  << " (diff: " << (static_cast<int64_t>(mImgData_.timestamp) - static_cast<int64_t>(lastImgTimestamp_)) << " ns)" << std::endl;
+                    } else {
+                        uint64_t timeDiff = mImgData_.timestamp - lastImgTimestamp_;
+                        if (timeDiff > VIDEO_THRESHOLD_NS) {
+                            double timeDiffMs = timeDiff / 1e6;
+                            std::cout << "[Video] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Time gap detected: " << std::fixed << std::setprecision(3) 
+                                      << timeDiffMs << " ms (prev: " << lastImgTimestamp_ 
+                                      << ", curr: " << mImgData_.timestamp << ", expected: ~20ms)" << std::endl;
+                        }
                     }
                 }
                 lastImgTimestamp_ = mImgData_.timestamp;
