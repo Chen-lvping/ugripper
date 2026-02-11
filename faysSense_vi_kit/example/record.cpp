@@ -278,7 +278,8 @@ void signalHandler(int signal);
 class FaysRecorder {
 public:
     FaysRecorder(const char* configPath, const std::string& outputDir = ".")
-        : mptrHandle_{nullptr}, mbIsRunning_{true}, outputDir_(outputDir)
+        : mptrHandle_{nullptr}, mbIsRunning_{true}, outputDir_(outputDir),
+          lastImuTimestamp_(0), lastImgTimestamp_(0)
     {
         // 分配内存
         mImgData_.data = new uchar[FAYS_ATRAK_MONO_MAX_BYTES * 3]; // 预留足够空间
@@ -343,15 +344,28 @@ private:
 #endif
 
         AtrakIMU imuData;
+        const uint64_t IMU_THRESHOLD_NS = 5000000;  // 5 milliseconds in nanoseconds
         while (mbIsRunning_) {
             if (FAYS_VIK_GetImuData(mptrHandle_, &imuData) == EXIT_SUCCESS) {
+                // Check time gap between consecutive IMU frames
+                if (lastImuTimestamp_ != 0) {
+                    uint64_t timeDiff = imuData.timestamp - lastImuTimestamp_;
+                    if (timeDiff > IMU_THRESHOLD_NS) {
+                        double timeDiffMs = timeDiff / 1e6;
+                        std::cout << "[IMU] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Time gap detected: " << std::fixed << std::setprecision(3) 
+                                  << timeDiffMs << " ms (prev: " << lastImuTimestamp_ 
+                                  << ", curr: " << imuData.timestamp << ")" << std::endl;
+                    }
+                }
+                lastImuTimestamp_ = imuData.timestamp;
+                
 #if ENABLE_IMU_MCAP
                 mImuLogger_.Log(imuData);
 #endif
 #if ENABLE_IMU_CSV
                 mImuCsvLogger_.Log(imuData);
 #endif
-                std::this_thread::sleep_for(std::chrono::nanoseconds(100));
+                std::this_thread::sleep_for(std::chrono::nanoseconds(10000));
             }
         }
     }
@@ -361,6 +375,7 @@ private:
         std::cout << "[SDK] Version: " << version << std::endl;
 
         const int RECORD_FPS = 50; // 假设帧率为30，根据实际相机配置调整
+        const uint64_t VIDEO_THRESHOLD_NS = 60000000;  // 3 * (1.0 / RECORD_FPS) * 1e9 = 60ms in nanoseconds
         bool isInitialized = false;
         long frameIndex = 0;
 
@@ -373,6 +388,18 @@ private:
 
         while (mbIsRunning_) {
             if (EXIT_SUCCESS == FAYS_VIK_GetStereoFrames(mptrHandle_, &mImgData_)) {
+                // Check time gap between consecutive video frames
+                if (lastImgTimestamp_ != 0) {
+                    uint64_t timeDiff = mImgData_.timestamp - lastImgTimestamp_;
+                    if (timeDiff > VIDEO_THRESHOLD_NS) {
+                        double timeDiffMs = timeDiff / 1e6;
+                        std::cout << "[Video] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Time gap detected: " << std::fixed << std::setprecision(3) 
+                                  << timeDiffMs << " ms (prev: " << lastImgTimestamp_ 
+                                  << ", curr: " << mImgData_.timestamp << ", expected: ~20ms)" << std::endl;
+                    }
+                }
+                lastImgTimestamp_ = mImgData_.timestamp;
+                
                 // 1. 构造 Mat (不拷贝数据)
                 // 这里的 img 包含了 Left 和 Right (通常是上下拼接)
                 int type = (mImgData_.channel == 1) ? CV_8UC1 : CV_8UC3;
@@ -424,6 +451,9 @@ private:
 #if ENABLE_IMU_CSV
     ImuCsvLogger mImuCsvLogger_;
 #endif
+    
+    uint64_t lastImuTimestamp_;  // Last IMU timestamp for gap detection
+    uint64_t lastImgTimestamp_;   // Last image timestamp for gap detection
 };
 
 // Signal handler function implementation
