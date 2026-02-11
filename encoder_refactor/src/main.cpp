@@ -12,7 +12,7 @@
 #include <mcap/writer.hpp>
 
 // 定义调试宏,注释可以取消一些调试信息的打印
-#define DEBUG_READ_FREQ
+//#define DEBUG_READ_FREQ
 
 std::atomic<bool> g_stopFlag(false);
 
