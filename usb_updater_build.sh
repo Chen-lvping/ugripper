@@ -13,7 +13,7 @@ MAINTAINER="User <user@example.com>"
 DESC="Auto update ugripper via USB and Boot Check"
 
 # 构建临时目录
-BUILD_DIR="build_usb_updater_temp"
+BUILD_DIR="temp_build_usb_updater"
 PKG_DIR="${PKG_NAME}_${PKG_VERSION}_${ARCH}"
 
 # ================= 0. 检查源文件 =================

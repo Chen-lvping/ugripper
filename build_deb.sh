@@ -4,10 +4,10 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ================= 变量定义区域 =================
 APP_NAME="ugripper"
-VERSION="1.0.11"       # 每次发布前修改这里
+VERSION="1.0.14"       # 每次发布前修改这里
 ARCH="arm64"
 INSTALL_DIR="/opt/${APP_NAME}"
-BUILD_ROOT="build_deb_temp"
+BUILD_ROOT="temp_build_deb"
 PACK_SCRIPT_DIR="pack_script"
 
 # 默认行为变量
@@ -62,25 +62,17 @@ echo "=== [2/5] 编译 C++ 模块 ==="
 
 if [ "$QUICK_MODE" = true ]; then
     echo "--> [SKIP] Skipping C++ compilation."
-    if [ ! -f "build/im648_imu_alone/im648_imu" ] || [ ! -f "build/encoder_refactor/main" ]; then
-        echo "⚠️  警告: 二进制文件缺失！打包可能不可用。"
+    if [ ! -f "build/src/sensor_recorder/sensor_recorder" ]; then
+        echo "⚠️  警告: sensor_recorder 二进制缺失！打包可能不可用。"
     fi
 else
-    # 编译 dm_imu_alone
-    echo "--> Building dm_imu_alone..."
-    cd dm_imu_alone
-    rm -rf build && mkdir build && cd build
+    echo "--> Building C++ modules (root CMake)..."
+    rm -rf build
+    mkdir -p build
+    cd build
     cmake .. -DCMAKE_BUILD_TYPE=Release
     make -j$(nproc)
-    cd ../..
-
-    # 编译 encoder_refactor
-    echo "--> Building encoder_refactor..."
-    cd encoder_refactor
-    rm -rf build && mkdir build && cd build
-    cmake .. -DCMAKE_BUILD_TYPE=Release
-    make -j$(nproc)
-    cd ../..
+    cd ..
 fi
 
 echo "=== [3/5] 组装文件资源 ==="
@@ -95,6 +87,8 @@ EXCLUDE_LIST=(
     --exclude="$BUILD_ROOT"
     --exclude='dm_imu_alone'
     --exclude='encoder_refactor'
+    --exclude='im648_imu_alone'
+    --exclude='src/sensor_recorder'
     --exclude='*.deb'
 )
 
@@ -120,12 +114,8 @@ rsync -av "${EXCLUDE_LIST[@]}" . "$BUILD_ROOT/$INSTALL_DIR/"
 
 # 2. 手动补回编译好的二进制文件
 echo "--> Restoring compiled binaries..."
-mkdir -p "$BUILD_ROOT/$INSTALL_DIR/dm_imu_alone/build"
-cp build/im648_imu_alone/im648_imu "$BUILD_ROOT/$INSTALL_DIR/im648_imu_alone/build/" || true
-
-mkdir -p "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build"
-cp build/encoder_refactor/main "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/" || true
-cp build/encoder_refactor/zeroing "$BUILD_ROOT/$INSTALL_DIR/encoder_refactor/build/" || true
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder"
+cp build/src/sensor_recorder/sensor_recorder "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true
 
 # 4. 部署 Udev 规则
 cp camera_record/99-fixed-usb-map.rules "$BUILD_ROOT/etc/udev/rules.d/" || true
@@ -138,6 +128,8 @@ cp "auto_calibration/ugripper-calibration.service" "$BUILD_ROOT/etc/systemd/syst
 cp "auto_calibration/ugripper-network-monitor.service" "$BUILD_ROOT/etc/systemd/system/ugripper-network-monitor.service"
 cp "time_sync/ugripper-ntp-sync.service" "$BUILD_ROOT/etc/systemd/system/ugripper-ntp-sync.service"
 cp "time_sync/ugripper-ptp-monitor.service" "$BUILD_ROOT/etc/systemd/system/ugripper-ptp-monitor.service"
+cp "auto_update/umi-shutdown-trigger.service" "$BUILD_ROOT/etc/systemd/system/umi-shutdown-trigger.service"
+cp "auto_update/umi-shutdown-trigger.path" "$BUILD_ROOT/etc/systemd/system/umi-shutdown-trigger.path"
 
 # 2. 拷贝 DEBIAN 控制文件
 cp "$PACK_SCRIPT_DIR/control"  "$BUILD_ROOT/DEBIAN/"
@@ -158,6 +150,7 @@ FILES_TO_PATCH=(
     "$BUILD_ROOT/DEBIAN/prerm"
     "$BUILD_ROOT/DEBIAN/postrm"
     "$BUILD_ROOT/etc/systemd/system/${APP_NAME}.service"
+    "$BUILD_ROOT/etc/systemd/system/umi-shutdown-trigger.service"
 )
 
 for file in "${FILES_TO_PATCH[@]}"; do
