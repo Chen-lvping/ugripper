@@ -74,6 +74,9 @@ class AudioPlayer:
         setup_audio_device()
 
         pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+        # Reserve a background channel for long/looping prompts (e.g. "writing")
+        self.bg_channel = pygame.mixer.Channel(0)
+        self.fx_channel = pygame.mixer.Channel(1)
 
         self.pipe_path = "/tmp/umi_audio_pipe"
         self.audio_dir = os.path.dirname(os.path.abspath(__file__))
@@ -83,6 +86,9 @@ class AudioPlayer:
             "ready": self.load_sound("ready.wav"),
             "audio_recording_start": self.load_sound("audio_recording_start.wav"),
             "audio_recording_stop": self.load_sound("audio_recording_stop.wav"),
+            "pre_audio_recording": self.load_sound("pre_audio_recording.wav"),
+            "post_audio_recording": self.load_sound("post_audio_recording.wav"),
+            "writing": self.load_sound("writing.wav"),
             "recording_start": self.load_sound("recording_start.wav"),
             "recording_stop": self.load_sound("recording_stop.wav"),
             "error": self.load_sound("error.wav"),
@@ -118,7 +124,14 @@ class AudioPlayer:
     def play_sound(self, sound_name):
         if sound_name in self.sounds and self.sounds[sound_name]:
             try:
-                self.sounds[sound_name].play()
+                if sound_name == "writing":
+                    # Loop "writing" until a later cue (e.g. "ready") interrupts it.
+                    self.bg_channel.play(self.sounds[sound_name], loops=-1)
+                else:
+                    # Any non-writing cue interrupts "writing".
+                    if self.bg_channel.get_busy():
+                        self.bg_channel.stop()
+                    self.fx_channel.play(self.sounds[sound_name])
                 print(f"Playing: {sound_name}")
             except Exception as e:
                 print(f"Error playing {sound_name}: {e}")
