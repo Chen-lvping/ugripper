@@ -58,7 +58,8 @@ DEBOUNCE_MS=0.03         # 30ms
 # 长按检测阈值（秒）
 LONG_PRESS_THRESHOLD=0.5
 DUAL_LONG_PRESS_THRESHOLD=4.0
-SHUTDOWN_PROMPT_THRESHOLD=3.0
+SHUTDOWN_PROMPT_THRESHOLD=2.0
+DUAL_CHORD_WINDOW=0.2
 SHUTDOWN_REQUEST_FILE="/tmp/umi_shutdown_request"
 
 DOWN_BUTTON_AVAILABLE=true
@@ -104,20 +105,37 @@ fi
 
 # 3. 定义发送状态的函数
 # 可选状态: INIT (蓝), READY (绿呼吸), RECORDING (红闪), ERROR (红快闪), EXIT (关)
+write_pipe_message() {
+    local pipe_path=$1
+    local message=$2
+    local timeout_sec=${3:-0.15}
+
+    if [ ! -p "$pipe_path" ]; then
+        return 1
+    fi
+
+    timeout "$timeout_sec" bash -c 'printf "%s\n" "$1" > "$2"' _ "$message" "$pipe_path" 2>/dev/null
+}
+
 set_state() {
     local state=$1
-    # 仅当管道存在时写入，& 放入后台防止阻塞 Bash
-    if [ -p "$LED_PIPE" ]; then
-        echo "$state" > "$LED_PIPE" &
-    fi
+    local attempts=3
+
+    while [ "$attempts" -gt 0 ]; do
+        if write_pipe_message "$LED_PIPE" "$state"; then
+            return 0
+        fi
+        attempts=$((attempts - 1))
+        sleep 0.03
+    done
+
+    return 1
 }
 
 # 音频状态通知函数
 notify_audio() {
     local action=$1
-    if [ -p "$AUDIO_PIPE" ]; then
-        echo "$action" > "$AUDIO_PIPE" &
-    fi
+    write_pipe_message "$AUDIO_PIPE" "$action" 0.10 || true
 }
 
 # 设置初始状态：初始化中
@@ -245,8 +263,9 @@ set_state "INIT"
 # ================= 目录结构与元数据 =================
 echo "[INFO]:Initializing Data Structure..."
 
-DIR_META="$DATA_ROOT/metadata"
-DIR_CALIB="$DATA_ROOT/calibration"
+DIR_RUNTIME="/tmp/umi_episode_runtime"
+DIR_META="$DIR_RUNTIME/metadata"
+DIR_CALIB="$DIR_RUNTIME/calibration"
 DIR_DATA="$DATA_ROOT/data"
 
 mkdir -p "$DIR_META"
@@ -255,10 +274,7 @@ mkdir -p "$DIR_DATA"
 
 # 1. 生成 metadata
 META_FILE="$DIR_META/metadata.json"
-if [ ! -f "$META_FILE" ]; then
-    # 使用 cat 生成 JSON 内容
-    # 注意：DEVICE_SN 来源于脚本开头的 /etc/environment 读取
-    cat <<EOF > "$META_FILE"
+cat <<EOF > "$META_FILE"
 {
     "device_type": "UMI",
     "device_model": "ugripper",
@@ -268,19 +284,18 @@ if [ ! -f "$META_FILE" ]; then
     "data_path": "data/episode_{date:08d}_{episode_index:04d}"
 }
 EOF
-    echo "[INFO]:Metadata info.json created."
-fi
+echo "[INFO]:Metadata metadata.json prepared."
 
 # 2. 拷贝 calibration 文件
 # 从 ./config/fake*Calib.json 拷贝到 calibration/xxx.json
 if [ -f "./config/fakeCamCalib.json" ]; then
-    cp -n "./config/fakeCamCalib.json" "$DIR_CALIB/cam.json"
+    cp -f "./config/fakeCamCalib.json" "$DIR_CALIB/cam.json"
 fi
 if [ -f "./config/fakeEncoderCalib.json" ]; then
-    cp -n "./config/fakeEncoderCalib.json" "$DIR_CALIB/encoder.json"
+    cp -f "./config/fakeEncoderCalib.json" "$DIR_CALIB/encoder.json"
 fi
 if [ -f "./config/fakeIMUCalib.json" ]; then
-    cp -n "./config/fakeIMUCalib.json" "$DIR_CALIB/imu.json"
+    cp -f "./config/fakeIMUCalib.json" "$DIR_CALIB/imu.json"
 fi
 echo "[INFO]:Calibration files synced."
 
@@ -491,9 +506,7 @@ monitor_system_health() {
                     printf "%.2f", p
                 }')
 
-            if [ -p "$LED_PIPE" ]; then
-                echo "[INFO]:CALIB_RUN:$progress" > "$LED_PIPE"
-            fi
+            set_state "CALIB_RUN:$progress"
 
             SYSTEM_HEALTH_STATUS="WAITING"
             return
@@ -571,6 +584,28 @@ prepare_directory() {
     echo "[INFO]:New recording session: $TARGET_DIR"
 }
 
+# 函数：在 episode 目录写入 metadata/calibration 信息
+prepare_episode_manifest_files() {
+    local episode_dir="$1"
+    local episode_meta_file="$episode_dir/metadata.json"
+    local episode_calib_file="$episode_dir/calibration.json"
+
+    if [ -f "$META_FILE" ]; then
+        cp -f "$META_FILE" "$episode_meta_file"
+    else
+        echo "[WARNING]:Metadata source missing: $META_FILE"
+    fi
+
+    local calib_items=()
+    [ -f "$DIR_CALIB/cam.json" ] && calib_items+=("\"cam\"")
+    [ -f "$DIR_CALIB/imu.json" ] && calib_items+=("\"imu\"")
+    [ -f "$DIR_CALIB/encoder.json" ] && calib_items+=("\"encoder\"")
+
+    local joined_calib
+    joined_calib=$(IFS=,; echo "${calib_items[*]}")
+    printf '[%s]\n' "$joined_calib" > "$episode_calib_file"
+}
+
 # 函数：启动音频录制
 record_audio() {
     # 如果是 Left (Slave)，直接禁用录音功能
@@ -591,12 +626,16 @@ record_audio() {
     elif [ "$audio_type" = "post" ]; then
         notify_audio "post_audio_recording"
     fi
-    notify_audio "audio_recording_start"
     
     arecord -D hw:rockchipes8388,0 -f cd -r 44100 -c 2 -t wav "$temp_file.raw" &
     local arecord_pid=$!
 
-    if { [ "$mode" = "hold" ] || [ "$mode" = "latch" ]; } && [ -z "$monitor_gpio" ]; then
+    if [ "$mode" != "hold" ]; then
+        echo "[WARNING]:Unsupported audio mode '$mode', fallback to hold."
+        mode="hold"
+    fi
+
+    if [ -z "$monitor_gpio" ]; then
         echo "[ERROR]:Mode $mode requires GPIO monitor line."
         kill $arecord_pid 2>/dev/null
         wait $arecord_pid 2>/dev/null
@@ -606,28 +645,14 @@ record_audio() {
     fi
     
     # 按键检测逻辑 (仅在 Right 有效)
-    if [ "$mode" = "hold" ]; then
-        echo "[INFO]:Recording... (Release button to stop)"
-        while kill -0 $arecord_pid 2>/dev/null; do
-            if [ "$(gpioget $monitor_gpio)" -ne "$BTN_ACTIVE_LEVEL" ]; then
-                kill -SIGINT $arecord_pid 2>/dev/null
-                break
-            fi
-            sleep 0.05
-        done
-    elif [ "$mode" = "latch" ]; then
-        echo "[INFO]:Recording... (Press button again to stop)"
-        while [ "$(gpioget $monitor_gpio)" -eq "$BTN_ACTIVE_LEVEL" ]; do sleep 0.05; done
-        while kill -0 $arecord_pid 2>/dev/null; do
-            if [ "$(gpioget $monitor_gpio)" -eq "$BTN_ACTIVE_LEVEL" ]; then
-                sleep $DEBOUNCE_MS
-                kill -SIGINT $arecord_pid 2>/dev/null
-                break
-            fi
-            sleep 0.05
-        done
-        while [ "$(gpioget $monitor_gpio)" -eq "$BTN_ACTIVE_LEVEL" ]; do sleep 0.05; done
-    fi
+    echo "[INFO]:Recording... (Release button to stop)"
+    while kill -0 $arecord_pid 2>/dev/null; do
+        if [ "$(gpioget $monitor_gpio)" -ne "$BTN_ACTIVE_LEVEL" ]; then
+            kill -SIGINT $arecord_pid 2>/dev/null
+            break
+        fi
+        sleep 0.05
+    done
     
     # 等待录音进程完全结束
     wait $arecord_pid 2>/dev/null
@@ -640,9 +665,6 @@ record_audio() {
         echo "[WARNING]:No audio data recorded"
         return 1
     fi
-
-    # 播放录制完成提示音
-    notify_audio "audio_recording_stop"
 
     # 根据音频类型处理
     if [ "$audio_type" = "pre" ]; then
@@ -657,6 +679,12 @@ record_audio() {
             rm -f "$temp_file"
         fi
     fi
+
+    sync -f "$DISK_DIR"
+    /usr/sbin/blockdev --flushbufs "$(findmnt -n -o SOURCE --target "$DISK_DIR")"
+    
+    # 播放录制完成提示音
+    notify_audio "audio_recording_stop"
 }
 
 # 函数：启动所有录制进程
@@ -669,6 +697,9 @@ start_recording() {
 
     # 2. 准备目录
     prepare_directory "$sync_dir_name"
+
+    # 2.1 录制开始时，将 metadata/calibration 写入当前 episode 目录
+    prepare_episode_manifest_files "$TARGET_DIR"
     
     # 3. 如果是 Master，需要通知 Slave
     if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
@@ -840,7 +871,7 @@ stop_recording() {
     set_state "INIT"  # 临时切换状态指示sync
     sync -f "$DISK_DIR"
     #sync 全盘sync好像有概率等待很久，改为只sync数据盘目录
-    blockdev --flushbufs "$(findmnt -n -o SOURCE --target "$DISK_DIR")"
+    /usr/sbin/blockdev --flushbufs "$(findmnt -n -o SOURCE --target "$DISK_DIR")"
 
     # Interrupt writing prompt with ready.
     notify_audio "ready"
@@ -877,6 +908,45 @@ request_system_shutdown() {
     notify_audio "writing"
     touch "$SHUTDOWN_REQUEST_FILE"
     echo "[INFO]:Shutdown request file created: $SHUTDOWN_REQUEST_FILE"
+}
+
+handle_dual_button_shutdown() {
+    local press_start
+    local shutdown_triggered=false
+    local shutdown_prompted=false
+
+    press_start=$(date +%s.%N)
+
+    while [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ] && \
+          [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; do
+        local current_time elapsed
+        current_time=$(date +%s.%N)
+        elapsed=$(echo "$current_time - $press_start" | bc)
+
+        if [ "$shutdown_prompted" = false ] && (( $(echo "$elapsed >= $SHUTDOWN_PROMPT_THRESHOLD" | bc -l) )); then
+            shutdown_prompted=true
+            echo "[INFO]:Dual-button hold 2s reached. Playing shutdown prompt..."
+            notify_audio "shutdown"
+        fi
+
+        if (( $(echo "$elapsed >= $DUAL_LONG_PRESS_THRESHOLD" | bc -l) )); then
+            shutdown_triggered=true
+            echo "[INFO]:Dual-button long press detected. Triggering shutdown service..."
+            request_system_shutdown
+            break
+        fi
+
+        sleep 0.05
+    done
+
+    while [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ] || \
+          [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; do
+        sleep 0.1
+    done
+
+    if [ "$shutdown_triggered" = false ]; then
+        echo "[INFO]:Dual-button short press detected (ignored)."
+    fi
 }
 
 cleanup() {
@@ -931,11 +1001,6 @@ cleanup() {
 trap cleanup SIGINT SIGTERM EXIT
 
 # ================= 逻辑分流：Master (Right) vs Slave (Left) =================
-
-set_state "READY"
-# 播放准备就绪提示音
-notify_audio "ready"
-
 monitor_loop &        # 后台运行硬件监控
 MONITOR_PID=$!
 
@@ -945,10 +1010,14 @@ if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
     # ================= Slave (Left) 逻辑 =================
     echo "=========================================="
     echo "RUNNING AS SLAVE (LEFT)"
-    echo " - Physical buttons DISABLED"
-    echo " - Audio recording DISABLED"
+    #echo " - Physical buttons DISABLED"
+    #echo " - Audio recording DISABLED"
     echo " - Waiting for commands from RIGHT ($IP_RIGHT)..."
     echo "=========================================="
+
+    set_state "READY"
+    # 播放准备就绪提示音
+    notify_audio "ready"
 
     # 网络监听循环
     while true; do
@@ -994,11 +1063,15 @@ else
     # ================= Master (Right) 逻辑 =================
     echo "=========================================="
     echo "RUNNING AS MASTER (RIGHT)"
-    echo " - Up click: Start/Stop data recording (syncs Left)"
-    echo " - Up long press: Record pre-annotation audio"
-    echo " - Down long press: Record post-annotation audio"
-    echo " - Both long press: System shutdown"
+    #echo " - Up click: Start/Stop data recording (syncs Left)"
+    #echo " - Up long press: Record pre-annotation audio"
+    #echo " - Down long press: Record post-annotation audio"
+    #echo " - Both long press: System shutdown"
     echo "=========================================="
+
+    set_state "READY"
+    # 播放准备就绪提示音
+    notify_audio "ready"
 
     while true; do
         if [ "$DOWN_BUTTON_AVAILABLE" = true ] && [ -n "$GPIO_DOWN_LINE" ] && \
@@ -1008,38 +1081,7 @@ else
 
             if [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ] && \
                [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
-                press_start=$(date +%s.%N)
-                shutdown_triggered=false
-                shutdown_prompted=false
-
-                while [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ] && \
-                      [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; do
-                    current_time=$(date +%s.%N)
-                    elapsed=$(echo "$current_time - $press_start" | bc)
-
-                    if [ "$shutdown_prompted" = false ] && (( $(echo "$elapsed >= $SHUTDOWN_PROMPT_THRESHOLD" | bc -l) )); then
-                        shutdown_prompted=true
-                        echo "[INFO]:Dual-button hold 3s reached. Playing shutdown prompt..."
-                        notify_audio "shutdown"
-                    fi
-
-                    if (( $(echo "$elapsed >= $DUAL_LONG_PRESS_THRESHOLD" | bc -l) )); then
-                        shutdown_triggered=true
-                        echo "[INFO]:Dual-button long press detected. Triggering shutdown service..."
-                        request_system_shutdown
-                        break
-                    fi
-                    sleep 0.05
-                done
-
-                while [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ] || \
-                      [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; do
-                    sleep 0.1
-                done
-
-                if [ "$shutdown_triggered" = false ]; then
-                    echo "[INFO]:Dual-button short press detected (ignored)."
-                fi
+                handle_dual_button_shutdown
 
                 sleep 0.2
                 echo "[INFO]:Waiting for next command..."
@@ -1051,10 +1093,29 @@ else
             sleep $DEBOUNCE_MS
 
             if [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                # 给双键组合留一个短窗口，避免双按时被误判为上键长按音频
+                if [ "$DOWN_BUTTON_AVAILABLE" = true ] && [ -n "$GPIO_DOWN_LINE" ]; then
+                    sleep "$DUAL_CHORD_WINDOW"
+                    if [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ] && \
+                       [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                        echo "[INFO]:Dual-button chord detected while UP pending, entering dual-button handler..."
+                        handle_dual_button_shutdown
+                        continue
+                    fi
+                fi
+
                 press_start=$(date +%s.%N)
                 handled=false
 
                 while [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; do
+                    if [ "$DOWN_BUTTON_AVAILABLE" = true ] && [ -n "$GPIO_DOWN_LINE" ] && \
+                       [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                        handled=true
+                        echo "[INFO]:Dual-button chord detected during UP hold, entering dual-button handler..."
+                        handle_dual_button_shutdown
+                        break
+                    fi
+
                     current_time=$(date +%s.%N)
                     elapsed=$(echo "$current_time - $press_start" | bc)
 
@@ -1092,10 +1153,26 @@ else
                 sleep $DEBOUNCE_MS
 
                 if [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                    # 给双键组合留一个短窗口，避免双按时被误判为下键长按音频
+                    sleep "$DUAL_CHORD_WINDOW"
+                    if [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ] && \
+                       [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                        echo "[INFO]:Dual-button chord detected while DOWN pending, entering dual-button handler..."
+                        handle_dual_button_shutdown
+                        continue
+                    fi
+
                     press_start=$(date +%s.%N)
                     down_long=false
 
                     while [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; do
+                        if [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                            down_long=true
+                            echo "[INFO]:Dual-button chord detected during DOWN hold, entering dual-button handler..."
+                            handle_dual_button_shutdown
+                            break
+                        fi
+
                         current_time=$(date +%s.%N)
                         elapsed=$(echo "$current_time - $press_start" | bc)
 

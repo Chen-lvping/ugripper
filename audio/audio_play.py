@@ -89,6 +89,7 @@ class AudioPlayer:
             "pre_audio_recording": self.load_sound("pre_audio_recording.wav"),
             "post_audio_recording": self.load_sound("post_audio_recording.wav"),
             "writing": self.load_sound("writing.wav"),
+            "shutdown": self.load_sound("shutdown.wav"),
             "recording_start": self.load_sound("recording_start.wav"),
             "recording_stop": self.load_sound("recording_stop.wav"),
             "error": self.load_sound("error.wav"),
