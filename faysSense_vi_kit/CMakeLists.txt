@@ -74,6 +74,5 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/scripts
 # Make scripts executable
 file(GLOB SCRIPT_FILES "${CMAKE_CURRENT_BINARY_DIR}/scripts/*.sh")
 foreach(SCRIPT ${SCRIPT_FILES})
-    file(CHMOD ${SCRIPT} PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE
-         GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+    execute_process(COMMAND chmod +x ${SCRIPT})
 endforeach()

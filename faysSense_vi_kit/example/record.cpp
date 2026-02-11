@@ -232,6 +232,10 @@ public:
             << "-qp_min 24 "
             << "-qp_max_i 38 "
             << "-qp_min_i 20 ";
+        
+        // cmd << "-c:v libx265 "
+        //     << "-preset medium "
+        //     << "-crf 28 ";
 
         // 3. 输出路径
         cmd << "\"" << savePath << "\"";
@@ -374,8 +378,9 @@ private:
 #if ENABLE_IMU_CSV
                 mImuCsvLogger_.Log(imuData);
 #endif
-                std::this_thread::sleep_for(std::chrono::nanoseconds(10000));
+               
             }
+            std::this_thread::sleep_for(std::chrono::nanoseconds(100000));
         }
     }
 
