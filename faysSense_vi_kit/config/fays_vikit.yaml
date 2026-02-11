@@ -17,7 +17,7 @@ stereo_single_cam_width: 640
 # The width of the stereo camera image[400/800]
 stereo_single_cam_height: 400
 
-stereo_fps: 50
+stereo_fps: 25
 # Only support color sensors. Output: [0: raw image, 1: RGB image]
 # The stereo color camera only supports a resolution of 1280*800.
 stereo_color_mode: 0

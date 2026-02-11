@@ -6,6 +6,9 @@
 #include <opencv2/opencv.hpp>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <vector>
 #include <cstdio>
 #include <csignal>
 #include <chrono>
@@ -199,6 +202,75 @@ private:
 };
 #endif
 
+// --- Thread-safe IMU queue for producer-consumer pattern ---
+class ImuQueue {
+public:
+    ImuQueue() : stopped_(false) {}
+
+    // Push one IMU sample into the queue (called by producer)
+    void Push(const AtrakIMU& data) {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            if (queue_.size() >= MAX_SIZE) {
+                // Drop oldest data to prevent unbounded memory growth
+                queue_.pop_front();
+                dropCount_++;
+                if (dropCount_ == 1 || dropCount_ % 1000 == 0) {
+                    std::cerr << "[ImuQueue] WARNING: Queue full, dropped " 
+                              << dropCount_ << " frames total" << std::endl;
+                }
+            }
+            queue_.push_back(data);
+        }
+        cv_.notify_one();
+    }
+
+    // Drain up to maxCount items into 'out' vector (called by consumer)
+    // Returns the number of items drained
+    size_t DrainTo(std::vector<AtrakIMU>& out, size_t maxCount) {
+        std::unique_lock<std::mutex> lock(mtx_);
+        // Wait until data is available or stopped
+        cv_.wait_for(lock, std::chrono::milliseconds(5), [this]() {
+            return !queue_.empty() || stopped_;
+        });
+        size_t count = std::min(queue_.size(), maxCount);
+        if (count == 0) return 0;
+        out.reserve(out.size() + count);
+        for (size_t i = 0; i < count; ++i) {
+            out.push_back(queue_.front());
+            queue_.pop_front();
+        }
+        return count;
+    }
+
+    bool Empty() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return queue_.empty();
+    }
+
+    size_t Size() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return queue_.size();
+    }
+
+    // Unblock consumer thread waiting in DrainTo()
+    void NotifyStop() {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            stopped_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    static constexpr size_t MAX_SIZE = 8192; // ~8s buffer at 1000Hz
+    std::deque<AtrakIMU> queue_;
+    mutable std::mutex mtx_;
+    std::condition_variable cv_;
+    bool stopped_;
+    uint64_t dropCount_ = 0;
+};
+
 // --- FFmpeg 录制器 ---
 class FFmpegRecorder {
 public:
@@ -284,7 +356,8 @@ class FaysRecorder {
 public:
     FaysRecorder(const char* configPath, const std::string& outputDir = ".")
         : mptrHandle_{nullptr}, mbIsRunning_{true}, outputDir_(outputDir),
-          lastImuTimestamp_(0), lastImgTimestamp_(0)
+          lastImuTimestamp_(0), lastImgTimestamp_(0),
+          imuGapCount_(0), imuRollbackCount_(0)
     {
         // 分配内存
         mImgData_.data = new uchar[FAYS_ATRAK_MONO_MAX_BYTES * 3]; // 预留足够空间
@@ -294,8 +367,13 @@ public:
         std::cout << "[FaysRecorder] Created handle with config: " << configPath << std::endl;
         std::cout << "[FaysRecorder] Output directory: " << outputDir_ << std::endl;
 
-        // 启动 IMU 和 Stereo 图像线程
+        // Start IMU producer thread (reads from SDK, pushes to queue)
         mptrImuThr_ = std::thread(&FaysRecorder::ImuOnlineCapture, this);
+#if ENABLE_IMU_CSV
+        // Start IMU CSV consumer thread (drains queue, writes to CSV)
+        mptrImuCsvWriterThr_ = std::thread(&FaysRecorder::ImuCsvWriterThread, this);
+#endif
+        // Start Stereo image thread
         mptrImgThr_ = std::thread(&FaysRecorder::ImgOnlineCapture, this);
     }
 
@@ -304,18 +382,28 @@ public:
         
         mRecorder_.Stop();
 
-        // Flush CSV files to ensure data is written to disk
+        // Flush stereo CSV
         mCsvLogger_.Flush();
+
+        // Wait for IMU producer thread to finish (it will call imuQueue_.NotifyStop())
+        if (mptrImuThr_.joinable()) mptrImuThr_.join();
+
+#if ENABLE_IMU_CSV
+        // Signal queue stop so consumer can drain remaining data and exit
+        imuQueue_.NotifyStop();
+        if (mptrImuCsvWriterThr_.joinable()) mptrImuCsvWriterThr_.join();
+#endif
+
 #if ENABLE_IMU_MCAP
         mImuLogger_.Flush();
 #endif
-#if ENABLE_IMU_CSV
-        mImuCsvLogger_.Flush();
-#endif
 
         if (mptrImgThr_.joinable()) mptrImgThr_.join();
-        if (mptrImuThr_.joinable()) mptrImuThr_.join();
         
+        // Print final IMU statistics
+        std::cout << "[IMU] Final stats - Gaps: " << imuGapCount_ 
+                  << ", Rollbacks: " << imuRollbackCount_ << std::endl;
+
         FAYS_VIK_DestroyHandle(mptrHandle_);
         delete[] mImgData_.data;
     }
@@ -328,7 +416,8 @@ public:
 
 private:
     void ImuOnlineCapture() {
-        // IMU thread: consume and log IMU data
+        // IMU producer thread: read data from SDK and push to queue
+        // CSV/MCAP writing is handled by the separate ImuCsvWriterThread
 
 #if ENABLE_IMU_MCAP
         std::string mcapPath = outputDir_ + "fays_imu_data.mcap";
@@ -339,50 +428,98 @@ private:
         }
 #endif
 
-#if ENABLE_IMU_CSV
-        std::string csvPath = outputDir_ + "fays_imu_data.csv";
-        if (!mImuCsvLogger_.Open(csvPath)) {
-            std::cerr << "Error: Could not create IMU CSV file: " << csvPath << std::endl;
-        } else {
-            std::cout << "[IMU CSV] Logging to " << csvPath << std::endl;
-        }
-#endif
-
         AtrakIMU imuData;
-        const uint64_t IMU_THRESHOLD_NS = 5000000;  // 5 milliseconds in nanoseconds
+        // Threshold: 2ms gap at 1000Hz means missing at least 1 frame
+        const uint64_t IMU_THRESHOLD_NS = 10000000;
+        uint64_t imuReadCount = 0;
+
         while (mbIsRunning_) {
-            if (FAYS_VIK_GetImuData(mptrHandle_, &imuData) == EXIT_SUCCESS) {
-                // Check time gap between consecutive IMU frames
+            bool gotData = false;
+            // Drain all available IMU data in a tight loop
+            while (FAYS_VIK_GetImuData(mptrHandle_, &imuData) == EXIT_SUCCESS) {
+                gotData = true;
+                imuReadCount++;
+
+                // Lightweight gap detection (counter only, no expensive cout)
                 if (lastImuTimestamp_ != 0) {
-                    // Check for timestamp rollback (out-of-order)
                     if (imuData.timestamp < lastImuTimestamp_) {
-                        std::cout << "[IMU] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Timestamp rollback detected: "
-                                  << "prev: " << lastImuTimestamp_ 
-                                  << ", curr: " << imuData.timestamp 
-                                  << " (diff: " << (static_cast<int64_t>(imuData.timestamp) - static_cast<int64_t>(lastImuTimestamp_)) << " ns)" << std::endl;
+                        imuRollbackCount_++;
                     } else {
                         uint64_t timeDiff = imuData.timestamp - lastImuTimestamp_;
                         if (timeDiff > IMU_THRESHOLD_NS) {
-                            double timeDiffMs = timeDiff / 1e6;
-                            std::cout << "[IMU] !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! Time gap detected: " << std::fixed << std::setprecision(3) 
-                                      << timeDiffMs << " ms (prev: " << lastImuTimestamp_ 
-                                      << ", curr: " << imuData.timestamp << ")" << std::endl;
+                            imuGapCount_++;
                         }
                     }
                 }
                 lastImuTimestamp_ = imuData.timestamp;
-                
+
+                // Push to thread-safe queue (fast, no I/O in hot path)
+                imuQueue_.Push(imuData);
+
 #if ENABLE_IMU_MCAP
                 mImuLogger_.Log(imuData);
 #endif
-#if ENABLE_IMU_CSV
-                mImuCsvLogger_.Log(imuData);
-#endif
-               
             }
-            std::this_thread::sleep_for(std::chrono::nanoseconds(100000));
+
+            // Periodic summary report (every ~5 seconds at 1000Hz)
+            // if (imuReadCount > 0 && imuReadCount % 5000 == 0) {
+            //     std::cout << "[IMU] Read: " << imuReadCount
+            //               << ", Gaps: " << imuGapCount_
+            //               << ", Rollbacks: " << imuRollbackCount_
+            //               << ", Queue: " << imuQueue_.Size() << std::endl;
+            // }
+
+            // Only sleep when SDK has no more data available
+            if (!gotData) {
+                std::this_thread::sleep_for(std::chrono::microseconds(50));
+            }
         }
+
+        // Signal the queue to unblock the consumer thread
+        imuQueue_.NotifyStop();
     }
+
+#if ENABLE_IMU_CSV
+    void ImuCsvWriterThread() {
+        // IMU consumer thread: drain queue and write to CSV file
+
+        std::string csvPath = outputDir_ + "fays_imu_data.csv";
+        if (!mImuCsvLogger_.Open(csvPath)) {
+            std::cerr << "Error: Could not create IMU CSV file: " << csvPath << std::endl;
+            return;
+        }
+        std::cout << "[IMU CSV] Logging to " << csvPath << std::endl;
+
+        std::vector<AtrakIMU> batch;
+        batch.reserve(256);
+        uint64_t totalWritten = 0;
+        uint64_t flushCounter = 0;
+
+        // Keep running until stopped AND queue is fully drained
+        while (mbIsRunning_ || !imuQueue_.Empty()) {
+            size_t count = imuQueue_.DrainTo(batch, 256);
+            if (count > 0) {
+                for (const auto& imu : batch) {
+                    mImuCsvLogger_.Log(imu);
+                }
+                totalWritten += count;
+                flushCounter += count;
+                batch.clear();
+
+                // Periodic flush every ~1000 frames (~1 second at 1000Hz)
+                if (flushCounter >= 1000) {
+                    mImuCsvLogger_.Flush();
+                    flushCounter = 0;
+                }
+            }
+            // DrainTo already waits with timeout when queue is empty
+        }
+
+        // Final flush to ensure all data is written to disk
+        mImuCsvLogger_.Flush();
+        std::cout << "[IMU CSV] Writer stopped. Total written: " << totalWritten << " frames." << std::endl;
+    }
+#endif
 
     void ImgOnlineCapture() {
         std::string version = FAYS_VIK_GetVersion(mptrHandle_);
@@ -460,6 +597,9 @@ private:
     void* mptrHandle_;
     std::thread mptrImgThr_;
     std::thread mptrImuThr_;
+#if ENABLE_IMU_CSV
+    std::thread mptrImuCsvWriterThr_;  // Dedicated CSV writer thread
+#endif
 
     AtrakImage mImgData_;
     std::atomic<bool> mbIsRunning_;
@@ -473,8 +613,15 @@ private:
 #if ENABLE_IMU_CSV
     ImuCsvLogger mImuCsvLogger_;
 #endif
-    
-    uint64_t lastImuTimestamp_;  // Last IMU timestamp for gap detection
+
+    // IMU producer-consumer queue
+    ImuQueue imuQueue_;
+
+    // IMU gap detection statistics (updated by producer thread only)
+    uint64_t lastImuTimestamp_;
+    std::atomic<uint64_t> imuGapCount_;
+    std::atomic<uint64_t> imuRollbackCount_;
+
     uint64_t lastImgTimestamp_;   // Last image timestamp for gap detection
 };
 
