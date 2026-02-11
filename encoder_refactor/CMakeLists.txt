@@ -29,7 +29,11 @@ add_executable(main
     ${ENCODER_SOURCES}
 )
 
-target_link_libraries(main PRIVATE ${SERIALPORT_LIB})
+target_link_libraries(main
+  PRIVATE
+    ${SERIALPORT_LIB}
+    mcap
+)
 
 # -----------------------------
 # 编译归零程序 zeroing

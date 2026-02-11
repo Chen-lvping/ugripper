@@ -9,8 +9,8 @@ dist/
 build/
 *.egg-info/
 *.deb
-/build_deb_temp/
-/build_usb_updater_temp/
+/temp_build_deb/
+/temp_build_usb_updater/
 # Python 缓存
 __pycache__/
 *.py[cod]

@@ -8,17 +8,32 @@
 #include <iomanip>
 #include <csignal>
 #include <string>
+#include <cstring>
+#include <mcap/writer.hpp>
 
 // 定义调试宏,注释可以取消一些调试信息的打印
-// #define DEBUG_READ_FREQ
+//#define DEBUG_READ_FREQ
 
 std::atomic<bool> g_stopFlag(false);
 
-// 新增：信号处理函数，用于接收 Shell 脚本的停止指令
+// 信号处理函数
 void signalHandler(int signum)
 {
     std::cout << "\nInterrupt signal (" << signum << ") received. Stopping..." << std::endl;
     g_stopFlag = true;
+}
+
+std::string create_encoder_json(const EncoderData& d) {
+    char buffer[256];
+    // 使用 snprintf 格式化数据，比 string 拼接更高效且格式可控
+    snprintf(buffer, sizeof(buffer), 
+        "{"
+            "\"position_raw\":%d,"
+            "\"position_rad\":%.6f"
+        "}",
+        d.currentPosition, d.currentPositionRad
+    );
+    return std::string(buffer);
 }
 
 // 编码器读取线程函数
@@ -49,9 +64,11 @@ void encoderReadThreadFunc(EncoderDriver *encoder)
 #ifdef DEBUG_READ_FREQ
             auto now = std::chrono::steady_clock::now();
             double elapsed = std::chrono::duration<double>(now - lastTime).count();
-            if (elapsed >= 1.0)
+            if (elapsed >= 0.01)
             {
                 std::cout << "[DEBUG] Encoder Read Frequency: " << (dataCount / elapsed) << " Hz" << std::endl;
+                std::cout << "[DEBUG] Last frame position (raw): " << encoder->getState().currentPosition 
+                          << ", position (rad): " << encoder->getState().currentPositionRad << std::endl;
                 dataCount = 0;
                 lastTime = now;
             }
@@ -69,10 +86,8 @@ void encoderReadThreadFunc(EncoderDriver *encoder)
 void encoderRequestThreadFunc(EncoderDriver *encoder)
 {
     auto next_time = std::chrono::steady_clock::now();
-    auto period = std::chrono::microseconds(980); // 1 kHz = 1ms
-    // TODO:不确定什么原因，虽然发送频率1k，但是读取到的数据频率会稍低20hz，通过稍微抬高发送频率缓解，频率不对会导致写数据的时候升采样。当然也可以把传感器频率拉到2k之类的缓解
-    size_t count = 0;
-
+    auto period = std::chrono::microseconds(1000); // 1 kHz = 1ms
+    
     while (!g_stopFlag.load())
     {
         next_time += period; // 下一次请求时间
@@ -88,11 +103,11 @@ void encoderRequestThreadFunc(EncoderDriver *encoder)
 
 int main(int argc, char *argv[])
 {
-    // 新增：注册信号处理，捕获 Ctrl+C 或 kill 信号
+    // 注册信号处理
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
-    // 新增：处理命令行参数，获取输出目录
+    // 处理命令行参数
     std::string outputDir = "."; // 默认为当前目录
     if (argc > 1)
     {
@@ -109,7 +124,35 @@ int main(int argc, char *argv[])
     {
         outputDir += "/";
     }
-    std::string filename = outputDir + "encoder_data.csv";
+    std::string filename = outputDir + "encoder_data.mcap";
+
+    // --- 1. 初始化 MCAP Writer ---
+    mcap::McapWriter writer;
+    mcap::McapWriterOptions options("");
+    options.compression = mcap::Compression::Lz4; // 参考 imu: 开启压缩
+
+    auto writerStatus = writer.open(filename, options); // 修改变量名防止重定义
+    if (!writerStatus.ok())
+    {
+        std::cerr << "Failed to open MCAP file: " << filename << std::endl;
+        return -1;
+    }
+
+    // --- 2. 注册 Schema ---
+    mcap::Schema schema("EncoderFrame", "json", R"({
+        "type": "object",
+        "properties": {
+            "position_raw": { "type": "integer" },
+            "position_rad": { "type": "number" }
+        }
+    })");
+    writer.addSchema(schema);
+
+    // --- 3. 注册 Channel ---
+    mcap::Channel channel("/encoder", "json", schema.id);
+    writer.addChannel(channel);
+
+    std::cout << "Logging data to " << filename << " (MCAP format)" << std::endl;
 
     // 创建编码器驱动实例
     EncoderDriver encoder(1, "/dev/ttyS7", 1000000, "Joint1_Encoder");
@@ -163,37 +206,15 @@ int main(int argc, char *argv[])
         std::cout << "Encoder ready at 1Mbps." << std::endl;
     }
 
-    /* if (!encoder.setCurrentAsZero())
-    {
-        // TODO: 归零逻辑还没写
-        std::cerr << "Failed to set zero position" << std::endl;
-    } */
-    // 已迁移到单独的归零程序
-
-    // 打开文件
-    std::ofstream csvFile(filename);
-    if (!csvFile.is_open())
-    {
-        std::cerr << "Failed to open file for logging: " << filename << std::endl;
-        return -1; // 如果文件无法创建，应该退出
-    }
-    else
-    {
-        csvFile << "Timestamp_us,Position_Raw,Position_Rad" << std::endl;
-        std::cout << "Logging data to " << filename << std::endl;
-    }
-
+    // 启动线程
     std::thread encoderReadThread(encoderReadThreadFunc, &encoder);
     std::thread encoderRequestThread(encoderRequestThreadFunc, &encoder);
 
-    double print_hz = 10.0;
-    auto printPeriod = std::chrono::microseconds(static_cast<int>(1e6 / print_hz));
-
     std::cout << "Starting encoder monitoring... Waiting for stop signal." << std::endl;
 
-    // 主循环：固定 1 kHz 写入 CSV
     auto next_time = std::chrono::steady_clock::now();
     auto writePeriod = std::chrono::microseconds(1000); // 1 ms = 1 kHz
+    uint32_t sequenceId = 0;
 
     int wait_counts = 0;
     while (!g_stopFlag.load())//预热
@@ -212,6 +233,7 @@ int main(int argc, char *argv[])
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
 
+    // --- 5. 主循环 ---
     while (!g_stopFlag.load())
     {
         try
@@ -220,27 +242,29 @@ int main(int argc, char *argv[])
 
             // 获取编码器状态
             EncoderData state = encoder.getState();
-
-            // 获取系统时间戳（微秒）
+            
+            // 获取纳秒级时间戳 (MCAP 标准)
             auto now = std::chrono::system_clock::now();
-            auto timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
-                                    now.time_since_epoch())
-                                    .count();
+            auto timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                now.time_since_epoch()).count();
 
-            // 写入 CSV
-            if (csvFile.is_open())
-            {
-                csvFile << timestamp_us << ","
-                        << state.currentPosition << ","
-                        << state.currentPositionRad
-                        << std::endl;
+            // 构建 JSON Payload (使用辅助函数)
+            std::string payload = create_encoder_json(state);
+
+            // 构建并写入消息
+            mcap::Message msg;
+            msg.channelId = channel.id;
+            msg.sequence = sequenceId++;
+            msg.logTime = timestamp_ns;     // 采样时间
+            msg.publishTime = timestamp_ns; // 发布时间
+            msg.data = reinterpret_cast<const std::byte*>(payload.data());
+            msg.dataSize = payload.size();
+
+            auto writeRes = writer.write(msg);
+            if (!writeRes.ok()) {
+                 std::cerr << "Failed to write frame: " << writeRes.message << std::endl;
             }
 
-            // 可选：终端打印，注意频繁打印会降低性能
-            // std::cout << "[" << timestamp_us << "] Pos: " << state.currentPositionRad << std::endl;
-
-            // 控制 1 kHz
-            // 控制周期
             std::this_thread::sleep_until(next_time);
         }
         catch (const std::exception &e)
@@ -251,14 +275,12 @@ int main(int argc, char *argv[])
     }
 
     std::cout << "Shutting down..." << std::endl;
+    // --- 6. 清理 ---
     // g_stopFlag 已经在信号处理或循环结束时置位，无需再次置位，但为了安全：
     g_stopFlag = true;
-
-    if (csvFile.is_open())
-    {
-        csvFile.close();
-        std::cout << "CSV log saved to " << filename << std::endl;
-    }
+    
+    writer.close();
+    std::cout << "MCAP log saved to " << filename << std::endl;
 
     if (encoderReadThread.joinable())
         encoderReadThread.join();

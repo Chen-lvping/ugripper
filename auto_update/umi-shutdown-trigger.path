@@ -1,0 +1,8 @@
+[Unit]
+Description=Watch shutdown trigger file from run_record
+
+[Path]
+PathExists=/tmp/umi_shutdown_request
+
+[Install]
+WantedBy=multi-user.target

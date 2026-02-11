@@ -16,7 +16,7 @@
 
 // --- 全局控制变量 ---
 std::atomic<bool> g_stopFlag(false);
-//#define VIEW_IMU_LOG
+//#define VIEW_IMU_LOG // 定义此宏可在终端查看实时数据（注意：高频IO可能影响控制循环抖动）
 
 // --- 信号处理函数 ---
 void signalHandler(int signum)
@@ -59,10 +59,10 @@ struct __attribute__((packed)) ImuPacket
     float w, x, y, z;
 };
 
+// --- JSON 序列化 ---
 std::string create_imu_json(long timestamp_ns, const auto& d) {
-    // 使用 snprintf 保证格式化速度和安全性
     char buffer[512];
-
+    // 使用 snprintf 保证格式化速度和安全性
     snprintf(buffer, sizeof(buffer), 
         "{"
             "\"frame_id\":\"imu_link\","
@@ -74,7 +74,7 @@ std::string create_imu_json(long timestamp_ns, const auto& d) {
         d.gyrox, d.gyroy, d.gyroz,
         d.accx, d.accy, d.accz
     );
-    
+
     return std::string(buffer);
 }
 
@@ -106,7 +106,7 @@ int main(int argc, char *argv[])
     // 3. 初始化 MCAP Writer
     mcap::McapWriter writer;
     mcap::McapWriterOptions options("");
-    options.compression = mcap::Compression::Lz4; // 建议开启压缩
+    options.compression = mcap::Compression::Lz4; // 开启压缩
 
     auto status = writer.open(filename, options);
     if (!status.ok())
@@ -115,35 +115,22 @@ int main(int argc, char *argv[])
         return -1;
     }
 
-    // 注册 Schema (使用 Foxglove 标准 IMU 格式，以便自动可视化)
+    // 注册 Foxglove IMU Schema
     mcap::Schema schema("foxglove.Imu", "jsonschema", R"({
         "type": "object",
         "properties": {
             "frame_id": { "type": "string" },
             "orientation": {
                 "type": "object",
-                "properties": {
-                    "x": { "type": "number" },
-                    "y": { "type": "number" },
-                    "z": { "type": "number" },
-                    "w": { "type": "number" }
-                }
+                "properties": { "x": {"type":"number"}, "y": {"type":"number"}, "z": {"type":"number"}, "w": {"type":"number"} }
             },
             "angular_velocity": {
                 "type": "object",
-                "properties": {
-                    "x": { "type": "number" },
-                    "y": { "type": "number" },
-                    "z": { "type": "number" }
-                }
+                "properties": { "x": {"type":"number"}, "y": {"type":"number"}, "z": {"type":"number"} }
             },
             "linear_acceleration": {
                 "type": "object",
-                "properties": {
-                    "x": { "type": "number" },
-                    "y": { "type": "number" },
-                    "z": { "type": "number" }
-                }
+                "properties": { "x": {"type":"number"}, "y": {"type":"number"}, "z": {"type":"number"} }
             }
         }
     })");
@@ -229,9 +216,10 @@ int main(int argc, char *argv[])
         {
             printDivisor = 0;
 
-// 只有定义VIEW_IMU_LOG才打印
 #ifdef VIEW_IMU_LOG
             // 清屏并回位 (注意：这在 log 模式下可能会干扰查看，建议仅在调试时开启)
+            long timestamp_us = timestamp_ns / 1000;
+            
             std::cout << "\033[2J\033[H";
             std::cout << "================= IMU Data Dashboard =================\n";
             std::cout << std::setfill(' ') << std::right;
@@ -265,8 +253,8 @@ int main(int argc, char *argv[])
 
     // --- 清理资源 ---
     std::cout << "Shutting down IMU..." << std::endl;
-    
-    writer.close(); // 关闭 MCAP
+
+    writer.close();
     std::cout << "MCAP log saved." << std::endl;
 
     if (sock >= 0) close(sock);

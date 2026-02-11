@@ -22,6 +22,9 @@ MONITOR_SERVICE="ugripper-ptp-monitor.service"
 # NTP 同步服务路径
 NTP_SYNC_SCRIPT="${APP_DIR}/time_sync/safe_ntp_sync.sh"
 NTP_SYNC_SERVICE="ugripper-ntp-sync.service"
+SHUTDOWN_TRIGGER_SCRIPT="${APP_DIR}/auto_update/trigger_shutdown.sh"
+SHUTDOWN_TRIGGER_SERVICE="umi-shutdown-trigger.service"
+SHUTDOWN_TRIGGER_PATH="umi-shutdown-trigger.path"
 
 
 # --------------------------------------------------
@@ -216,6 +219,7 @@ fi
 chmod +x "$NTP_SYNC_SCRIPT"
 chmod +x "$MONITOR_SCRIPT"
 chmod +x "$APP_DIR/run_record.sh"
+chmod +x "$SHUTDOWN_TRIGGER_SCRIPT"
 chmod -R 777 "$APP_DIR"
 
 systemctl daemon-reload
@@ -239,6 +243,14 @@ fi
 # PTP 监控服务
 systemctl enable "$MONITOR_SERVICE"
 systemctl restart "$MONITOR_SERVICE"
+
+# 双键关机触发服务
+# 安装阶段若残留触发文件，会导致 Path 单元立即触发关机流程。先清理。
+rm -f /tmp/umi_shutdown_request
+systemctl enable "$SHUTDOWN_TRIGGER_SERVICE" "$SHUTDOWN_TRIGGER_PATH"
+if ! systemctl restart "$SHUTDOWN_TRIGGER_PATH"; then
+    echo "Warning: failed to restart $SHUTDOWN_TRIGGER_PATH (will not block install)"
+fi
 
 # 主应用服务
 systemctl enable "$SERVICE_NAME"
