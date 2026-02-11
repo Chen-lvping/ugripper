@@ -231,9 +231,9 @@ class LedStateMachine:
             # 使用 sin 函数生成 0.0 到 1.0 的平滑曲线
             brightness = (math.sin(t * 0.04) + 1) / 2
 
-            self.led.set_scaled_rgb(255, 200, 0, brightness)
+            self.led.set_scaled_rgb(0, 255, 30, brightness)
 
-        elif self.state == "RECORDING":
+        elif self.state == "RECORDING" or self.state == "CALIB_DONE":
             # 绿色闪烁 (周期 1秒: 0.5亮 0.5灭)
             if (t % 50) < 25:
                 self.led.set_rgb(0, 255, 0)
@@ -243,14 +243,14 @@ class LedStateMachine:
         elif self.state == "ERROR":
             # 红色急促快闪
             if (t % 10) < 5:
-                self.led.set_rgb(255, 0, 0)
+                self.led.set_scaled_rgb(255, 0, 0, 0.8) # 红色，稍微降低亮度
             else:
                 self.led.set_rgb(0, 0, 0)
 
         elif self.state == "CALIB_PRE":
             # 准备校准: 黄灯慢闪 (1Hz)
             if (t % 50) < 25:
-                self.led.set_rgb(255, 30, 0) # 黄色
+                self.led.set_rgb(255, 100, 0)
             else:
                 self.led.set_rgb(0, 0, 0)
 
@@ -261,14 +261,7 @@ class LedStateMachine:
             period_ticks = max(1, int(50 / freq))
 
             if (t % period_ticks) < (period_ticks // 2):
-                self.led.set_rgb(255, 30, 0)
-            else:
-                self.led.set_rgb(0, 0, 0)
-
-        elif self.state == "CALIB_DONE":
-            # 校准完成: 绿灯闪烁 (1Hz)
-            if (t % 50) < 25:
-                self.led.set_rgb(0, 255, 0) # 纯绿
+                self.led.set_rgb(255, 100, 0)
             else:
                 self.led.set_rgb(0, 0, 0)
 
