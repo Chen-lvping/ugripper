@@ -85,6 +85,18 @@ else
 fi
 
 # ========================================================
+# 0. 校准触发（检测 calibration.txt）
+# ========================================================
+if [ -f "$MOUNT_POINT/calibration.txt" ]; then
+  log "检测到 calibration.txt，触发 ugripper-calibration.service，跳过本次升级流程。"
+  systemctl start ugripper-calibration.service --no-block || {
+    log "触发 ugripper-calibration.service 失败。"
+    exit 1
+  }
+  exit 0
+fi
+
+# ========================================================
 # 1. 优先检查并更新自身 (Self-Update)
 # ========================================================
 UPDATER_DEB="$(find "$MOUNT_POINT" -maxdepth 1 -type f -name "${UPDATER_PREFIX}.deb" | head -n 1 || true)"

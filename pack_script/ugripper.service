@@ -12,6 +12,8 @@ ExecStart=/bin/bash -lc '/opt/ugripper/run_record.sh'
 
 Restart=always
 RestartSec=3
+TimeoutStopSec=20s
+KillMode=control-group
 
 StandardOutput=journal
 StandardError=journal

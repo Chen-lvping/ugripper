@@ -3,15 +3,22 @@
 INTERFACE="end0"
 CARRIER_PATH="/sys/class/net/$INTERFACE/carrier"
 
-DATA_DEV="/mnt/data_disk"
-UMOUNT_TIMEOUT=5
+read_carrier_state() {
+    if [ ! -r "$CARRIER_PATH" ]; then
+        echo "0"
+        return
+    fi
+
+    local state
+    state=$(cat "$CARRIER_PATH" 2>/dev/null || true)
+    if [ "$state" != "0" ] && [ "$state" != "1" ]; then
+        state="0"
+    fi
+    echo "$state"
+}
 
 # ================= 初始化状态 =================
-if [ -f "$CARRIER_PATH" ]; then
-    LAST_STATE=$(cat "$CARRIER_PATH")
-else
-    LAST_STATE=0
-fi
+LAST_STATE=$(read_carrier_state)
 
 echo "Network Monitor Started for $INTERFACE. Initial State: $LAST_STATE"
 
@@ -22,23 +29,23 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
+restart_ugripper() {
+    echo "Restarting ugripper.service..."
+    systemctl restart ugripper.service || {
+        echo "WARNING: failed to restart ugripper.service"
+    }
+}
+
 # ================= 主循环 =================
 while true; do
     if [ -f "$CARRIER_PATH" ]; then
-        CURRENT_STATE=$(cat "$CARRIER_PATH")
+        CURRENT_STATE=$(read_carrier_state)
 
         # ================= 下降沿：插着 → 拔掉 =================
         if [ "$LAST_STATE" -eq 1 ] && [ "$CURRENT_STATE" -eq 0 ]; then
             echo "[$(date)] Cable Removal Detected!"
 
-            if mountpoint -q "$DATA_DEV"; then
-                echo "Unmounting $DATA_DEV ..."
-                timeout "$UMOUNT_TIMEOUT" umount "$DATA_DEV" || {
-                    echo "WARNING: umount timeout or failed for $DATA_DEV"
-                }
-            else
-                echo "$DATA_DEV not mounted, skip umount."
-            fi
+            restart_ugripper
         fi
 
         # ================= 上升沿：拔掉 → 插入 =================
@@ -48,8 +55,7 @@ while true; do
             echo "Triggering udev block rules..."
             udevadm trigger --subsystem-match=block --action=add || true
 
-            echo "Starting calibration service..."
-            systemctl start ugripper-calibration.service --no-block
+            restart_ugripper
         fi
 
         LAST_STATE="$CURRENT_STATE"

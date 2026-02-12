@@ -13,8 +13,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir/../" || exit 1
 
 # ================= 配置部分 =================
-IMU_CALIB_BIN="./build/dm_imu_alone/imu_calib"
-ENCODER_CALIB_BIN="./build/encoder_refactor/zeroing"
+ENCODER_CALIB_BIN="./build/src/sensor_recorder/zeroing"
 
 # --- LED 控制配置 ---
 LED_SCRIPT="./led_manager.py"
@@ -27,11 +26,6 @@ AUDIO_PIPE="/tmp/umi_audio_pipe"
 # 全局变量存储 PID
 PID_LED_SHELL=""
 PID_AUDIO_SHELL=""
-
-# --- 按钮配置 ---
-PIN_BTN="PIN_36"    # 按钮输入
-BTN_ACTIVE_LEVEL=1  # 1表示按下
-DEBOUNCE_MS=0.03    # 30ms
 
 # --- 硬盘检测配置 ---
 USB_LINK="/dev/usb_update_stick"
@@ -67,20 +61,6 @@ if [ ! -f "$MOUNT_POINT/calibration.txt" ]; then
 fi
 
 echo "USB Check Passed: calibration.txt detected."
-
-# ================= 检查按钮状态 =================
-if [ -z "$(gpiofind "$PIN_BTN")" ]; then
-    echo "Error: Could not find GPIO pin $PIN_BTN."
-    systemctl start ugripper.service
-    exit 1
-fi
-
-BTN_VAL=$(gpioget $(gpiofind "$PIN_BTN"))
-if [ "$BTN_VAL" != "$BTN_ACTIVE_LEVEL" ]; then
-    echo "Button is not pressed. Exiting calibration."
-    systemctl start ugripper.service
-    exit 0
-fi
 
 # ================= 辅助函数 =================
 

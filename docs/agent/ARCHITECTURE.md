@@ -27,15 +27,16 @@
 | 模块 | 所在目录 | 启动方式 | 主要职责 | 主要输出 |
 | --- | --- | --- | --- | --- |
 | 三路相机录制 | `camera_record/triple_camera_record_h265.py` | `uv run ... --output-dir <episode>` | 录制主摄 + 左右触觉视频（H265）并写时间戳 CSV。 | `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`, 对应 `*.csv` |
-| FaysSense 常驻录制 | `faysSense_vi_kit/scripts/run_fays_record.sh` + `fays_record_example` | 开机 `daemon`，录制时 `start <episode>`，停止时 `stop` | 常驻占用相机与 SDK 句柄，命令触发写文件，避免每次录制冷启动。时间戳统一写入 `fays_data.mcap`：topic `i` 为 IMU，topic `c` 为相机时间戳；`logTime` 使用 Fays 时钟，`publishTime` 由 IMU 对齐到系统时钟。 | `fays_stereo_output.mkv`, `fays_data.mcap` |
+| FaysSense 常驻录制 | `faysSense_vi_kit/scripts/run_fays_record.sh` + `fays_record_example` | 检测到 FTDI 时启动 `daemon`，录制时 `start <episode>`，停止时 `stop` | Fays 作为可选设备：启动缺失不阻断主流程；运行中支持热插拔检测与 daemon 自动重连。时间戳统一写入 `fays_data.mcap`：topic `i` 为 IMU，topic `c` 为相机时间戳；`logTime` 使用 Fays 时钟，`publishTime` 由 IMU 对齐到系统时钟。 | `fays_stereo_output.mkv`, `fays_data.mcap`（启用 Fays 时） |
 | 统一传感器录制 | `src/sensor_recorder` | `./build/src/sensor_recorder/sensor_recorder <episode>` | 同时采集串口 IMU + 编码器，写统一 MCAP。 | `sensor_data.mcap` (`imu_raw`/`encoder`) |
+| Encoder 校准 | `src/sensor_recorder` | `./build/src/sensor_recorder/zeroing` | 执行编码器归零，供自动校准流程调用。 | 无（设备状态变更） |
 
 编排要点：
-- `run_record.sh` 启动后先拉起 FaysSense 常驻进程（`daemon`），记录 `PID_FAYS_DAEMON`。
-- `start_recording()` 仅向 FaysSense 发送 `START|<episode_dir>` 命令，同时拉起 `PID_CAM` 与 `PID_SENSOR`。
-- `stop_recording()` 向 FaysSense 发送 `STOP` 命令，停止 `PID_CAM` 与 `PID_SENSOR`，Fays 进程保持常驻。
+- `run_record.sh` 启动后先检测 FTDI：存在则拉起 Fays daemon；缺失则进入无 Fays 模式。
+- `start_recording()` 在 Fays 已启用时发送 `START|<episode_dir>`，否则跳过 Fays，仅拉起 `PID_CAM` 与 `PID_SENSOR`。
+- `stop_recording()` 仅在本次 Fays 会话 active 时发送 `STOP`，停止 `PID_CAM` 与 `PID_SENSOR`，Fays 进程保持常驻。
 - `cleanup()` 才发送 `EXIT` 关闭 Fays 常驻进程。
-- 录制后校验至少覆盖 `cam/tact` 视频、`fays_stereo_output.mkv`、`fays_data.mcap`、`sensor_data.mcap`。
+- 录制后校验固定覆盖 `cam/tact` 视频与 `sensor_data.mcap`；若本次 episode 期望 Fays 数据，再校验 `fays_stereo_output.mkv` 与 `fays_data.mcap`。
 
 ### 2.3 Right/Left 协同控制
 - 通信：TCP `12345` 端口。
@@ -50,12 +51,12 @@
 ## 3. 支撑服务与运维流程
 
 ### 3.1 自动校准
-- `auto_calibration/monitor_network.sh` 由 `ugripper-network-monitor.service` 常驻，监听 `end0` 网线插拔。
-- 网线插入后触发 `ugripper-calibration.service`（`run_calibration.sh`）：
+- `auto_update/99-usb-auto-update.rules` 触发 `usb-auto-update@.service`，由 `auto_update/usb_auto_update.sh` 检查 U 盘根目录是否存在 `calibration.txt`。
+- 存在 `calibration.txt` 时触发 `ugripper-calibration.service`（`run_calibration.sh`）：
   - 停止主服务。
   - 启动 LED/音频提示。
-  - 执行校准流程。
-- 现状：校准链路仍依赖历史目录内二进制（`dm_imu_alone`、`encoder_refactor`）。
+  - 执行 `build/src/sensor_recorder/zeroing`。
+- `auto_calibration/monitor_network.sh` 仍常驻监听 `end0` 网线插拔，但仅负责存储处理与 `ugripper.service` 重启，不再触发校准。
 
 ### 3.2 时间同步
 - `ugripper-ptp-monitor.service`：运行 `time_sync/ptp_monitor.sh`，持续写 `/dev/shm/umi_ptp_status`。
@@ -63,7 +64,7 @@
 - `postinst` 按 `DEVICE_SIDE` 生成并启用 `ptp4l.service`、`phc2sys.service`。
 
 ### 3.3 自动更新与自愈
-- `auto_update/99-usb-auto-update.rules` + `usb-auto-update@.service`：U 盘插入自动触发升级脚本。
+- `auto_update/99-usb-auto-update.rules` + `usb-auto-update@.service`：U 盘插入自动触发统一入口脚本（先判定 `calibration.txt` 是否触发校准，再进入升级逻辑）。
 - `auto_update/boot_check_install.sh` + `ugripper-boot-install.service`：开机检测主包缺失时从 `/opt/backup` 自恢复。
 
 ### 3.4 关机权限隔离
@@ -80,7 +81,7 @@
 - `data/episode_YYYYMMDD_NNNN/`
   - `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`
   - `cam.csv`, `tact_left.csv`, `tact_right.csv`
-  - `fays_stereo_output.mkv`, `fays_data.mcap`
+  - `fays_stereo_output.mkv`, `fays_data.mcap`（仅在该 episode 启用 Fays 时）
   - `sensor_data.mcap`
   - `audio_pre.wav`, `audio_post.wav`（可选）
   - `validation_error.log`（校验失败时）
@@ -111,12 +112,14 @@
 ### 5.2 deb 组包关键点
 - Quick 模式检查以下二进制是否已存在：
   - `build/src/sensor_recorder/sensor_recorder`
+  - `build/src/sensor_recorder/zeroing`
   - `build/faysSense_vi_kit/fays_record_example`
 - `rsync` 主体时排除源码目录 `faysSense_vi_kit` 与 `src/sensor_recorder`，随后手动回填产物：
   - `build/faysSense_vi_kit/fays_record_example`
   - `build/faysSense_vi_kit/scripts/*.sh`
   - `build/faysSense_vi_kit/config/*.yaml`
   - `build/src/sensor_recorder/sensor_recorder`
+  - `build/src/sensor_recorder/zeroing`
 - 打包产物：`ugripper_<VERSION>_arm64.deb`。
 
 ### 5.3 安装后行为（postinst）
@@ -141,9 +144,7 @@
 
 ## 7. 迁移与扩展注意事项
 1. 若新增传感器，优先沿用 `run_record.sh` 的并发启动/统一停止/统一校验模式。
-2. 若清理历史目录（`dm_imu_alone`、`encoder_refactor`、`im648_imu_alone`），需先迁移：
-   - `run_calibration.sh` 中的旧校准二进制路径。
-   - `build_deb.sh` 中 `encoder_refactor/99-serial.rules` 的来源。
+2. 历史目录（`dm_imu_alone`、`encoder_refactor`、`im648_imu_alone`）已清理，相关能力已并入 `src/sensor_recorder`。
 3. FaysSense 相关依赖（OpenCV/FTDI/libfays）需在目标机预装并保持版本兼容，否则会在运行时动态链接失败。
 
 ## 8. 快速排障指引

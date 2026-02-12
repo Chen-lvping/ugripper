@@ -62,8 +62,10 @@ echo "=== [2/5] 编译 C++ 模块 (统一构建) ==="
 
 if [ "$QUICK_MODE" = true ]; then
     echo "--> [SKIP] Skipping C++ compilation."
-    if [ ! -f "build/src/sensor_recorder/sensor_recorder" ] || [ ! -f "build/faysSense_vi_kit/fays_record_example" ]; then
-        echo "⚠️  警告: sensor_recorder 二进制缺失！打包可能不可用。"
+    if [ ! -f "build/src/sensor_recorder/sensor_recorder" ] || \
+       [ ! -f "build/src/sensor_recorder/zeroing" ] || \
+       [ ! -f "build/faysSense_vi_kit/fays_record_example" ]; then
+        echo "⚠️  警告: 核心 C++ 二进制缺失！打包可能不可用。"
     fi
 else
     echo "--> Building C++ modules (root CMake)..."
@@ -85,11 +87,8 @@ EXCLUDE_LIST=(
     --exclude='build_deb.sh'
     --exclude='pack_script'
     --exclude="$BUILD_ROOT"
-    --exclude='dm_imu_alone'
-    --exclude='encoder_refactor'
     --exclude='faysSense_vi_kit'
     --exclude='build'
-    --exclude='im648_imu_alone'
     --exclude='src/sensor_recorder'
     --exclude='*.deb'
 )
@@ -123,10 +122,11 @@ cp build/faysSense_vi_kit/scripts/*.sh "$BUILD_ROOT/$INSTALL_DIR/build/faysSense
 cp build/faysSense_vi_kit/config/*.yaml "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/config/" || true
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder"
 cp build/src/sensor_recorder/sensor_recorder "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true
+cp build/src/sensor_recorder/zeroing "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true
 
 # 4. 部署 Udev 规则
 cp camera_record/99-fixed-usb-map.rules "$BUILD_ROOT/etc/udev/rules.d/" || true
-cp encoder_refactor/99-serial.rules "$BUILD_ROOT/etc/udev/rules.d/" || true
+cp src/sensor_recorder/99-serial.rules "$BUILD_ROOT/etc/udev/rules.d/" || true
 
 echo "=== [4/5] 处理配置脚本与变量替换 ==="
 # 1. 拷贝 Systemd Service
