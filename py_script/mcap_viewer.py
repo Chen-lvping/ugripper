@@ -47,6 +47,13 @@ def is_json_like_encoding(encoding: str) -> bool:
     return normalized.startswith("json")
 
 
+def format_time_delta(log_time_ns, publish_time_ns):
+    if publish_time_ns is None:
+        return ""
+    delta_ms = (publish_time_ns - log_time_ns) / 1e6
+    return f" dt={delta_ms:.3f}ms"
+
+
 def format_payload(data):
     """
     智能格式化 Payload 数据
@@ -82,7 +89,6 @@ def format_payload(data):
 
     # --- 2. 适配 编码器 格式 ---
     if "position_raw" in keys and "position_rad" in keys:
-        # 优化显示格式，对齐数值
         return f"PosRaw: {data['position_raw']:<8} PosRad: {data['position_rad']:.6f}"
 
     if "r" in keys and "p" in keys:
@@ -92,7 +98,9 @@ def format_payload(data):
     return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
 
 
-def format_binary_payload(topic, payload_bytes):
+def format_binary_payload(topic, payload_bytes, log_time_ns, publish_time_ns):
+    time_delta_suffix = format_time_delta(log_time_ns, publish_time_ns)
+
     if topic == "imu_raw" and len(payload_bytes) >= 40:
         qx, qy, qz, qw, gx, gy, gz, ax, ay, az = struct.unpack(
             "<10f", payload_bytes[:40]
@@ -101,13 +109,36 @@ def format_binary_payload(topic, payload_bytes):
             f"Acc:({ax:.2f},{ay:.2f},{az:.2f}) "
             f"Gyro:({gx:.2f},{gy:.2f},{gz:.2f}) "
             f"Quat:({qw:.2f},{qx:.2f},{qy:.2f},{qz:.2f})"
+            f"{time_delta_suffix}"
         )
 
     if topic == "encoder" and len(payload_bytes) >= 8:
         raw, rad = struct.unpack("<if", payload_bytes[:8])
-        return f"PosRaw: {raw:<8} PosRad: {rad:.6f}"
+        return f"PosRaw: {raw:<8} PosRad: {rad:.6f}{time_delta_suffix}"
 
-    return f"<Binary Data ({len(payload_bytes)} bytes)>"
+    # Fays unified MCAP topics
+    if topic == "i":
+        # Current writer uses 6xfloat64. Keep float32 fallback for compatibility.
+        if len(payload_bytes) >= 48:
+            gx, gy, gz, ax, ay, az = struct.unpack("<6d", payload_bytes[:48])
+            return (
+                f"FaysIMU Gyro:({gx:.3f},{gy:.3f},{gz:.3f}) "
+                f"Acc:({ax:.3f},{ay:.3f},{az:.3f})"
+                f"{time_delta_suffix}"
+            )
+        if len(payload_bytes) >= 24:
+            gx, gy, gz, ax, ay, az = struct.unpack("<6f", payload_bytes[:24])
+            return (
+                f"FaysIMU Gyro:({gx:.3f},{gy:.3f},{gz:.3f}) "
+                f"Acc:({ax:.3f},{ay:.3f},{az:.3f})"
+                f"{time_delta_suffix}"
+            )
+
+    if topic == "c" and len(payload_bytes) >= 4:
+        frame_index = struct.unpack("<I", payload_bytes[:4])[0]
+        return f"FaysCamTs FrameIdx:{frame_index}{time_delta_suffix}"
+
+    return f"<Binary Data ({len(payload_bytes)} bytes){time_delta_suffix}>"
 
 
 def read_mcap(file_path, topic_filters=None):
@@ -120,7 +151,7 @@ def read_mcap(file_path, topic_filters=None):
     print(f"Opening: {file_path}")
 
     msg_count = 0
-    total_bytes = 0  # 累计消息载荷字节数
+    total_bytes = 0
     start_time = None
     end_time = None
     topic_stats = defaultdict(
@@ -162,7 +193,6 @@ def read_mcap(file_path, topic_filters=None):
 
     try:
         with open(file_path, "rb") as f:
-            # 打印表头
             header = f"{'Timestamp':<26} | {'Topic':<20} | {'Data Payload'}"
             print("-" * 120)
             print(header)
@@ -174,20 +204,16 @@ def read_mcap(file_path, topic_filters=None):
 
                 msg_count += 1
 
-                # 统计载荷大小 (Bytes)
                 msg_size = len(message.data)
                 total_bytes += msg_size
 
-                # 记录时间范围
                 if start_time is None:
                     start_time = message.log_time
                 end_time = message.log_time
 
-                # 格式化时间戳
                 dt = datetime.datetime.fromtimestamp(message.log_time / 1e9)
                 ts_str = dt.strftime("%Y-%m-%d %H:%M:%S.%f")
 
-                # 更新 topic 统计
                 stats = topic_stats[channel.topic]
                 stats["count"] += 1
                 stats["bytes"] += msg_size
@@ -198,8 +224,9 @@ def read_mcap(file_path, topic_filters=None):
                 )
                 stats["end"] = message.log_time
 
-                # 解析 Payload
                 payload_str = ""
+                publish_time = getattr(message, "publish_time", None)
+
                 try:
                     encoding = resolve_message_encoding(schema, channel)
 
@@ -207,10 +234,16 @@ def read_mcap(file_path, topic_filters=None):
                         try:
                             payload_data = json.loads(message.data.decode("utf-8"))
                             payload_str = format_payload(payload_data)
+                            payload_str += format_time_delta(message.log_time, publish_time)
                         except Exception:
                             payload_str = f"<Binary Data ({msg_size} bytes)>"
                     else:
-                        payload_str = format_binary_payload(channel.topic, message.data)
+                        payload_str = format_binary_payload(
+                            channel.topic,
+                            message.data,
+                            message.log_time,
+                            publish_time,
+                        )
 
                 except Exception as e:
                     payload_str = f"<Parse Error: {e}>"
@@ -224,7 +257,6 @@ def read_mcap(file_path, topic_filters=None):
         print(f"Error reading MCAP: {e}")
         return
 
-    # 打印摘要信息
     if msg_count > 0:
         print("-" * 120)
         print("Summary:")

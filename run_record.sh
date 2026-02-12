@@ -986,23 +986,26 @@ validate_recording() {
         fi
     done
 
-    # --- 2. 检查综合 MCAP 文件 ---
-    local mcap_file="$dir/sensor_data.mcap"
-    if [ -f "$mcap_file" ]; then
-        local mcap_size
-        mcap_size=$(stat -c%s "$mcap_file" 2>/dev/null || echo 0)
-        if [ "$mcap_size" -le 1024 ]; then
-            validation_pass=false
-            error_details="${error_details} sensor_data.mcap too small (${mcap_size}B);"
-            echo "[ERROR]:sensor_data.mcap size (${mcap_size} bytes) looks invalid."
+    # --- 2. 检查 MCAP 文件 ---
+    local mcap_files=("sensor_data.mcap" "fays_data.mcap")
+    for mcap_name in "${mcap_files[@]}"; do
+        local mcap_file="$dir/$mcap_name"
+        if [ -f "$mcap_file" ]; then
+            local mcap_size
+            mcap_size=$(stat -c%s "$mcap_file" 2>/dev/null || echo 0)
+            if [ "$mcap_size" -le 1024 ]; then
+                validation_pass=false
+                error_details="${error_details} ${mcap_name} too small (${mcap_size}B);"
+                echo "[ERROR]:${mcap_name} size (${mcap_size} bytes) looks invalid."
+            else
+                echo "[INFO]:PASS: ${mcap_name} present (${mcap_size} bytes)."
+            fi
         else
-            echo "[INFO]:PASS: sensor_data.mcap present (${mcap_size} bytes)."
+            echo "[ERROR]:${mcap_name} missing."
+            validation_pass=false
+            error_details="${error_details} ${mcap_name} missing;"
         fi
-    else
-        echo "[ERROR]:sensor_data.mcap missing."
-        validation_pass=false
-        error_details="${error_details} sensor_data.mcap missing;"
-    fi
+    done
 
     # --- 3. 结果处理 ---
     if [ "$validation_pass" = false ]; then

@@ -27,7 +27,7 @@
 | 模块 | 所在目录 | 启动方式 | 主要职责 | 主要输出 |
 | --- | --- | --- | --- | --- |
 | 三路相机录制 | `camera_record/triple_camera_record_h265.py` | `uv run ... --output-dir <episode>` | 录制主摄 + 左右触觉视频（H265）并写时间戳 CSV。 | `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`, 对应 `*.csv` |
-| FaysSense 常驻录制 | `faysSense_vi_kit/scripts/run_fays_record.sh` + `fays_record_example` | 开机 `daemon`，录制时 `start <episode>`，停止时 `stop` | 常驻占用相机与 SDK 句柄，命令触发写文件，避免每次录制冷启动。 | `fays_stereo_output.mkv`, `fays_stereo_timestamp.csv`, `fays_imu_data.csv` |
+| FaysSense 常驻录制 | `faysSense_vi_kit/scripts/run_fays_record.sh` + `fays_record_example` | 开机 `daemon`，录制时 `start <episode>`，停止时 `stop` | 常驻占用相机与 SDK 句柄，命令触发写文件，避免每次录制冷启动。时间戳统一写入 `fays_data.mcap`：topic `i` 为 IMU，topic `c` 为相机时间戳；`logTime` 使用 Fays 时钟，`publishTime` 由 IMU 对齐到系统时钟。 | `fays_stereo_output.mkv`, `fays_data.mcap` |
 | 统一传感器录制 | `src/sensor_recorder` | `./build/src/sensor_recorder/sensor_recorder <episode>` | 同时采集串口 IMU + 编码器，写统一 MCAP。 | `sensor_data.mcap` (`imu_raw`/`encoder`) |
 
 编排要点：
@@ -35,7 +35,7 @@
 - `start_recording()` 仅向 FaysSense 发送 `START|<episode_dir>` 命令，同时拉起 `PID_CAM` 与 `PID_SENSOR`。
 - `stop_recording()` 向 FaysSense 发送 `STOP` 命令，停止 `PID_CAM` 与 `PID_SENSOR`，Fays 进程保持常驻。
 - `cleanup()` 才发送 `EXIT` 关闭 Fays 常驻进程。
-- 录制后校验至少覆盖 `cam/tact` 视频、`fays_stereo_output.mkv`、`sensor_data.mcap`。
+- 录制后校验至少覆盖 `cam/tact` 视频、`fays_stereo_output.mkv`、`fays_data.mcap`、`sensor_data.mcap`。
 
 ### 2.3 Right/Left 协同控制
 - 通信：TCP `12345` 端口。
@@ -80,8 +80,7 @@
 - `data/episode_YYYYMMDD_NNNN/`
   - `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`
   - `cam.csv`, `tact_left.csv`, `tact_right.csv`
-  - `fays_stereo_output.mkv`, `fays_stereo_timestamp.csv`
-  - `fays_imu_data.csv`（`fays_imu_data.mcap` 默认关闭）
+  - `fays_stereo_output.mkv`, `fays_data.mcap`
   - `sensor_data.mcap`
   - `audio_pre.wav`, `audio_post.wav`（可选）
   - `validation_error.log`（校验失败时）

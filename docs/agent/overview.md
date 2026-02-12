@@ -42,7 +42,7 @@
 4. 停止录制后：
    - 对 `PID_CAM/PID_SENSOR` 发送 `SIGINT`，并向 FaysSense 发送 `STOP` 命令。
    - 对数据盘执行 `sync` + `blockdev --flushbufs`。
-   - 校验关键产物（至少包含 `cam*.mkv`、`tact_*.mkv`、`fays_stereo_output.mkv`、`sensor_data.mcap` 非空）。
+   - 校验关键产物（至少包含 `cam*.mkv`、`tact_*.mkv`、`fays_stereo_output.mkv`、`fays_data.mcap`、`sensor_data.mcap` 非空）。
 
 ### 3.2 Right/Left 协同
 - TCP 端口：`12345`。
@@ -86,11 +86,11 @@
   - `stop`：停止当前 episode 写文件，但保持进程与相机句柄。
   - `exit`：退出常驻进程（通常在 `run_record.sh` 清理阶段调用）。
 - 常驻命令通道：`/tmp/umi_fays_cmd`（`START|<dir>` / `STOP` / `EXIT`）。
-- 当前默认输出（`record.cpp` 编译宏）：
+- 当前默认输出：
   - `fays_stereo_output.mkv`
-  - `fays_stereo_timestamp.csv`
-  - `fays_imu_data.csv`
-  - `fays_imu_data.mcap` 代码路径存在，但默认 `ENABLE_IMU_MCAP=0`（当前构建默认不产出）。
+  - `fays_data.mcap`（统一记录 Fays IMU + 相机时间戳）
+    - topic `i`：IMU（`logTime=Fays IMU 时间`，`publishTime=接收 IMU 时系统时间`）
+    - topic `c`：相机时间戳（`logTime=Fays 相机时间`，`publishTime=基于最新 IMU 偏移对齐后的系统时间`）
 
 ### 4.3 三路相机录制（`triple_camera_record_h265.py`）
 - 输出：`cam.mkv`, `tact_left.mkv`, `tact_right.mkv` 及对应 `*.csv`。
@@ -105,8 +105,7 @@
 - `data/episode_YYYYMMDD_NNNN/`
   - `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`
   - `cam.csv`, `tact_left.csv`, `tact_right.csv`
-  - `fays_stereo_output.mkv`, `fays_stereo_timestamp.csv`
-  - `fays_imu_data.csv`（`fays_imu_data.mcap` 仅在开启编译宏时出现）
+  - `fays_stereo_output.mkv`, `fays_data.mcap`
   - `sensor_data.mcap`
   - `audio_pre.wav` / `audio_post.wav`（可选）
   - `validation_error.log`（失败时）
@@ -198,7 +197,7 @@
   - 检查 `build/faysSense_vi_kit/fays_record_example` 与 `build/faysSense_vi_kit/scripts/run_fays_record.sh`
   - 检查 `/usr/local/lib/libft602.so` 与 OpenCV 目录是否存在
 - 更新日志：`/var/log/ugripper/usb_auto_update.log`, `/var/log/ugripper/boot_install.log`
-- 数据异常：查看 episode 下 `validation_error.log`，并用 `py_script/mcap_viewer.py` 统计 topic 频率与数据量
+- 数据异常：查看 episode 下 `validation_error.log`，并用 `py_script/mcap_viewer.py` 统计 topic 频率与数据量（已支持 `fays_data.mcap` 的 `i/c` 二进制解析与 `publishTime-logTime` 差值显示）
 
 ---
 
