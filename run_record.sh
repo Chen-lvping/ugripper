@@ -79,6 +79,12 @@ PRE_AUDIO_FILE=""    # 存储预录制音频文件路径
 NEXT_RESET_SOURCE_EPISODE_DIR=""   # 下一次录制的复位来源目录（由下键短按设置）
 CURRENT_RECORDING_IS_RESET=false    # 当前录制是否为复位录制
 CURRENT_RECORDING_RESET_SOURCE_DIR="" # 当前复位录制的来源目录
+CURRENT_RECORDING_EXPECT_FAYS=false   # 当前录制是否期望存在 Fays 数据
+FAYS_ENABLED=false                    # 是否启用 Fays（启动可缺省，插入后可自动启用）
+FAYS_USB_PRESENT=false                # 最近一次检测到的 Fays FTDI USB 存在状态
+FAYS_RECORDING_ACTIVE=false           # 当前是否已向 Fays 下发 START
+FAYS_LAST_MONITOR_TS=0                # Fays 热插拔监控节流时间戳（秒）
+CLEANUP_RUNNING=false                 # 防止 cleanup trap 重入
 RECORDING_LOCK_FILE="/tmp/umi_recording.lock" # 录制锁文件
 # 启动直接释放锁文件，防止断电导致残留
 rm -f "$RECORDING_LOCK_FILE"
@@ -510,6 +516,8 @@ monitor_system_health() {
         fi
     fi
 
+    # Fays 状态由主流程 check_and_maintain_fays 维护，避免后台子进程读取到过期变量。
+
     # ===============================
     # 2. 若存在 ERROR，立刻进入 ERROR
     # ===============================
@@ -578,8 +586,7 @@ monitor_system_health() {
 
 monitor_loop() {
     while true; do
-        # 如果正在录制，不检查，避免争抢 IO
-        if [ "$IS_RECORDING" = false ]; then
+        if [ ! -f "$RECORDING_LOCK_FILE" ]; then
             monitor_system_health
         fi
 
@@ -785,7 +792,86 @@ is_pid_alive() {
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
 }
 
+wait_for_pid_exit() {
+    local pid="$1"
+    local timeout_s="${2:-5}"
+    local start_ts now_ts
+
+    [ -z "$pid" ] && return 0
+
+    start_ts=$(date +%s)
+    while is_pid_alive "$pid"; do
+        now_ts=$(date +%s)
+        if [ $((now_ts - start_ts)) -ge "$timeout_s" ]; then
+            return 1
+        fi
+        sleep 0.1
+    done
+
+    return 0
+}
+
+wait_for_pids_exit() {
+    local timeout_s="${1:-5}"
+    shift
+
+    local start_ts now_ts pid alive
+    start_ts=$(date +%s)
+
+    while true; do
+        alive=0
+        for pid in "$@"; do
+            if is_pid_alive "$pid"; then
+                alive=1
+                break
+            fi
+        done
+
+        [ "$alive" -eq 0 ] && return 0
+
+        now_ts=$(date +%s)
+        if [ $((now_ts - start_ts)) -ge "$timeout_s" ]; then
+            return 1
+        fi
+        sleep 0.1
+    done
+}
+
+force_stop_pid() {
+    local pid="$1"
+    local name="$2"
+
+    [ -z "$pid" ] && return 0
+    if ! is_pid_alive "$pid"; then
+        wait "$pid" 2>/dev/null || true
+        return 0
+    fi
+
+    kill -15 "$pid" 2>/dev/null || true
+    if ! wait_for_pid_exit "$pid" 2; then
+        echo "[WARNING]:$name (PID=$pid) did not exit after SIGTERM, sending SIGKILL."
+        kill -9 "$pid" 2>/dev/null || true
+        wait_for_pid_exit "$pid" 1 || true
+    fi
+
+    wait "$pid" 2>/dev/null || true
+}
+
+is_fays_ftdi_present() {
+    if ! command -v v4l2-ctl >/dev/null 2>&1; then
+        return 1
+    fi
+
+    local devices
+    devices=$(v4l2-ctl --list-devices 2>/dev/null || true)
+    echo "$devices" | grep -q "FTDI Superspeed Video Bridge"
+}
+
 start_fays_daemon() {
+    if [ "$FAYS_ENABLED" != true ]; then
+        return 0
+    fi
+
     if is_pid_alive "$PID_FAYS_DAEMON"; then
         return 0
     fi
@@ -796,7 +882,8 @@ start_fays_daemon() {
     fi
 
     echo "[INFO]:Starting FaysSense daemon (warmup mode)..."
-    "$FAYS_RECORD_SCRIPT" daemon &
+    # Filter noisy SDK FPS logs while keeping other daemon output visible.
+    "$FAYS_RECORD_SCRIPT" daemon > >(sed -u -e '/IMU FPS:/d' -e '/Stereo FPS:/d') 2>&1 &
     PID_FAYS_DAEMON=$!
 
     sleep 0.5
@@ -812,20 +899,41 @@ start_fays_daemon() {
 
 start_fays_recording_session() {
     local output_dir="$1"
+    local attempt=1
+    local max_attempts=5
+
+    if [ "$FAYS_ENABLED" != true ]; then
+        return 0
+    fi
 
     if ! start_fays_daemon; then
         return 1
     fi
 
-    if ! "$FAYS_RECORD_SCRIPT" start "$output_dir"; then
-        echo "[ERROR]:Failed to send START command to FaysSense daemon."
-        return 1
-    fi
+    while [ "$attempt" -le "$max_attempts" ]; do
+        if "$FAYS_RECORD_SCRIPT" start "$output_dir"; then
+            return 0
+        fi
 
-    return 0
+        if ! is_pid_alive "$PID_FAYS_DAEMON"; then
+            echo "[ERROR]:FaysSense daemon exited before START could be delivered."
+            break
+        fi
+
+        echo "[WARNING]:Failed to send START command to FaysSense daemon (attempt ${attempt}/${max_attempts}). Retrying..."
+        attempt=$((attempt + 1))
+        sleep 0.2
+    done
+
+    echo "[ERROR]:Failed to send START command to FaysSense daemon."
+    return 1
 }
 
 stop_fays_recording_session() {
+    if [ "$FAYS_ENABLED" != true ]; then
+        return 0
+    fi
+
     if ! is_pid_alive "$PID_FAYS_DAEMON"; then
         return 0
     fi
@@ -838,9 +946,78 @@ stop_fays_recording_session() {
     return 0
 }
 
+check_and_maintain_fays() {
+    local now_ts
+    now_ts=$(date +%s)
+    if [ "$now_ts" -eq "$FAYS_LAST_MONITOR_TS" ]; then
+        return
+    fi
+    FAYS_LAST_MONITOR_TS="$now_ts"
+
+    local present_now=false
+    if is_fays_ftdi_present; then
+        present_now=true
+    fi
+
+    # Case 1: startup had no Fays, but device is plugged later.
+    if [ "$FAYS_ENABLED" != true ] && [ "$present_now" = true ]; then
+        echo "[INFO]:Fays FTDI detected. Enabling Fays recording."
+        FAYS_ENABLED=true
+        FAYS_USB_PRESENT=true
+        if start_fays_daemon; then
+            if [ "$IS_RECORDING" = true ] && [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
+                if start_fays_recording_session "$TARGET_DIR"; then
+                    FAYS_RECORDING_ACTIVE=true
+                    CURRENT_RECORDING_EXPECT_FAYS=true
+                    echo "[INFO]:Fays reconnected during recording. Fays session resumed."
+                fi
+            fi
+        else
+            echo "[WARNING]:Fays detected but daemon start failed. Will retry."
+        fi
+        return
+    fi
+
+    # Case 2: Fays enabled but FTDI removed.
+    if [ "$FAYS_ENABLED" = true ] && [ "$present_now" != true ]; then
+        if [ "$FAYS_USB_PRESENT" = true ]; then
+            echo "[WARNING]:Fays FTDI disconnected."
+        fi
+        FAYS_USB_PRESENT=false
+        FAYS_RECORDING_ACTIVE=false
+        stop_fays_daemon || true
+        return
+    fi
+
+    # Case 3: Fays enabled and FTDI present -> keep daemon healthy.
+    if [ "$FAYS_ENABLED" = true ] && [ "$present_now" = true ]; then
+        if [ "$FAYS_USB_PRESENT" != true ]; then
+            echo "[INFO]:Fays FTDI reconnected."
+        fi
+        FAYS_USB_PRESENT=true
+
+        if ! is_pid_alive "$PID_FAYS_DAEMON" || [ ! -p "/tmp/umi_fays_cmd" ]; then
+            echo "[WARNING]:Fays daemon/FIFO unavailable. Attempting restart..."
+            stop_fays_daemon || true
+            if start_fays_daemon; then
+                if [ "$IS_RECORDING" = true ] && [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
+                    if start_fays_recording_session "$TARGET_DIR"; then
+                        FAYS_RECORDING_ACTIVE=true
+                        CURRENT_RECORDING_EXPECT_FAYS=true
+                        echo "[INFO]:Fays session resumed after daemon restart."
+                    fi
+                fi
+            else
+                echo "[WARNING]:Fays daemon restart failed. Will retry."
+            fi
+        fi
+    fi
+}
+
 stop_fays_daemon() {
     if ! is_pid_alive "$PID_FAYS_DAEMON"; then
         PID_FAYS_DAEMON=""
+        FAYS_RECORDING_ACTIVE=false
         return 0
     fi
 
@@ -859,8 +1036,15 @@ stop_fays_daemon() {
         kill -2 "$PID_FAYS_DAEMON" 2>/dev/null || true
     fi
 
+    if ! wait_for_pid_exit "$PID_FAYS_DAEMON" 2; then
+        echo "[WARNING]:Fays daemon did not exit in time, sending SIGKILL."
+        kill -9 "$PID_FAYS_DAEMON" 2>/dev/null || true
+        wait_for_pid_exit "$PID_FAYS_DAEMON" 1 || true
+    fi
+
     wait "$PID_FAYS_DAEMON" 2>/dev/null || true
     PID_FAYS_DAEMON=""
+    FAYS_RECORDING_ACTIVE=false
 }
 
 # 函数：启动所有录制进程
@@ -871,6 +1055,8 @@ start_recording() {
 
     CURRENT_RECORDING_IS_RESET=false
     CURRENT_RECORDING_RESET_SOURCE_DIR=""
+    CURRENT_RECORDING_EXPECT_FAYS=false
+    FAYS_RECORDING_ACTIVE=false
     NEXT_RESET_SOURCE_EPISODE_DIR=""
 
     if [ -n "$reset_source_candidate" ] && [ -d "$reset_source_candidate" ]; then
@@ -931,12 +1117,28 @@ start_recording() {
         return 1
     fi
 
-    # 触发 FaysSense 守护进程进入录制态（进程常驻，不重启）
-    if ! start_fays_recording_session "$TARGET_DIR"; then
-        set_state "ERROR"
-        notify_audio "error"
-        rm -f "$RECORDING_LOCK_FILE"
-        return 1
+    # 在主流程内维护 Fays 状态，避免依赖后台子进程里的变量副本。
+    check_and_maintain_fays
+
+    # 若启动时未启用 Fays，但录制前设备已插入，则即时启用。
+    if [ "$FAYS_ENABLED" != true ] && is_fays_ftdi_present; then
+        echo "[INFO]:Fays FTDI detected before recording. Enabling Fays."
+        FAYS_ENABLED=true
+        FAYS_USB_PRESENT=true
+        start_fays_daemon || true
+    fi
+
+    # FaysSense 为可选设备：仅在启用时尝试进入录制态。
+    if [ "$FAYS_ENABLED" = true ]; then
+        if start_fays_recording_session "$TARGET_DIR"; then
+            CURRENT_RECORDING_EXPECT_FAYS=true
+            FAYS_RECORDING_ACTIVE=true
+        else
+            echo "[WARNING]:Fays recording start failed, continuing without Fays for this episode."
+            FAYS_RECORDING_ACTIVE=false
+        fi
+    else
+        echo "[INFO]:Fays not enabled, skip Fays recording for this episode."
     fi
     
     # 启动相机    
@@ -968,7 +1170,12 @@ validate_recording() {
     # --- 1. 检查 MKV 文件大小 ---
     # 检查 cam.mkv, tact_left.mkv, tact_right.mkv 是否存在且大小不为 0
     # 注意：根据实际生成的文件名可能需要调整，这里假设文件名如下
-    local mkv_files=("cam.mkv" "tact_left.mkv" "tact_right.mkv" "fays_stereo_output.mkv")
+    local mkv_files=("cam.mkv" "tact_left.mkv" "tact_right.mkv")
+    if [ "$CURRENT_RECORDING_EXPECT_FAYS" = true ]; then
+        mkv_files+=("fays_stereo_output.mkv")
+    else
+        echo "[INFO]:Skip Fays MKV validation for this episode (Fays not expected)."
+    fi
     
     for fname in "${mkv_files[@]}"; do
         local fpath="$dir/$fname"
@@ -987,7 +1194,12 @@ validate_recording() {
     done
 
     # --- 2. 检查 MCAP 文件 ---
-    local mcap_files=("sensor_data.mcap" "fays_data.mcap")
+    local mcap_files=("sensor_data.mcap")
+    if [ "$CURRENT_RECORDING_EXPECT_FAYS" = true ]; then
+        mcap_files+=("fays_data.mcap")
+    else
+        echo "[INFO]:Skip Fays MCAP validation for this episode (Fays not expected)."
+    fi
     for mcap_name in "${mcap_files[@]}"; do
         local mcap_file="$dir/$mcap_name"
         if [ -f "$mcap_file" ]; then
@@ -1035,7 +1247,10 @@ stop_recording() {
     echo "[INFO]:Recording stopping at: $time_stamp on $CURRENT_SIDE_LOWER"
 
     # 先通知 FaysSense 停止落盘（进程保持常驻预热）
-    stop_fays_recording_session || true
+    if [ "$FAYS_RECORDING_ACTIVE" = true ]; then
+        stop_fays_recording_session || true
+        FAYS_RECORDING_ACTIVE=false
+    fi
 
     # 发送 SIGINT
     for pid in "$PID_CAM" "$PID_SENSOR"; do
@@ -1044,32 +1259,29 @@ stop_recording() {
         fi
     done
 
-    # 最多等待 5 秒
-    TIMEOUT=5
-    start_ts=$(date +%s)
-
-    while :; do
-        alive=0
+    if ! wait_for_pids_exit 5 "$PID_CAM" "$PID_SENSOR"; then
+        set_state "ERROR"
+        echo "[ERROR]:Timeout waiting for recording processes to stop. Sending SIGTERM."
         for pid in "$PID_CAM" "$PID_SENSOR"; do
-            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-                alive=1
+            if is_pid_alive "$pid"; then
+                kill -15 "$pid" 2>/dev/null || true
             fi
         done
+    fi
 
-        [ "$alive" -eq 0 ] && break
+    if ! wait_for_pids_exit 2 "$PID_CAM" "$PID_SENSOR"; then
+        echo "[WARNING]:Recording processes still alive. Sending SIGKILL."
+        for pid in "$PID_CAM" "$PID_SENSOR"; do
+            if is_pid_alive "$pid"; then
+                kill -9 "$pid" 2>/dev/null || true
+            fi
+        done
+        wait_for_pids_exit 1 "$PID_CAM" "$PID_SENSOR" || true
+    fi
 
-        now=$(date +%s)
-        if [ $((now - start_ts)) -ge "$TIMEOUT" ]; then
-            set_state "ERROR"
-            echo "[ERROR]:Timeout waiting for processes to stop."
-            break
-        fi
-
-        sleep 0.1
-    done
-    
-    # 等待退出
-    wait $PID_CAM $PID_SENSOR 2>/dev/null
+    # 回收子进程，避免僵尸
+    [ -n "$PID_CAM" ] && wait "$PID_CAM" 2>/dev/null || true
+    [ -n "$PID_SENSOR" ] && wait "$PID_SENSOR" 2>/dev/null || true
 
     # 复位录制：在录制结束后对 info.json 打 tag
     mark_reset_tag_to_info || true
@@ -1102,6 +1314,7 @@ stop_recording() {
     PID_SENSOR=""
     CURRENT_RECORDING_IS_RESET=false
     CURRENT_RECORDING_RESET_SOURCE_DIR=""
+    CURRENT_RECORDING_EXPECT_FAYS=false
 
     # 删除录制锁文件
     rm -f "$RECORDING_LOCK_FILE"
@@ -1161,7 +1374,12 @@ handle_dual_button_shutdown() {
 }
 
 cleanup() {
-    #TODO:好像失败了，没有进来
+    if [ "$CLEANUP_RUNNING" = true ]; then
+        return 0
+    fi
+    CLEANUP_RUNNING=true
+    trap - SIGINT SIGTERM EXIT
+
     echo "[INFO]:System exit requested."
 
     # 1. 停止录制业务
@@ -1177,7 +1395,7 @@ cleanup() {
     notify_audio "exit"
     if [ -n "$PID_AUDIO_PLAY" ]; then
         sleep 0.1
-        kill $PID_AUDIO_PLAY 2>/dev/null
+        force_stop_pid "$PID_AUDIO_PLAY" "Audio player"
     fi
 
     # 3. 关闭/复原 LED 状态
@@ -1188,17 +1406,17 @@ cleanup() {
     if [ -n "$PID_LED_SCRIPT" ]; then
         # 给 Python 脚本 0.5秒 时间处理 "EXIT" 信号并关闭灯光硬件
         sleep 0.5
-        kill $PID_LED_SCRIPT 2>/dev/null
+        force_stop_pid "$PID_LED_SCRIPT" "LED manager"
     fi
 
     # 5.停止硬件监控
     if [ -n "$MONITOR_PID" ]; then
-        kill $MONITOR_PID 2>/dev/null
+        force_stop_pid "$MONITOR_PID" "Hardware monitor"
     fi
 
     # 停止日志同步
     if [ -n "$PID_LOG_SYNC" ]; then
-        kill $PID_LOG_SYNC 2>/dev/null
+        force_stop_pid "$PID_LOG_SYNC" "Log sync"
     fi
     
     # 5. 清理临时文件
@@ -1215,16 +1433,21 @@ cleanup() {
 trap cleanup SIGINT SIGTERM EXIT
 
 # ================= 逻辑分流：Master (Right) vs Slave (Left) =================
+if is_fays_ftdi_present; then
+    FAYS_ENABLED=true
+    FAYS_USB_PRESENT=true
+    if ! start_fays_daemon; then
+        echo "[WARNING]:Fays detected but daemon failed during startup. Will retry automatically."
+    fi
+else
+    FAYS_ENABLED=false
+    FAYS_USB_PRESENT=false
+    echo "[INFO]:Fays FTDI not detected at startup. Running without Fays recording."
+fi
+
 monitor_loop &        # 后台运行硬件监控
 MONITOR_PID=$!
-
 echo "[INFO]:Hardware monitor PID: $MONITOR_PID"
-
-if ! start_fays_daemon; then
-    echo "[ERROR]:Failed to start FaysSense daemon during startup."
-    set_state "ERROR"
-    notify_audio "error"
-fi
 
 if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
     # ================= Slave (Left) 逻辑 =================
@@ -1241,6 +1464,8 @@ if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
 
     # 网络监听循环
     while true; do
+        check_and_maintain_fays
+
         # 会阻塞执行
         
         # === 网络监听 ===
@@ -1294,6 +1519,8 @@ else
     notify_audio "ready"
 
     while true; do
+        check_and_maintain_fays
+
         if [ "$DOWN_BUTTON_AVAILABLE" = true ] && [ -n "$GPIO_DOWN_LINE" ] && \
            [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ] && \
            [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
