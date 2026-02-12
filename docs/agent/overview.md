@@ -49,6 +49,7 @@
 - 上键长按：录制 pre 标注语音（保存为下一条 episode 的 `audio_pre.wav`）。
 - 下键长按：录制 post 标注语音（保存为上一条 episode 的 `audio_post.wav`）。
 - 双键长按 4 秒：触发关机请求；按住 3 秒先播放关机提示音。
+- 启动前置硬件检查：Right 侧在 `INIT` 期间持续校验 `PIN_36/PIN_38`（可读且为释放态）；未通过则保持 `ERROR` 并停在磁盘检查前，直到恢复。
 
 ### 3.4 关机权限隔离机制（新增）
 - 业务脚本不直接执行 `poweroff`，而是写触发文件 `/tmp/umi_shutdown_request`。

@@ -74,6 +74,9 @@ PID_SENSOR=""
 TARGET_DIR=""
 LAST_EPISODE_DIR=""  # 记录上次录制的目录（用于post音频）
 PRE_AUDIO_FILE=""    # 存储预录制音频文件路径
+NEXT_RESET_SOURCE_EPISODE_DIR=""   # 下一次录制的复位来源目录（由下键短按设置）
+CURRENT_RECORDING_IS_RESET=false    # 当前录制是否为复位录制
+CURRENT_RECORDING_RESET_SOURCE_DIR="" # 当前复位录制的来源目录
 RECORDING_LOCK_FILE="/tmp/umi_recording.lock" # 录制锁文件
 # 启动直接释放锁文件，防止断电导致残留
 rm -f "$RECORDING_LOCK_FILE"
@@ -163,6 +166,63 @@ fi
 
 # 创建临时音频目录
 mkdir -p "$AUDIO_TEMP_DIR"
+
+# ================= GPIO 启动有效性检查 (仅 Right 需要) =================
+if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
+    echo "[INFO]:Pre-check GPIO validity for Master (Right)..."
+
+    gpio_error_reported=false
+    last_gpio_error_msg=""
+
+    while true; do
+        GPIO_VALID=true
+        gpio_error_msg=""
+
+        GPIO_UP_LINE=$(gpiofind "$PIN_BTN_UP" 2>/dev/null || true)
+        GPIO_DOWN_LINE=$(gpiofind "$PIN_BTN_DOWN" 2>/dev/null || true)
+
+        if [ -z "$GPIO_UP_LINE" ]; then
+            GPIO_VALID=false
+            gpio_error_msg+=" missing $PIN_BTN_UP;"
+        fi
+
+        if [ -z "$GPIO_DOWN_LINE" ]; then
+            GPIO_VALID=false
+            gpio_error_msg+=" missing $PIN_BTN_DOWN;"
+        fi
+
+        if [ "$GPIO_VALID" = true ]; then
+            if [ "$(gpioget "$GPIO_UP_LINE")" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                GPIO_VALID=false
+                gpio_error_msg+=" $PIN_BTN_UP active on startup;"
+            fi
+
+            if [ "$(gpioget "$GPIO_DOWN_LINE")" -eq "$BTN_ACTIVE_LEVEL" ]; then
+                GPIO_VALID=false
+                gpio_error_msg+=" $PIN_BTN_DOWN active on startup;"
+            fi
+        fi
+
+        if [ "$GPIO_VALID" = true ]; then
+            if [ "$gpio_error_reported" = true ]; then
+                echo "[INFO]:GPIO pre-check recovered. Continue startup."
+                set_state "INIT"
+            fi
+            break
+        fi
+
+        if [ "$gpio_error_reported" = false ] || [ "$gpio_error_msg" != "$last_gpio_error_msg" ]; then
+            echo "[ERROR]:GPIO pre-check failed:$gpio_error_msg"
+            echo "[ERROR]:Hold before disk checks, retrying in 1s..."
+            set_state "ERROR"
+            notify_audio "error"
+            gpio_error_reported=true
+            last_gpio_error_msg="$gpio_error_msg"
+        fi
+
+        sleep 1
+    done
+fi
 
 # ================= 业务配置检查 =================
 # 检查硬盘挂载 (改为循环等待模式)
@@ -414,21 +474,9 @@ check_tactile_hardware() {
 check_tactile_hardware "/dev/left_tcam" "Left Tactile"
 check_tactile_hardware "/dev/right_tcam" "Right Tactile"
 
-# ================= GPIO 初始化 (仅 Right 需要) =================
-if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
-    echo "[INFO]:Initializing GPIO for Master (Right)..."
-    GPIO_UP_LINE=$(gpiofind "$PIN_BTN_UP")
-    if [ -z "$GPIO_UP_LINE" ]; then
-        echo "[ERROR]:Could not find GPIO line for $PIN_BTN_UP."
-        set_state "ERROR"; notify_audio "error"; exit 1
-    fi
-
-    GPIO_DOWN_LINE=$(gpiofind "$PIN_BTN_DOWN")
-    if [ -z "$GPIO_DOWN_LINE" ]; then
-        echo "[WARNING]:Could not find GPIO line for $PIN_BTN_DOWN. Down button features disabled."
-        DOWN_BUTTON_AVAILABLE=false
-    fi
-else
+# ================= GPIO 初始化说明 =================
+# Right 侧 GPIO 已在启动阶段完成有效性检查与初始化；Left 侧无需按键 GPIO。
+if [ "$CURRENT_SIDE_LOWER" != "right" ]; then
     echo "[INFO]:GPIO initialization skipped for Slave (Left)."
 fi
 
@@ -606,6 +654,49 @@ prepare_episode_manifest_files() {
     printf '[%s]\n' "$joined_calib" > "$episode_calib_file"
 }
 
+# 函数：在当前 episode 的 info.json 上写入复位 tag
+mark_reset_tag_to_info() {
+    if [ "$CURRENT_RECORDING_IS_RESET" != true ]; then
+        return 0
+    fi
+
+    if [ -z "$TARGET_DIR" ] || [ ! -d "$TARGET_DIR" ]; then
+        echo "[WARNING]:Skip reset tag: invalid TARGET_DIR ($TARGET_DIR)."
+        return 1
+    fi
+
+    local info_file="$TARGET_DIR/info.json"
+    if [ ! -f "$info_file" ]; then
+        echo "[WARNING]:Skip reset tag: info.json not found at $info_file"
+        return 1
+    fi
+
+    local tmp_file="$info_file.tmp"
+    local source_name
+    source_name=$(basename "$CURRENT_RECORDING_RESET_SOURCE_DIR")
+
+    if jq \
+        --arg source_dir "$CURRENT_RECORDING_RESET_SOURCE_DIR" \
+        --arg source_name "$source_name" \
+        '
+        .tags = ((.tags // []) + ["reset"]) |
+        .tags |= unique |
+        .reset_info = {
+            "is_reset_operation": true,
+            "source_episode_dir": $source_dir,
+            "source_episode_name": $source_name
+        }
+        ' "$info_file" > "$tmp_file"; then
+        mv "$tmp_file" "$info_file"
+        echo "[INFO]:Reset tag written to info.json: source=$CURRENT_RECORDING_RESET_SOURCE_DIR"
+        return 0
+    fi
+
+    echo "[ERROR]:Failed to write reset tag to info.json"
+    rm -f "$tmp_file"
+    return 1
+}
+
 # 函数：启动音频录制
 record_audio() {
     # 如果是 Left (Slave)，直接禁用录音功能
@@ -691,6 +782,17 @@ record_audio() {
 # 参数1 (可选): 强制指定的目录名 (用于 Slave)
 start_recording() {
     local sync_dir_name=$1
+    local reset_source_candidate="${NEXT_RESET_SOURCE_EPISODE_DIR:-}"
+
+    CURRENT_RECORDING_IS_RESET=false
+    CURRENT_RECORDING_RESET_SOURCE_DIR=""
+    NEXT_RESET_SOURCE_EPISODE_DIR=""
+
+    if [ -n "$reset_source_candidate" ] && [ -d "$reset_source_candidate" ]; then
+        CURRENT_RECORDING_IS_RESET=true
+        CURRENT_RECORDING_RESET_SOURCE_DIR="$reset_source_candidate"
+        echo "[INFO]:This recording is marked as RESET. Source: $CURRENT_RECORDING_RESET_SOURCE_DIR"
+    fi
 
     # 1. 创建锁 (防止 NTP 在录制期间运行)
     touch "$RECORDING_LOCK_FILE"
@@ -754,7 +856,11 @@ start_recording() {
     LAST_EPISODE_DIR="$TARGET_DIR"  # 更新上次录制目录
     
     set_state "RECORDING"
-    notify_audio "recording_start"
+    if [ "$CURRENT_RECORDING_IS_RESET" = true ]; then
+        notify_audio "reset_recording_start"
+    else
+        notify_audio "recording_start"
+    fi
 }
 
 # ================= 数据校验函数 =================
@@ -865,6 +971,9 @@ stop_recording() {
     # 等待退出
     wait $PID_CAM $PID_SENSOR 2>/dev/null
 
+    # 复位录制：在录制结束后对 info.json 打 tag
+    mark_reset_tag_to_info || true
+
     # 强制同步数据到磁盘
     echo "[INFO]:Syncing data to disk..."
     notify_audio "writing"
@@ -891,6 +1000,8 @@ stop_recording() {
     # 清空 PID
     PID_CAM=""
     PID_SENSOR=""
+    CURRENT_RECORDING_IS_RESET=false
+    CURRENT_RECORDING_RESET_SOURCE_DIR=""
 
     # 删除录制锁文件
     rm -f "$RECORDING_LOCK_FILE"
@@ -1136,6 +1247,7 @@ else
                 if [ "$handled" = false ]; then
                     echo "[INFO]:Up button single click detected."
                     if [ "$IS_RECORDING" = false ]; then
+                        NEXT_RESET_SOURCE_EPISODE_DIR=""
                         start_recording
                     else
                         stop_recording
@@ -1191,8 +1303,21 @@ else
                     done
 
                     if [ "$down_long" = false ]; then
-                        echo "[INFO]:Down button short press detected (no action bound)."
+                        echo "[INFO]:Down button short press detected."
                         while [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; do sleep 0.05; done
+
+                        if [ "$IS_RECORDING" = false ]; then
+                            if [ -n "$LAST_EPISODE_DIR" ] && [ -d "$LAST_EPISODE_DIR" ]; then
+                                NEXT_RESET_SOURCE_EPISODE_DIR="$LAST_EPISODE_DIR"
+                                echo "[INFO]:Trigger: Start RESET recording from LAST_EPISODE_DIR=$LAST_EPISODE_DIR"
+                                start_recording
+                            else
+                                echo "[INFO]:No LAST_EPISODE_DIR found, reset recording not needed."
+                                notify_audio "no_reset_needed"
+                            fi
+                        else
+                            stop_recording
+                        fi
                     fi
 
                     sleep 0.2
