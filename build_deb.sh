@@ -4,7 +4,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ================= 变量定义区域 =================
 APP_NAME="ugripper"
-VERSION="1.0.16"       # 每次发布前修改这里
+VERSION="1.1.0"       # 每次发布前修改这里
 ARCH="arm64"
 INSTALL_DIR="/opt/${APP_NAME}"
 BUILD_ROOT="temp_build_deb"
@@ -117,9 +117,13 @@ rsync -av "${EXCLUDE_LIST[@]}" . "$BUILD_ROOT/$INSTALL_DIR/"
 echo "--> Restoring compiled binaries..."
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts"
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/config"
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/lib"
 cp build/faysSense_vi_kit/fays_record_example "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/" || true
-cp build/faysSense_vi_kit/scripts/*.sh "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts/" || true
+# Use source scripts so quick mode still gets latest runtime fixes.
+cp faysSense_vi_kit/scripts/*.sh "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts/" || true
 cp build/faysSense_vi_kit/config/*.yaml "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/config/" || true
+cp -a faysSense_vi_kit/lib/fays_atrak "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/lib/" || true
+chmod +x "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts/"*.sh 2>/dev/null || true
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder"
 cp build/src/sensor_recorder/sensor_recorder "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true
 cp build/src/sensor_recorder/zeroing "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true

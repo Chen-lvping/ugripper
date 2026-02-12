@@ -7,6 +7,8 @@ BUILD_DIR="$(dirname "$SCRIPT_DIR")"
 CONFIG_FILE="$BUILD_DIR/config/fays_vikit.yaml"
 EXECUTABLE="$BUILD_DIR/fays_record_example"
 CMD_FIFO="/tmp/umi_fays_cmd"
+ARCH="$(uname -m)"
+LOCAL_FAYS_LIB_DIR="$BUILD_DIR/lib/fays_atrak/${ARCH}/Release"
 
 append_ld_library_path() {
     local path_to_add="$1"
@@ -104,6 +106,7 @@ send_control_cmd() {
     return 0
 }
 
+append_ld_library_path "$LOCAL_FAYS_LIB_DIR"
 append_ld_library_path "/usr/local/lib"
 append_ld_library_path "/usr/local/opencv-4.2.0-linux-aarch64/lib"
 
