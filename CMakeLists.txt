@@ -7,4 +7,5 @@ set(CMAKE_CXX_STANDARD 17)
 add_subdirectory(src/third_party/mcap_builder)
 
 # ========= 子模块 =========
+add_subdirectory(faysSense_vi_kit)
 add_subdirectory(src/sensor_recorder)

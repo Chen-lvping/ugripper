@@ -70,6 +70,7 @@ GPIO_DOWN_LINE=""
 # ================= 全局变量 =================
 IS_RECORDING=false
 PID_CAM=""
+PID_FAYS=""
 PID_SENSOR=""
 TARGET_DIR=""
 LAST_EPISODE_DIR=""  # 记录上次录制的目录（用于post音频）
@@ -842,6 +843,10 @@ start_recording() {
     uv run ./camera_record/triple_camera_record_h265.py --output-dir "$TARGET_DIR" &
     PID_CAM=$!
 
+    # 启动 FaysSense VIO
+    echo "[INFO]:Starting FaysSense VIO recording at $TARGET_DIR"
+    ./build/faysSense_vi_kit/scripts/run_fays_record.sh "$TARGET_DIR" &
+    PID_FAYS=$!
     if [ ! -x "$SENSOR_RECORDER_BIN" ]; then
         echo "[ERROR]:Sensor recorder binary not found or not executable: $SENSOR_RECORDER_BIN"
         set_state "ERROR"
@@ -874,7 +879,7 @@ validate_recording() {
     # --- 1. 检查 MKV 文件大小 ---
     # 检查 cam.mkv, tact_left.mkv, tact_right.mkv 是否存在且大小不为 0
     # 注意：根据实际生成的文件名可能需要调整，这里假设文件名如下
-    local mkv_files=("cam.mkv" "tact_left.mkv" "tact_right.mkv")
+    local mkv_files=("cam.mkv" "tact_left.mkv" "tact_right.mkv" "fays_stereo_output.mkv")
     
     for fname in "${mkv_files[@]}"; do
         local fpath="$dir/$fname"
@@ -938,7 +943,7 @@ stop_recording() {
     echo "[INFO]:Recording stopping at: $time_stamp on $CURRENT_SIDE_LOWER"
 
     # 发送 SIGINT
-    for pid in "$PID_CAM" "$PID_SENSOR"; do
+    for pid in "$PID_CAM" "$PID_SENSOR" "$PID_FAYS"; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             kill -2 "$pid"
         fi
@@ -950,7 +955,7 @@ stop_recording() {
 
     while :; do
         alive=0
-        for pid in "$PID_CAM" "$PID_SENSOR"; do
+        for pid in "$PID_CAM" "$PID_SENSOR" "$PID_FAYS"; do
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
                 alive=1
             fi
@@ -969,7 +974,7 @@ stop_recording() {
     done
     
     # 等待退出
-    wait $PID_CAM $PID_SENSOR 2>/dev/null
+    wait $PID_CAM $PID_SENSOR $PID_FAYS 2>/dev/null
 
     # 复位录制：在录制结束后对 info.json 打 tag
     mark_reset_tag_to_info || true
@@ -999,6 +1004,7 @@ stop_recording() {
 
     # 清空 PID
     PID_CAM=""
+    PID_FAYS=""
     PID_SENSOR=""
     CURRENT_RECORDING_IS_RESET=false
     CURRENT_RECORDING_RESET_SOURCE_DIR=""

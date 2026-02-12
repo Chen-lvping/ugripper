@@ -1,0 +1,206 @@
+/**
+ * @file fays_vikit.h
+ * @brief Used to get sensor datas and set sensor properties.
+ */
+
+#pragma once
+
+
+#include "fays_atrak_types.h"
+#include <functional>
+
+
+#if (defined (_WIN32) || defined(WIN64))
+	#define FAYS_VIK_API __declspec(dllexport)
+#else
+    #define FAYS_VIK_API __attribute__((visibility("default")))
+#endif
+
+
+#ifdef __cplusplus
+extern "C" {
+#endif 
+
+
+/****************************************************************************
+ *  standard Fays ViKit SDK
+ ****************************************************************************/
+
+/*
+* @brief Image callback function definition.
+*/
+using FAYS_VIK_ImageCallback = std::function<void(AtrakImage* pImg)>;
+
+/*
+* @brief IMU callback function definition.
+*/
+using FAYS_VIK_ImuCallback = std::function<void(const AtrakIMU&)>;
+
+/**
+ * @brief Open sensor .
+ * 
+ * @param[in] configuration The configuration file path.
+ * @param[out] handle
+ * @return Creation success or failure.
+ */
+FAYS_VIK_API      int     FAYS_VIK_CreateHandleWithConfig           (void** handle, const char* configPath);
+
+/**
+ * @brief Destroy the handle and turn off the sensors.
+ * 
+ * @param[out] handle
+ * @return Destruction success or failure.
+ */
+FAYS_VIK_API      int     FAYS_VIK_DestroyHandle                    (void* handle);
+
+/**
+ * @brief Get grayscale camera image (The image is stitched together).
+ * 
+ * @param[in] handle
+ * @param[out] image Stereo camera grayscale image.
+ * @return Whether the image acquisition is successful or not.
+ */
+FAYS_VIK_API      int     FAYS_VIK_GetStereoFrames                  (void* handle, AtrakImage* pImage);
+
+/**
+ * @brief Set the Gain of the stereo camera.
+ *
+ * @param[in] handle
+ * @param[in] value Target gain value.
+ * @note Only supports setting gain value through root.
+ * @note Gain range: 1.0 ~ 15.0.
+ * @return Set whether gain is successful or not.
+ */
+FAYS_VIK_API      int     FAYS_VIK_SetStereoGain                    (void* handle, float gainValue);
+
+/**
+ * @brief Set the exposure time of the stereo camera.
+ * 
+ * @param[in] handle
+ * @param[in] value Target exposure value. 
+ * @note Only supports setting exposure value through root.
+ * @note Exposure range: 1.0 ~ 507.0.
+ * @return Set whether exposure is successful or not.
+ */
+FAYS_VIK_API      int     FAYS_VIK_SetStereoExposure                (void* handle, double exposureValue);
+
+/**
+ * @brief Set the camera frame rate to 30FPS.
+ * 
+ * @param[in] handle
+ * @note Only supports setting FPS through root.
+ * @note Currently only supports setting to 30FPS.
+ * @note After the stereo camera is powered off and restarted, it will be restored to 60 FPS by default.
+ * @return Set whether FPS is successful or not.
+ */
+FAYS_VIK_API      int     FAYS_VIK_SetStereoFPS                     (void* handle, int fps);
+
+/**
+    * @brief Register stereo image callback function.
+    * 
+    * @param[in] handle
+    * @param[in] imgCallback Callback function for new images.
+    * @return Registration success or failure.
+*/
+FAYS_VIK_API  int FAYS_VIK_RegisterStereoImageCallback          (void* handle, FAYS_VIK_ImageCallback imgCallback);
+
+/**
+    * @brief Get the RGB image.
+    * 
+    * @param[in] handle
+    * @param[out] rgb RGB image data.
+    * @return Get whether RGB image data is successful or not.
+*/
+FAYS_VIK_API      int     FAYS_VIK_GetRgbFrames                      (void* handle, AtrakImage* pImg);
+
+/**
+ * @brief Set the exposure time of the RGB camera.
+ * 
+ * @param[in] handle
+ * @param[in] value Target exposure value. 
+ * @note Only supports setting exposure value through root.
+ * @note Exposure range: 8.0 ~ 2146.0.
+ * @return Set whether exposure is successful or not.
+ */
+FAYS_VIK_API      int     FAYS_VIK_SetRgbExposure                  (void* handle, double exposureValue);
+
+/**
+ * @brief Set the gain of the RGB camera.
+ * 
+ * @param[in] handle
+ * @param[in] value Target gain value.
+ * @note Only supports setting gain value through root.
+ * @note Gain range: 1.0 ~ 72.0.
+ * @return Set whether gain is successful or not.
+ */
+FAYS_VIK_API      int     FAYS_VIK_SetRgbGain                      (void* handle, float gainValue);
+
+/**
+    * @brief Get the RGB image.
+    * 
+    * @param[in] handle
+    * @param[out] rgb RGB image data.
+    * @return Get whether RGB image data is successful or not.
+*/
+FAYS_VIK_API      int     FAYS_VIK_GetRgbFrames                      (void* handle, AtrakImage* pImg);
+
+/**
+ * @brief Set the exposure time of the RGB camera.
+ * 
+ * @param[in] handle
+ * @param[in] value Target exposure value. 
+ * @note Only supports setting exposure value through root.
+ * @note Exposure range: 8.0 ~ 2146.0.
+ * @return Set whether exposure is successful or not.
+ */
+FAYS_VIK_API      int     FAYS_VIK_SetRgbExposure                  (void* handle, double exposureValue);
+
+/**
+ * @brief Set the gain of the RGB camera.
+ * 
+ * @param[in] handle
+ * @param[in] value Target gain value.
+ * @note Only supports setting gain value through root.
+ * @note Gain range: 1.0 ~ 72.0.
+ * @return Set whether gain is successful or not.
+ */
+FAYS_VIK_API      int     FAYS_VIK_SetRgbGain                      (void* handle, float gainValue);
+
+/**
+ * @brief Register RGB image callback function.
+ * 
+ * @param[in] handle
+ * @param[in] imgCallback Callback function for new images.
+ * @return Registration success or failure.
+ */
+FAYS_VIK_API  int FAYS_VIK_RegisterRgbImageCallback             (void* handle, FAYS_VIK_ImageCallback imgCallback);
+
+/**
+ * @brief Get imu data.
+ * 
+ * @param[in] handle
+ * @param[out] imu 6-axis imu data.
+ * @return Get whether IMU data is successful or not.
+ */
+FAYS_VIK_API      int     FAYS_VIK_GetImuData                       (void* handle, AtrakIMU* pImu);
+
+/**
+ * @brief Get the version of the SDK.
+ * 
+ * @param[in] handle
+ * @return The version of the SDK.
+ */
+FAYS_VIK_API const char* FAYS_VIK_GetVersion                        (void* handle);
+
+/*
+ * @brief Register IMU callback function.
+ *
+ * @param[in] handle
+ * @param[in] imuCallback Callback function for new IMU data.
+ * @return Registration success or failure.
+ */
+FAYS_VIK_API  int FAYS_VIK_RegisterImuCallback            (void* handle, FAYS_VIK_ImuCallback imuCallback);
+
+#ifdef __cplusplus
+}
+#endif 

@@ -58,11 +58,11 @@ mkdir -p "$BUILD_ROOT/usr/local/bin"
 mkdir -p "$BUILD_ROOT/etc/systemd/system"
 mkdir -p "$BUILD_ROOT/etc/udev/rules.d"
 
-echo "=== [2/5] 编译 C++ 模块 ==="
+echo "=== [2/5] 编译 C++ 模块 (统一构建) ==="
 
 if [ "$QUICK_MODE" = true ]; then
     echo "--> [SKIP] Skipping C++ compilation."
-    if [ ! -f "build/src/sensor_recorder/sensor_recorder" ]; then
+    if [ ! -f "build/src/sensor_recorder/sensor_recorder" ] || [ ! -f "build/faysSense_vi_kit/fays_record_example" ]; then
         echo "⚠️  警告: sensor_recorder 二进制缺失！打包可能不可用。"
     fi
 else
@@ -87,6 +87,8 @@ EXCLUDE_LIST=(
     --exclude="$BUILD_ROOT"
     --exclude='dm_imu_alone'
     --exclude='encoder_refactor'
+    --exclude='faysSense_vi_kit'
+    --exclude='build'
     --exclude='im648_imu_alone'
     --exclude='src/sensor_recorder'
     --exclude='*.deb'
@@ -112,8 +114,13 @@ fi
 echo "--> Copying project files..."
 rsync -av "${EXCLUDE_LIST[@]}" . "$BUILD_ROOT/$INSTALL_DIR/"
 
-# 2. 手动补回编译好的二进制文件
+# 2. 手动补回编译好的二进制文件 (from unified build/ directory)
 echo "--> Restoring compiled binaries..."
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts"
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/config"
+cp build/faysSense_vi_kit/fays_record_example "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/" || true
+cp build/faysSense_vi_kit/scripts/*.sh "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts/" || true
+cp build/faysSense_vi_kit/config/*.yaml "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/config/" || true
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder"
 cp build/src/sensor_recorder/sensor_recorder "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true
 
