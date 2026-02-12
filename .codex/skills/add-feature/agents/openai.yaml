@@ -1,0 +1,4 @@
+interface:
+  display_name: "Add Feature"
+  short_description: "按 overview 先规划再新增功能并同步 docs/agent"
+  default_prompt: "Use $add-feature to plan first, implement after confirmation, and sync docs/agent updates."
