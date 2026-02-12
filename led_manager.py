@@ -234,7 +234,7 @@ class LedStateMachine:
             self.led.set_scaled_rgb(0, 255, 20, brightness)
 
         elif self.state == "RECORDING":
-            self.led.set_rgb(0, 255, 20)
+            self.led.set_rgb(0, 255, 0)
 
         elif self.state == "CALIB_DONE":
             # 绿色闪烁 (周期 1秒: 0.5亮 0.5灭)

@@ -48,6 +48,7 @@ AUDIO_PIPE="/tmp/umi_audio_pipe"
 
 # --- 传感器录制配置 ---
 SENSOR_RECORDER_BIN="./build/src/sensor_recorder/sensor_recorder"
+FAYS_RECORD_SCRIPT="./build/faysSense_vi_kit/scripts/run_fays_record.sh"
 
 # --- GPIO 配置 ---
 PIN_BTN_UP="PIN_36"      # 上按键（原有）
@@ -70,7 +71,7 @@ GPIO_DOWN_LINE=""
 # ================= 全局变量 =================
 IS_RECORDING=false
 PID_CAM=""
-PID_FAYS=""
+PID_FAYS_DAEMON=""
 PID_SENSOR=""
 TARGET_DIR=""
 LAST_EPISODE_DIR=""  # 记录上次录制的目录（用于post音频）
@@ -779,6 +780,89 @@ record_audio() {
     notify_audio "audio_recording_stop"
 }
 
+is_pid_alive() {
+    local pid="$1"
+    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+start_fays_daemon() {
+    if is_pid_alive "$PID_FAYS_DAEMON"; then
+        return 0
+    fi
+
+    if [ ! -x "$FAYS_RECORD_SCRIPT" ]; then
+        echo "[ERROR]:Fays record script missing or not executable: $FAYS_RECORD_SCRIPT"
+        return 1
+    fi
+
+    echo "[INFO]:Starting FaysSense daemon (warmup mode)..."
+    "$FAYS_RECORD_SCRIPT" daemon &
+    PID_FAYS_DAEMON=$!
+
+    sleep 0.5
+    if ! is_pid_alive "$PID_FAYS_DAEMON"; then
+        echo "[ERROR]:FaysSense daemon failed to start."
+        PID_FAYS_DAEMON=""
+        return 1
+    fi
+
+    echo "[INFO]:FaysSense daemon started. PID=$PID_FAYS_DAEMON"
+    return 0
+}
+
+start_fays_recording_session() {
+    local output_dir="$1"
+
+    if ! start_fays_daemon; then
+        return 1
+    fi
+
+    if ! "$FAYS_RECORD_SCRIPT" start "$output_dir"; then
+        echo "[ERROR]:Failed to send START command to FaysSense daemon."
+        return 1
+    fi
+
+    return 0
+}
+
+stop_fays_recording_session() {
+    if ! is_pid_alive "$PID_FAYS_DAEMON"; then
+        return 0
+    fi
+
+    if ! "$FAYS_RECORD_SCRIPT" stop; then
+        echo "[WARNING]:Failed to send STOP command to FaysSense daemon."
+        return 1
+    fi
+
+    return 0
+}
+
+stop_fays_daemon() {
+    if ! is_pid_alive "$PID_FAYS_DAEMON"; then
+        PID_FAYS_DAEMON=""
+        return 0
+    fi
+
+    echo "[INFO]:Stopping FaysSense daemon..."
+    "$FAYS_RECORD_SCRIPT" stop >/dev/null 2>&1 || true
+    "$FAYS_RECORD_SCRIPT" exit >/dev/null 2>&1 || true
+
+    for _ in $(seq 1 30); do
+        if ! is_pid_alive "$PID_FAYS_DAEMON"; then
+            break
+        fi
+        sleep 0.1
+    done
+
+    if is_pid_alive "$PID_FAYS_DAEMON"; then
+        kill -2 "$PID_FAYS_DAEMON" 2>/dev/null || true
+    fi
+
+    wait "$PID_FAYS_DAEMON" 2>/dev/null || true
+    PID_FAYS_DAEMON=""
+}
+
 # 函数：启动所有录制进程
 # 参数1 (可选): 强制指定的目录名 (用于 Slave)
 start_recording() {
@@ -839,20 +923,25 @@ start_recording() {
     time_stamp=$(date +"%Y-%m-%d %H:%M:%S")
     echo "[INFO]:Recording started at: $time_stamp"
 
-    # 启动相机    
-    uv run ./camera_record/triple_camera_record_h265.py --output-dir "$TARGET_DIR" &
-    PID_CAM=$!
-
-    # 启动 FaysSense VIO
-    echo "[INFO]:Starting FaysSense VIO recording at $TARGET_DIR"
-    ./build/faysSense_vi_kit/scripts/run_fays_record.sh "$TARGET_DIR" &
-    PID_FAYS=$!
     if [ ! -x "$SENSOR_RECORDER_BIN" ]; then
         echo "[ERROR]:Sensor recorder binary not found or not executable: $SENSOR_RECORDER_BIN"
         set_state "ERROR"
         notify_audio "error"
+        rm -f "$RECORDING_LOCK_FILE"
         return 1
     fi
+
+    # 触发 FaysSense 守护进程进入录制态（进程常驻，不重启）
+    if ! start_fays_recording_session "$TARGET_DIR"; then
+        set_state "ERROR"
+        notify_audio "error"
+        rm -f "$RECORDING_LOCK_FILE"
+        return 1
+    fi
+    
+    # 启动相机    
+    uv run ./camera_record/triple_camera_record_h265.py --output-dir "$TARGET_DIR" &
+    PID_CAM=$!
 
     "$SENSOR_RECORDER_BIN" "$TARGET_DIR" &
     PID_SENSOR=$!
@@ -942,8 +1031,11 @@ stop_recording() {
     time_stamp=$(date +"%Y-%m-%d %H:%M:%S")
     echo "[INFO]:Recording stopping at: $time_stamp on $CURRENT_SIDE_LOWER"
 
+    # 先通知 FaysSense 停止落盘（进程保持常驻预热）
+    stop_fays_recording_session || true
+
     # 发送 SIGINT
-    for pid in "$PID_CAM" "$PID_SENSOR" "$PID_FAYS"; do
+    for pid in "$PID_CAM" "$PID_SENSOR"; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             kill -2 "$pid"
         fi
@@ -955,7 +1047,7 @@ stop_recording() {
 
     while :; do
         alive=0
-        for pid in "$PID_CAM" "$PID_SENSOR" "$PID_FAYS"; do
+        for pid in "$PID_CAM" "$PID_SENSOR"; do
             if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
                 alive=1
             fi
@@ -974,7 +1066,7 @@ stop_recording() {
     done
     
     # 等待退出
-    wait $PID_CAM $PID_SENSOR $PID_FAYS 2>/dev/null
+    wait $PID_CAM $PID_SENSOR 2>/dev/null
 
     # 复位录制：在录制结束后对 info.json 打 tag
     mark_reset_tag_to_info || true
@@ -1004,7 +1096,6 @@ stop_recording() {
 
     # 清空 PID
     PID_CAM=""
-    PID_FAYS=""
     PID_SENSOR=""
     CURRENT_RECORDING_IS_RESET=false
     CURRENT_RECORDING_RESET_SOURCE_DIR=""
@@ -1075,6 +1166,9 @@ cleanup() {
         stop_recording
     fi
 
+    # 停止 FaysSense 常驻进程
+    stop_fays_daemon || true
+
     # 2. 停止音频播放
     # 优先停止音频，防止报错音一直响
     notify_audio "exit"
@@ -1122,6 +1216,12 @@ monitor_loop &        # 后台运行硬件监控
 MONITOR_PID=$!
 
 echo "[INFO]:Hardware monitor PID: $MONITOR_PID"
+
+if ! start_fays_daemon; then
+    echo "[ERROR]:Failed to start FaysSense daemon during startup."
+    set_state "ERROR"
+    notify_audio "error"
+fi
 
 if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
     # ================= Slave (Left) 逻辑 =================

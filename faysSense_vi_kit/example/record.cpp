@@ -14,6 +14,11 @@
 #include <chrono>
 #include <iomanip>
 #include <cstddef>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <cerrno>
+#include <cstring>
 #include <mcap/writer.hpp>
 #include "fays_atrak/fays_atrak_types.h"
 #include "fays_atrak/fays_atrak_vimod.h"
@@ -43,7 +48,7 @@ std::string create_imu_json(uint64_t timestamp_ns, const AtrakIMU& imuData) {
 class TimestampLogger {
 public:
     TimestampLogger() {}
-    ~TimestampLogger() { if (file_.is_open()) file_.close(); }
+    ~TimestampLogger() { Close(); }
 
     bool Open(const std::string& path) {
         file_.open(path);
@@ -66,6 +71,16 @@ public:
         if (file_.is_open()) {
             file_.flush();
         }
+    }
+
+    void Close() {
+        if (file_.is_open()) {
+            file_.close();
+        }
+    }
+
+    bool IsOpen() const {
+        return file_.is_open();
     }
 
 private:
@@ -168,7 +183,7 @@ private:
 class ImuCsvLogger {
 public:
     ImuCsvLogger() {}
-    ~ImuCsvLogger() { if (file_.is_open()) file_.close(); }
+    ~ImuCsvLogger() { Close(); }
 
     bool Open(const std::string& path) {
         file_.open(path);
@@ -195,6 +210,16 @@ public:
         if (file_.is_open()) {
             file_.flush();
         }
+    }
+
+    void Close() {
+        if (file_.is_open()) {
+            file_.close();
+        }
+    }
+
+    bool IsOpen() const {
+        return file_.is_open();
     }
 
 private:
@@ -338,6 +363,10 @@ public:
         }
     }
 
+    bool IsStarted() const {
+        return pipe_ != nullptr;
+    }
+
 private:
     FILE* pipe_;
 };
@@ -354,8 +383,8 @@ void signalHandler(int signal);
 // --- 主业务类 ---
 class FaysRecorder {
 public:
-    FaysRecorder(const char* configPath, const std::string& outputDir = ".")
-        : mptrHandle_{nullptr}, mbIsRunning_{true}, outputDir_(outputDir),
+    explicit FaysRecorder(const char* configPath)
+        : mptrHandle_{nullptr}, mbIsRunning_{true}, recordingEnabled_{false},
           lastImuTimestamp_(0), lastImgTimestamp_(0),
           imuGapCount_(0), imuRollbackCount_(0)
     {
@@ -365,7 +394,7 @@ public:
         // 创建句柄
         FAYS_VIK_CreateHandleWithConfig(&mptrHandle_, configPath);
         std::cout << "[FaysRecorder] Created handle with config: " << configPath << std::endl;
-        std::cout << "[FaysRecorder] Output directory: " << outputDir_ << std::endl;
+        std::cout << "[FaysRecorder] Standby mode ready. Waiting for START command." << std::endl;
 
         // Start IMU producer thread (reads from SDK, pushes to queue)
         mptrImuThr_ = std::thread(&FaysRecorder::ImuOnlineCapture, this);
@@ -378,12 +407,8 @@ public:
     }
 
     ~FaysRecorder() {
+        StopRecordingSession();
         mbIsRunning_ = false;
-        
-        mRecorder_.Stop();
-
-        // Flush stereo CSV
-        mCsvLogger_.Flush();
 
         // Wait for IMU producer thread to finish (it will call imuQueue_.NotifyStop())
         if (mptrImuThr_.joinable()) mptrImuThr_.join();
@@ -399,6 +424,14 @@ public:
 #endif
 
         if (mptrImgThr_.joinable()) mptrImgThr_.join();
+
+        mRecorder_.Stop();
+        mCsvLogger_.Flush();
+        mCsvLogger_.Close();
+#if ENABLE_IMU_CSV
+        mImuCsvLogger_.Flush();
+        mImuCsvLogger_.Close();
+#endif
         
         // Print final IMU statistics
         std::cout << "[IMU] Final stats - Gaps: " << imuGapCount_ 
@@ -412,33 +445,60 @@ public:
     
     void Stop() {
         mbIsRunning_ = false;
+        StopRecordingSession();
+    }
+
+    void StartRecording(const std::string& outputDir) {
+        std::lock_guard<std::mutex> lock(recordingMtx_);
+        recordingOutputDir_ = NormalizeOutputDir(outputDir);
+        recordingEnabled_ = true;
+        std::cout << "[Control] START recording. Output directory: " << recordingOutputDir_ << std::endl;
+    }
+
+    void StopRecordingSession() {
+        bool wasRecording = recordingEnabled_.exchange(false);
+        if (wasRecording) {
+            std::cout << "[Control] STOP recording." << std::endl;
+        }
     }
 
 private:
+    static std::string NormalizeOutputDir(const std::string& outputDir) {
+        std::string normalized = outputDir;
+        if (normalized.empty()) {
+            normalized = ".";
+        }
+        if (!normalized.empty() && normalized.back() != '/') {
+            normalized += '/';
+        }
+        return normalized;
+    }
+
+    bool GetRecordingState(std::string* outDir = nullptr) const {
+        bool enabled = recordingEnabled_.load();
+        if (enabled && outDir != nullptr) {
+            std::lock_guard<std::mutex> lock(recordingMtx_);
+            *outDir = recordingOutputDir_;
+        }
+        return enabled;
+    }
+
     void ImuOnlineCapture() {
         // IMU producer thread: read data from SDK and push to queue
         // CSV/MCAP writing is handled by the separate ImuCsvWriterThread
 
-#if ENABLE_IMU_MCAP
-        std::string mcapPath = outputDir_ + "fays_imu_data.mcap";
-        if (!mImuLogger_.Open(mcapPath)) {
-            std::cerr << "Error: Could not create IMU MCAP file: " << mcapPath << std::endl;
-        } else {
-            std::cout << "[IMU MCAP] Logging to " << mcapPath << std::endl;
-        }
-#endif
-
         AtrakIMU imuData;
         // Threshold: 2ms gap at 1000Hz means missing at least 1 frame
         const uint64_t IMU_THRESHOLD_NS = 10000000;
-        uint64_t imuReadCount = 0;
+#if ENABLE_IMU_MCAP
+        bool mcapOpened = false;
+#endif
 
         while (mbIsRunning_) {
             bool gotData = false;
             // Drain all available IMU data in a tight loop
             while (FAYS_VIK_GetImuData(mptrHandle_, &imuData) == EXIT_SUCCESS) {
                 gotData = true;
-                imuReadCount++;
 
                 // Lightweight gap detection (counter only, no expensive cout)
                 if (lastImuTimestamp_ != 0) {
@@ -457,17 +517,26 @@ private:
                 imuQueue_.Push(imuData);
 
 #if ENABLE_IMU_MCAP
-                mImuLogger_.Log(imuData);
+                std::string outputDir;
+                bool shouldRecord = GetRecordingState(&outputDir);
+                if (shouldRecord && !mcapOpened) {
+                    std::string mcapPath = outputDir + "fays_imu_data.mcap";
+                    if (!mImuLogger_.Open(mcapPath)) {
+                        std::cerr << "Error: Could not create IMU MCAP file: " << mcapPath << std::endl;
+                    } else {
+                        std::cout << "[IMU MCAP] Logging to " << mcapPath << std::endl;
+                        mcapOpened = true;
+                    }
+                } else if (!shouldRecord && mcapOpened) {
+                    mImuLogger_.Flush();
+                    mcapOpened = false;
+                }
+
+                if (shouldRecord && mcapOpened) {
+                    mImuLogger_.Log(imuData);
+                }
 #endif
             }
-
-            // Periodic summary report (every ~5 seconds at 1000Hz)
-            // if (imuReadCount > 0 && imuReadCount % 5000 == 0) {
-            //     std::cout << "[IMU] Read: " << imuReadCount
-            //               << ", Gaps: " << imuGapCount_
-            //               << ", Rollbacks: " << imuRollbackCount_
-            //               << ", Queue: " << imuQueue_.Size() << std::endl;
-            // }
 
             // Only sleep when SDK has no more data available
             if (!gotData) {
@@ -475,48 +544,69 @@ private:
             }
         }
 
+#if ENABLE_IMU_MCAP
+        if (mcapOpened) {
+            mImuLogger_.Flush();
+        }
+#endif
+
         // Signal the queue to unblock the consumer thread
         imuQueue_.NotifyStop();
     }
 
 #if ENABLE_IMU_CSV
     void ImuCsvWriterThread() {
-        // IMU consumer thread: drain queue and write to CSV file
-
-        std::string csvPath = outputDir_ + "fays_imu_data.csv";
-        if (!mImuCsvLogger_.Open(csvPath)) {
-            std::cerr << "Error: Could not create IMU CSV file: " << csvPath << std::endl;
-            return;
-        }
-        std::cout << "[IMU CSV] Logging to " << csvPath << std::endl;
+        // IMU consumer thread: always drain queue; write only while recording is enabled.
 
         std::vector<AtrakIMU> batch;
         batch.reserve(256);
         uint64_t totalWritten = 0;
         uint64_t flushCounter = 0;
+        bool imuCsvOpen = false;
 
         // Keep running until stopped AND queue is fully drained
         while (mbIsRunning_ || !imuQueue_.Empty()) {
             size_t count = imuQueue_.DrainTo(batch, 256);
-            if (count > 0) {
-                for (const auto& imu : batch) {
-                    mImuCsvLogger_.Log(imu);
+            std::string outputDir;
+            bool shouldRecord = GetRecordingState(&outputDir);
+
+            if (shouldRecord && !imuCsvOpen) {
+                std::string csvPath = outputDir + "fays_imu_data.csv";
+                if (!mImuCsvLogger_.Open(csvPath)) {
+                    std::cerr << "Error: Could not create IMU CSV file: " << csvPath << std::endl;
+                } else {
+                    std::cout << "[IMU CSV] Logging to " << csvPath << std::endl;
+                    imuCsvOpen = true;
                 }
-                totalWritten += count;
-                flushCounter += count;
+            } else if (!shouldRecord && imuCsvOpen) {
+                mImuCsvLogger_.Flush();
+                mImuCsvLogger_.Close();
+                imuCsvOpen = false;
+                flushCounter = 0;
+            }
+
+            if (count > 0) {
+                if (shouldRecord && imuCsvOpen) {
+                    for (const auto& imu : batch) {
+                        mImuCsvLogger_.Log(imu);
+                    }
+                    totalWritten += count;
+                    flushCounter += count;
+                }
                 batch.clear();
 
-                // Periodic flush every ~1000 frames (~1 second at 1000Hz)
-                if (flushCounter >= 1000) {
+                // Periodic flush every ~1000 frames (~1 second at 1000Hz) while recording.
+                if (imuCsvOpen && flushCounter >= 1000) {
                     mImuCsvLogger_.Flush();
                     flushCounter = 0;
                 }
             }
-            // DrainTo already waits with timeout when queue is empty
         }
 
-        // Final flush to ensure all data is written to disk
-        mImuCsvLogger_.Flush();
+        if (imuCsvOpen) {
+            mImuCsvLogger_.Flush();
+            mImuCsvLogger_.Close();
+        }
         std::cout << "[IMU CSV] Writer stopped. Total written: " << totalWritten << " frames." << std::endl;
     }
 #endif
@@ -527,13 +617,9 @@ private:
 
         const int RECORD_FPS = 50; // 假设帧率为30，根据实际相机配置调整
         const uint64_t VIDEO_THRESHOLD_NS = 60000000;  // 3 * (1.0 / RECORD_FPS) * 1e9 = 60ms in nanoseconds
-        bool isInitialized = false;
+        bool videoSessionOpen = false;
         long frameIndex = 0;
-
-        // 打开 CSV 文件
-        if (!mCsvLogger_.Open(outputDir_ + "fays_stereo_timestamp.csv")) {
-            std::cerr << "Error: Could not create timestamp CSV file." << std::endl;
-        }
+        std::string sessionOutputDir;
 
         std::cout << "[Record] Waiting for Stereo frames..." << std::endl;
 
@@ -564,32 +650,50 @@ private:
                 int type = (mImgData_.channel == 1) ? CV_8UC1 : CV_8UC3;
                 cv::Mat img(mImgData_.height, mImgData_.width, type, mImgData_.data);
 
-                // 2. 初始化录制 (第一帧执行)
-                if (!isInitialized && img.cols > 0 && img.rows > 0) {
-                    bool isColor = (img.channels() == 3);
-                    std::cout << "[Record] Input Info: " << img.cols << "x" << img.rows 
-                              << " Channels: " << img.channels() << std::endl;
-                    
-                    if (mRecorder_.Start(outputDir_ + "fays_stereo_output.mkv", img.cols, img.rows, RECORD_FPS, isColor)) {
-                        isInitialized = true;
-                    }
-                }
+                std::string outputDir;
+                bool shouldRecord = GetRecordingState(&outputDir);
 
-                // 3. 写入数据
-                if (isInitialized) {
-                    // 写入视频帧 (包含左右目)
-                    mRecorder_.Write(img);
-                    
-                    // 写入 CSV (使用 SDK 返回的硬件时间戳)
-                    mCsvLogger_.Log(frameIndex, mImgData_.timestamp);
-
-                    frameIndex++;
-                    if (frameIndex % 300 == 0) {
-                        std::cout << "[Record] Saved " << frameIndex << " frames. Latest TS: " << mImgData_.timestamp << "\n";
+                if (shouldRecord) {
+                    if (!videoSessionOpen && img.cols > 0 && img.rows > 0) {
+                        bool isColor = (img.channels() == 3);
+                        std::cout << "[Record] Input Info: " << img.cols << "x" << img.rows
+                                  << " Channels: " << img.channels() << std::endl;
+                        if (!mCsvLogger_.Open(outputDir + "fays_stereo_timestamp.csv")) {
+                            std::cerr << "Error: Could not create timestamp CSV file." << std::endl;
+                        }
+                        if (mRecorder_.Start(outputDir + "fays_stereo_output.mkv", img.cols, img.rows, RECORD_FPS, isColor)) {
+                            sessionOutputDir = outputDir;
+                            videoSessionOpen = true;
+                            frameIndex = 0;
+                        }
                     }
+
+                    if (videoSessionOpen) {
+                        mRecorder_.Write(img);
+                        mCsvLogger_.Log(frameIndex, mImgData_.timestamp);
+
+                        frameIndex++;
+                        if (frameIndex % 300 == 0) {
+                            std::cout << "[Record] Saved " << frameIndex
+                                      << " frames to " << sessionOutputDir
+                                      << " . Latest TS: " << mImgData_.timestamp << "\n";
+                        }
+                    }
+                } else if (videoSessionOpen) {
+                    mRecorder_.Stop();
+                    mCsvLogger_.Flush();
+                    mCsvLogger_.Close();
+                    videoSessionOpen = false;
+                    sessionOutputDir.clear();
                 }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        if (videoSessionOpen) {
+            mRecorder_.Stop();
+            mCsvLogger_.Flush();
+            mCsvLogger_.Close();
         }
     }
 
@@ -603,7 +707,9 @@ private:
 
     AtrakImage mImgData_;
     std::atomic<bool> mbIsRunning_;
-    std::string outputDir_;
+    std::atomic<bool> recordingEnabled_;
+    mutable std::mutex recordingMtx_;
+    std::string recordingOutputDir_;
 
     FFmpegRecorder mRecorder_;
     TimestampLogger mCsvLogger_;
@@ -633,50 +739,143 @@ void signalHandler(int signal) {
     }
 }
 
+static std::string Trim(const std::string& input) {
+    const std::string whitespace = " \t\r\n";
+    size_t start = input.find_first_not_of(whitespace);
+    if (start == std::string::npos) {
+        return "";
+    }
+    size_t end = input.find_last_not_of(whitespace);
+    return input.substr(start, end - start + 1);
+}
+
+static bool EnsureControlFifo(const std::string& fifoPath) {
+    struct stat st {};
+    if (stat(fifoPath.c_str(), &st) == 0) {
+        if (!S_ISFIFO(st.st_mode)) {
+            std::cerr << "[Control] Path exists but is not FIFO: " << fifoPath << std::endl;
+            return false;
+        }
+        return true;
+    }
+
+    if (mkfifo(fifoPath.c_str(), 0666) != 0) {
+        if (errno == EEXIST) {
+            return true;
+        }
+        std::cerr << "[Control] Failed to create FIFO " << fifoPath
+                  << ": " << std::strerror(errno) << std::endl;
+        return false;
+    }
+    return true;
+}
+
+static void RunControlLoop(FaysRecorder& recorder, const std::string& fifoPath) {
+    std::cout << "[Control] Entering command loop. FIFO: " << fifoPath << std::endl;
+    std::cout << "[Control] Supported commands: START|<output_dir>, STOP, EXIT" << std::endl;
+
+    while (recorder.IsRunning()) {
+        int fd = open(fifoPath.c_str(), O_RDONLY);
+        if (fd < 0) {
+            std::cerr << "[Control] Failed to open FIFO: " << std::strerror(errno) << std::endl;
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
+        FILE* stream = fdopen(fd, "r");
+        if (stream == nullptr) {
+            std::cerr << "[Control] fdopen failed: " << std::strerror(errno) << std::endl;
+            close(fd);
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            continue;
+        }
+
+        char buffer[1024];
+        while (recorder.IsRunning() && fgets(buffer, sizeof(buffer), stream) != nullptr) {
+            std::string cmd = Trim(buffer);
+            if (cmd.empty()) {
+                continue;
+            }
+
+            if (cmd.rfind("START|", 0) == 0) {
+                std::string outputDir = Trim(cmd.substr(6));
+                if (outputDir.empty()) {
+                    std::cerr << "[Control] START command missing output directory." << std::endl;
+                    continue;
+                }
+                recorder.StartRecording(outputDir);
+            } else if (cmd == "STOP") {
+                recorder.StopRecordingSession();
+            } else if (cmd == "EXIT") {
+                recorder.Stop();
+                break;
+            } else {
+                std::cerr << "[Control] Unknown command: " << cmd << std::endl;
+            }
+        }
+
+        fclose(stream);
+    }
+}
+
 int main(int argc, char** argv) {
     if (argc < 2) {
-        std::cerr << "Usage: ./app <config_path> [output_directory]" << std::endl;
-        std::cerr << "  - config_path: Path to configuration YAML file" << std::endl;
-        std::cerr << "  - output_directory: (Optional) Output directory for data files (default: current directory)" << std::endl;
+        std::cerr << "Usage:" << std::endl;
+        std::cerr << "  ./fays_record_example <config_path> [output_directory]" << std::endl;
+        std::cerr << "  ./fays_record_example <config_path> --control-fifo <fifo_path>" << std::endl;
         return 1;
     }
 
-    // Parse output directory argument
+    std::string configPath = argv[1];
+    bool controlMode = false;
     std::string outputDir = ".";
-    if (argc > 2) {
+    std::string controlFifoPath;
+
+    if (argc >= 4 && std::string(argv[2]) == "--control-fifo") {
+        controlMode = true;
+        controlFifoPath = argv[3];
+    } else if (argc >= 3) {
         outputDir = argv[2];
-    } else {
-        std::cout << "Warning: No output directory provided, using current directory." << std::endl;
-    }
-     // 确保输出目录以 '/' 结尾
-     if (!outputDir.empty() && outputDir.back() != '/') {
-        outputDir += "/";
     }
 
     // Register signal handlers
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
-    FaysRecorder recorder(argv[1], outputDir);
-    
+    FaysRecorder recorder(configPath.c_str());
+
     // Set global pointer for signal handler access
     g_recorder = &recorder;
 
-    std::cout << "========================================" << std::endl;
-    std::cout << "   Stereo Recorder (Headless) Started" << std::endl;
-    std::cout << "   Video: " << outputDir << "fays_stereo_output.mkv" << std::endl;
-    std::cout << "   Time : " << outputDir << "fays_stereo_timestamp.csv" << std::endl;
+    if (controlMode) {
+        if (!EnsureControlFifo(controlFifoPath)) {
+            g_recorder = nullptr;
+            return 1;
+        }
+        RunControlLoop(recorder, controlFifoPath);
+    } else {
+        recorder.StartRecording(outputDir);
+        std::string normalizedOutputDir = outputDir;
+        if (!normalizedOutputDir.empty() && normalizedOutputDir.back() != '/') {
+            normalizedOutputDir += "/";
+        }
+
+        std::cout << "========================================" << std::endl;
+        std::cout << "   Stereo Recorder (Headless) Started" << std::endl;
+        std::cout << "   Video: " << normalizedOutputDir << "fays_stereo_output.mkv" << std::endl;
+        std::cout << "   Time : " << normalizedOutputDir << "fays_stereo_timestamp.csv" << std::endl;
 #if ENABLE_IMU_MCAP
-    std::cout << "   IMU MCAP: " << outputDir << "fays_imu_data.mcap" << std::endl;
+        std::cout << "   IMU MCAP: " << normalizedOutputDir << "fays_imu_data.mcap" << std::endl;
 #endif
 #if ENABLE_IMU_CSV
-    std::cout << "   IMU CSV : " << outputDir << "fays_imu_data.csv" << std::endl;
+        std::cout << "   IMU CSV : " << normalizedOutputDir << "fays_imu_data.csv" << std::endl;
 #endif
-    std::cout << "   Press Ctrl+C to stop recording" << std::endl;
-    std::cout << "========================================" << std::endl;
+        std::cout << "   Press Ctrl+C to stop recording" << std::endl;
+        std::cout << "========================================" << std::endl;
 
-    while (recorder.IsRunning()) {
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        while (recorder.IsRunning()) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        }
     }
 
     // Clear global pointer before recorder is destroyed
