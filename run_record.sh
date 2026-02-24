@@ -730,6 +730,13 @@ record_audio() {
     local monitor_gpio=${3:-""}
     local timestamp=$(date +%Y%m%d_%H%M%S)
     local temp_file="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}.wav"
+    local capture_file="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}_capture.wav"
+    local ch1_file="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}_ch1.wav"
+    local ch2_file="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}_ch2.wav"
+    local ch1_denoised="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}_ch1_denoised.wav"
+    local ch2_denoised="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}_ch2_denoised.wav"
+    local mono_mix_file="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}_mono_mix.wav"
+    local noise_profile="$script_dir/audio/noise.prof"
     
     echo "[INFO]:Starting $audio_type audio recording (Mode: $mode)..."
     if [ "$audio_type" = "pre" ]; then
@@ -738,7 +745,7 @@ record_audio() {
         notify_audio "post_audio_recording"
     fi
     
-    arecord -D hw:rockchipes8388,0 -f cd -r 44100 -c 2 -t wav "$temp_file.raw" &
+    arecord -D hw:rockchipes8388,0 -f cd -r 44100 -c 2 -t wav "$capture_file" &
     local arecord_pid=$!
 
     if [ "$mode" != "hold" ]; then
@@ -750,7 +757,7 @@ record_audio() {
         echo "[ERROR]:Mode $mode requires GPIO monitor line."
         kill $arecord_pid 2>/dev/null
         wait $arecord_pid 2>/dev/null
-        rm -f "$temp_file.raw"
+        rm -f "$capture_file"
         notify_audio "audio_recording_stop"
         return 1
     fi
@@ -768,10 +775,26 @@ record_audio() {
     # 等待录音进程完全结束
     wait $arecord_pid 2>/dev/null
     
-    # 降噪处理
-    if [ -f "$temp_file.raw" ]; then
-        sox "$temp_file.raw" "$temp_file" remix 2 noisered "$script_dir/audio/noise.prof" 0.15 remix 1 1 norm
-        rm -f "$temp_file.raw"
+    # 降噪处理：左右声道分别降噪，再叠加为单声道，最后复制为双声道输出。
+    if [ -s "$capture_file" ]; then
+        if [ -f "$noise_profile" ] \
+            && sox "$capture_file" "$ch1_file" remix 1 \
+            && sox "$capture_file" "$ch2_file" remix 2 \
+            && sox "$ch1_file" "$ch1_denoised" noisered "$noise_profile" 0.15 \
+            && sox "$ch2_file" "$ch2_denoised" noisered "$noise_profile" 0.15 \
+            && sox -m -v 0.5 "$ch1_denoised" -v 0.5 "$ch2_denoised" "$mono_mix_file" \
+            && sox "$mono_mix_file" "$temp_file" remix 1 1 norm; then
+            echo "[INFO]:Audio denoise and channel merge completed."
+        else
+            echo "[WARNING]:Denoise pipeline failed or noise profile missing, fallback to direct normalization."
+            if ! sox "$capture_file" "$temp_file" norm; then
+                echo "[ERROR]:Audio post-process failed."
+                rm -f "$capture_file" "$ch1_file" "$ch2_file" "$ch1_denoised" "$ch2_denoised" "$mono_mix_file"
+                notify_audio "audio_recording_stop"
+                return 1
+            fi
+        fi
+        rm -f "$capture_file" "$ch1_file" "$ch2_file" "$ch1_denoised" "$ch2_denoised" "$mono_mix_file"
     else
         echo "[WARNING]:No audio data recorded"
         return 1
