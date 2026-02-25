@@ -201,12 +201,12 @@ if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
         fi
 
         if [ "$GPIO_VALID" = true ]; then
-            if [ "$(gpioget "$GPIO_UP_LINE")" -eq "$BTN_ACTIVE_LEVEL" ]; then
+            if [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
                 GPIO_VALID=false
                 gpio_error_msg+=" $PIN_BTN_UP active on startup;"
             fi
 
-            if [ "$(gpioget "$GPIO_DOWN_LINE")" -eq "$BTN_ACTIVE_LEVEL" ]; then
+            if [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
                 GPIO_VALID=false
                 gpio_error_msg+=" $PIN_BTN_DOWN active on startup;"
             fi
