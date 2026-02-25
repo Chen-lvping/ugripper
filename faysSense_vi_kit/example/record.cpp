@@ -390,7 +390,7 @@ private:
         const std::string version = FAYS_VIK_GetVersion(mptrHandle_);
         std::cout << "[SDK] Version: " << version << std::endl;
 
-        const int RECORD_FPS = 50;
+        const int RECORD_FPS = 25;
         const uint64_t VIDEO_THRESHOLD_NS = 60000000;
         bool videoSessionOpen = false;
         uint32_t frameIndex = 0;
