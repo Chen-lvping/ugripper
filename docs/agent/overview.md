@@ -202,6 +202,7 @@
 - 关键硬件映射：
   - `/dev/cam_main`, `/dev/left_tcam`, `/dev/right_tcam`
   - FaysSense FTDI 设备对应 `/dev/video*`（运行时自动探测）
+  - Fays FTDI 权限规则由 `camera_record/99-fixed-usb-map.rules` 提供，当前设备按 `VID:PID=0403:602e` 放开 `video4linux`/`usb` 访问权限。
   - `/dev/ttyS2`(IMU), `/dev/ttyS7`(Encoder)
   - 音频卡：`rockchipes8388`
   - 按键：`PIN_36`（上），`PIN_38`（下）
