@@ -14,20 +14,78 @@ MOUNT_POINT="/mnt/usb_updater_tmp"
 LOG_FILE="/var/log/ugripper/usb_auto_update.log"
 LOCK_FILE="/run/usb_auto_update.lock"
 
+# 升级保护锁：安装期间用于抑制 network monitor 的重启/二次触发
+UPGRADE_GUARD_FILE="/run/ugripper_installing_from_usb.lock"
+NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
+
 # 是否强制要求 “触发设备 == 固定口 by-path”
 ENFORCE_BY_PATH="0"   # 1=强制校验；0=不校验
 # ===========================================
 
 mkdir -p "$(dirname "$LOG_FILE")"
 
+IN_UPGRADE_WINDOW=0
+
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+stop_service_fast() {
+  local service_name="$1"
+  local timeout_sec="${2:-6}"
+
+  timeout "${timeout_sec}s" systemctl stop "$service_name" >/dev/null 2>&1 || true
+
+  if systemctl is-active --quiet "$service_name"; then
+    log "服务 $service_name 停止超时，执行 kill。"
+    systemctl kill "$service_name" >/dev/null 2>&1 || true
+  fi
+}
+
+stop_record_stack_fast() {
+  stop_service_fast "ugripper.service" 6
+
+  # 兜底：防止旧 run_record/音频/灯光进程在安装窗口残留
+  if command -v pkill >/dev/null 2>&1; then
+    pkill -TERM -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
+    pkill -TERM -f 'led_manager.py' >/dev/null 2>&1 || true
+    pkill -TERM -f 'audio/audio_play.py' >/dev/null 2>&1 || true
+    sleep 0.3
+    pkill -KILL -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
+    pkill -KILL -f 'led_manager.py' >/dev/null 2>&1 || true
+    pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
+  fi
+
+  rm -f /tmp/umi_audio_pipe /tmp/umi_led_pipe /tmp/umi_recording.lock || true
+}
+
+enter_upgrade_window() {
+  if [ "$IN_UPGRADE_WINDOW" -eq 1 ]; then
+    return
+  fi
+
+  log "进入升级保护窗口：创建 guard 并暂停 network monitor。"
+  touch "$UPGRADE_GUARD_FILE"
+  stop_service_fast "$NETWORK_MONITOR_SERVICE" 4
+  IN_UPGRADE_WINDOW=1
+}
+
+leave_upgrade_window() {
+  if [ "$IN_UPGRADE_WINDOW" -eq 0 ]; then
+    return
+  fi
+
+  rm -f "$UPGRADE_GUARD_FILE"
+  systemctl start "$NETWORK_MONITOR_SERVICE" >/dev/null 2>&1 || true
+  IN_UPGRADE_WINDOW=0
+  log "退出升级保护窗口。"
 }
 
 cleanup() {
   if mountpoint -q "$MOUNT_POINT"; then
     umount "$MOUNT_POINT" || true
   fi
+  leave_upgrade_window
 }
 trap cleanup EXIT
 
@@ -103,14 +161,13 @@ UPDATER_DEB="$(find "$MOUNT_POINT" -maxdepth 1 -type f -name "${UPDATER_PREFIX}.
 
 if [ -n "${UPDATER_DEB:-}" ]; then
   log "发现 Updater 自身更新包：$UPDATER_DEB，开始自我更新..."
-  # 停止应用 方便指示灯显示
-  systemctl stop ugripper.service || true
+  enter_upgrade_window
+  stop_record_stack_fast
 
   # 注意：在 Linux 中，Bash 脚本运行时文件被删除或替换（dpkg 会做原子替换），
   # 当前运行的进程仍持有旧文件的 inode 句柄，因此会继续执行旧脚本剩下的逻辑直到结束。
   # 这是安全的，新逻辑将在下一次触发时生效。
   if dpkg -i --force-overwrite "$UPDATER_DEB"; then
-    systemctl start ugripper.service || true
     log "Updater 自我更新成功。"
   else
     log "Updater 自我更新失败 (dpkg error)，将尝试继续后续业务更新。"
@@ -124,13 +181,18 @@ fi
 # ========================================================
 DEB_FILE="$(find "$MOUNT_POINT" -maxdepth 1 -type f -name "${DEB_PREFIX}*.deb" | head -n 1 || true)"
 if [ -z "${DEB_FILE:-}" ]; then
+  if [ "$IN_UPGRADE_WINDOW" -eq 1 ]; then
+    # 仅升级 updater 时，恢复主服务
+    systemctl start ugripper.service >/dev/null 2>&1 || true
+  fi
   log "未发现更新包（匹配 ${DEB_PREFIX}*.deb），跳过。"
   exit 0
 fi
 
 log "发现更新包：$DEB_FILE，开始安装..."
-# 停止应用
-systemctl stop ugripper.service || true
+enter_upgrade_window
+stop_record_stack_fast
+
 # 安装更新包
 if dpkg -i --force-overwrite "$DEB_FILE"; then
   log "安装/更新成功。"

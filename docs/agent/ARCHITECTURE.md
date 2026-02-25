@@ -56,15 +56,18 @@
   - 停止主服务。
   - 启动 LED/音频提示。
   - 执行 `build/src/sensor_recorder/zeroing`。
-- `auto_calibration/monitor_network.sh` 仍常驻监听 `end0` 网线插拔，但仅负责存储处理与 `ugripper.service` 重启，不再触发校准。
+- `auto_calibration/monitor_network.sh` 仍常驻监听 `end0` 网线插拔，但仅负责 `ugripper.service` 重启，不再触发校准。
+- 升级期间若检测到 `/run/ugripper_installing_from_usb.lock`，network monitor 跳过插拔动作，避免升级中的伪上升沿与二次触发。
 
 ### 3.2 时间同步
 - `ugripper-ptp-monitor.service`：运行 `time_sync/ptp_monitor.sh`，持续写 `/dev/shm/umi_ptp_status`。
 - `ugripper-ntp-sync.service`：运行 `time_sync/safe_ntp_sync.sh`，仅在无录制锁（`/tmp/umi_recording.lock`）时短暂开 NTP。
-- `postinst` 按 `DEVICE_SIDE` 生成并启用 `ptp4l.service`、`phc2sys.service`。
+- `postinst` 按 `DEVICE_SIDE` 生成并启用 `ptp4l.service`、`phc2sys.service`，并对 PTP 启动执行重试检查。
+- `postinst/prerm` 均采用“短超时 stop + kill 兜底”清理旧录制/音频/灯光进程，避免升级后残留占用。
 
 ### 3.3 自动更新与自愈
 - `auto_update/99-usb-auto-update.rules` + `usb-auto-update@.service`：U 盘插入自动触发统一入口脚本（先判定 `calibration.txt` 是否触发校准，再进入升级逻辑）。
+- 升级窗口内 `usb_auto_update.sh` 会创建 `/run/ugripper_installing_from_usb.lock`，暂停 network monitor，并在结束后恢复。
 - `auto_update/boot_check_install.sh` + `ugripper-boot-install.service`：开机检测主包缺失时从 `/opt/backup` 自恢复。
 
 ### 3.4 关机权限隔离
@@ -95,6 +98,7 @@
 - `/dev/shm/umi_ptp_status`：PTP 监控 JSON。
 - `/tmp/umi_led_pipe`, `/tmp/umi_audio_pipe`：状态通知 FIFO。
 - `/tmp/umi_fays_cmd`：FaysSense 常驻进程命令 FIFO（`START|...`/`STOP`/`EXIT`）。
+- `/run/ugripper_installing_from_usb.lock`：升级保护锁。
 
 ## 5. 构建与打包链路（`build_deb.sh`）
 
@@ -123,10 +127,10 @@
 - 打包产物：`ugripper_<VERSION>_arm64.deb`。
 
 ### 5.3 安装后行为（postinst）
+- 安装窗口先快速停止 `ugripper.service` 并清理残留录制/音频/灯光进程（短超时 + kill 兜底）。
 - 配置 `end0` 静态 IP（Right=`192.168.1.100`, Left=`192.168.1.101`）。
-- 启用 PTP/NTP 监控相关服务。
-- 启用网络监控、关机触发 path/service。
-- 重新加载 udev 规则并重启 `ugripper.service`。
+- 重建并启动 PTP 栈（`ptp4l`/`phc2sys`）并执行重试检查。
+- 重新加载 udev 规则（不触发 `block add`），重启 `ugripper.service`，最后启动 network monitor 与关机触发 path/service。
 
 ## 6. 依赖与硬件约束
 - 系统依赖：`linuxptp`, `netcat-openbsd`, `jq`, `sox`, `alsa-utils`, `libserialport`, `uv`。

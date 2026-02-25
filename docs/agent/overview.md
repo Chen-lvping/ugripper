@@ -20,6 +20,7 @@
 | FaysSense 常驻录制（C++ + Shell） | `faysSense_vi_kit/scripts/run_fays_record.sh`, `faysSense_vi_kit/example/record.cpp` | 开机后常驻占用相机并预热；录制时通过命令触发写文件，停止时仅停写不退出进程。 |
 | 反馈通道 | `led_manager.py`, `audio/audio_play.py` | 通过 FIFO (`/tmp/umi_led_pipe`, `/tmp/umi_audio_pipe`) 播放灯光/音频状态。 |
 | 打包脚本 | `build_deb.sh` | 根目录 CMake 构建 + deb 组包 + systemd/udev 安装资源注入。 |
+| 发布收尾自动化（Skill） | `.codex/skills/auto-release-deb/scripts/auto_release_deb.sh` | 代码修改后自动升级 `build_deb.sh` 版本（默认 +.z，显式指定才 +.x/+ .y），并自动选择是否使用 `-q` 打包。 |
 
 ## 3. 运行时架构
 
@@ -132,6 +133,7 @@
 - `/dev/shm/umi_ptp_status`：PTP 监控输出 JSON（state/offset/path_delay/sys_offset）。
 - `/tmp/umi_led_pipe`, `/tmp/umi_audio_pipe`：跨进程状态通知 FIFO。
 - `/tmp/umi_fays_cmd`：FaysSense 常驻录制命令 FIFO。
+- `/run/ugripper_installing_from_usb.lock`：U 盘升级保护锁；存在时 network monitor 跳过插拔重启动作。
 
 ## 6. 构建、打包与安装
 
@@ -163,12 +165,22 @@
 
 ### 6.3 安装/卸载脚本关键动作
 - `pack_script/postinst`：
-  - 配置 `end0` 静态 IP（Right=`192.168.1.100`, Left=`192.168.1.101`）
-  - 生成并启用 `ptp4l.service`, `phc2sys.service`
-  - 启用 `ugripper-ptp-monitor.service`, `ugripper-ntp-sync.service`, `ugripper-network-monitor.service`
-  - 启用 `umi-shutdown-trigger.path/.service`
-  - reload udev 规则并重启主服务
-- `pack_script/prerm`：禁用以上服务并清理动态生成配置。
+  - 安装窗口先快速停止 `ugripper.service` 并清理残留 `run_record/led/audio` 进程（短超时 + kill 兜底）。
+  - 配置 `end0` 静态 IP（Right=`192.168.1.100`, Left=`192.168.1.101`）。
+  - 生成并启用 `ptp4l.service`, `phc2sys.service`，并对 PTP 启动执行重试检查。
+  - 启用 `ugripper-ptp-monitor.service`, `ugripper-ntp-sync.service`。
+  - 启用 `umi-shutdown-trigger.path/.service`。
+  - reload udev 规则但不再触发 `block add`，最后重启主服务与 `ugripper-network-monitor.service`。
+- `pack_script/prerm`：先快速停止相关服务与残留录制/音频进程，再禁用并清理动态生成配置。
+
+### 6.4 开发发布自动化（Skill）
+- 入口脚本：`.codex/skills/auto-release-deb/scripts/auto_release_deb.sh`。
+- 版本规则：默认仅升级 `build_deb.sh` 的 `.z`（patch）；仅当调用方显式指定 `--bump .y` 或 `--bump .x` 时，才升级 `.y/.x`。
+- changelog：由 `add-feature` 流程维护，聚焦软件功能改动，条目保持简洁。
+- 构建模式自动选择：
+  - 若检测到 C/C++/CMake 改动，执行标准模式 `./build_deb.sh`。
+  - 若无上述改动且关键二进制齐全，执行 Quick 模式 `./build_deb.sh -q`。
+  - 若关键二进制缺失，自动回退标准模式。
 
 ## 7. 支撑服务（运维链路）
 | 领域 | 关键文件 | 触发方式 | 说明 |
@@ -176,8 +188,8 @@
 | 自动校准 | `auto_calibration/run_calibration.sh`, `src/sensor_recorder/src/zeroing.cpp` | 插入 `usb_update_stick` 且 U 盘根目录存在 `calibration.txt` 时触发 | 停主服务后执行 Encoder 归零流程。 |
 | PTP 监控 | `time_sync/ptp_monitor.sh` | `ugripper-ptp-monitor.service` 常驻 | 持续写 `/dev/shm/umi_ptp_status`。 |
 | 安全 NTP | `time_sync/safe_ntp_sync.sh` | `ugripper-ntp-sync.service` | 仅在无录制锁时短暂开 NTP 同步后关闭。 |
-| U 盘升级 | `auto_update/usb_auto_update.sh` + udev rule | 插盘触发 `usb-auto-update@.service` | 若存在 `calibration.txt` 则优先触发校准，否则执行升级流程。 |
-| 网线监控 | `auto_calibration/monitor_network.sh` | `ugripper-network-monitor.service` 常驻 | 网线插拔时处理存储与 `ugripper.service` 重启，不再触发校准。 |
+| U 盘升级 | `auto_update/usb_auto_update.sh` + udev rule | 插盘触发 `usb-auto-update@.service` | 若存在 `calibration.txt` 则优先触发校准，否则执行升级；升级期间创建 guard 文件并暂停 network monitor，安装后自动恢复。 |
+| 网线监控 | `auto_calibration/monitor_network.sh` | `ugripper-network-monitor.service` 常驻 | 网线插拔时处理 `ugripper.service` 重启；检测到升级 guard 时跳过插拔动作，避免升级竞态。 |
 | 开机自愈 | `auto_update/boot_check_install.sh` | `ugripper-boot-install.service` | 主包缺失时从 `/opt/backup` 自动恢复。 |
 
 ## 8. 依赖与硬件约束
