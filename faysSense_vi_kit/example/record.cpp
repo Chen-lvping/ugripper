@@ -181,7 +181,8 @@ public:
         }
 
         std::stringstream cmd;
-        cmd << "ffmpeg -y ";
+        // Keep ffmpeg output minimal: suppress banner/progress spam in system logs.
+        cmd << "ffmpeg -hide_banner -loglevel error -nostats -y ";
 
         std::string pixFmt = isColor ? "bgr24" : "gray";
 
