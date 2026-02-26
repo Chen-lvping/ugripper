@@ -86,6 +86,7 @@ FAYS_USB_PRESENT=false                # 最近一次检测到的 Fays FTDI USB �
 FAYS_RECORDING_ACTIVE=false           # 当前是否已向 Fays 下发 START
 FAYS_LAST_MONITOR_TS=0                # Fays 热插拔监控节流时间戳（秒）
 CLEANUP_RUNNING=false                 # 防止 cleanup trap 重入
+LAST_MONITOR_ERROR_MSG=""             # 最近一次硬件检测错误详情（用于去重日志）
 RECORDING_LOCK_FILE="/tmp/umi_recording.lock" # 录制锁文件
 # 启动直接释放锁文件，防止断电导致残留
 rm -f "$RECORDING_LOCK_FILE"
@@ -492,8 +493,13 @@ fi
 # ================= 函数定义 =================
 # 函数：系统健康监测与状态管理
 monitor_system_health() {
+    local is_recording_now=false
     local has_error=false
     local error_msg=""
+
+    if [ -f "$RECORDING_LOCK_FILE" ]; then
+        is_recording_now=true
+    fi
 
     # ===============================
     # 1. 硬件 / 连接错误检测（最高优先级）
@@ -527,12 +533,25 @@ monitor_system_health() {
     # 2. 若存在 ERROR，立刻进入 ERROR
     # ===============================
     if [ "$has_error" = true ]; then
-        if [ "$SYSTEM_HEALTH_STATUS" != "ERROR" ]; then
+        if [ "$SYSTEM_HEALTH_STATUS" != "ERROR" ] || [ "$LAST_MONITOR_ERROR_MSG" != "$error_msg" ]; then
             echo "[ERROR]:[$(date)] MONITOR ERROR:$error_msg"
             set_state "ERROR"
             notify_audio "error"
-            SYSTEM_HEALTH_STATUS="ERROR"
         fi
+        SYSTEM_HEALTH_STATUS="ERROR"
+        LAST_MONITOR_ERROR_MSG="$error_msg"
+        return
+    fi
+
+    LAST_MONITOR_ERROR_MSG=""
+
+    # 录制中仅做硬件错误检测，不切换到 READY/CALIB 状态。
+    if [ "$is_recording_now" = true ]; then
+        if [ "$SYSTEM_HEALTH_STATUS" = "ERROR" ]; then
+            echo "[INFO]:[$(date)] MONITOR RECOVERED during recording."
+            set_state "RECORDING"
+        fi
+        SYSTEM_HEALTH_STATUS="OK"
         return
     fi
 
@@ -591,13 +610,7 @@ monitor_system_health() {
 
 monitor_loop() {
     while true; do
-        # Fays 维护在后台线程执行，避免阻塞主按键轮询。
-        check_and_maintain_fays
-
-        if [ ! -f "$RECORDING_LOCK_FILE" ]; then
-            monitor_system_health
-        fi
-
+        monitor_system_health
         sleep 0.05  # 控制检查频率
     done
 }
@@ -1471,9 +1484,7 @@ else
     echo "[INFO]:Fays FTDI not detected at startup. Running without Fays recording."
 fi
 
-monitor_loop &        # 后台运行硬件监控
-MONITOR_PID=$!
-echo "[INFO]:Hardware monitor PID: $MONITOR_PID"
+echo "[INFO]:Hardware monitor integrated into main loop (no background monitor subprocess)."
 
 if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
     # ================= Slave (Left) 逻辑 =================
@@ -1490,6 +1501,10 @@ if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
 
     # 网络监听循环
     while true; do
+        # Fays 生命周期维护必须在主进程上下文，避免后台子 shell 状态分叉。
+        check_and_maintain_fays
+        monitor_system_health
+
         # 会阻塞执行
         
         # === 网络监听 ===
@@ -1543,6 +1558,10 @@ else
     notify_audio "ready"
 
     while true; do
+        # Fays 生命周期维护必须在主进程上下文，避免后台子 shell 状态分叉。
+        check_and_maintain_fays
+        monitor_system_health
+
         if [ "$DOWN_BUTTON_AVAILABLE" = true ] && [ -n "$GPIO_DOWN_LINE" ] && \
            [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ] && \
            [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
