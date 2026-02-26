@@ -20,6 +20,7 @@ Usage:
 import rosbag
 import rospy
 import cv2
+import numpy as np
 import os
 import sys
 import struct
@@ -43,6 +44,21 @@ IMU_FRAME_ID = "imu_link"
 # =============================================================
 
 bridge = CvBridge()
+
+
+def _ns_to_ros_time(timestamp_ns):
+    """Convert nanosecond timestamp to rospy.Time without float64 precision loss."""
+    secs = int(timestamp_ns // 1_000_000_000)
+    nsecs = int(timestamp_ns % 1_000_000_000)
+    return rospy.Time(secs, nsecs)
+
+
+def _is_gray_bgr(frame):
+    """Check if a BGR frame is actually grayscale (B==G==R for all pixels)."""
+    if len(frame.shape) != 3 or frame.shape[2] != 3:
+        return False
+    b, g, r = frame[:, :, 0], frame[:, :, 1], frame[:, :, 2]
+    return bool(np.array_equal(b, g) and np.array_equal(g, r))
 
 
 def iter_mcap_messages(mcap_file):
@@ -79,67 +95,64 @@ def iter_mcap_messages(mcap_file):
                 yield schema, channel, record
 
 
-def load_timestamps_from_mcap(mcap_file):
+def load_mcap_data(mcap_file):
     """
-    Extract camera frame timestamps from MCAP topic "c".
-    Each message payload is a uint32 frame_index (little-endian, 4 bytes).
-    The message.log_time (nanoseconds) is used as the frame timestamp.
+    Single-pass extraction of both camera timestamps and raw IMU records.
 
-    Returns: dict mapping frame_index -> timestamp_ns
+    Returns:
+        timestamps: dict mapping frame_index -> timestamp_ns  (from topic "c")
+        imu_records: list of (timestamp_ns, payload_bytes)     (from topic "i")
     """
     timestamps = {}
-    print(f"[Timestamps] Extracting camera timestamps from {mcap_file} (topic 'c')...")
+    imu_records = []
+    print(f"[MCAP] Reading {mcap_file} (single pass)...")
 
     for _schema, channel, message in iter_mcap_messages(mcap_file):
-        if channel.topic != "c":
-            continue
+        if channel.topic == "c":
+            if len(message.data) >= 4:
+                frame_index = struct.unpack("<I", message.data[:4])[0]
+                timestamps[frame_index] = message.log_time
+        elif channel.topic == "i":
+            imu_records.append((message.log_time, bytes(message.data)))
 
-        if len(message.data) < 4:
-            continue
-
-        frame_index = struct.unpack("<I", message.data[:4])[0]
-        timestamp_ns = message.log_time
-        timestamps[frame_index] = timestamp_ns
-
-    print(f"[Timestamps] Loaded {len(timestamps)} camera timestamps")
-    if len(timestamps) > 0:
+    print(f"[MCAP] Loaded {len(timestamps)} camera timestamps, {len(imu_records)} IMU samples")
+    if timestamps:
         first_idx = min(timestamps.keys())
         last_idx = max(timestamps.keys())
-        print(f"[Timestamps] Frame range: {first_idx} to {last_idx}")
+        print(f"[MCAP] Cam frame range: {first_idx} to {last_idx}")
         print(
-            f"[Timestamps] First: {timestamps[first_idx]} ns "
+            f"[MCAP] Cam first: {timestamps[first_idx]} ns "
             f"({timestamps[first_idx] * 1e-9:.6f} sec)"
         )
         print(
-            f"[Timestamps] Last:  {timestamps[last_idx]} ns "
+            f"[MCAP] Cam last:  {timestamps[last_idx]} ns "
             f"({timestamps[last_idx] * 1e-9:.6f} sec)"
         )
+    if imu_records:
+        print(
+            f"[MCAP] IMU first: {imu_records[0][0]} ns "
+            f"({imu_records[0][0] * 1e-9:.6f} sec)"
+        )
+        print(
+            f"[MCAP] IMU last:  {imu_records[-1][0]} ns "
+            f"({imu_records[-1][0] * 1e-9:.6f} sec)"
+        )
 
-    return timestamps
+    return timestamps, imu_records
 
 
-def iter_imu_messages(mcap_file):
+def iter_imu_messages(imu_records):
     """
-    Generator that yields (timestamp_ns, topic, Imu msg) for each IMU reading.
-    MCAP topic "i" payload: 6xfloat64 little-endian (gx, gy, gz, ax, ay, az) = 48 bytes.
+    Generator that yields (timestamp_ns, topic, Imu msg) from pre-loaded IMU records.
+    Each record payload: 6xfloat64 little-endian (gx, gy, gz, ax, ay, az) = 48 bytes.
     Falls back to 6xfloat32 (24 bytes) for compatibility.
     """
-    print(f"[IMU] Reading IMU data from {mcap_file} (topic 'i')...")
+    print(f"[IMU] Building {len(imu_records)} IMU messages...")
 
     count = 0
-    first_ts = None
-    last_ts = None
+    for timestamp_ns, payload in imu_records:
+        stamp = _ns_to_ros_time(timestamp_ns)
 
-    for _schema, channel, message in iter_mcap_messages(mcap_file):
-        if channel.topic != "i":
-            continue
-
-        payload = message.data
-        timestamp_ns = message.log_time
-        timestamp_sec = timestamp_ns * 1e-9
-        stamp = rospy.Time.from_sec(timestamp_sec)
-
-        # Parse gyroscope and accelerometer values
         if len(payload) >= 48:
             gx, gy, gz, ax, ay, az = struct.unpack("<6d", payload[:48])
         elif len(payload) >= 24:
@@ -152,32 +165,23 @@ def iter_imu_messages(mcap_file):
         imu.header.stamp = stamp
         imu.header.frame_id = IMU_FRAME_ID
 
-        # Angular velocity (rad/s)
         imu.angular_velocity.x = gx
         imu.angular_velocity.y = gy
         imu.angular_velocity.z = gz
 
-        # Linear acceleration (m/s^2)
         imu.linear_acceleration.x = ax
         imu.linear_acceleration.y = ay
         imu.linear_acceleration.z = az
 
-        # Orientation not available, set to identity quaternion
         imu.orientation.w = 1.0
         imu.orientation.x = 0.0
         imu.orientation.y = 0.0
         imu.orientation.z = 0.0
-
-        if first_ts is None:
-            first_ts = timestamp_ns
-            print(f"[IMU] First timestamp: {timestamp_ns} ns ({timestamp_sec:.6f} sec)")
-        last_ts = timestamp_ns
+        imu.orientation_covariance[0] = -1.0
 
         count += 1
         yield (timestamp_ns, IMU_TOPIC, imu)
 
-    if last_ts:
-        print(f"[IMU] Last timestamp: {last_ts} ns ({last_ts * 1e-9:.6f} sec)")
     print(f"[IMU] Done: {count} IMU messages")
 
 
@@ -201,6 +205,7 @@ def iter_stereo_messages(mkv_file, timestamps_dict):
     frame_idx = 0
     left_count = 0
     right_count = 0
+    is_mono = None
 
     while True:
         ret, frame = cap.read()
@@ -213,20 +218,23 @@ def iter_stereo_messages(mkv_file, timestamps_dict):
             continue
 
         timestamp_ns = timestamps_dict[frame_idx]
-        timestamp_sec = timestamp_ns * 1e-9
-        stamp = rospy.Time.from_sec(timestamp_sec)
+        stamp = _ns_to_ros_time(timestamp_ns)
 
         # Split into top (left camera) and bottom (right camera)
         left_frame = frame[0:half_height, :]
         right_frame = frame[half_height:, :]
 
-        if frame_idx == 0:
+        if is_mono is None:
+            if len(frame.shape) == 2 or frame.shape[2] == 1:
+                is_mono = True
+            else:
+                is_mono = _is_gray_bgr(frame)
             ch = frame.shape[2] if len(frame.shape) > 2 else 1
             print(f"[Stereo] First frame shape: {frame.shape}, channels={ch}")
             print(f"[Stereo] Left: {left_frame.shape}, Right: {right_frame.shape}")
+            print(f"[Stereo] Detected encoding: {'mono8' if is_mono else 'bgr8'}")
 
-        # Determine encoding based on number of channels
-        if len(frame.shape) == 2 or frame.shape[2] == 1:
+        if is_mono:
             encoding = "mono8"
             if len(left_frame.shape) == 3:
                 left_frame = cv2.cvtColor(left_frame, cv2.COLOR_BGR2GRAY)
@@ -281,23 +289,19 @@ def merge_and_write(bag, stereo_iter, imu_iter):
         if stereo_msg is not None and imu_msg is not None:
             if stereo_msg[0] <= imu_msg[0]:
                 ts_ns, topic, msg = stereo_msg
-                stamp = rospy.Time.from_sec(ts_ns * 1e-9)
-                bag.write(topic, msg, stamp)
+                bag.write(topic, msg, _ns_to_ros_time(ts_ns))
                 stereo_msg = next(stereo_iter, None)
             else:
                 ts_ns, topic, msg = imu_msg
-                stamp = rospy.Time.from_sec(ts_ns * 1e-9)
-                bag.write(topic, msg, stamp)
+                bag.write(topic, msg, _ns_to_ros_time(ts_ns))
                 imu_msg = next(imu_iter, None)
         elif stereo_msg is not None:
             ts_ns, topic, msg = stereo_msg
-            stamp = rospy.Time.from_sec(ts_ns * 1e-9)
-            bag.write(topic, msg, stamp)
+            bag.write(topic, msg, _ns_to_ros_time(ts_ns))
             stereo_msg = next(stereo_iter, None)
         else:
             ts_ns, topic, msg = imu_msg
-            stamp = rospy.Time.from_sec(ts_ns * 1e-9)
-            bag.write(topic, msg, stamp)
+            bag.write(topic, msg, _ns_to_ros_time(ts_ns))
             imu_msg = next(imu_iter, None)
 
         total_count += 1
@@ -346,8 +350,8 @@ def main():
 
     rospy.init_node("fays_mcap_mkv_to_rosbag", anonymous=False)
 
-    # Step 1: Extract camera timestamps from MCAP topic "c"
-    timestamps_dict = load_timestamps_from_mcap(mcap_file)
+    # Step 1: Single-pass MCAP extraction (camera timestamps + IMU records)
+    timestamps_dict, imu_records = load_mcap_data(mcap_file)
     if len(timestamps_dict) == 0:
         print("[ERROR] No camera timestamps found in MCAP (topic 'c')!")
         sys.exit(1)
@@ -356,7 +360,7 @@ def main():
 
     # Step 2: Create iterators for stereo images and IMU data
     stereo_iter = iter_stereo_messages(mkv_file, timestamps_dict)
-    imu_iter = iter_imu_messages(mcap_file)
+    imu_iter = iter_imu_messages(imu_records)
 
     # Step 3: Merge-sort by timestamp and write to bag
     with rosbag.Bag(out_bag, "w") as bag:
