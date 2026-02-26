@@ -9,6 +9,7 @@ EXECUTABLE="$BUILD_DIR/fays_record_example"
 CMD_FIFO="/tmp/umi_fays_cmd"
 ARCH="$(uname -m)"
 LOCAL_FAYS_LIB_DIR="$BUILD_DIR/lib/fays_atrak/${ARCH}/Release"
+CMD_SEND_TIMEOUT_SEC="${FAYS_CMD_TIMEOUT_SEC:-0.35}"
 
 append_ld_library_path() {
     local path_to_add="$1"
@@ -97,7 +98,7 @@ send_control_cmd() {
         return 1
     fi
 
-    if ! timeout 1 bash -c 'printf "%s\n" "$1" > "$2"' _ "$cmd" "$CMD_FIFO" 2>/dev/null; then
+    if ! timeout "$CMD_SEND_TIMEOUT_SEC" bash -c 'printf "%s\n" "$1" > "$2"' _ "$cmd" "$CMD_FIFO" 2>/dev/null; then
         echo "Error: Failed to send command '$cmd' via $CMD_FIFO"
         return 1
     fi

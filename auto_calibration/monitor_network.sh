@@ -1,24 +1,33 @@
 #!/bin/bash
-# TODO service重启时如果有插入状态记录 可能产生“伪上升沿”暂时不影响功能
+# TODO service重启时如果有插入状态记录 可能产生“伪上升沿”
 INTERFACE="end0"
 CARRIER_PATH="/sys/class/net/$INTERFACE/carrier"
+UPGRADE_GUARD_FILE="/run/ugripper_installing_from_usb.lock"
 
 read_carrier_state() {
     if [ ! -r "$CARRIER_PATH" ]; then
-        echo "0"
+        echo ""
         return
     fi
 
     local state
     state=$(cat "$CARRIER_PATH" 2>/dev/null || true)
     if [ "$state" != "0" ] && [ "$state" != "1" ]; then
-        state="0"
+        echo ""
+        return
     fi
     echo "$state"
 }
 
+is_upgrade_in_progress() {
+    [ -f "$UPGRADE_GUARD_FILE" ]
+}
+
 # ================= 初始化状态 =================
 LAST_STATE=$(read_carrier_state)
+if [ -z "$LAST_STATE" ]; then
+    LAST_STATE=0
+fi
 
 echo "Network Monitor Started for $INTERFACE. Initial State: $LAST_STATE"
 
@@ -38,13 +47,26 @@ restart_ugripper() {
 
 # ================= 主循环 =================
 while true; do
-    if [ -f "$CARRIER_PATH" ]; then
-        CURRENT_STATE=$(read_carrier_state)
+    CURRENT_STATE=$(read_carrier_state)
+
+    # 网卡暂时不可读时不覆盖 LAST_STATE，避免制造伪边沿
+    if [ -z "$CURRENT_STATE" ]; then
+        echo "Warning: interface $INTERFACE not ready, keep last state=$LAST_STATE"
+        sleep 1
+        continue
+    fi
+
+    if [ "$LAST_STATE" -ne "$CURRENT_STATE" ]; then
+        if is_upgrade_in_progress; then
+            echo "[$(date)] Upgrade guard active, skip network edge action: ${LAST_STATE} -> ${CURRENT_STATE}"
+            LAST_STATE="$CURRENT_STATE"
+            sleep 1
+            continue
+        fi
 
         # ================= 下降沿：插着 → 拔掉 =================
         if [ "$LAST_STATE" -eq 1 ] && [ "$CURRENT_STATE" -eq 0 ]; then
             echo "[$(date)] Cable Removal Detected!"
-
             restart_ugripper
         fi
 
@@ -59,9 +81,6 @@ while true; do
         fi
 
         LAST_STATE="$CURRENT_STATE"
-    else
-        echo "Warning: interface $INTERFACE not found."
-        LAST_STATE=0
     fi
 
     sleep 1

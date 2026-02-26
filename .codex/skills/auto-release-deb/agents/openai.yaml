@@ -1,0 +1,4 @@
+interface:
+  display_name: "Auto Release Deb"
+  short_description: "代码改动后自动升版本并执行 build_deb"
+  default_prompt: "Use $auto-release-deb after code changes to bump build_deb.sh VERSION (default +.z) and run build_deb.sh with auto -q selection."

@@ -8,9 +8,6 @@ INTERFACE_NAME="end0"
 IP_RIGHT="192.168.1.100"
 IP_LEFT="192.168.1.101"
 
-NM_DIR="/etc/NetworkManager/system-connections"
-NM_CONN_FILE="${NM_DIR}/${INTERFACE_NAME}-{{APP_NAME}}.nmconnection"
-
 # PTP 配置目录和文件
 PTP_CONF_DIR="/etc/linuxptp"
 PTP_CONF_FILE="${PTP_CONF_DIR}/ptp4l.conf"
@@ -25,7 +22,61 @@ NTP_SYNC_SERVICE="ugripper-ntp-sync.service"
 SHUTDOWN_TRIGGER_SCRIPT="${APP_DIR}/auto_update/trigger_shutdown.sh"
 SHUTDOWN_TRIGGER_SERVICE="umi-shutdown-trigger.service"
 SHUTDOWN_TRIGGER_PATH="umi-shutdown-trigger.path"
+NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 
+stop_service_fast() {
+    local service_name="$1"
+    local timeout_sec="${2:-6}"
+
+    timeout "${timeout_sec}s" systemctl stop "$service_name" >/dev/null 2>&1 || true
+
+    if systemctl is-active --quiet "$service_name"; then
+        echo "Warning: $service_name stop timeout, force killing..."
+        systemctl kill "$service_name" >/dev/null 2>&1 || true
+    fi
+}
+
+force_cleanup_recording_processes() {
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -TERM -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
+        pkill -TERM -f 'led_manager.py' >/dev/null 2>&1 || true
+        pkill -TERM -f 'audio/audio_play.py' >/dev/null 2>&1 || true
+        sleep 0.3
+        pkill -KILL -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
+        pkill -KILL -f 'led_manager.py' >/dev/null 2>&1 || true
+        pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
+    fi
+
+    rm -f /tmp/umi_audio_pipe /tmp/umi_led_pipe /tmp/umi_recording.lock || true
+}
+
+restart_ptp_stack_with_retry() {
+    local max_retry=3
+    local i
+
+    echo "Starting PTP services..."
+    systemctl enable ptp4l phc2sys || true
+
+    for i in $(seq 1 "$max_retry"); do
+        systemctl restart ptp4l phc2sys || true
+        sleep 1
+
+        if systemctl is-active --quiet ptp4l && systemctl is-active --quiet phc2sys; then
+            echo "PTP services active (attempt $i/$max_retry)."
+            return 0
+        fi
+
+        echo "Warning: PTP services not ready (attempt $i/$max_retry)."
+    done
+
+    echo "Warning: PTP services still not fully active after retries."
+    return 1
+}
+
+# 安装窗口先清理旧业务进程，避免升级后残留占用音频/GPIO/FIFO
+stop_service_fast "$SERVICE_NAME" 6
+stop_service_fast "$NETWORK_MONITOR_SERVICE" 4
+force_cleanup_recording_processes
 
 # --------------------------------------------------
 # 0) 读取 DEVICE_SIDE
@@ -62,7 +113,7 @@ fi
 # --------------------------------------------------
 if [ -n "$TARGET_IP" ]; then
     echo "Configuring NetworkManager for $INTERFACE_NAME ($DEVICE_SIDE → $TARGET_IP)"
-    
+
     CONN_NAME="${INTERFACE_NAME}-{{APP_NAME}}"
 
     # 1. 如果连接已存在，先删除，确保配置干净
@@ -94,20 +145,20 @@ fi
 if [ -n "$DEVICE_SIDE" ]; then
     # 确保配置目录存在
     mkdir -p "$PTP_CONF_DIR"
-    
+
     # 停止旧的 PTP 服务以应用新配置
     systemctl stop ptp4l phc2sys 2>/dev/null || true
 
     case "$(echo "$DEVICE_SIDE" | tr '[:upper:]' '[:lower:]')" in
         left)
             echo "Configuring PTP for LEFT (Slave)..."
-            
+
             # 1. 关闭普通网络授时 (NTP), 避免与 PTP 冲突
             timedatectl set-ntp false || true
-            
+
             # 2. 生成 ptp4l 配置文件 (Slave Mode)
             # slaveOnly 1: 强制作为从钟
-            cat <<EOF > "$PTP_CONF_FILE"
+            cat <<EOPTPSLAVE > "$PTP_CONF_FILE"
 [global]
 tx_timestamp_timeout   50
 slaveOnly              1
@@ -121,14 +172,14 @@ step_threshold         0.2
 first_step_threshold   0.0002
 # 接口
 [$INTERFACE_NAME]
-EOF
-            
+EOPTPSLAVE
+
             # 3. 创建/重写 phc2sys 服务 (PHC -> System Clock)
             # -s $INTERFACE_NAME: 源是网卡时钟
             # -c CLOCK_REALTIME: 目标是系统时钟
             # -w: 等待 ptp4l 同步
-            # 加入 -S 0.0 (Step threshold)
-            cat <<EOF > /etc/systemd/system/phc2sys.service
+            # 加入 -S 0.2 (Step threshold)
+            cat <<EOPHCSLEFT > /etc/systemd/system/phc2sys.service
 [Unit]
 Description=Synchronize system clock or PTP hardware clock (PHC)
 After=ptp4l.service
@@ -141,18 +192,18 @@ Restart=always
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOPHCSLEFT
             ;;
 
         right)
             echo "Configuring PTP for RIGHT (Master)..."
-        
+
             # 1. 关闭普通网络授时 (NTP), 会使用单独的ntpservice做one shot逻辑，获取互联网时间作为基准
             timedatectl set-ntp false || true
-            
+
             # 2. 生成 ptp4l 配置文件 (Master Mode)
             # priority1 10: 优先级高，确保成为 Master (默认是 128)
-            cat <<EOF > "$PTP_CONF_FILE"
+            cat <<EOPTMASTER > "$PTP_CONF_FILE"
 [global]
 tx_timestamp_timeout   50
 priority1              10
@@ -160,13 +211,13 @@ priority2              10
 domainNumber           0
 time_stamping          hardware
 [$INTERFACE_NAME]
-EOF
+EOPTMASTER
 
             # 3. 创建/重写 phc2sys 服务 (System Clock -> PHC)
             # -s CLOCK_REALTIME: 源是系统时钟 (由 NTP 维护)
             # -c $INTERFACE_NAME: 目标是网卡 PHC
             # -w: 等待 ptp4l
-            cat <<EOF > /etc/systemd/system/phc2sys.service
+            cat <<EOPHCSRIGHT > /etc/systemd/system/phc2sys.service
 [Unit]
 Description=Synchronize system clock or PTP hardware clock (PHC)
 After=ptp4l.service
@@ -179,15 +230,14 @@ Restart=always
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOPHCSRIGHT
             ;;
     esac
 
     # --------------------------------------------------
     # 通用 PTP 服务配置 (ptp4l)
     # --------------------------------------------------
-    # 创建/确保 ptp4l 服务使用我们生成的配置文件
-    cat <<EOF > /etc/systemd/system/ptp4l.service
+    cat <<EOPTPUNIT > /etc/systemd/system/ptp4l.service
 [Unit]
 Description=Precision Time Protocol (PTP) service
 After=network-online.target
@@ -199,18 +249,10 @@ Restart=always
 
 [Install]
 WantedBy=multi-user.target
-EOF
+EOPTPUNIT
 
-    # 重新加载 Systemd 并启动 PTP 服务
     systemctl daemon-reload
-    
-    # 启用并启动服务
-    echo "Starting PTP services..."
-    systemctl enable ptp4l phc2sys || true
-    systemctl restart ptp4l phc2sys || true
-    
-    # 检查状态 (可选)
-    # systemctl status ptp4l --no-pager
+    restart_ptp_stack_with_retry || true
 fi
 
 # --------------------------------------------------
@@ -225,19 +267,14 @@ chmod -R 777 "$APP_DIR"
 systemctl daemon-reload
 
 udevadm control --reload-rules
-#加载触觉传感器相关规则
+# 加载触觉传感器相关规则
 udevadm trigger
-#强制加载mount相关规则
-udevadm trigger --subsystem-match=block --action=add || true
-
-# 网线监测服务
-systemctl enable ugripper-network-monitor.service
-systemctl restart ugripper-network-monitor.service
+# 不再触发 block add，避免升级期间重复触发 usb-auto-update
 
 # NTP 同步服务（仅right启动）
 if [ "$(echo "$DEVICE_SIDE" | tr '[:upper:]' '[:lower:]')" == "right" ]; then
     systemctl enable "$NTP_SYNC_SERVICE"
-    #不能重启，ntp服务不会立即返回，会有很长的超时，会导致安装卡住
+    # 不能重启，ntp服务不会立即返回，会有很长的超时，会导致安装卡住
 fi
 
 # PTP 监控服务
@@ -256,6 +293,9 @@ fi
 systemctl enable "$SERVICE_NAME"
 systemctl restart "$SERVICE_NAME"
 
+# 网线监测服务最后启动，降低安装窗口内竞态
+systemctl enable "$NETWORK_MONITOR_SERVICE"
+systemctl restart "$NETWORK_MONITOR_SERVICE"
 
 echo "[$SERVICE_NAME] Installed and Started successfully."
 exit 0

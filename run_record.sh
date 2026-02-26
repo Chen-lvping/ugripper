@@ -57,7 +57,8 @@ BTN_ACTIVE_LEVEL=0       # 0表示按下
 DEBOUNCE_MS=0.03         # 30ms
 
 # 长按检测阈值（秒）
-LONG_PRESS_THRESHOLD=0.5
+# 0.5s 在实操中容易把短按误判成长按，导致“偶发不触发录制”。
+LONG_PRESS_THRESHOLD=0.8
 DUAL_LONG_PRESS_THRESHOLD=4.0
 SHUTDOWN_PROMPT_THRESHOLD=2.0
 DUAL_CHORD_WINDOW=0.2
@@ -200,12 +201,12 @@ if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
         fi
 
         if [ "$GPIO_VALID" = true ]; then
-            if [ "$(gpioget "$GPIO_UP_LINE")" -eq "$BTN_ACTIVE_LEVEL" ]; then
+            if [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
                 GPIO_VALID=false
                 gpio_error_msg+=" $PIN_BTN_UP active on startup;"
             fi
 
-            if [ "$(gpioget "$GPIO_DOWN_LINE")" -eq "$BTN_ACTIVE_LEVEL" ]; then
+            if [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then
                 GPIO_VALID=false
                 gpio_error_msg+=" $PIN_BTN_DOWN active on startup;"
             fi
@@ -516,7 +517,11 @@ monitor_system_health() {
         fi
     fi
 
-    # Fays 状态由主流程 check_and_maintain_fays 维护，避免后台子进程读取到过期变量。
+    # Fays：仅在已启用场景下，掉线即报错。
+    if [ "$FAYS_ENABLED" = true ] && [ "$FAYS_USB_PRESENT" != true ]; then
+        has_error=true
+        error_msg+=" Fays camera lost;"
+    fi
 
     # ===============================
     # 2. 若存在 ERROR，立刻进入 ERROR
@@ -586,6 +591,9 @@ monitor_system_health() {
 
 monitor_loop() {
     while true; do
+        # Fays 维护在后台线程执行，避免阻塞主按键轮询。
+        check_and_maintain_fays
+
         if [ ! -f "$RECORDING_LOCK_FILE" ]; then
             monitor_system_health
         fi
@@ -598,10 +606,13 @@ monitor_loop() {
 send_network_command() {
     local cmd=$1
     local arg=$2
-    # 使用 netcat 发送 UDP 包或者 TCP 连接，这里使用 TCP 并设置超时
-    # 格式: COMMAND|ARGUMENT
-    echo "${cmd}|${arg}" | nc -w 1 "$IP_LEFT" "$SYNC_PORT" 2>/dev/null
-    echo "Sent to Left: ${cmd}|${arg}"
+    local payload="${cmd}|${arg}"
+
+    # 只发送，不在主流程等待 Left 响应/连接结果。
+    (
+        printf "%s\n" "$payload" | nc "$IP_LEFT" "$SYNC_PORT" >/dev/null 2>&1 || true
+    ) &
+    echo "Sent to Left (async): ${payload}"
 }
 
 # 函数：计算新路径并创建文件夹
@@ -719,6 +730,10 @@ record_audio() {
     local monitor_gpio=${3:-""}
     local timestamp=$(date +%Y%m%d_%H%M%S)
     local temp_file="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}.wav"
+    local capture_file="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}_capture.wav"
+    local ch1_file="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}_ch1.wav"
+    local ch1_denoised="$AUDIO_TEMP_DIR/audio_${audio_type}_${timestamp}_ch1_denoised.wav"
+    local noise_profile="$script_dir/audio/noise.prof"
     
     echo "[INFO]:Starting $audio_type audio recording (Mode: $mode)..."
     if [ "$audio_type" = "pre" ]; then
@@ -727,7 +742,7 @@ record_audio() {
         notify_audio "post_audio_recording"
     fi
     
-    arecord -D hw:rockchipes8388,0 -f cd -r 44100 -c 2 -t wav "$temp_file.raw" &
+    arecord -D hw:rockchipes8388,0 -f cd -r 44100 -c 2 -t wav "$capture_file" &
     local arecord_pid=$!
 
     if [ "$mode" != "hold" ]; then
@@ -739,7 +754,7 @@ record_audio() {
         echo "[ERROR]:Mode $mode requires GPIO monitor line."
         kill $arecord_pid 2>/dev/null
         wait $arecord_pid 2>/dev/null
-        rm -f "$temp_file.raw"
+        rm -f "$capture_file"
         notify_audio "audio_recording_stop"
         return 1
     fi
@@ -757,10 +772,24 @@ record_audio() {
     # 等待录音进程完全结束
     wait $arecord_pid 2>/dev/null
     
-    # 降噪处理
-    if [ -f "$temp_file.raw" ]; then
-        sox "$temp_file.raw" "$temp_file" remix 2 noisered "$script_dir/audio/noise.prof" 0.15 remix 1 1 norm
-        rm -f "$temp_file.raw"
+    # 降噪处理：固定提取 ch1，单声道降噪后输出。
+    if [ -s "$capture_file" ]; then
+        if [ -f "$noise_profile" ] \
+            && sox "$capture_file" "$ch1_file" remix 1 \
+            && sox "$ch1_file" "$ch1_denoised" noisered "$noise_profile" 0.15 \
+            && sox "$ch1_denoised" "$temp_file" norm; then
+            echo "[INFO]:Audio denoise completed on ch1."
+        else
+            echo "[WARNING]:Denoise pipeline failed or noise profile missing, fallback to direct normalization."
+            if ! sox "$capture_file" "$ch1_file" remix 1 \
+                || ! sox "$ch1_file" "$temp_file" norm; then
+                echo "[ERROR]:Audio post-process failed."
+                rm -f "$capture_file" "$ch1_file" "$ch1_denoised"
+                notify_audio "audio_recording_stop"
+                return 1
+            fi
+        fi
+        rm -f "$capture_file" "$ch1_file" "$ch1_denoised"
     else
         echo "[WARNING]:No audio data recorded"
         return 1
@@ -900,7 +929,7 @@ start_fays_daemon() {
 start_fays_recording_session() {
     local output_dir="$1"
     local attempt=1
-    local max_attempts=5
+    local max_attempts=1
 
     if [ "$FAYS_ENABLED" != true ]; then
         return 0
@@ -1116,9 +1145,6 @@ start_recording() {
         rm -f "$RECORDING_LOCK_FILE"
         return 1
     fi
-
-    # 在主流程内维护 Fays 状态，避免依赖后台子进程里的变量副本。
-    check_and_maintain_fays
 
     # 若启动时未启用 Fays，但录制前设备已插入，则即时启用。
     if [ "$FAYS_ENABLED" != true ] && is_fays_ftdi_present; then
@@ -1464,8 +1490,6 @@ if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
 
     # 网络监听循环
     while true; do
-        check_and_maintain_fays
-
         # 会阻塞执行
         
         # === 网络监听 ===
@@ -1519,8 +1543,6 @@ else
     notify_audio "ready"
 
     while true; do
-        check_and_maintain_fays
-
         if [ "$DOWN_BUTTON_AVAILABLE" = true ] && [ -n "$GPIO_DOWN_LINE" ] && \
            [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ] && \
            [ "$(gpioget $GPIO_DOWN_LINE)" -eq "$BTN_ACTIVE_LEVEL" ]; then

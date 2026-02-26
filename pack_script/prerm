@@ -14,45 +14,63 @@ NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 SHUTDOWN_TRIGGER_SERVICE="umi-shutdown-trigger.service"
 SHUTDOWN_TRIGGER_PATH="umi-shutdown-trigger.path"
 
+stop_service_fast() {
+    local service_name="$1"
+    local timeout_sec="${2:-5}"
+
+    timeout "${timeout_sec}s" systemctl stop "$service_name" >/dev/null 2>&1 || true
+
+    if systemctl is-active --quiet "$service_name"; then
+        echo "Warning: $service_name stop timeout, force killing..."
+        systemctl kill "$service_name" >/dev/null 2>&1 || true
+    fi
+}
+
+force_cleanup_recording_processes() {
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -TERM -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
+        pkill -TERM -f 'led_manager.py' >/dev/null 2>&1 || true
+        pkill -TERM -f 'audio/audio_play.py' >/dev/null 2>&1 || true
+        sleep 0.3
+        pkill -KILL -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
+        pkill -KILL -f 'led_manager.py' >/dev/null 2>&1 || true
+        pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
+    fi
+
+    rm -f /tmp/umi_audio_pipe /tmp/umi_led_pipe /tmp/umi_recording.lock || true
+}
+
 echo "Removing {{APP_NAME}} configuration..."
 
 # --------------------------------------------------
-# 1) 停止并禁用服务
+# 1) 快速停止服务与残留进程（避免安装后旧进程残留）
 # --------------------------------------------------
-# 先停业务
-#systemctl stop --no-block "$SERVICE_NAME" || true
+stop_service_fast "$SERVICE_NAME" 6
+stop_service_fast "$NETWORK_MONITOR_SERVICE" 4
+stop_service_fast "$MONITOR_SERVICE" 4
+stop_service_fast "$NTP_SYNC_SERVICE" 4
+stop_service_fast "$PHC_SERVICE" 4
+stop_service_fast "$PTP_SERVICE" 4
+force_cleanup_recording_processes
+
+# --------------------------------------------------
+# 2) 禁用服务
+# --------------------------------------------------
 systemctl disable "$SERVICE_NAME" || true
-
-# 停辅助监控
-#systemctl stop --no-block "$NETWORK_MONITOR_SERVICE" || true
 systemctl disable "$NETWORK_MONITOR_SERVICE" || true
-
-# 停双键关机触发
 systemctl disable "$SHUTDOWN_TRIGGER_PATH" || true
 systemctl disable "$SHUTDOWN_TRIGGER_SERVICE" || true
-
-# 停 NTP/PTP 监控
-#systemctl stop --no-block "$NTP_SYNC_SERVICE" || true
 systemctl disable "$NTP_SYNC_SERVICE" || true
-
-#systemctl stop --no-block "$MONITOR_SERVICE" || true
 systemctl disable "$MONITOR_SERVICE" || true
-
-# 停 PTP 核心
-#systemctl stop --no-block "$PHC_SERVICE" || true
 systemctl disable "$PHC_SERVICE" || true
-
-#systemctl stop --no-block "$PTP_SERVICE" || true
 systemctl disable "$PTP_SERVICE" || true
 
 # --------------------------------------------------
-# 2) 清理生成的文件
+# 3) 清理生成的文件
 # --------------------------------------------------
 echo "Cleaning up systemd units and configs..."
 
 # 清理 postinst 中生成的 systemd unit 文件
-# 注意：这移除了我们在 /etc/systemd/system/ 下创建的自定义配置
-# 从而避免残留文件影响系统或后续重装
 rm -f "/etc/systemd/system/$PHC_SERVICE"
 rm -f "/etc/systemd/system/$PTP_SERVICE"
 rm -f "/etc/systemd/system/$SHUTDOWN_TRIGGER_SERVICE"
@@ -65,26 +83,23 @@ rm -f "/etc/linuxptp/ptp4l.conf"
 rm -f "/dev/shm/umi_ptp_status"
 
 # --------------------------------------------------
-# 3) 移除网络配置
+# 4) 移除网络配置
 # --------------------------------------------------
 if command -v nmcli >/dev/null 2>&1; then
     nmcli connection delete "$NM_CONN_ID" || true
 fi
 
 # --------------------------------------------------
-# 4) 恢复系统默认行为
+# 5) 恢复系统默认行为
 # --------------------------------------------------
-# 恢复默认的时间同步设置，避免卸载后系统时间不再同步
 echo "Restoring default NTP behavior..."
-# 后台恢复
 systemd-run --no-block --unit=ugripper-restore-ntp \
     /usr/bin/timedatectl set-ntp true
 
-# 重载 daemon
 systemctl daemon-reload
 
 # --------------------------------------------------
-# 5) udev reload
+# 6) udev reload
 # --------------------------------------------------
 udevadm control --reload-rules || true
 

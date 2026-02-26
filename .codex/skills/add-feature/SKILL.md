@@ -1,6 +1,6 @@
 ---
 name: add-feature
-description: 为 ugripper 项目执行新增功能（add feature）类需求的标准工作流。用于用户提出“add feature / 加功能 / 新增功能”等请求时：先阅读 docs/agent/overview.md 理解当前实现，再先给实现计划并等待确认，然后以 heredoc 方式修改代码，并同步创建或维护 docs/agent 文档，保持后续对话可检索。
+description: 为 ugripper 项目执行新增功能（add feature）类需求的标准工作流。用于用户提出“add feature / 加功能 / 新增功能”等请求时：先阅读 docs/agent/overview.md 理解当前实现，再先给实现计划并等待确认，然后以 heredoc 方式修改代码，并同步创建或维护 docs 文档，保持后续对话可检索。
 ---
 
 # add-feature
@@ -16,12 +16,13 @@ description: 为 ugripper 项目执行新增功能（add feature）类需求的�
 1. 修改范围保持最小化，只实现当前 feature，避免顺手重构。
 2. 所有改动完成后，汇总可追踪 diff（按文件说明改动点）。
 
-## 文档同步规则（docs/agent）
+## 文档同步规则（docs）
 
 1. 每次 feature 修改后，必须同步创建或维护相关文档。
 2. 默认至少检查并更新 `docs/agent/overview.md` 中受影响的条目。
 3. 当流程、模块边界、运行时架构变化时，同时更新 `docs/agent/ARCHITECTURE.md`。
-4. 仅在确有新增知识且无法放入现有文档时，新增文档；避免文档碎片化。
+4. 每次 feature 修改后，都要维护 `docs/CHANGELOG.md`，内容聚焦“软件功能改动”，避免写构建过程流水；条目尽量简洁。
+5. 仅在确有新增知识且无法放入现有文档时，新增文档；避免文档碎片化。
 
 ## 验收与检查默认策略
 

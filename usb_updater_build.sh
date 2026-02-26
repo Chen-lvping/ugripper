@@ -7,7 +7,7 @@ SRC_DIR="./auto_update"
 
 # 软件包信息
 PKG_NAME="ugripper-usb-updater"
-PKG_VERSION="1.0.2"
+PKG_VERSION="1.0.3"
 ARCH="all"
 MAINTAINER="User <user@example.com>"
 DESC="Auto update ugripper via USB and Boot Check"
