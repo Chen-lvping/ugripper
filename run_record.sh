@@ -86,11 +86,26 @@ FAYS_USB_PRESENT=false                # 最近一次检测到的 Fays FTDI USB �
 FAYS_RECORDING_ACTIVE=false           # 当前是否已向 Fays 下发 START
 FAYS_LAST_MONITOR_TS=0                # Fays 热插拔监控节流时间戳（秒）
 CLEANUP_RUNNING=false                 # 防止 cleanup trap 重入
-LAST_MONITOR_ERROR_MSG=""             # 最近一次硬件检测错误详情（用于去重日志）
+LAST_MONITOR_ERROR_MSG=""             # 最近一次监控错误详情（用于去重日志）
+FAYS_PRESENT_CACHE_FILE="/dev/shm/umi_fays_present"  # Fays 在位检测缓存（1=在位，0=不在位）
+MONITOR_PID=""
 RECORDING_LOCK_FILE="/tmp/umi_recording.lock" # 录制锁文件
+# ERROR 灯效分级定义（数字越小越严重）
+# ERROR_1: 数据完整性异常（存储/录制校验）
+# ERROR_2: 关键硬件异常（相机/传感器/GPIO/Fays 断连）
+# ERROR_3: 网络同步异常（对端不可达/PTP 同步超时）
+# ERROR_4: 一般外设异常（非关键链路）
+# ERROR_5: 运行时异常（进程超时/内部执行失败）
+ERROR_DATA_INTEGRITY="ERROR_1"
+ERROR_HW_ABNORMAL="ERROR_2"
+ERROR_NET_SYNC="ERROR_3"
+ERROR_OPTIONAL_PERIPHERAL="ERROR_4"
+ERROR_RUNTIME="ERROR_5"
+
 # 启动直接释放锁文件，防止断电导致残留
 rm -f "$RECORDING_LOCK_FILE"
 rm -f "$SHUTDOWN_REQUEST_FILE"
+rm -f "$FAYS_PRESENT_CACHE_FILE"
 
 # PTP状态参数
 PTP_WAIT_START_TS=0
@@ -117,7 +132,10 @@ else
 fi
 
 # 3. 定义发送状态的函数
-# 可选状态: INIT (蓝), READY (绿呼吸), RECORDING (红闪), ERROR (红快闪), EXIT (关)
+# 可选状态:
+# INIT (蓝), READY (绿呼吸), RECORDING (绿闪烁), EXIT (关)
+# ERROR_1~ERROR_5（红色长短编码，含义见上方 ERROR 灯效分级定义）
+# 兼容态 ERROR 仍可用，但建议统一使用 ERROR_1~ERROR_5
 write_pipe_message() {
     local pipe_path=$1
     local message=$2
@@ -143,6 +161,20 @@ set_state() {
     done
 
     return 1
+}
+
+set_error_state() {
+    local state=$1
+
+    case "$state" in
+        ERROR_1|ERROR_2|ERROR_3|ERROR_4|ERROR_5)
+            ;;
+        *)
+            state="$ERROR_RUNTIME"
+            ;;
+    esac
+
+    set_state "$state"
 }
 
 # 音频状态通知函数
@@ -224,7 +256,7 @@ if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
         if [ "$gpio_error_reported" = false ] || [ "$gpio_error_msg" != "$last_gpio_error_msg" ]; then
             echo "[ERROR]:GPIO pre-check failed:$gpio_error_msg"
             echo "[ERROR]:Hold before disk checks, retrying in 1s..."
-            set_state "ERROR"
+            set_error_state "$ERROR_HW_ABNORMAL"
             notify_audio "error"
             gpio_error_reported=true
             last_gpio_error_msg="$gpio_error_msg"
@@ -241,7 +273,7 @@ disk_error_reported=false
 while ! mountpoint -q "$DISK_DIR"; do
     if [ "$disk_error_reported" = false ]; then
         echo "[ERROR]:$DISK_DIR is NOT mounted! Waiting for disk..."
-        set_state "ERROR"       # 设置红灯快闪
+        set_error_state "$ERROR_DATA_INTEGRITY"
         # notify_audio "error"  # 可选播放提示音
         disk_error_reported=true
     fi
@@ -496,6 +528,9 @@ monitor_system_health() {
     local is_recording_now=false
     local has_error=false
     local error_msg=""
+    local error_state=""
+    local error_rank=99
+    local error_key=""
 
     if [ -f "$RECORDING_LOCK_FILE" ]; then
         is_recording_now=true
@@ -509,41 +544,68 @@ monitor_system_health() {
     if ! mountpoint -q "$DISK_DIR"; then
         has_error=true
         error_msg+=" Disk not mounted;"
+        error_state="$ERROR_DATA_INTEGRITY"
+        error_rank=1
     fi
 
     # 相机
-    [ ! -e "/dev/right_tcam" ] && has_error=true && error_msg+=" Right Cam lost;"
-    [ ! -e "/dev/left_tcam"  ] && has_error=true && error_msg+=" Left Cam lost;"
+    if [ ! -e "/dev/right_tcam" ]; then
+        has_error=true
+        error_msg+=" Right Cam lost;"
+        if [ "$error_rank" -gt 2 ]; then
+            error_state="$ERROR_HW_ABNORMAL"
+            error_rank=2
+        fi
+    fi
+    if [ ! -e "/dev/left_tcam" ]; then
+        has_error=true
+        error_msg+=" Left Cam lost;"
+        if [ "$error_rank" -gt 2 ]; then
+            error_state="$ERROR_HW_ABNORMAL"
+            error_rank=2
+        fi
+    fi
 
     # 对端连接
     if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
         if ! ping -c 1 -W 1 "$IP_RIGHT" >/dev/null 2>&1; then
             has_error=true
             error_msg+=" Right device unreachable;"
+            if [ "$error_rank" -gt 3 ]; then
+                error_state="$ERROR_NET_SYNC"
+                error_rank=3
+            fi
         fi
     fi
 
     # Fays：仅在已启用场景下，掉线即报错。
-    if [ "$FAYS_ENABLED" = true ] && [ "$FAYS_USB_PRESENT" != true ]; then
+    # 注意这里读取共享缓存（/dev/shm/umi_fays_present），避免后台监控进程
+    # 使用到主循环中的进程内变量，导致断连状态不可见。
+    if [ "$FAYS_ENABLED" = true ] && ! is_fays_ftdi_present; then
         has_error=true
         error_msg+=" Fays camera lost;"
+        if [ "$error_rank" -gt 2 ]; then
+            error_state="$ERROR_HW_ABNORMAL"
+            error_rank=2
+        fi
     fi
 
     # ===============================
     # 2. 若存在 ERROR，立刻进入 ERROR
     # ===============================
     if [ "$has_error" = true ]; then
-        if [ "$SYSTEM_HEALTH_STATUS" != "ERROR" ] || [ "$LAST_MONITOR_ERROR_MSG" != "$error_msg" ]; then
-            echo "[ERROR]:[$(date)] MONITOR ERROR:$error_msg"
-            set_state "ERROR"
+        [ -z "$error_state" ] && error_state="$ERROR_RUNTIME"
+        error_key="${error_state}|${error_msg}"
+
+        if [ "$SYSTEM_HEALTH_STATUS" != "ERROR" ] || [ "$LAST_MONITOR_ERROR_MSG" != "$error_key" ]; then
+            echo "[ERROR]:[$(date)] MONITOR ERROR (${error_state}):$error_msg"
+            set_error_state "$error_state"
             notify_audio "error"
         fi
         SYSTEM_HEALTH_STATUS="ERROR"
-        LAST_MONITOR_ERROR_MSG="$error_msg"
+        LAST_MONITOR_ERROR_MSG="$error_key"
         return
     fi
-
-    LAST_MONITOR_ERROR_MSG=""
 
     # 录制中仅做硬件错误检测，不切换到 READY/CALIB 状态。
     if [ "$is_recording_now" = true ]; then
@@ -552,6 +614,7 @@ monitor_system_health() {
             set_state "RECORDING"
         fi
         SYSTEM_HEALTH_STATUS="OK"
+        LAST_MONITOR_ERROR_MSG=""
         return
     fi
 
@@ -572,10 +635,17 @@ monitor_system_health() {
             wait_elapsed=$((now_ts - PTP_WAIT_START_TS))
 
             if [ "$wait_elapsed" -ge "$PTP_WAIT_TIMEOUT" ]; then
-                echo "[ERROR]:[$(date)] MONITOR ERROR: PTP sync timeout"
-                set_state "ERROR"
-                notify_audio "error"
+                local ptp_error_msg=" PTP sync timeout (state=${ptp_state}, offset=${ptp_offset}, waited=${wait_elapsed}s);"
+                local ptp_error_key="${ERROR_NET_SYNC}|PTP sync timeout"
+
+                if [ "$SYSTEM_HEALTH_STATUS" != "ERROR" ] || [ "$LAST_MONITOR_ERROR_MSG" != "$ptp_error_key" ]; then
+                    echo "[ERROR]:[$(date)] MONITOR ERROR (${ERROR_NET_SYNC}):${ptp_error_msg}"
+                    set_error_state "$ERROR_NET_SYNC"
+                    notify_audio "error"
+                fi
+
                 SYSTEM_HEALTH_STATUS="ERROR"
+                LAST_MONITOR_ERROR_MSG="$ptp_error_key"
                 return
             fi
 
@@ -591,6 +661,7 @@ monitor_system_health() {
             set_state "CALIB_RUN:$progress"
 
             SYSTEM_HEALTH_STATUS="WAITING"
+            LAST_MONITOR_ERROR_MSG=""
             return
         elif [ "$PTP_WAIT_START_TS" -ne 0 ]; then
             # --- PTP 已同步 ---
@@ -606,10 +677,18 @@ monitor_system_health() {
         notify_audio "ready"
         SYSTEM_HEALTH_STATUS="OK"
     fi
+    LAST_MONITOR_ERROR_MSG=""
 }
 
 monitor_loop() {
+    local now_ts=0
+    local last_probe_ts=0
     while true; do
+        now_ts=$(date +%s)
+        if [ "$now_ts" -ne "$last_probe_ts" ]; then
+            refresh_fays_presence_cache
+            last_probe_ts="$now_ts"
+        fi
         monitor_system_health
         sleep 0.05  # 控制检查频率
     done
@@ -899,7 +978,7 @@ force_stop_pid() {
     wait "$pid" 2>/dev/null || true
 }
 
-is_fays_ftdi_present() {
+detect_fays_ftdi_present_raw() {
     if ! command -v v4l2-ctl >/dev/null 2>&1; then
         return 1
     fi
@@ -907,6 +986,22 @@ is_fays_ftdi_present() {
     local devices
     devices=$(v4l2-ctl --list-devices 2>/dev/null || true)
     echo "$devices" | grep -q "FTDI Superspeed Video Bridge"
+}
+
+refresh_fays_presence_cache() {
+    if detect_fays_ftdi_present_raw; then
+        echo "1" > "$FAYS_PRESENT_CACHE_FILE"
+    else
+        echo "0" > "$FAYS_PRESENT_CACHE_FILE"
+    fi
+}
+
+is_fays_ftdi_present() {
+    if [ -f "$FAYS_PRESENT_CACHE_FILE" ]; then
+        [ "$(cat "$FAYS_PRESENT_CACHE_FILE" 2>/dev/null)" = "1" ]
+        return
+    fi
+    detect_fays_ftdi_present_raw
 }
 
 start_fays_daemon() {
@@ -1153,7 +1248,7 @@ start_recording() {
 
     if [ ! -x "$SENSOR_RECORDER_BIN" ]; then
         echo "[ERROR]:Sensor recorder binary not found or not executable: $SENSOR_RECORDER_BIN"
-        set_state "ERROR"
+        set_error_state "$ERROR_RUNTIME"
         notify_audio "error"
         rm -f "$RECORDING_LOCK_FILE"
         return 1
@@ -1262,7 +1357,7 @@ validate_recording() {
     if [ "$validation_pass" = false ]; then
         echo ">>> VALIDATION FAILED: $error_details"
         # 触发报错灯光和声音
-        set_state "ERROR"
+        set_error_state "$ERROR_DATA_INTEGRITY"
         notify_audio "validation_failed"
         
         # 在数据文件夹中写入一个错误日志
@@ -1299,7 +1394,7 @@ stop_recording() {
     done
 
     if ! wait_for_pids_exit 5 "$PID_CAM" "$PID_SENSOR"; then
-        set_state "ERROR"
+        set_error_state "$ERROR_RUNTIME"
         echo "[ERROR]:Timeout waiting for recording processes to stop. Sending SIGTERM."
         for pid in "$PID_CAM" "$PID_SENSOR"; do
             if is_pid_alive "$pid"; then
@@ -1484,7 +1579,10 @@ else
     echo "[INFO]:Fays FTDI not detected at startup. Running without Fays recording."
 fi
 
-echo "[INFO]:Hardware monitor integrated into main loop (no background monitor subprocess)."
+refresh_fays_presence_cache
+monitor_loop &        # 后台运行硬件监控（含 Fays 在位缓存刷新）
+MONITOR_PID=$!
+echo "[INFO]:Hardware monitor PID: $MONITOR_PID"
 
 if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
     # ================= Slave (Left) 逻辑 =================
@@ -1501,9 +1599,7 @@ if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
 
     # 网络监听循环
     while true; do
-        # Fays 生命周期维护必须在主进程上下文，避免后台子 shell 状态分叉。
         check_and_maintain_fays
-        monitor_system_health
 
         # 会阻塞执行
         
@@ -1558,9 +1654,7 @@ else
     notify_audio "ready"
 
     while true; do
-        # Fays 生命周期维护必须在主进程上下文，避免后台子 shell 状态分叉。
         check_and_maintain_fays
-        monitor_system_health
 
         if [ "$DOWN_BUTTON_AVAILABLE" = true ] && [ -n "$GPIO_DOWN_LINE" ] && \
            [ "$(gpioget $GPIO_UP_LINE)" -eq "$BTN_ACTIVE_LEVEL" ] && \
