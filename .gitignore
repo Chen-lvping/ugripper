@@ -33,3 +33,7 @@ checks.json
 #模型及数据集文件
 ASR/model/
 ASR/audio/
+
+py_script/set_baud_1m.py
+py_script/README_set_baud_1m_windows.md
+
