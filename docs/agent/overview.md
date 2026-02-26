@@ -33,7 +33,7 @@
 2. 启动反馈进程：
    - `uv run led_manager.py`
    - `uv run audio/audio_play.py`
-   - 通过 FIFO 发 `INIT/READY/RECORDING/ERROR/EXIT` 等状态。
+   - 通过 FIFO 发 `INIT/READY/RECORDING/ERROR_1~ERROR_5/EXIT` 等状态（`ERROR` 兼容态仍保留）。
 3. 录制控制：
    - 开机初始化阶段检测 Fays FTDI 设备：
      - 若存在：启动 FaysSense 常驻进程 `./build/faysSense_vi_kit/scripts/run_fays_record.sh daemon`。
@@ -62,9 +62,17 @@
 - 下键长按：录制 post 标注语音（保存为上一条 episode 的 `audio_post.wav`）。
 - pre/post 录音后处理：固定提取 ch1 为单声道，执行 `sox noisered + norm` 输出；若降噪不可用则回退为 ch1 归一化。
 - 双键长按 4 秒：触发关机请求；按住 3 秒先播放关机提示音。
-- 启动前置硬件检查：Right 侧在 `INIT` 期间持续校验 `PIN_36/PIN_38`（可读且为释放态）；未通过则保持 `ERROR` 并停在磁盘检查前，直到恢复。
+- 启动前置硬件检查：Right 侧在 `INIT` 期间持续校验 `PIN_36/PIN_38`（可读且为释放态）；未通过则保持 `ERROR_2` 并停在磁盘检查前，直到恢复。
 
-### 3.4 关机权限隔离机制（新增）
+### 3.4 报错灯效分级（新增）
+- 错误状态分级为 `ERROR_1` 到 `ERROR_5`（数字越小越严重），灯效统一为红色“长 + N个短”循环编码：
+  - `ERROR_1`：数据完整性异常（存储/录制校验）
+  - `ERROR_2`：关键硬件异常（相机/传感器/GPIO/Fays 断连）
+  - `ERROR_3`：网络同步异常（对端不可达/PTP 同步超时）
+  - `ERROR_4`：一般外设异常（非关键链路）
+  - `ERROR_5`：运行时异常（进程超时/内部执行失败）
+
+### 3.5 关机权限隔离机制（新增）
 - 业务脚本不直接执行 `poweroff`，而是写触发文件 `/tmp/umi_shutdown_request`。
 - `umi-shutdown-trigger.path` 监听触发文件。
 - `umi-shutdown-trigger.service` 执行 `auto_update/trigger_shutdown.sh`，由 systemd 以 root 调用 `systemctl poweroff`。

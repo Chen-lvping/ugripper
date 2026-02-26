@@ -160,6 +160,7 @@ class LedStateMachine:
 
             valid_states = {
                 "INIT", "READY", "RECORDING", "ERROR", "EXIT",
+                "ERROR_1", "ERROR_2", "ERROR_3", "ERROR_4", "ERROR_5",
                 "CALIB_PRE", "CALIB_RUN", "CALIB_DONE"
             }
 
@@ -218,6 +219,61 @@ class LedStateMachine:
         if hasattr(self, 'led'):
             self.led.close()
 
+    def get_error_level(self):
+        """返回错误等级（1~5，数字越小越严重）"""
+        if self.state == "ERROR":
+            # 兼容旧状态，归并到最低优先级编码
+            return 5
+
+        if self.state.startswith("ERROR_"):
+            try:
+                level = int(self.state.split("_", 1)[1])
+                if 1 <= level <= 5:
+                    return level
+            except ValueError:
+                pass
+
+        return 5
+
+    def render_error_pattern(self, t):
+        """
+        错误编码灯效：固定红色，按“长 + N个短”循环闪烁。
+        ERROR_1: 长短
+        ERROR_2: 长短短
+        ERROR_3: 长短短短
+        ERROR_4: 长短短短短
+        ERROR_5: 长短短短短短
+        """
+        level = self.get_error_level()
+        pulse_defs = ["long"] + ["short"] * level
+
+        # 为了可肉眼读码，节奏改为更慢且间隔更清晰
+        long_on_ticks = 35      # 700ms
+        short_on_ticks = 11     # 220ms
+        pulse_gap_ticks = 15    # 脉冲间隔 300ms
+        sequence_gap_ticks = 60 # 轮次间隔 1200ms
+
+        segments = []
+        for idx, pulse_type in enumerate(pulse_defs):
+            on_ticks = long_on_ticks if pulse_type == "long" else short_on_ticks
+            segments.append((True, on_ticks))
+            off_ticks = sequence_gap_ticks if idx == (len(pulse_defs) - 1) else pulse_gap_ticks
+            segments.append((False, off_ticks))
+
+        cycle_ticks = sum(duration for _, duration in segments)
+        phase = t % cycle_ticks
+
+        for is_on, duration in segments:
+            if phase < duration:
+                if is_on:
+                    self.led.set_scaled_rgb(255, 0, 0, 0.8)
+                else:
+                    self.led.set_rgb(0, 0, 0)
+                return
+            phase -= duration
+
+        self.led.set_rgb(0, 0, 0)
+
     def update_effect(self):
         """根据当前状态渲染灯效"""
         t = self.tick
@@ -234,7 +290,11 @@ class LedStateMachine:
             self.led.set_scaled_rgb(0, 255, 20, brightness)
 
         elif self.state == "RECORDING":
-            self.led.set_rgb(0, 255, 0)
+            # 录制中：绿色闪烁（2Hz）
+            if (t % 25) < 12:
+                self.led.set_rgb(0, 255, 0)
+            else:
+                self.led.set_rgb(0, 0, 0)
 
         elif self.state == "CALIB_DONE":
             # 绿色闪烁 (周期 1秒: 0.5亮 0.5灭)
@@ -243,12 +303,8 @@ class LedStateMachine:
             else:
                 self.led.set_rgb(0, 0, 0)
 
-        elif self.state == "ERROR":
-            # 红色急促快闪
-            if (t % 10) < 5:
-                self.led.set_scaled_rgb(255, 0, 0, 0.8) # 红色，稍微降低亮度
-            else:
-                self.led.set_rgb(0, 0, 0)
+        elif self.state == "ERROR" or self.state.startswith("ERROR_"):
+            self.render_error_pattern(t)
 
         elif self.state == "CALIB_PRE":
             # 准备校准: 黄灯慢闪 (1Hz)
