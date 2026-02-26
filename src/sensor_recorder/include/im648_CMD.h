@@ -39,9 +39,11 @@ typedef float                  F32;
 
 
 // ===============================调试信息开关====================================
-    #define __Debug  // 使用调试口输出调试信息,不使用调试信息屏蔽本句即可
+    // 默认关闭 IM648 协议调试日志，避免输出大量 tx/rx 和参数细节。
+    // 若后续需要临时打开，可手动恢复 __Debug 宏。
+    // #define __Debug
     #ifdef __Debug
-        #define Dbp(fmt, args...)  printf(fmt, ##args) // 若需要使用调试信息, 用户对接Dbp函数名即可
+        #define Dbp(fmt, args...)  printf(fmt, ##args)
         extern void Dbp_U8_buf(const char *sBeginInfo, const char *sEndInfo, const char *sFormat, const U8 *Buf, U32 Len);
     #else
         #define Dbp(fmt, args...)
@@ -223,6 +225,5 @@ typedef float                  F32;
 
 
 #endif
-
 
 
