@@ -97,6 +97,7 @@
 - 运行策略：
   - 启动时若未检测到 Fays FTDI，系统进入无 Fays 模式并继续正常录制。
   - 运行中若发生 Fays 插拔，`run_record.sh` 会自动检测并尝试重连 daemon；重连成功后可在当前 episode 内恢复 Fays 录制。
+  - `fays_record_example` 进程内部会轮询 `fays_vikit.yaml` 中的 `stereo_dev_port/imu_dev_port` 设备节点；若检测到节点消失会打印错误并主动退出，让上层按重连流程拉起新实例。
 - 常驻命令通道：`/tmp/umi_fays_cmd`（`START|<dir>` / `STOP` / `EXIT`）。
 - 当前默认输出：
   - `fays_stereo_output.mkv`

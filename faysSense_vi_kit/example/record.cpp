@@ -2,10 +2,13 @@
 #include <thread>
 #include <memory>
 #include <iostream>
+#include <fstream>
+#include <vector>
 #include <opencv2/opencv.hpp>
 #include <atomic>
 #include <mutex>
 #include <cstdio>
+#include <cstdlib>
 #include <csignal>
 #include <chrono>
 #include <iomanip>
@@ -247,11 +250,13 @@ public:
         mImgData_.data = new uchar[FAYS_ATRAK_MONO_MAX_BYTES * 3];
 
         FAYS_VIK_CreateHandleWithConfig(&mptrHandle_, configPath);
+        LoadMonitoredDevicePaths(configPath);
         std::cout << "[FaysRecorder] Created handle with config: " << configPath << std::endl;
         std::cout << "[FaysRecorder] Standby mode ready. Waiting for START command." << std::endl;
 
         mptrImuThr_ = std::thread(&FaysRecorder::ImuOnlineCapture, this);
         mptrImgThr_ = std::thread(&FaysRecorder::ImgOnlineCapture, this);
+        mptrUsbWatchThr_ = std::thread(&FaysRecorder::UsbConnectionWatchdog, this);
     }
 
     ~FaysRecorder() {
@@ -263,6 +268,9 @@ public:
         }
         if (mptrImgThr_.joinable()) {
             mptrImgThr_.join();
+        }
+        if (mptrUsbWatchThr_.joinable()) {
+            mptrUsbWatchThr_.join();
         }
 
         mRecorder_.Stop();
@@ -310,6 +318,87 @@ public:
     }
 
 private:
+    static std::string TrimCopy(const std::string& input) {
+        const std::string whitespace = " \t\r\n";
+        const size_t start = input.find_first_not_of(whitespace);
+        if (start == std::string::npos) {
+            return "";
+        }
+        const size_t end = input.find_last_not_of(whitespace);
+        return input.substr(start, end - start + 1);
+    }
+
+    static std::string ReadConfigValue(const std::string& configPath, const std::string& key) {
+        std::ifstream in(configPath);
+        if (!in.is_open()) {
+            std::cerr << "[USB] Failed to open config file for USB watch: " << configPath << std::endl;
+            return "";
+        }
+
+        const std::string prefix = key + ":";
+        std::string line;
+        while (std::getline(in, line)) {
+            const size_t commentPos = line.find('#');
+            if (commentPos != std::string::npos) {
+                line = line.substr(0, commentPos);
+            }
+
+            line = TrimCopy(line);
+            if (line.rfind(prefix, 0) != 0) {
+                continue;
+            }
+
+            std::string value = TrimCopy(line.substr(prefix.size()));
+            if (value == "NULL" || value == "null") {
+                return "";
+            }
+            return value;
+        }
+
+        return "";
+    }
+
+    void LoadMonitoredDevicePaths(const std::string& configPath) {
+        monitoredDevicePaths_.clear();
+
+        const std::string stereoPort = ReadConfigValue(configPath, "stereo_dev_port");
+        const std::string imuPort = ReadConfigValue(configPath, "imu_dev_port");
+
+        if (!stereoPort.empty()) {
+            monitoredDevicePaths_.push_back(stereoPort);
+        }
+        if (!imuPort.empty() && imuPort != stereoPort) {
+            monitoredDevicePaths_.push_back(imuPort);
+        }
+
+        if (monitoredDevicePaths_.empty()) {
+            std::cerr << "[USB] No Fays device nodes parsed from config. USB disconnection watch disabled." << std::endl;
+            return;
+        }
+
+        for (const auto& devPath : monitoredDevicePaths_) {
+            std::cout << "[USB] Watching device node: " << devPath << std::endl;
+        }
+    }
+
+    void UsbConnectionWatchdog() {
+        while (mbIsRunning_) {
+            for (const auto& devPath : monitoredDevicePaths_) {
+                if (devPath.empty()) {
+                    continue;
+                }
+                if (access(devPath.c_str(), F_OK) != 0) {
+                    std::cerr << "[USB] Fays USB disconnected, missing node: " << devPath
+                              << ". Exiting fays_record_example." << std::endl;
+                    Stop();
+                    std::fflush(nullptr);
+                    std::exit(2);
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
     static std::string NormalizeOutputDir(const std::string& outputDir) {
         std::string normalized = outputDir;
         if (normalized.empty()) {
@@ -467,6 +556,7 @@ private:
     void* mptrHandle_;
     std::thread mptrImgThr_;
     std::thread mptrImuThr_;
+    std::thread mptrUsbWatchThr_;
 
     AtrakImage mImgData_;
     std::atomic<bool> mbIsRunning_;
@@ -484,6 +574,7 @@ private:
     uint64_t lastImgTimestamp_;
     std::atomic<int64_t> imuToSysOffsetNs_;
     std::atomic<bool> hasImuTimeOffset_;
+    std::vector<std::string> monitoredDevicePaths_;
 };
 
 void signalHandler(int signal) {
