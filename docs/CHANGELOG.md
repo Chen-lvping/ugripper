@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.4 - 2026-02-27
+- 新增 `py_script/fays_kalibr_to_vinsfusion.py`，支持把 Kalibr 文本结果一键转换成 VINS-Fusion 所需的 3 个 YAML 文件。
+- `body_T_cam0/body_T_cam1` 分别使用 `Transformation (cam0/cam1)` 的 `T_ic (camX to imu0)`，并同步输出双目 `equidistant` 相机参数。
+
 ## v1.1.3 - 2026-02-25
 - 在 `camera_record/99-fixed-usb-map.rules` 新增 Fays FTDI (`0403:602e`) 的 udev 权限规则，统一放开 `video4linux` 与 `usb` 节点访问权限。
 - 便于 Fays 相机在系统启动后无需额外手工执行权限脚本即可被录制流程访问。

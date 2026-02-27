@@ -18,6 +18,7 @@
 | 统一传感器录制（C++） | `src/sensor_recorder/src/main.cpp`, `src/sensor_recorder/src/zeroing.cpp` | 统一管理 IMU+Encoder 录制与 Encoder 归零工具。 |
 | 三路相机录制（Python） | `camera_record/triple_camera_record_h265.py` | 录制 `cam.mkv`, `tact_left.mkv`, `tact_right.mkv` 及时间戳 CSV。 |
 | FaysSense 常驻录制（C++ + Shell） | `faysSense_vi_kit/scripts/run_fays_record.sh`, `faysSense_vi_kit/example/record.cpp` | 开机后常驻占用相机并预热；录制时通过命令触发写文件，停止时仅停写不退出进程。 |
+| 标定结果转换工具（Python） | `py_script/fays_kalibr_to_vinsfusion.py` | 将 Kalibr 文本报告转换为 VINS-Fusion 所需的 `StereoIMU` 与双目 `equidistant` YAML。 |
 | 反馈通道 | `led_manager.py`, `audio/audio_play.py` | 通过 FIFO (`/tmp/umi_led_pipe`, `/tmp/umi_audio_pipe`) 播放灯光/音频状态。 |
 | 打包脚本 | `build_deb.sh` | 根目录 CMake 构建 + deb 组包 + systemd/udev 安装资源注入。 |
 | 发布收尾自动化（Skill） | `.codex/skills/auto-release-deb/scripts/auto_release_deb.sh` | 代码修改后自动升级 `build_deb.sh` 版本（默认 +.z，显式指定才 +.x/+ .y），并自动选择是否使用 `-q` 打包。 |
@@ -222,6 +223,7 @@
   - 检查 `/usr/local/lib/libft602.so` 与 OpenCV 目录是否存在
 - 更新日志：`/var/log/ugripper/usb_auto_update.log`, `/var/log/ugripper/boot_install.log`
 - 数据异常：查看 episode 下 `validation_error.log`，并用 `py_script/mcap_viewer.py` 统计 topic 频率与数据量（已支持 `fays_data.mcap` 的 `i/c` 二进制解析与 `publishTime-logTime` 差值显示）
+- 标定参数落盘：使用 `python3 py_script/fays_kalibr_to_vinsfusion.py --input py_script/fays_tmp_calib-results-imucam.txt` 生成 VINS-Fusion 配置文件。
 
 ---
 
@@ -229,6 +231,7 @@
 - 找“录制主逻辑”：优先看 `run_record.sh`。
 - 找“FaysSense 启停与输出”：看 `faysSense_vi_kit/scripts/run_fays_record.sh` 与 `faysSense_vi_kit/example/record.cpp`。
 - 找“传感器频率/MCAP格式”：看 `src/sensor_recorder/src/main.cpp` 与 `py_script/mcap_viewer.py`。
+- 找“Kalibr 到 VINS-Fusion 参数转换”：看 `py_script/fays_kalibr_to_vinsfusion.py`。
 - 找“安装后系统行为”：看 `pack_script/postinst`。
 - 找“关机权限路径”：看 `auto_update/umi-shutdown-trigger.path` + `auto_update/trigger_shutdown.sh`。
 - 找“打包内容变化”：看 `build_deb.sh` 的 `EXCLUDE_LIST` 与二进制回填段。
