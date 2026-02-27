@@ -7,12 +7,15 @@
 #include <opencv2/opencv.hpp>
 #include <atomic>
 #include <mutex>
+#include <condition_variable>
+#include <deque>
 #include <cstdio>
 #include <cstdlib>
 #include <csignal>
 #include <chrono>
 #include <iomanip>
 #include <cstddef>
+#include <iterator>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -37,6 +40,273 @@ struct FaysCamTsSample {
 
 static_assert(sizeof(FaysImuSample) == 48, "FaysImuSample layout changed");
 static_assert(sizeof(FaysCamTsSample) == 4, "FaysCamTsSample layout changed");
+
+struct ImuQueuedSample {
+    AtrakIMU imu;
+    uint64_t publishTimeNs;
+    uint64_t sessionId;
+};
+
+struct CamTsQueuedSample {
+    uint64_t faysTsNs;
+    uint64_t publishTimeNs;
+    uint32_t frameIndex;
+    uint64_t sessionId;
+};
+
+struct McapControlCommand {
+    enum class Type {
+        Start,
+        Stop,
+    };
+
+    Type type;
+    uint64_t sessionId;
+    std::string mcapPath;
+};
+
+class ImuQueue {
+public:
+    ImuQueue() : stopped_(false), nextBacklogWarnSize_(8192) {}
+
+    bool TryPushBatch(std::deque<ImuQueuedSample>& pending) {
+        if (pending.empty()) {
+            return true;
+        }
+        std::unique_lock<std::mutex> lock(mtx_, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            return false;
+        }
+
+        queue_.insert(
+            queue_.end(),
+            std::make_move_iterator(pending.begin()),
+            std::make_move_iterator(pending.end()));
+        pending.clear();
+
+        if (queue_.size() >= nextBacklogWarnSize_) {
+            std::cerr << "[ImuQueue] WARNING: backlog grew to " << queue_.size() << std::endl;
+            nextBacklogWarnSize_ = queue_.size() + 4096;
+        }
+        cv_.notify_one();
+        return true;
+    }
+
+    size_t DrainTo(std::vector<ImuQueuedSample>& out, size_t maxCount) {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_.wait_for(lock, std::chrono::milliseconds(5), [this]() {
+            return !queue_.empty() || stopped_;
+        });
+        return DrainToLocked(out, maxCount);
+    }
+
+    size_t TryDrainTo(std::vector<ImuQueuedSample>& out, size_t maxCount) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return DrainToLocked(out, maxCount);
+    }
+
+    size_t Size() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return queue_.size();
+    }
+
+    bool Empty() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return queue_.empty();
+    }
+
+    void NotifyStop() {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            stopped_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    size_t DrainToLocked(std::vector<ImuQueuedSample>& out, size_t maxCount) {
+        size_t count = queue_.size();
+        if (count > maxCount) {
+            count = maxCount;
+        }
+        if (count == 0) {
+            return 0;
+        }
+
+        out.reserve(out.size() + count);
+        for (size_t i = 0; i < count; ++i) {
+            out.push_back(queue_.front());
+            queue_.pop_front();
+        }
+        return count;
+    }
+
+    std::deque<ImuQueuedSample> queue_;
+    mutable std::mutex mtx_;
+    std::condition_variable cv_;
+    bool stopped_;
+    size_t nextBacklogWarnSize_;
+};
+
+class CamTsQueue {
+public:
+    CamTsQueue() : stopped_(false), nextBacklogWarnSize_(2048) {}
+
+    bool TryPushBatch(std::deque<CamTsQueuedSample>& pending) {
+        if (pending.empty()) {
+            return true;
+        }
+        std::unique_lock<std::mutex> lock(mtx_, std::try_to_lock);
+        if (!lock.owns_lock()) {
+            return false;
+        }
+
+        queue_.insert(
+            queue_.end(),
+            std::make_move_iterator(pending.begin()),
+            std::make_move_iterator(pending.end()));
+        pending.clear();
+
+        if (queue_.size() >= nextBacklogWarnSize_) {
+            std::cerr << "[CamTsQueue] WARNING: backlog grew to " << queue_.size() << std::endl;
+            nextBacklogWarnSize_ = queue_.size() + 1024;
+        }
+        cv_.notify_one();
+        return true;
+    }
+
+    size_t DrainTo(std::vector<CamTsQueuedSample>& out, size_t maxCount) {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_.wait_for(lock, std::chrono::milliseconds(5), [this]() {
+            return !queue_.empty() || stopped_;
+        });
+        return DrainToLocked(out, maxCount);
+    }
+
+    size_t TryDrainTo(std::vector<CamTsQueuedSample>& out, size_t maxCount) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return DrainToLocked(out, maxCount);
+    }
+
+    bool Empty() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return queue_.empty();
+    }
+
+    size_t Size() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return queue_.size();
+    }
+
+    void NotifyStop() {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            stopped_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    size_t DrainToLocked(std::vector<CamTsQueuedSample>& out, size_t maxCount) {
+        size_t count = queue_.size();
+        if (count > maxCount) {
+            count = maxCount;
+        }
+        if (count == 0) {
+            return 0;
+        }
+
+        out.reserve(out.size() + count);
+        for (size_t i = 0; i < count; ++i) {
+            out.push_back(queue_.front());
+            queue_.pop_front();
+        }
+        return count;
+    }
+
+    std::deque<CamTsQueuedSample> queue_;
+    mutable std::mutex mtx_;
+    std::condition_variable cv_;
+    bool stopped_;
+    size_t nextBacklogWarnSize_;
+};
+
+class McapControlQueue {
+public:
+    McapControlQueue() : stopped_(false) {}
+
+    void PushStart(uint64_t sessionId, const std::string& mcapPath) {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            McapControlCommand cmd{};
+            cmd.type = McapControlCommand::Type::Start;
+            cmd.sessionId = sessionId;
+            cmd.mcapPath = mcapPath;
+            queue_.push_back(std::move(cmd));
+        }
+        cv_.notify_one();
+    }
+
+    void PushStop(uint64_t sessionId) {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            McapControlCommand cmd{};
+            cmd.type = McapControlCommand::Type::Stop;
+            cmd.sessionId = sessionId;
+            queue_.push_back(std::move(cmd));
+        }
+        cv_.notify_one();
+    }
+
+    size_t DrainTo(std::vector<McapControlCommand>& out, size_t maxCount) {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_.wait_for(lock, std::chrono::milliseconds(5), [this]() {
+            return !queue_.empty() || stopped_;
+        });
+        return DrainToLocked(out, maxCount);
+    }
+
+    size_t TryDrainTo(std::vector<McapControlCommand>& out, size_t maxCount) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return DrainToLocked(out, maxCount);
+    }
+
+    bool Empty() const {
+        std::lock_guard<std::mutex> lock(mtx_);
+        return queue_.empty();
+    }
+
+    void NotifyStop() {
+        {
+            std::lock_guard<std::mutex> lock(mtx_);
+            stopped_ = true;
+        }
+        cv_.notify_all();
+    }
+
+private:
+    size_t DrainToLocked(std::vector<McapControlCommand>& out, size_t maxCount) {
+        size_t count = queue_.size();
+        if (count > maxCount) {
+            count = maxCount;
+        }
+        if (count == 0) {
+            return 0;
+        }
+
+        out.reserve(out.size() + count);
+        for (size_t i = 0; i < count; ++i) {
+            out.push_back(std::move(queue_.front()));
+            queue_.pop_front();
+        }
+        return count;
+    }
+
+    std::deque<McapControlCommand> queue_;
+    mutable std::mutex mtx_;
+    std::condition_variable cv_;
+    bool stopped_;
+};
 
 class FaysDataLogger {
 public:
@@ -242,6 +512,8 @@ public:
         : mptrHandle_(nullptr),
           mbIsRunning_(true),
           recordingEnabled_(false),
+          recordingSessionId_(0),
+          recordingSessionSeed_(0),
           lastImuTimestamp_(0),
           lastImgTimestamp_(0),
           imuGapCount_(0),
@@ -256,6 +528,7 @@ public:
         std::cout << "[FaysRecorder] Standby mode ready. Waiting for START command." << std::endl;
 
         mptrImuThr_ = std::thread(&FaysRecorder::ImuOnlineCapture, this);
+        mptrMcapWriterThr_ = std::thread(&FaysRecorder::McapWriteThread, this);
         mptrImgThr_ = std::thread(&FaysRecorder::ImgOnlineCapture, this);
         mptrUsbWatchThr_ = std::thread(&FaysRecorder::UsbConnectionWatchdog, this);
     }
@@ -274,8 +547,15 @@ public:
             mptrUsbWatchThr_.join();
         }
 
+        imuQueue_.NotifyStop();
+        camTsQueue_.NotifyStop();
+        mcapControlQueue_.NotifyStop();
+
+        if (mptrMcapWriterThr_.joinable()) {
+            mptrMcapWriterThr_.join();
+        }
+
         mRecorder_.Stop();
-        mDataLogger_.Close();
 
         std::cout << "[IMU] Final stats - Gaps: " << imuGapCount_
                   << ", Rollbacks: " << imuRollbackCount_ << std::endl;
@@ -296,26 +576,24 @@ public:
         const std::string normalizedOutputDir = NormalizeOutputDir(outputDir);
         const std::string mcapPath = normalizedOutputDir + "fays_data.mcap";
 
-        if (!mDataLogger_.Open(mcapPath)) {
-            std::cerr << "[Control] START aborted: failed to open " << mcapPath << std::endl;
-            recordingEnabled_ = false;
-            return;
-        }
-
         recordingOutputDir_ = normalizedOutputDir;
-        recordingEnabled_ = true;
+        const uint64_t sessionId = recordingSessionSeed_.fetch_add(1, std::memory_order_relaxed) + 1;
+        recordingSessionId_.store(sessionId, std::memory_order_release);
+        recordingEnabled_.store(true, std::memory_order_release);
         hasImuTimeOffset_.store(false, std::memory_order_release);
+        mcapControlQueue_.PushStart(sessionId, mcapPath);
 
         std::cout << "[Control] START recording. Output directory: " << recordingOutputDir_ << std::endl;
         std::cout << "[Control] MCAP output: " << mcapPath << std::endl;
     }
 
     void StopRecordingSession() {
-        bool wasRecording = recordingEnabled_.exchange(false);
+        bool wasRecording = recordingEnabled_.exchange(false, std::memory_order_acq_rel);
+        const uint64_t stoppedSessionId = recordingSessionId_.exchange(0, std::memory_order_acq_rel);
         if (wasRecording) {
             std::cout << "[Control] STOP recording." << std::endl;
         }
-        mDataLogger_.Close();
+        mcapControlQueue_.PushStop(stoppedSessionId);
     }
 
 private:
@@ -432,8 +710,11 @@ private:
         return aligned > 0 ? static_cast<uint64_t>(aligned) : 0ULL;
     }
 
-    bool GetRecordingState(std::string* outDir = nullptr) const {
-        const bool enabled = recordingEnabled_.load();
+    bool GetRecordingState(std::string* outDir = nullptr, uint64_t* outSessionId = nullptr) const {
+        const bool enabled = recordingEnabled_.load(std::memory_order_acquire);
+        if (outSessionId != nullptr) {
+            *outSessionId = recordingSessionId_.load(std::memory_order_relaxed);
+        }
         if (enabled && outDir != nullptr) {
             std::lock_guard<std::mutex> lock(recordingMtx_);
             *outDir = recordingOutputDir_;
@@ -444,6 +725,7 @@ private:
     void ImuOnlineCapture() {
         AtrakIMU imuData;
         const uint64_t IMU_THRESHOLD_NS = 10000000;
+        std::deque<ImuQueuedSample> pendingSamples;
 
         while (mbIsRunning_) {
             bool gotData = false;
@@ -465,14 +747,145 @@ private:
                 const uint64_t systemNowNs = SystemNowNs();
                 UpdateImuTimeOffset(imuData.timestamp, systemNowNs);
 
-                if (GetRecordingState()) {
-                    mDataLogger_.LogImu(imuData, systemNowNs);
+                uint64_t sessionId = 0;
+                if (GetRecordingState(nullptr, &sessionId) && sessionId != 0) {
+                    ImuQueuedSample sample{};
+                    sample.imu = imuData;
+                    sample.publishTimeNs = systemNowNs;
+                    sample.sessionId = sessionId;
+                    pendingSamples.push_back(sample);
+                    imuQueue_.TryPushBatch(pendingSamples);
                 }
             }
 
+            if (!pendingSamples.empty()) {
+                imuQueue_.TryPushBatch(pendingSamples);
+            }
             if (!gotData) {
                 std::this_thread::sleep_for(std::chrono::microseconds(50));
             }
+        }
+
+        while (!pendingSamples.empty()) {
+            if (!imuQueue_.TryPushBatch(pendingSamples)) {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+        }
+        imuQueue_.NotifyStop();
+    }
+
+    void McapWriteThread() {
+        std::vector<ImuQueuedSample> imuBatch;
+        std::vector<CamTsQueuedSample> camBatch;
+        std::vector<McapControlCommand> controlBatch;
+        imuBatch.reserve(512);
+        camBatch.reserve(256);
+        controlBatch.reserve(16);
+        uint64_t lastBacklogReportNs = 0;
+        uint64_t activeLoggerSessionId = 0;
+        bool loggerOpen = false;
+
+        auto processControlCommand = [&](const McapControlCommand& cmd) {
+            if (cmd.type == McapControlCommand::Type::Start) {
+                if (loggerOpen) {
+                    mDataLogger_.Close();
+                    loggerOpen = false;
+                    activeLoggerSessionId = 0;
+                }
+                if (!mDataLogger_.Open(cmd.mcapPath)) {
+                    std::cerr << "[Control] START aborted in MCAP thread: failed to open "
+                              << cmd.mcapPath << std::endl;
+                    recordingSessionId_.store(0, std::memory_order_release);
+                    recordingEnabled_.store(false, std::memory_order_release);
+                    return;
+                }
+                loggerOpen = true;
+                activeLoggerSessionId = cmd.sessionId;
+                return;
+            }
+
+            if (cmd.type == McapControlCommand::Type::Stop) {
+                if (!loggerOpen) {
+                    return;
+                }
+                if (cmd.sessionId != 0 && cmd.sessionId != activeLoggerSessionId) {
+                    return;
+                }
+                mDataLogger_.Close();
+                loggerOpen = false;
+                activeLoggerSessionId = 0;
+            }
+        };
+
+        while (mbIsRunning_.load(std::memory_order_acquire) || !imuQueue_.Empty() || !camTsQueue_.Empty() || !mcapControlQueue_.Empty()) {
+            size_t controlCount = mcapControlQueue_.TryDrainTo(controlBatch, 16);
+            if (controlCount > 0) {
+                for (const auto& cmd : controlBatch) {
+                    processControlCommand(cmd);
+                }
+                controlBatch.clear();
+            }
+
+            const size_t imuCount = imuQueue_.DrainTo(imuBatch, 512);
+            size_t camCount = camTsQueue_.TryDrainTo(camBatch, 256);
+            if (imuCount == 0 && camCount == 0 && controlCount == 0) {
+                controlCount = mcapControlQueue_.DrainTo(controlBatch, 16);
+                if (controlCount > 0) {
+                    for (const auto& cmd : controlBatch) {
+                        processControlCommand(cmd);
+                    }
+                    controlBatch.clear();
+                }
+            }
+            if (imuCount == 0 && camCount == 0 && controlCount == 0) {
+                camCount = camTsQueue_.DrainTo(camBatch, 64);
+            }
+            if (imuCount == 0 && camCount == 0 && controlCount == 0) {
+                continue;
+            }
+
+            for (const auto& sample : imuBatch) {
+                if (sample.sessionId == 0) {
+                    continue;
+                }
+                if (!loggerOpen) {
+                    continue;
+                }
+                if (sample.sessionId != activeLoggerSessionId) {
+                    continue;
+                }
+                mDataLogger_.LogImu(sample.imu, sample.publishTimeNs);
+            }
+            for (const auto& sample : camBatch) {
+                if (sample.sessionId == 0) {
+                    continue;
+                }
+                if (!loggerOpen) {
+                    continue;
+                }
+                if (sample.sessionId != activeLoggerSessionId) {
+                    continue;
+                }
+                mDataLogger_.LogCamTs(sample.faysTsNs, sample.publishTimeNs, sample.frameIndex);
+            }
+
+            imuBatch.clear();
+            camBatch.clear();
+
+            const size_t imuBacklog = imuQueue_.Size();
+            const size_t camBacklog = camTsQueue_.Size();
+            if (imuBacklog > 4096 || camBacklog > 512) {
+                const uint64_t nowNs = SystemNowNs();
+                if (lastBacklogReportNs == 0 || nowNs - lastBacklogReportNs > 2000000000ULL) {
+                    std::cerr << "[McapWriter] WARNING: queue backlog imu=" << imuBacklog
+                              << ", cam=" << camBacklog << std::endl;
+                    lastBacklogReportNs = nowNs;
+                }
+            }
+        }
+
+        if (loggerOpen) {
+            mDataLogger_.Close();
         }
     }
 
@@ -484,12 +897,16 @@ private:
         const uint64_t VIDEO_THRESHOLD_NS = 60000000;
         bool videoSessionOpen = false;
         uint32_t frameIndex = 0;
+        uint64_t activeVideoSessionId = 0;
         std::string sessionOutputDir;
+        std::deque<CamTsQueuedSample> pendingCamSamples;
 
         std::cout << "[Record] Waiting for Stereo frames..." << std::endl;
 
         while (mbIsRunning_) {
+            bool gotFrame = false;
             if (EXIT_SUCCESS == FAYS_VIK_GetStereoFrames(mptrHandle_, &mImgData_)) {
+                gotFrame = true;
                 if (lastImgTimestamp_ != 0) {
                     if (mImgData_.timestamp < lastImgTimestamp_) {
                         std::cout << "[Video] Timestamp rollback detected: prev=" << lastImgTimestamp_
@@ -513,9 +930,16 @@ private:
                 cv::Mat img(mImgData_.height, mImgData_.width, type, mImgData_.data);
 
                 std::string outputDir;
-                const bool shouldRecord = GetRecordingState(&outputDir);
+                uint64_t sessionId = 0;
+                const bool shouldRecord = GetRecordingState(&outputDir, &sessionId);
 
-                if (shouldRecord) {
+                if (shouldRecord && sessionId != 0) {
+                    if (videoSessionOpen && sessionId != activeVideoSessionId) {
+                        mRecorder_.Stop();
+                        videoSessionOpen = false;
+                        sessionOutputDir.clear();
+                        activeVideoSessionId = 0;
+                    }
                     if (!videoSessionOpen && img.cols > 0 && img.rows > 0) {
                         const bool isColor = (img.channels() == 3);
                         std::cout << "[Record] Input Info: " << img.cols << "x" << img.rows
@@ -523,6 +947,7 @@ private:
                         if (mRecorder_.Start(outputDir + "fays_stereo_output.mkv", img.cols, img.rows, RECORD_FPS, isColor)) {
                             sessionOutputDir = outputDir;
                             videoSessionOpen = true;
+                            activeVideoSessionId = sessionId;
                             frameIndex = 0;
                         }
                     }
@@ -530,43 +955,63 @@ private:
                     if (videoSessionOpen) {
                         mRecorder_.Write(img);
                         const uint64_t publishTimeNs = AlignFaysTsToSystem(mImgData_.timestamp);
-                        mDataLogger_.LogCamTs(mImgData_.timestamp, publishTimeNs, frameIndex);
+                        CamTsQueuedSample camSample{};
+                        camSample.faysTsNs = mImgData_.timestamp;
+                        camSample.publishTimeNs = publishTimeNs;
+                        camSample.frameIndex = frameIndex;
+                        camSample.sessionId = activeVideoSessionId;
+                        pendingCamSamples.push_back(camSample);
+                        camTsQueue_.TryPushBatch(pendingCamSamples);
 
                         frameIndex++;
-                        if (frameIndex % 300 == 0) {
-                            std::cout << "[Record] Saved " << frameIndex
-                                      << " frames to " << sessionOutputDir
-                                      << ". Latest TS: " << mImgData_.timestamp << "\n";
-                        }
                     }
                 } else if (videoSessionOpen) {
                     mRecorder_.Stop();
                     videoSessionOpen = false;
+                    activeVideoSessionId = 0;
                     sessionOutputDir.clear();
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+
+            if (!pendingCamSamples.empty()) {
+                camTsQueue_.TryPushBatch(pendingCamSamples);
+            }
+            if (!gotFrame) {
+                std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
         }
 
         if (videoSessionOpen) {
             mRecorder_.Stop();
         }
+        while (!pendingCamSamples.empty()) {
+            if (!camTsQueue_.TryPushBatch(pendingCamSamples)) {
+                std::this_thread::sleep_for(std::chrono::microseconds(100));
+            }
+        }
+        camTsQueue_.NotifyStop();
     }
 
 private:
     void* mptrHandle_;
     std::thread mptrImgThr_;
     std::thread mptrImuThr_;
+    std::thread mptrMcapWriterThr_;
     std::thread mptrUsbWatchThr_;
 
     AtrakImage mImgData_;
     std::atomic<bool> mbIsRunning_;
     std::atomic<bool> recordingEnabled_;
+    std::atomic<uint64_t> recordingSessionId_;
+    std::atomic<uint64_t> recordingSessionSeed_;
     mutable std::mutex recordingMtx_;
     std::string recordingOutputDir_;
 
     FFmpegRecorder mRecorder_;
     FaysDataLogger mDataLogger_;
+    ImuQueue imuQueue_;
+    CamTsQueue camTsQueue_;
+    McapControlQueue mcapControlQueue_;
 
     uint64_t lastImuTimestamp_;
     std::atomic<uint64_t> imuGapCount_;

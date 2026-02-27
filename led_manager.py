@@ -290,8 +290,8 @@ class LedStateMachine:
             self.led.set_scaled_rgb(0, 255, 20, brightness)
 
         elif self.state == "RECORDING":
-            # 录制中：绿色闪烁（2Hz）
-            if (t % 25) < 12:
+            # 录制中：绿色闪烁（1Hz）
+            if (t % 50) < 25:
                 self.led.set_rgb(0, 255, 0)
             else:
                 self.led.set_rgb(0, 0, 0)

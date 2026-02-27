@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.1.6 - 2026-02-27
+- 调整 Fays 维护策略：支持运行时自动拉起 daemon/FIFO；若在录制中恢复，仅恢复就绪，不补发 `START`、不续写当前 episode。
+- `run_record.sh` 新增按时间戳跨度的数据完整性校验：对期望 Fays 的 episode，对比 `cam.mkv` 与 `fays_stereo_output.mkv` 的 `end-start` 时长；若 Fays 短超过 10 秒或跨度无法读取则判定失败。
+- 重构 `fays_record_example` 录制链路：IMU/视频读取线程只负责采集和入队，`fays_data.mcap` 的 `Open/Close/Log` 统一由独立 MCAP 写线程处理，并按 session 隔离写入。
+- 入队路径改为“本地 pending + 非阻塞批量重试”，锁竞争时先缓存后重试，降低高负载下的样本丢失风险。
+- 增加 Fays USB 节点监控：`record.cpp` 轮询配置中的视频节点，断连时打印错误并主动退出，由上层维护流程重建。
+- `led_manager.py` 中 `RECORDING` 状态调整为 1Hz 绿色闪烁。
+
 ## v1.1.5 - 2026-02-26
 - 新增报错灯效分级：`ERROR_1~ERROR_5`，按严重度区分并使用红灯“长+短码”循环编码（`ERROR_1`=长短，`ERROR_2`=长短短，依次类推）。
 - `run_record.sh` 按错误类型映射错误码并按严重度选最高优先级展示；`ERROR` 注释同步维护了各错误分级说明。
