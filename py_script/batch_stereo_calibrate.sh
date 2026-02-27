@@ -12,6 +12,7 @@ BAG_FREQ="20"
 TOPICS="/fays/atrak/cam0 /fays/atrak/cam1"
 KALIBR_SETUP="/home/rosuser/catkin_ws/devel/setup.bash"
 CONVERTER="$SCRIPT_DIR/fays_imu_para_bag.py"
+VINS_CONVERTER="$SCRIPT_DIR/fays_kalibr_to_vinsfusion.py"
 BAG_NAME="output.bag"
 KALIBR_BIN="/home/rosuser/catkin_ws/devel/lib/kalibr"
 # ============================================================
@@ -21,7 +22,8 @@ usage() {
 Usage: $(basename "$0") [OPTIONS]
 
 Batch stereo + IMU calibration: convert mkv+mcap to rosbag, run kalibr
-stereo camera calibration, then IMU-camera calibration, and clean up.
+stereo camera calibration, then IMU-camera calibration, convert to
+VINS-Fusion format, and clean up.
 
 Options:
   --data-dir DIR      Root data directory         (default: $DATA_DIR)
@@ -93,6 +95,11 @@ if [[ ! -f "$CONVERTER" ]]; then
     exit 1
 fi
 
+if [[ ! -f "$VINS_CONVERTER" ]]; then
+    echo "[ERROR] VINS converter script not found: $VINS_CONVERTER"
+    exit 1
+fi
+
 if [[ ! -f "$KALIBR_SETUP" ]]; then
     echo "[ERROR] Kalibr setup.bash not found: $KALIBR_SETUP"
     exit 1
@@ -151,7 +158,7 @@ for idx in "${!device_list[@]}"; do
     echo "=========================================="
 
     # ---------- Step 1: mkv + mcap -> rosbag ----------
-    echo "[$device_name] Step 1/4: Converting mkv+mcap to rosbag ..."
+    echo "[$device_name] Step 1/5: Converting mkv+mcap to rosbag ..."
     if ! python3 "$CONVERTER" "$device_dir" "$bag_file"; then
         echo "[ERROR] [$device_name] Data conversion failed. Skipping."
         fail_count=$((fail_count + 1))
@@ -168,7 +175,7 @@ for idx in "${!device_list[@]}"; do
     echo "[$device_name] Rosbag created: $bag_file"
 
     # ---------- Step 2: kalibr stereo camera calibration ----------
-    echo "[$device_name] Step 2/4: Running kalibr stereo camera calibration ..."
+    echo "[$device_name] Step 2/5: Running kalibr stereo camera calibration ..."
     pushd "$device_dir" > /dev/null
 
     # $TOPICS and $MODELS are intentionally unquoted to allow word splitting
@@ -202,7 +209,7 @@ for idx in "${!device_list[@]}"; do
     fi
 
     # ---------- Step 3: kalibr IMU-camera calibration ----------
-    echo "[$device_name] Step 3/4: Running kalibr IMU-camera calibration ..."
+    echo "[$device_name] Step 3/5: Running kalibr IMU-camera calibration ..."
 
     if ! "$KALIBR_BIN/kalibr_calibrate_imu_camera" \
             --bag "$bag_file" \
@@ -222,8 +229,29 @@ for idx in "${!device_list[@]}"; do
     popd > /dev/null
     echo "[$device_name] IMU-camera calibration completed."
 
-    # ---------- Step 4: Clean up rosbag ----------
-    echo "[$device_name] Step 4/4: Removing rosbag to free disk space ..."
+    # ---------- Step 4: Convert to VINS-Fusion format ----------
+    echo "[$device_name] Step 4/5: Converting calibration results to VINS-Fusion format ..."
+    # Kalibr output: <BAGNAME>-results-imucam.txt (e.g. output-results-imucam.txt)
+    KALIBR_TXT="$device_dir/${BAG_STEM}-results-imucam.txt"
+    if [[ -f "$KALIBR_TXT" ]]; then
+        if ! python3 "$VINS_CONVERTER" \
+                --input "$KALIBR_TXT" \
+                --output-dir "$device_dir" \
+                --stereo-out "StereoIMU-vinsfusion.yaml" \
+                --cam0-out "cam0_equidistant.yaml" \
+                --cam1-out "cam1_equidistant.yaml"; then
+            echo "[ERROR] [$device_name] VINS-Fusion conversion failed."
+            fail_count=$((fail_count + 1))
+            failed_devices+=("$device_name")
+            continue
+        fi
+        echo "[$device_name] VINS-Fusion config files generated."
+    else
+        echo "[WARN] [$device_name] Kalibr txt not found: $KALIBR_TXT, skip VINS conversion"
+    fi
+
+    # ---------- Step 5: Clean up rosbag ----------
+    echo "[$device_name] Step 5/5: Removing rosbag to free disk space ..."
     rm -f "$bag_file"
     echo "[$device_name] Rosbag removed."
 
