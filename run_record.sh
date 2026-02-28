@@ -49,6 +49,7 @@ AUDIO_PIPE="/tmp/umi_audio_pipe"
 # --- 传感器录制配置 ---
 SENSOR_RECORDER_BIN="./build/src/sensor_recorder/sensor_recorder"
 FAYS_RECORD_SCRIPT="./build/faysSense_vi_kit/scripts/run_fays_record.sh"
+TRIPLE_CAMERA_CODEC="${TRIPLE_CAMERA_CODEC:-h264}"   # h264 | h265
 
 # --- GPIO 配置 ---
 PIN_BTN_UP="PIN_36"      # 上按键（原有）
@@ -1322,8 +1323,12 @@ start_recording() {
         echo "[INFO]:Fays not enabled, skip Fays recording for this episode."
     fi
     
-    # 启动相机    
-    uv run ./camera_record/triple_camera_record_h265.py --output-dir "$TARGET_DIR" &
+    # 启动相机
+    if [ "$TRIPLE_CAMERA_CODEC" != "h264" ] && [ "$TRIPLE_CAMERA_CODEC" != "h265" ]; then
+        echo "[WARNING]:Invalid TRIPLE_CAMERA_CODEC=$TRIPLE_CAMERA_CODEC, fallback to h264."
+        TRIPLE_CAMERA_CODEC="h264"
+    fi
+    uv run ./camera_record/triple_camera_record.py --codec "$TRIPLE_CAMERA_CODEC" --output-dir "$TARGET_DIR" &
     PID_CAM=$!
 
     "$SENSOR_RECORDER_BIN" "$TARGET_DIR" &
