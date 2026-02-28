@@ -36,6 +36,8 @@ stereo_gain_value: -1
 left_cam_rotate_180: 0
 # Right camera rotation control [0: no rotation, 1: rotate 180 degrees]
 right_cam_rotate_180: 1
+# Swap the left and right images [0: do not swap, 1: swap]
+stereo_swap_lr: 0
 
 # Imu device number
 imu_dev_port: /dev/video26

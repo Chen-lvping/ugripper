@@ -23,7 +23,8 @@
 #include <cstring>
 #include <mcap/writer.hpp>
 #include "fays_atrak/fays_atrak_types.h"
-#include "fays_atrak/fays_atrak_vimod.h"
+#include "fays_atrak/fays_vikit.h"
+#include "common/print_helpers.h"
 
 struct FaysImuSample {
     double gx;
@@ -527,6 +528,9 @@ public:
         mImgData_.data = new uchar[FAYS_ATRAK_MONO_MAX_BYTES * 3];
 
         FAYS_VIK_CreateHandleWithConfig(&mptrHandle_, configPath);
+        PrintDeviceInfo(mptrHandle_);
+        PrintCalibrationInfo(mptrHandle_);
+
         LoadMonitoredDevicePaths(configPath);
         std::cout << "[FaysRecorder] Created handle with config: " << configPath << std::endl;
         std::cout << "[FaysRecorder] Standby mode ready. Waiting for START command." << std::endl;
@@ -565,7 +569,9 @@ public:
                   << ", Rollbacks: " << imuRollbackCount_ << std::endl;
 
         FAYS_VIK_DestroyHandle(mptrHandle_);
+        std::cout << "[FaysRecorder] Destroyed handle" << std::endl;
         delete[] mImgData_.data;
+        std::cout << "[FaysRecorder] Deleted image data" << std::endl;
     }
 
     bool IsRunning() const { return mbIsRunning_; }
