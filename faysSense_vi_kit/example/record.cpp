@@ -463,13 +463,11 @@ public:
             << "-r " << fps << " "
             << "-i - ";
 
-        cmd << "-c:v hevc_rkmpp "
-            << "-rc_mode CQP "
-            << "-qp_init 30 "
-            << "-qp_max 38 "
-            << "-qp_min 24 "
-            << "-qp_max_i 38 "
-            << "-qp_min_i 20 ";
+        cmd << "-c:v libx264 "
+            << "-preset veryfast "
+            << "-tune zerolatency "
+            << "-crf 24 "
+            << "-pix_fmt yuv420p ";
 
         cmd << "\"" << savePath << "\"";
 

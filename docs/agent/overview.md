@@ -36,7 +36,7 @@
 - 录制中若 daemon 恢复，仅恢复就绪，不补发当前 episode 的 `START`。
 
 ### 4.3 `fays_record_example` 线程模型（`record.cpp`）
-- `ImgOnlineCapture`：读取双目帧并写 `fays_stereo_output.mkv`。
+- `ImgOnlineCapture`：读取双目帧并写 `fays_stereo_output.mkv`（ffmpeg `libx264` CPU 软编码，H.264）。
 - `ImuOnlineCapture`：读取 IMU 并入队。
 - `McapWriteThread`：统一处理 `fays_data.mcap` 的 `Open/Close/Log`（按 session 隔离）。
 - `UsbConnectionWatchdog`：监控配置中的视频节点，断连时报错并退出进程。
