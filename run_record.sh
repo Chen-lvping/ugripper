@@ -1030,6 +1030,20 @@ start_fays_daemon() {
         return 1
     fi
 
+    # 等待 daemon 打开控制 FIFO 读端，避免紧接着 START 写入超时。
+    local _ready=0
+    for _ in $(seq 1 20); do
+        if is_pid_alive "$PID_FAYS_DAEMON" && [ -p "/tmp/umi_fays_cmd" ] && \
+           ls -l "/proc/$PID_FAYS_DAEMON/fd" 2>/dev/null | grep -q "/tmp/umi_fays_cmd"; then
+            _ready=1
+            break
+        fi
+        sleep 0.1
+    done
+    if [ "$_ready" -ne 1 ]; then
+        echo "[WARNING]:Fays daemon started but control FIFO reader not ready yet."
+    fi
+
     echo "[INFO]:FaysSense daemon started. PID=$PID_FAYS_DAEMON"
     return 0
 }
@@ -1103,11 +1117,7 @@ check_and_maintain_fays() {
         FAYS_USB_PRESENT=true
         if start_fays_daemon; then
             if [ "$IS_RECORDING" = true ] && [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
-                if start_fays_recording_session "$TARGET_DIR"; then
-                    FAYS_RECORDING_ACTIVE=true
-                    CURRENT_RECORDING_EXPECT_FAYS=true
-                    echo "[INFO]:Fays reconnected during recording. Fays session resumed."
-                fi
+                echo "[INFO]:Fays daemon recovered during recording. Skip START replay for current episode."
             fi
         else
             echo "[WARNING]:Fays detected but daemon start failed. Will retry."
@@ -1138,17 +1148,54 @@ check_and_maintain_fays() {
             stop_fays_daemon || true
             if start_fays_daemon; then
                 if [ "$IS_RECORDING" = true ] && [ -n "$TARGET_DIR" ] && [ -d "$TARGET_DIR" ]; then
-                    if start_fays_recording_session "$TARGET_DIR"; then
-                        FAYS_RECORDING_ACTIVE=true
-                        CURRENT_RECORDING_EXPECT_FAYS=true
-                        echo "[INFO]:Fays session resumed after daemon restart."
-                    fi
+                    echo "[INFO]:Fays daemon recovered during recording. Skip START replay for current episode."
                 fi
             else
                 echo "[WARNING]:Fays daemon restart failed. Will retry."
             fi
         fi
     fi
+}
+
+get_video_timestamp_span_sec() {
+    local file_path="$1"
+    local probe_output=""
+    local start_ts=""
+    local duration_val=""
+    local span_ts=""
+
+    [ -f "$file_path" ] || return 1
+
+    probe_output=$(timeout 2 ffprobe -v error \
+        -show_entries format=start_time,duration \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$file_path" 2>/dev/null | sed '/^[[:space:]]*$/d')
+
+    start_ts=$(printf "%s\n" "$probe_output" | sed -n '1p' | tr -d '\r')
+    duration_val=$(printf "%s\n" "$probe_output" | sed -n '2p' | tr -d '\r')
+
+    if [ -z "$start_ts" ] || [ -z "$duration_val" ] || [ "$start_ts" = "N/A" ] || [ "$duration_val" = "N/A" ]; then
+        return 1
+    fi
+
+    if ! awk -v s="$start_ts" -v d="$duration_val" 'BEGIN { exit ((s+0>=0) && (d+0>0)) ? 0 : 1 }'; then
+        return 1
+    fi
+
+    span_ts="$duration_val"
+
+    # 某些 copyts 场景下 format.duration 可能表现为“绝对结束时间”，
+    # 只要 duration_val > start_ts，就按 end-start 归一化。
+    if awk -v s="$start_ts" -v d="$duration_val" 'BEGIN { exit (d > s) ? 0 : 1 }'; then
+        span_ts=$(awk -v s="$start_ts" -v e="$duration_val" 'BEGIN { printf "%.6f", e - s }')
+    fi
+
+    if ! awk -v x="$span_ts" 'BEGIN { exit (x+0>0) ? 0 : 1 }'; then
+        return 1
+    fi
+
+    printf "%s" "$span_ts"
+    return 0
 }
 
 stop_fays_daemon() {
@@ -1326,6 +1373,34 @@ validate_recording() {
             fi
         fi
     done
+
+    # --- 1.5 Fays 与主相机视频起止时间差校验 ---
+    if [ "$CURRENT_RECORDING_EXPECT_FAYS" = true ]; then
+        local cam_file="$dir/cam.mkv"
+        local fays_file="$dir/fays_stereo_output.mkv"
+        if [ -f "$cam_file" ] && [ -f "$fays_file" ]; then
+            local cam_span=""
+            local fays_span=""
+            cam_span=$(get_video_timestamp_span_sec "$cam_file" || true)
+            fays_span=$(get_video_timestamp_span_sec "$fays_file" || true)
+
+            if [ -z "$cam_span" ] || [ -z "$fays_span" ]; then
+                validation_pass=false
+                error_details="${error_details} Failed to read video timestamp span (cam=${cam_span:-NA}, fays=${fays_span:-NA});"
+                echo "[ERROR]:Failed to read video timestamp span (cam=${cam_span:-NA}, fays=${fays_span:-NA})."
+            else
+                local duration_gap
+                duration_gap=$(awk -v c="$cam_span" -v f="$fays_span" 'BEGIN { printf "%.3f", c - f }')
+                if awk -v g="$duration_gap" 'BEGIN { exit (g > 10.0) ? 0 : 1 }'; then
+                    validation_pass=false
+                    error_details="${error_details} Fays video too short by timestamp span (cam=${cam_span}s, fays=${fays_span}s, gap=${duration_gap}s);"
+                    echo "[ERROR]:Fays video too short by timestamp span (cam=${cam_span}s, fays=${fays_span}s, gap=${duration_gap}s)."
+                else
+                    echo "[INFO]:PASS: video timestamp-span check (cam=${cam_span}s, fays=${fays_span}s, gap=${duration_gap}s)."
+                fi
+            fi
+        fi
+    fi
 
     # --- 2. 检查 MCAP 文件 ---
     local mcap_files=("sensor_data.mcap")
