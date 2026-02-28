@@ -17,7 +17,7 @@
 3. `start_recording`：
 - Right 先下发网络 `START` 给 Left。
 - 可用时启动 Fays 当前 episode（`run_fays_record.sh start <dir>`）。
-- 启动三路相机：`camera_record/triple_camera_record_h265.py`。
+- 启动三路相机：`camera_record/triple_camera_record.py --codec <h264|h265>`（默认 `h264`）。
 - 启动传感器：`build/src/sensor_recorder/sensor_recorder`。
 4. `stop_recording`：
 - Right 下发 `STOP` 给 Left。
@@ -36,7 +36,7 @@
 - 录制中若 daemon 恢复，仅恢复就绪，不补发当前 episode 的 `START`。
 
 ### 4.3 `fays_record_example` 线程模型（`record.cpp`）
-- `ImgOnlineCapture`：读取双目帧并写 `fays_stereo_output.mkv`。
+- `ImgOnlineCapture`：读取双目帧并写 `fays_stereo_output.mkv`（ffmpeg `h264_rkmpp` 硬编码，H.264）。
 - `ImuOnlineCapture`：读取 IMU 并入队。
 - `McapWriteThread`：统一处理 `fays_data.mcap` 的 `Open/Close/Log`（按 session 隔离）。
 - `UsbConnectionWatchdog`：监控配置中的视频节点，断连时报错并退出进程。

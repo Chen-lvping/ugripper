@@ -445,7 +445,7 @@ public:
 
     ~FFmpegRecorder() { Stop(); }
 
-    bool Start(const std::string& savePath, int width, int height, int fps, bool isColor) {
+    bool Start(const std::string& savePath, int width, int height, int fps) {
         if (pipe_) {
             return true;
         }
@@ -454,16 +454,14 @@ public:
         // Keep ffmpeg output minimal: suppress banner/progress spam in system logs.
         cmd << "ffmpeg -hide_banner -loglevel error -nostats -y ";
 
-        std::string pixFmt = isColor ? "bgr24" : "gray";
-
         cmd << "-thread_queue_size 512 "
             << "-f rawvideo -vcodec rawvideo "
-            << "-pix_fmt " << pixFmt << " "
+            << "-pix_fmt bgr24 "
             << "-s " << width << "x" << height << " "
             << "-r " << fps << " "
             << "-i - ";
 
-        cmd << "-c:v hevc_rkmpp "
+        cmd << "-c:v h264_rkmpp "
             << "-rc_mode CQP "
             << "-qp_init 30 "
             << "-qp_max 38 "
@@ -485,6 +483,12 @@ public:
 
     void Write(const cv::Mat& frame) {
         if (!pipe_ || frame.empty()) {
+            return;
+        }
+        if (frame.channels() == 1) {
+            cv::Mat bgrFrame;
+            cv::cvtColor(frame, bgrFrame, cv::COLOR_GRAY2BGR);
+            fwrite(bgrFrame.data, 1, bgrFrame.total() * bgrFrame.elemSize(), pipe_);
             return;
         }
         fwrite(frame.data, 1, frame.total() * frame.elemSize(), pipe_);
@@ -941,10 +945,9 @@ private:
                         activeVideoSessionId = 0;
                     }
                     if (!videoSessionOpen && img.cols > 0 && img.rows > 0) {
-                        const bool isColor = (img.channels() == 3);
                         std::cout << "[Record] Input Info: " << img.cols << "x" << img.rows
                                   << " Channels: " << img.channels() << std::endl;
-                        if (mRecorder_.Start(outputDir + "fays_stereo_output.mkv", img.cols, img.rows, RECORD_FPS, isColor)) {
+                        if (mRecorder_.Start(outputDir + "fays_stereo_output.mkv", img.cols, img.rows, RECORD_FPS)) {
                             sessionOutputDir = outputDir;
                             videoSessionOpen = true;
                             activeVideoSessionId = sessionId;

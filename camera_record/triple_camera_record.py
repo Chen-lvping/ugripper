@@ -1,245 +1,397 @@
 #!/usr/bin/env python3
 """
-三相机同步录制工具 (Shell脚本适配版)
+三相机同步录制工具 (H.264/H.265 硬件加速版 - 混合架构适配)
+
+- 触觉相机 (MJPEG): 直接调用 FFmpeg
+- 主相机 (NV12): 直接调用 FFmpeg
+
+停止方式:
+- 外部信号: kill -2 <PID> 或 kill -15 <PID>
+- 指定时长: -d 参数
 """
 
 import argparse
-import csv
+import json
 import os
 import signal
 import statistics
-import threading
+import subprocess
 import time
-import sys
-import traceback
+import re
 from datetime import datetime
-from fractions import Fraction
-from threading import Barrier
+from multiprocessing import Barrier, Event, Manager, Process
 
 import av
+
+MINRATE_1080p = "4M"
+NORMALRATE_1080p = "8M"
+MAXRATE_1080p = "50M"
+NORMALRATE_480p = "4M"
+MAXRATE_480p = "20M"
+
+BOOT_TIME_OFFSET_US = int((time.time() - time.monotonic()) * 1_000_000)
+
+
+def get_precise_system_time(pts_us):
+    """
+    将 FFmpeg 的整数 PTS (微秒)(monotonic_time) 转换为高精度系统时间戳
+    """
+    return BOOT_TIME_OFFSET_US + pts_us
+
+
+def get_encoder_name(codec):
+    if codec == "h264":
+        return "h264_rkmpp"
+    return "hevc_rkmpp"
+
+
+# 通用日志解析函数
+def parse_ffmpeg_log_loop(process, cam_name, start_event, stop_event, first_frame_info):
+    """
+    统一的 FFmpeg 日志解析循环
+    只解析整数 PTS，确保微秒级精度
+    """
+    # 匹配整数 PTS: "pts: 12345678"
+    # 示例: [Parsed_showinfo...] n: 1 pts: 352213 pts_time:0.352213 ...
+    pts_pattern = re.compile(r"pts:\s*(\d+)\s+pts_time:")
+
+    first_pts_recorded = False
+    frames_count = 0
+
+    while not stop_event.is_set():
+        if process.poll() is not None:
+            print(f"[{cam_name}] 错误: FFmpeg 进程意外退出")
+            break
+
+        line = process.stderr.readline()
+        if not line:
+            if process.poll() is not None:
+                break
+            continue
+
+        if "showinfo" in line:
+            match = pts_pattern.search(line)
+            if match:
+                kernel_pts_abs_us = int(match.group(1))
+                # print(f"[{cam_name}] 捕获帧 PTS: {kernel_pts_abs_us} (us)")
+
+                frames_count += 1
+                # 首帧锁定逻辑
+                if not first_pts_recorded:
+                    current_time = (
+                        get_precise_system_time(kernel_pts_abs_us) / 1000000.0
+                    )
+                    # 触发全局开始信号
+                    start_event.set()
+                    first_frame_info[cam_name] = {
+                        "kernel_pts_us": kernel_pts_abs_us,
+                        "dropped": 0,
+                        "sys_time_str": datetime.fromtimestamp(current_time).strftime(
+                            "%H:%M:%S.%f"
+                        ),
+                    }
+                    first_pts_recorded = True
+                    print(
+                        f"[{cam_name}] 首帧锁定: PTS={kernel_pts_abs_us} (us) | Sys={current_time:.6f}"
+                    )
+
+    return frames_count
+
+
+# ================================================================
+# 通用进程执行器
+# ================================================================
+def _run_ffmpeg_process(
+    cmd, config, barrier, start_event, stop_event, first_frame_info
+):
+    cam_name = config["name"]
+    print(f"[{cam_name}] 启动 FFmpeg (CMD模式)...")
+
+    # 信号忽略，由 stop_event 控制
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+    process = None
+    try:
+        # 同步等待
+        print(f"[{cam_name}] 等待同步...")
+        if barrier:
+            try:
+                barrier.wait()
+            except Exception:
+                return
+
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+            bufsize=1,
+        )
+        print(f"[{cam_name}] 录制中 (PID: {process.pid})")
+
+        # 进入统一的日志解析循环
+        frames = parse_ffmpeg_log_loop(
+            process, cam_name, start_event, stop_event, first_frame_info
+        )
+        print(f"[{cam_name}] 录制结束，总帧数: {frames}")
+
+    except Exception as e:
+        print(f"[{cam_name}] 异常: {e}")
+    finally:
+        if process:
+            if process.poll() is None:
+                # 1) 优雅退出：发 q
+                try:
+                    if process.stdin:
+                        process.stdin.write("q\n")
+                        process.stdin.flush()
+                except Exception:
+                    pass
+
+                # 2) 等待 ffmpeg 正常写尾
+                try:
+                    process.wait(timeout=10)   # mkv 建议给长一点
+                except subprocess.TimeoutExpired:
+                    # 3) 再用 terminate
+                    process.terminate()
+                    try:
+                        process.wait(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        # 4) 最后 kill
+                        process.kill()
+                        process.wait()
+
+        print(f"[{cam_name}] 退出")
+
+
+
+# ================================================================
+# 模式 A: 主相机 (NV12) - 保持 FFmpeg Direct
+# ================================================================
+def _record_direct_nv12(config, barrier, start_event, stop_event, first_frame_info, codec):
+    output_file = config["output"]
+    device_path = config["device"]
+    encoder = get_encoder_name(codec)
+
+    # 注意滤镜顺序: 先 showinfo 获取原始 PTS，后 fps 重采样
+    cmd = [
+        "ffmpeg",
+        "-f",
+        "v4l2",
+        "-input_format",
+        "nv12",
+        "-video_size",
+        f"{config['width']}x{config['height']}",
+        "-copyts",
+        "-i",
+        device_path,
+        "-vf",
+        "showinfo,fps=60",  # <--- 关键：showinfo 会把 PTS 打印到日志,顺序不能错，不然pts会被覆盖
+        "-c:v",
+        encoder,
+        "-rc_mode",
+        "CQP",
+        "-qp_init",
+        "30",
+        "-qp_max",
+        "35",
+        "-qp_min",
+        "20",
+        "-qp_max_i",
+        "35",
+        "-qp_min_i",
+        "18",
+        "-profile:v",
+        "main",
+        "-level",
+        "5.1",
+        "-y",
+        output_file,
+    ]
+
+    _run_ffmpeg_process(cmd, config, barrier, start_event, stop_event, first_frame_info)
+
+
+# ================================================================
+# 模式 B: 触觉相机 (MJPEG) - [重构] 改为 FFmpeg Direct
+# ================================================================
+def _record_direct_mjpeg(config, barrier, start_event, stop_event, first_frame_info, codec):
+    """
+    使用 FFmpeg 硬件 MJPEG 解码 + RK3576 硬件编码（H.264/H.265 可选）
+    不输出 NV12，减少 CPU 负担和延迟
+    """
+    output_file = config["output"]
+    device_path = config["device"]
+    fps = config.get("fps", 120)
+    encoder = get_encoder_name(codec)
+
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-thread_queue_size",
+        "512",  # 输入队列缓冲
+        "-f",
+        "v4l2",
+        "-input_format",
+        "mjpeg",
+        "-framerate",
+        str(fps),
+        "-video_size",
+        f"{config['width']}x{config['height']}",
+        "-copyts",
+        "-i",
+        device_path,
+        "-vf",
+        f"showinfo,fps={fps}",
+        "-c:v",
+        encoder,
+        "-rc_mode",
+        "CQP",
+        "-qp_init",
+        "30",
+        "-qp_max",
+        "38",
+        "-qp_min",
+        "24",
+        "-qp_max_i",
+        "38",
+        "-qp_min_i",
+        "20",
+        output_file,
+    ]
+    _run_ffmpeg_process(cmd, config, barrier, start_event, stop_event, first_frame_info)
+
+
+# ================================================================
+# 主控逻辑
+# ================================================================
+def _process_dispatch(config, barrier, start_event, stop_event, first_frame_info, codec):
+    """根据格式选择录制模式"""
+    fmt = config.get("format", "mjpeg")
+    if fmt == "nv12":
+        # 主相机: Direct FFmpeg + Log Parse
+        _record_direct_nv12(config, barrier, start_event, stop_event, first_frame_info, codec)
+    else:
+        # 触觉相机: Direct FFmpeg + Log Parse
+        _record_direct_mjpeg(config, barrier, start_event, stop_event, first_frame_info, codec)
 
 
 class TripleCameraRecorder:
     """三相机同步录制器"""
 
-    def __init__(self, output_dir: str):
+    def __init__(self, output_dir: str, codec: str):
         self.output_dir = output_dir
-        # 确保目录存在 (虽然Shell脚本可能已经创建，但再检查一次无害)
+        self.codec = codec
         os.makedirs(output_dir, exist_ok=True)
 
-        # 线程同步
-        self.barrier = None
-        self.stop_event = threading.Event()
-        self.start_event = threading.Event()
-        self.threads = []
+        # 进程同步
+        self.manager = Manager()
+        self.first_frame_info = self.manager.dict()
 
-        # 录制统计
-        self.first_frame_info = {}
-        self.info_lock = threading.Lock()
+        self.barrier = None
+        self.stop_event = Event()
+        self.start_event = Event()
+        self.processes = []
+
         self.global_start_time = 0.0
 
-        # 信号处理: 捕获 Shell 脚本发送的 kill -2 (SIGINT)
+        # 信号处理: 捕获 Shell 脚本发送的 kill -2 (SIGINT) 或 kill -15 (SIGTERM)
         signal.signal(signal.SIGINT, self._signal_handler)
         signal.signal(signal.SIGTERM, self._signal_handler)
 
     def _signal_handler(self, signum, frame):
-        print(f"\n[Camera] 收到信号 {signum}，正在安全停止录制...")
+        sig_name = "SIGINT" if signum == signal.SIGINT else "SIGTERM"
+        print(f"\n[Camera] 收到 {sig_name} 信号，正在安全停止录制...")
         self.stop_event.set()
-
-    def _record_camera(self, config: dict):
-        """单相机录制线程"""
-        cam_name = config["name"]
-        device_path = config["device"]
-        width, height = config["width"], config["height"]
-        fps = config["fps"]
-        output_file = config["output"]
-        csv_file = os.path.splitext(output_file)[0] + ".csv"
-
-        print(f"[{cam_name}] 初始化 ({device_path})...")
-
-        input_container = None
-        output_container = None
-        csv_f = None
-
-        try:
-            # 打开摄像头 (V4L2 + MJPEG)
-            input_container = av.open(
-                device_path,
-                format="v4l2",
-                options={
-                    "framerate": str(fps),
-                    "video_size": f"{width}x{height}",
-                    "input_format": "mjpeg",
-                },
-            )
-            input_stream = input_container.streams.video[0]
-            time_base = float(input_stream.time_base)
-
-            # 检查实际分辨率
-            if input_stream.width != width or input_stream.height != height:
-                print(
-                    f"[{cam_name}] 警告: 请求 {width}x{height}, 实际 {input_stream.width}x{input_stream.height}"
-                )
-
-            # 创建输出容器
-            output_container = av.open(output_file, "w")
-            output_stream = output_container.add_stream("mjpeg", rate=fps)
-            output_stream.width = input_stream.width
-            output_stream.height = input_stream.height
-            output_stream.pix_fmt = "yuvj420p"
-            output_stream.time_base = Fraction(1, 1000000)  # 微秒精度
-
-            # CSV 文件
-            csv_f = open(csv_file, "w", newline="", buffering=1)
-            csv_writer = csv.writer(csv_f)
-            csv_writer.writerow(
-                [
-                    "frame_id",
-                    "kernel_pts_us",  # 相对 PTS
-                    "kernel_pts_absolute_us",  # 绝对 PTS
-                    "kernel_interval_us",  # 帧间隔
-                    "system_time",  # Unix 时间戳
-                ]
-            )
-
-            print(f"[{cam_name}] 就绪，等待同步...")
-
-            # 同步屏障
-            if self.barrier:
-                try:
-                    self.barrier.wait()
-                except threading.BrokenBarrierError:
-                    return
-
-            # 录制状态变量
-            frames_count = 0
-            first_kernel_pts_us = None
-            last_rel_pts_us = 0
-            dropped_frames = 0
-
-            # 新鲜帧检测参数
-            expected_interval_us = 1_000_000 // fps
-            min_fresh_interval_us = expected_interval_us * 0.5
-            last_system_time = None
-            found_fresh = False
-
-            # === 主录制循环 ===
-            for packet in input_container.demux(input_stream):
-                # 检查退出标志
-                if self.stop_event.is_set():
-                    break
-
-                if packet.pts is None:
-                    continue
-
-                # 等待全局启动信号 (清空缓冲区阶段)
-                if not self.start_event.is_set():
-                    continue
-
-                current_time = time.time()
-                kernel_pts_us = int(packet.pts * time_base * 1_000_000)
-
-                # --- 新鲜帧检测逻辑 ---
-                if not found_fresh:
-                    if last_system_time is not None:
-                        sys_interval_us = (current_time - last_system_time) * 1_000_000
-                        if sys_interval_us >= min_fresh_interval_us:
-                            found_fresh = True
-                            first_kernel_pts_us = kernel_pts_us
-                            with self.info_lock:
-                                self.first_frame_info[cam_name] = {
-                                    "kernel_pts_us": first_kernel_pts_us,
-                                    "dropped": dropped_frames,
-                                }
-                            print(f"[{cam_name}] 首帧锁定: PTS={first_kernel_pts_us}")
-                        else:
-                            dropped_frames += 1
-                    last_system_time = current_time
-                    if not found_fresh:
-                        continue
-                # -----------------------
-
-                rel_pts_us = kernel_pts_us - first_kernel_pts_us
-                interval_us = rel_pts_us - last_rel_pts_us if frames_count > 0 else 0
-
-                # 写入视频帧
-                packet.dts = rel_pts_us
-                packet.pts = rel_pts_us
-                packet.stream = output_stream
-                output_container.mux(packet)
-
-                # 写入 CSV
-                csv_writer.writerow(
-                    [
-                        frames_count,
-                        rel_pts_us,
-                        kernel_pts_us,
-                        interval_us,
-                        f"{current_time:.6f}",
-                    ]
-                )
-
-                last_rel_pts_us = rel_pts_us
-                frames_count += 1
-
-            print(f"[{cam_name}] 录制结束，总帧数: {frames_count}")
-
-        except Exception as e:
-            print(f"[{cam_name}] 错误: {e}")
-            if self.barrier:
-                self.barrier.abort()
-        finally:
-            if csv_f:
-                csv_f.close()
-            if input_container:
-                input_container.close()
-            if output_container:
-                output_container.close()
 
     def start_all(self, configs: list, duration: int = 0):
         """启动所有相机录制"""
         print("=" * 70)
-        print("三相机同步录制系统")
+        print(f"三相机同步录制系统 ({self.codec.upper()} 硬件加速)")
         print("=" * 70)
         print(f"输出目录: {self.output_dir}")
+        print(f"主进程 PID: {os.getpid()}  (Shell可用 kill -2 {os.getpid()} 停止)")
+
+        # =================================================================
+        # 写入开机时间偏移量到 info.json
+        # 偏移量 = 当前Unix时间 - 系统运行时间(Monotonic)
+        # 后续可用公式: 真实时间 = 视频PTS(如果为Monotonic) + offset
+        # =================================================================
+        try:
+            offset = time.time() - time.monotonic()
+            info_path = os.path.join(self.output_dir, "info.json")
+            
+            data = {
+                "boot_time_offset": offset,                # 秒 (浮点数)
+                "boot_time_offset_us": int(offset * 1e6),  # 微秒 (整数)
+            }
+            
+            with open(info_path, "w") as f:
+                json.dump(data, f, indent=4)
+            print(f"[Info] 开机时间偏移量已写入: {info_path}")
+            
+        except Exception as e:
+            print(f"[Error] 写入 info.json 失败: {e}")
+        # =================================================================
+
+        if duration > 0:
+            print(f"录制时长: {duration} 秒")
+        else:
+            print("录制时长: 无限制 (等待外部信号停止)")
         print("=" * 70)
 
         for config in configs:
             config["duration"] = duration
 
+        # ... (后续代码保持不变: barrier初始化, 进程启动循环等) ...
         self.barrier = Barrier(len(configs) + 1)
         self.start_event.clear()
         self.first_frame_info.clear()
 
-        self.threads = []
+        self.processes = []
         for config in configs:
-            t = threading.Thread(target=self._record_camera, args=(config,))
-            t.start()
-            self.threads.append(t)
+            p = Process(
+                target=_process_dispatch,
+                args=(
+                    config,
+                    self.barrier,
+                    self.start_event,
+                    self.stop_event,
+                    self.first_frame_info,
+                    self.codec,
+                ),
+            )
+            p.start()
+            self.processes.append(p)
 
-        print("主线程: 等待相机初始化...")
+        print("主进程: 等待相机初始化...")
         try:
             self.barrier.wait(timeout=15)
-        except threading.BrokenBarrierError:
+        except Exception as e:
+            if type(e).__name__ == "BrokenBarrierError":
+                print("Barrier broken")
+            else:
+                raise
             print("错误: 相机初始化超时或失败")
             self.stop_event.set()
-            for t in self.threads:
-                t.join(timeout=1)
+            for p in self.processes:
+                p.join(timeout=1)
+                if p.is_alive():
+                    p.terminate()
             return
 
-        print("主线程: 清空缓冲区 (2秒)...")
-        time.sleep(2)
-
+        self.start_event.wait()
         self.global_start_time = time.time()
-        self.start_event.set()
         print(f"录制开始! 系统时间: {datetime.fromtimestamp(self.global_start_time)}")
 
         # 监控循环
         try:
-            while any(t.is_alive() for t in self.threads):
+            while any(p.is_alive() for p in self.processes):
                 elapsed = time.time() - self.global_start_time
 
-                # 检查线程是否要求停止
+                # 检查是否要求停止 (外部信号触发)
                 if self.stop_event.is_set():
                     break
 
@@ -249,15 +401,18 @@ class TripleCameraRecorder:
                     self.stop_event.set()
                     break
 
-                time.sleep(0.5)
+                time.sleep(0.1)  # 更快响应信号
 
         except KeyboardInterrupt:
-            print("\n主线程捕获中断...")
+            print("\n主进程捕获中断...")
             self.stop_event.set()
 
-        print("\n正在停止线程...")
-        for t in self.threads:
-            t.join(timeout=5)
+        print("\n正在停止进程...")
+        for p in self.processes:
+            p.join(timeout=5)
+            if p.is_alive():
+                print(f"警告: 进程 {p.pid} 未正常退出，强制终止")
+                p.terminate()
 
         print("相机录制完成")
         self._show_summary(configs)
@@ -268,60 +423,33 @@ class TripleCameraRecorder:
         print("同步分析报告")
         print("=" * 60)
 
-        if self.first_frame_info:
+        first_frame_info = dict(self.first_frame_info)
+        if first_frame_info:
             print("\n【首帧同步性】")
             print("-" * 50)
-            # 计算各相机首帧相对于最早首帧的时间差
-            pts_values = [
-                info["kernel_pts_us"] for info in self.first_frame_info.values()
-            ]
+            pts_values = [info["kernel_pts_us"] for info in first_frame_info.values()]
             if pts_values:
                 min_pts = min(pts_values)
-                for cam_name, info in sorted(self.first_frame_info.items()):
+                for cam_name, info in sorted(first_frame_info.items()):
                     offset_ms = (info["kernel_pts_us"] - min_pts) / 1000
                     print(
                         f"  {cam_name:<12}: 延迟 +{offset_ms:.2f}ms (丢弃旧帧: {info['dropped']})"
                     )
 
-        print("\n【帧间隔稳定性】")
-        print("-" * 50)
-        for config in configs:
-            cam_name = config["name"]
-            fps = config["fps"]
-            csv_file = os.path.splitext(config["output"])[0] + ".csv"
-
-            if not os.path.exists(csv_file):
-                continue
-
-            intervals = []
-            try:
-                with open(csv_file, "r") as f:
-                    reader = csv.DictReader(f)
-                    for row in reader:
-                        # 过滤掉首帧间隔
-                        val = int(row["kernel_interval_us"])
-                        if val > 0:
-                            intervals.append(val)
-            except Exception:
-                continue
-
-            if intervals:
-                avg = statistics.mean(intervals)
-                std = statistics.stdev(intervals) if len(intervals) > 1 else 0
-                expected = 1_000_000 / fps
-                jitter = (std / expected) * 100
-                print(
-                    f"  {cam_name:<12}: 平均间隔={avg:.0f}us (目标{expected:.0f}), 抖动={jitter:.2f}%"
-                )
-                print(f"  {cam_name}: 数据已保存至 {csv_file}")
-
 
 def main():
-    parser = argparse.ArgumentParser(description="三相机同步录制工具")
+    parser = argparse.ArgumentParser(
+        description="三相机同步录制工具 (H.264/H.265 硬件加速版)"
+    )
 
-    # 必须参数: 录制时长
+    # 可选参数: 录制时长 (不指定则无限录制，等待外部信号停止)
     parser.add_argument(
-        "-d", "--duration", type=int, required=False, default=0, help="录制时长(秒)"
+        "-d",
+        "--duration",
+        type=int,
+        required=False,
+        default=0,
+        help="录制时长(秒)，0表示无限制",
     )
 
     # 必须参数: 输出目录 (由 Shell 脚本传入完整路径)
@@ -331,6 +459,13 @@ def main():
         required=True,
         help="数采统一的完整输出目录路径",
     )
+    parser.add_argument(
+        "--codec",
+        type=str,
+        choices=["h264", "h265"],
+        default="h264",
+        help="硬件编码格式，默认 h264",
+    )
 
     args = parser.parse_args()
     output_dir = args.output_dir
@@ -339,10 +474,11 @@ def main():
     configs = [
         {
             "name": "cam",
-            "device": "/dev/third_cam",
+            "device": "/dev/video11",
             "width": 1920,
             "height": 1080,
             "fps": 60,
+            "format": "nv12",
             "output": os.path.join(output_dir, "cam.mkv"),
         },
         {
@@ -351,6 +487,7 @@ def main():
             "width": 640,
             "height": 480,
             "fps": 120,
+            "format": "mjpeg",
             "output": os.path.join(output_dir, "tact_left.mkv"),
         },
         {
@@ -359,11 +496,12 @@ def main():
             "width": 640,
             "height": 480,
             "fps": 120,
+            "format": "mjpeg",
             "output": os.path.join(output_dir, "tact_right.mkv"),
         },
     ]
 
-    recorder = TripleCameraRecorder(output_dir)
+    recorder = TripleCameraRecorder(output_dir, args.codec)
     recorder.start_all(configs, args.duration)
 
 
