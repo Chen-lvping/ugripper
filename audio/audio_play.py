@@ -66,6 +66,22 @@ def setup_audio_device():
         )
 
 
+def read_env_file_value(key: str, env_file: str = "/etc/environment"):
+    try:
+        with open(env_file, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                if k.strip() != key:
+                    continue
+                return v.strip().strip("\"").strip("'")
+    except Exception as e:
+        print(f"WARNING: failed to read {env_file}: {e}")
+    return None
+
+
 class AudioPlayer:
     def __init__(self):
         # 注册信号处理，捕获 SIGINT 和 SIGTERM 以便正常退出
@@ -81,7 +97,8 @@ class AudioPlayer:
 
         self.pipe_path = "/tmp/umi_audio_pipe"
         self.base_audio_dir = os.path.dirname(os.path.abspath(__file__))
-        self.lang = self.resolve_language(os.getenv("UGRIPPER_LANG", "zh"))
+        lang_from_file = read_env_file_value("UGRIPPER_LANG")
+        self.lang = self.resolve_language(lang_from_file or "zh")
         self.audio_dirs = self.resolve_audio_dirs(self.lang)
         self.volume = 1.0
 

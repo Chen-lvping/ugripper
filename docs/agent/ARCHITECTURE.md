@@ -26,8 +26,8 @@
 ### 2.2 录制进程编排
 | 模块 | 所在目录 | 启动方式 | 主要职责 | 主要输出 |
 | --- | --- | --- | --- | --- |
-| 三路相机录制 | `camera_record/triple_camera_record.py` | `uv run ... --codec <h264|h265> --output-dir <episode>` | 录制主摄 + 左右触觉视频（默认 H264，可选 H265）并写时间戳 CSV。 | `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`, 对应 `*.csv` |
-| FaysSense 常驻录制 | `faysSense_vi_kit/scripts/run_fays_record.sh` + `fays_record_example` | 检测到 FTDI 时启动 `daemon`，录制时 `start <episode>`，停止时 `stop` | Fays 作为可选设备：启动缺失不阻断主流程；运行中支持热插拔检测与 daemon 自动重连。时间戳统一写入 `fays_data.mcap`：topic `i` 为 IMU，topic `c` 为相机时间戳；`logTime` 使用 Fays 时钟，`publishTime` 由 IMU 对齐到系统时钟。 | `fays_stereo_output.mkv`, `fays_data.mcap`（启用 Fays 时） |
+| 三路相机录制 | `camera_record/triple_camera_record.py` | `uv run ... --codec <h264|h265> --output-dir <episode>` | 录制主摄 + 左右触觉视频并写时间戳 CSV；编码器由 `run_record.sh` 从 `/etc/environment` 的 `CAMERA_CODEC` 读取（默认 H264）。 | `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`, 对应 `*.csv` |
+| FaysSense 常驻录制 | `faysSense_vi_kit/scripts/run_fays_record.sh` + `fays_record_example` | 检测到 FTDI 时启动 `daemon`，录制时 `start <episode>`，停止时 `stop` | Fays 作为可选设备：启动缺失不阻断主流程；运行中支持热插拔检测与 daemon 自动重连。视频编码器由 `fays_record_example` 直接读取 `/etc/environment` 的 `CAMERA_CODEC`（`h264_rkmpp`/`hevc_rkmpp`）。时间戳统一写入 `fays_data.mcap`：topic `i` 为 IMU，topic `c` 为相机时间戳；`logTime` 使用 Fays 时钟，`publishTime` 由 IMU 对齐到系统时钟。 | `fays_stereo_output.mkv`, `fays_data.mcap`（启用 Fays 时） |
 | 统一传感器录制 | `src/sensor_recorder` | `./build/src/sensor_recorder/sensor_recorder <episode>` | 同时采集串口 IMU + 编码器，写统一 MCAP。 | `sensor_data.mcap` (`imu_raw`/`encoder`) |
 | Encoder 校准 | `src/sensor_recorder` | `./build/src/sensor_recorder/zeroing` | 执行编码器归零，供自动校准流程调用。 | 无（设备状态变更） |
 
@@ -68,7 +68,7 @@
 ### 3.3 自动更新与自愈
 - `auto_update/99-usb-auto-update.rules` + `usb-auto-update@.service`：U 盘插入自动触发统一入口脚本（先判定 `calibration.txt` 是否触发校准，再进入升级逻辑）。
 - 升级窗口内 `usb_auto_update.sh` 会创建 `/run/ugripper_installing_from_usb.lock`，暂停 network monitor，并在结束后恢复。
-- `usb_auto_update.sh` 挂载后会读取升级盘根目录 `config.txt` 的 `LANGUAGE/VOICE_LANG`，将规范化结果写入 `/etc/environment` 的 `UGRIPPER_LANG`（`zh|en`），供音频播报语言选择。
+- `usb_auto_update.sh` 挂载后会读取升级盘根目录 `config.txt`：`LANGUAGE/VOICE_LANG` 写入 `UGRIPPER_LANG`（`zh|en`）供音频播报语言选择；`CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC` 写入 `CAMERA_CODEC`（`h264|h265`）供 triple camera 与 Fays 编码选择。
 - `auto_update/boot_check_install.sh` + `ugripper-boot-install.service`：开机检测主包缺失时从 `/opt/backup` 自恢复。
 
 ### 3.4 关机权限隔离

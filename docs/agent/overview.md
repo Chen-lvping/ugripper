@@ -17,7 +17,7 @@
 3. `start_recording`：
 - Right 先下发网络 `START` 给 Left。
 - 可用时启动 Fays 当前 episode（`run_fays_record.sh start <dir>`）。
-- 启动三路相机：`camera_record/triple_camera_record.py --codec <h264|h265>`（默认 `h264`）。
+- 启动三路相机：`camera_record/triple_camera_record.py --codec <h264|h265>`（从 `/etc/environment` 的 `CAMERA_CODEC` 加载，默认 `h264`）。
 - 启动传感器：`build/src/sensor_recorder/sensor_recorder`。
 4. `stop_recording`：
 - Right 下发 `STOP` 给 Left。
@@ -36,7 +36,7 @@
 - 录制中若 daemon 恢复，仅恢复就绪，不补发当前 episode 的 `START`。
 
 ### 4.3 `fays_record_example` 线程模型（`record.cpp`）
-- `ImgOnlineCapture`：读取双目帧并写 `fays_stereo_output.mkv`（ffmpeg `h264_rkmpp` 硬编码，H.264）。
+- `ImgOnlineCapture`：读取双目帧并写 `fays_stereo_output.mkv`（ffmpeg 编码器按 `/etc/environment` 的 `CAMERA_CODEC` 选择：`h264_rkmpp`/`hevc_rkmpp`）。
 - `ImuOnlineCapture`：读取 IMU 并入队。
 - `McapWriteThread`：统一处理 `fays_data.mcap` 的 `Open/Close/Log`（按 session 隔离）。
 - `UsbConnectionWatchdog`：监控配置中的视频节点，断连时报错并退出进程。
@@ -74,8 +74,12 @@
 - 录制锁：`/tmp/umi_recording.lock`
 - PTP 状态：`/dev/shm/umi_ptp_status`
 
-## 9. USB 升级语言配置
+## 9. USB 升级语言与编码器配置
 - `auto_update/usb_auto_update.sh` 挂载升级 U 盘后会检查根目录 `config.txt`。
 - 支持配置键：`LANGUAGE`/`VOICE_LANG`（大小写不敏感），支持值：`zh|cn|chinese|中文` 与 `en|english`。
 - 识别成功后写入 `/etc/environment`：`UGRIPPER_LANG=<zh|en>`。
+- 支持编码器配置键：`CAMERA_CODEC`/`VIDEO_CODEC`/`TRIPLE_CAMERA_CODEC`/`CODEC`（大小写不敏感），支持值：`h264|h265`。
+- 编码器识别成功后写入 `/etc/environment`：`CAMERA_CODEC=<h264|h265>`。
+- `run_record.sh` 使用 `CAMERA_CODEC` 驱动三路相机编码参数。
+- `fays_record_example` 直接读取 `/etc/environment` 的 `CAMERA_CODEC`，不依赖进程继承环境变量。
 - `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音：`en` 优先 `audio_en/`，文件缺失时回退 `audio/`。

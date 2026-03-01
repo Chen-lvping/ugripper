@@ -12,6 +12,7 @@
 - 增加 Fays USB 节点监控：`record.cpp` 轮询配置中的视频节点，断连时打印错误并主动退出，由上层维护流程重建。
 - `led_manager.py` 中 `RECORDING` 状态调整为 1Hz 绿色闪烁。
 - USB 自动升级新增语言配置读取：若升级 U 盘根目录存在 `config.txt` 且配置 `LANGUAGE/VOICE_LANG`，会更新 `/etc/environment` 的 `UGRIPPER_LANG`（`zh|en`）；`audio_play.py` 按该变量优先播放 `audio_en`，缺失文件自动回退中文目录。
+- USB 自动升级新增编码器配置读取：若 `config.txt` 指定 `CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC`，会更新 `/etc/environment` 的 `CAMERA_CODEC`（`h264|h265`）；`run_record.sh` 和 `fays_record_example` 均按该值选择编码器，Fays 端直接读取 `/etc/environment` 不依赖进程环境继承。
 
 ## v1.1.5 - 2026-02-26
 - 新增报错灯效分级：`ERROR_1~ERROR_5`，按严重度区分并使用红灯“长+短码”循环编码（`ERROR_1`=长短，`ERROR_2`=长短短，依次类推）。

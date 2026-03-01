@@ -6,29 +6,29 @@ cd "$script_dir" || exit 1
 
 # ================= 配置部分 =================
 DISK_DIR="/mnt/data_disk"
-DEVICE_SN=""
-if [ -f /etc/environment ]; then
-    DEVICE_SN=$(grep -E '^DEVICE_SN=' /etc/environment \
-        | head -n1 \
-        | cut -d= -f2- \
-        | tr -d '"' \
-        | xargs)
-fi
+ENV_FILE="/etc/environment"
+
+get_env_value() {
+    local key="$1"
+    local line value
+
+    [ -f "$ENV_FILE" ] || return 1
+    line=$(grep -E "^${key}=" "$ENV_FILE" | head -n1 || true)
+    [ -n "$line" ] || return 1
+
+    value="${line#*=}"
+    value="$(printf '%s' "$value" | tr -d '"' | xargs)"
+    printf '%s' "$value"
+}
+
+DEVICE_SN="$(get_env_value "DEVICE_SN" || true)"
 DEVICE_SN_LOWER="${DEVICE_SN,,}"
 
 DATA_ROOT="/mnt/data_disk/${DEVICE_SN_LOWER:-noname_device}" 
 
 # --- 网络配置 (双臂协同) ---
 # 通过环境变量/etc/environment获取当前设备角色，默认为 Right (Master)
-DEVICE_SIDE=""
-
-if [ -f /etc/environment ]; then
-    DEVICE_SIDE=$(grep -E '^DEVICE_SIDE=' /etc/environment \
-        | head -n1 \
-        | cut -d= -f2- \
-        | tr -d '"' \
-        | xargs)
-fi
+DEVICE_SIDE="$(get_env_value "DEVICE_SIDE" || true)"
 
 CURRENT_SIDE=${DEVICE_SIDE:-Right}
 CURRENT_SIDE_LOWER="${CURRENT_SIDE,,}"
@@ -49,7 +49,9 @@ AUDIO_PIPE="/tmp/umi_audio_pipe"
 # --- 传感器录制配置 ---
 SENSOR_RECORDER_BIN="./build/src/sensor_recorder/sensor_recorder"
 FAYS_RECORD_SCRIPT="./build/faysSense_vi_kit/scripts/run_fays_record.sh"
-TRIPLE_CAMERA_CODEC="${TRIPLE_CAMERA_CODEC:-h264}"   # h264 | h265
+CAMERA_CODEC="$(get_env_value "CAMERA_CODEC" || true)"
+CAMERA_CODEC="${CAMERA_CODEC,,}"
+CAMERA_CODEC="${CAMERA_CODEC:-h264}"   # h264 | h265
 DURATION_GAP_THRESHOLD_SEC=5.0          # 时长误差阈值（秒）
 VIDEO_SPAN_PROBE_TIMEOUT_SEC=1.2        # 视频跨度探测超时（秒）
 
@@ -1397,12 +1399,19 @@ start_recording() {
         echo "[INFO]:Fays not enabled, skip Fays recording for this episode."
     fi
     
-    # 启动相机
-    if [ "$TRIPLE_CAMERA_CODEC" != "h264" ] && [ "$TRIPLE_CAMERA_CODEC" != "h265" ]; then
-        echo "[WARNING]:Invalid TRIPLE_CAMERA_CODEC=$TRIPLE_CAMERA_CODEC, fallback to h264."
-        TRIPLE_CAMERA_CODEC="h264"
+    # 启动相机（每次录制前刷新 /etc/environment 中的 CAMERA_CODEC）
+    local camera_codec_from_env=""
+    camera_codec_from_env="$(get_env_value "CAMERA_CODEC" || true)"
+    if [ -n "$camera_codec_from_env" ]; then
+        CAMERA_CODEC="${camera_codec_from_env,,}"
     fi
-    uv run ./camera_record/triple_camera_record.py --codec "$TRIPLE_CAMERA_CODEC" --output-dir "$TARGET_DIR" &
+
+    # 启动相机
+    if [ "$CAMERA_CODEC" != "h264" ] && [ "$CAMERA_CODEC" != "h265" ]; then
+        echo "[WARNING]:Invalid CAMERA_CODEC=$CAMERA_CODEC, fallback to h264."
+        CAMERA_CODEC="h264"
+    fi
+    uv run ./camera_record/triple_camera_record.py --codec "$CAMERA_CODEC" --output-dir "$TARGET_DIR" &
     PID_CAM=$!
 
     "$SENSOR_RECORDER_BIN" "$TARGET_DIR" &

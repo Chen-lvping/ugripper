@@ -25,6 +25,7 @@ ENFORCE_BY_PATH="0"   # 1=强制校验；0=不校验
 mkdir -p "$(dirname "$LOG_FILE")"
 
 IN_UPGRADE_WINDOW=0
+NEED_UGRIPPER_RESTART=0
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -56,6 +57,28 @@ normalize_language() {
       ;;
     zh|cn|zh_cn|chinese|zh_hans|zh-hans|中文)
       printf 'zh'
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+normalize_camera_codec() {
+  local raw="$1"
+  local normalized
+
+  normalized="$(trim_text "$raw")"
+  normalized="${normalized#\"}"
+  normalized="${normalized%\"}"
+  normalized="${normalized#\'}"
+  normalized="${normalized%\'}"
+  normalized="$(trim_text "$normalized")"
+  normalized="${normalized,,}"
+
+  case "$normalized" in
+    h264|h265)
+      printf '%s' "$normalized"
       return 0
       ;;
   esac
@@ -100,6 +123,43 @@ parse_language_from_config() {
   return 1
 }
 
+parse_camera_codec_from_config() {
+  local config_file="$1"
+  local line key value codec
+
+  [ -f "$config_file" ] || return 1
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(trim_text "$line")"
+    [ -z "$line" ] && continue
+
+    case "$line" in
+      \#*|\;*)
+        continue
+        ;;
+    esac
+
+    if [ "${line#*=}" = "$line" ]; then
+      continue
+    fi
+
+    key="$(trim_text "${line%%=*}")"
+    value="$(trim_text "${line#*=}")"
+    key="${key,,}"
+
+    case "$key" in
+      camera_codec|video_codec|triple_camera_codec|codec)
+        if codec="$(normalize_camera_codec "$value")"; then
+          printf '%s' "$codec"
+          return 0
+        fi
+        ;;
+    esac
+  done < "$config_file"
+
+  return 1
+}
+
 set_ugripper_language() {
   local lang="$1"
   local env_file="/etc/environment"
@@ -131,6 +191,40 @@ set_ugripper_language() {
   fi
 
   export UGRIPPER_LANG="$lang"
+  return 0
+}
+
+set_camera_codec() {
+  local codec="$1"
+  local env_file="/etc/environment"
+  local env_key="CAMERA_CODEC"
+  local env_line="${env_key}=${codec}"
+
+  if [ ! -e "$env_file" ]; then
+    if ! printf '%s\n' "$env_line" > "$env_file"; then
+      log "写入 $env_file 失败，编码器设置未生效。"
+      return 1
+    fi
+    export CAMERA_CODEC="$codec"
+    log "已创建 $env_file 并写入 $env_line"
+    return 0
+  fi
+
+  if grep -qE "^${env_key}=" "$env_file"; then
+    if ! sed -i -E "s|^${env_key}=.*$|${env_line}|" "$env_file"; then
+      log "更新 $env_file 中 ${env_key} 失败。"
+      return 1
+    fi
+    log "已更新 $env_file 中 ${env_key}=${codec}"
+  else
+    if ! printf '\n%s\n' "$env_line" >> "$env_file"; then
+      log "追加 ${env_key} 到 $env_file 失败。"
+      return 1
+    fi
+    log "已追加 $env_line 到 $env_file"
+  fi
+
+  export CAMERA_CODEC="$codec"
   return 0
 }
 
@@ -183,6 +277,21 @@ leave_upgrade_window() {
   systemctl start "$NETWORK_MONITOR_SERVICE" >/dev/null 2>&1 || true
   IN_UPGRADE_WINDOW=0
   log "退出升级保护窗口。"
+}
+
+restart_ugripper_if_needed() {
+  if [ "$NEED_UGRIPPER_RESTART" -ne 1 ]; then
+    return 0
+  fi
+
+  log "检测到配置已更新，重启 ugripper.service 以应用最新配置。"
+  if systemctl restart ugripper.service >/dev/null 2>&1; then
+    log "ugripper.service 重启成功。"
+    return 0
+  fi
+
+  log "ugripper.service 重启失败。"
+  return 1
 }
 
 cleanup() {
@@ -248,19 +357,32 @@ fi
 
 CONFIG_FILE="$MOUNT_POINT/config.txt"
 if [ -f "$CONFIG_FILE" ]; then
-  log "检测到 config.txt，检查语言配置。"
+  log "检测到 config.txt，检查语言与编码器配置。"
   CONFIG_LANG="$(parse_language_from_config "$CONFIG_FILE" || true)"
   if [ -n "$CONFIG_LANG" ]; then
     if set_ugripper_language "$CONFIG_LANG"; then
       log "已应用语言配置：UGRIPPER_LANG=$CONFIG_LANG"
+      NEED_UGRIPPER_RESTART=1
     else
       log "语言配置写入失败，继续后续流程。"
     fi
   else
     log "config.txt 未找到有效语言设置（支持 LANGUAGE/VOICE_LANG，值为 zh/en），跳过。"
   fi
+
+  CONFIG_CAMERA_CODEC="$(parse_camera_codec_from_config "$CONFIG_FILE" || true)"
+  if [ -n "$CONFIG_CAMERA_CODEC" ]; then
+    if set_camera_codec "$CONFIG_CAMERA_CODEC"; then
+      log "已应用编码器配置：CAMERA_CODEC=$CONFIG_CAMERA_CODEC"
+      NEED_UGRIPPER_RESTART=1
+    else
+      log "编码器配置写入失败，继续后续流程。"
+    fi
+  else
+    log "config.txt 未找到有效编码器设置（支持 CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC，值为 h264/h265），跳过。"
+  fi
 else
-  log "未检测到 config.txt，跳过语言配置。"
+  log "未检测到 config.txt，跳过语言与编码器配置。"
 fi
 
 # ========================================================
@@ -306,6 +428,7 @@ if [ -z "${DEB_FILE:-}" ]; then
     # 仅升级 updater 时，恢复主服务
     systemctl start ugripper.service >/dev/null 2>&1 || true
   fi
+  restart_ugripper_if_needed || true
   log "未发现更新包（匹配 ${DEB_PREFIX}*.deb），跳过。"
   exit 0
 fi
@@ -321,6 +444,8 @@ else
   log "dpkg 安装失败。"
   exit 1
 fi
+
+restart_ugripper_if_needed || true
 
 log "usb_auto_update done."
 exit 0

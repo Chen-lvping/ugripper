@@ -4,6 +4,8 @@
 #include <iostream>
 #include <fstream>
 #include <vector>
+#include <algorithm>
+#include <cctype>
 #include <opencv2/opencv.hpp>
 #include <atomic>
 #include <mutex>
@@ -24,6 +26,67 @@
 #include <mcap/writer.hpp>
 #include "fays_atrak/fays_atrak_types.h"
 #include "fays_atrak/fays_atrak_vimod.h"
+
+namespace {
+std::string TrimCopy(const std::string& input) {
+    const auto begin = input.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) {
+        return "";
+    }
+    const auto end = input.find_last_not_of(" \t\r\n");
+    return input.substr(begin, end - begin + 1);
+}
+
+std::string ToLowerCopy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return value;
+}
+
+std::string ReadCameraCodecFromEnvironmentFile() {
+    const std::string defaultCodec = "h264";
+    std::ifstream envFile("/etc/environment");
+    if (!envFile.is_open()) {
+        return defaultCodec;
+    }
+
+    std::string line;
+    while (std::getline(envFile, line)) {
+        line = TrimCopy(line);
+        if (line.empty() || line[0] == '#') {
+            continue;
+        }
+
+        const auto pos = line.find('=');
+        if (pos == std::string::npos) {
+            continue;
+        }
+
+        std::string key = ToLowerCopy(TrimCopy(line.substr(0, pos)));
+        if (key != "camera_codec") {
+            continue;
+        }
+
+        std::string value = TrimCopy(line.substr(pos + 1));
+        if (value.size() >= 2 &&
+            ((value.front() == '"' && value.back() == '"') || (value.front() == '\'' && value.back() == '\''))) {
+            value = value.substr(1, value.size() - 2);
+        }
+        value = ToLowerCopy(TrimCopy(value));
+
+        if (value == "h264" || value == "h265") {
+            return value;
+        }
+
+        std::cerr << "[FFmpeg] WARNING: invalid CAMERA_CODEC='" << value
+                  << "' in /etc/environment, fallback to h264" << std::endl;
+        return defaultCodec;
+    }
+
+    return defaultCodec;
+}
+}  // namespace
 
 struct FaysImuSample {
     double gx;
@@ -450,6 +513,9 @@ public:
             return true;
         }
 
+        const std::string cameraCodec = ReadCameraCodecFromEnvironmentFile();
+        const std::string ffmpegVideoEncoder = (cameraCodec == "h265") ? "hevc_rkmpp" : "h264_rkmpp";
+
         std::stringstream cmd;
         // Keep ffmpeg output minimal: suppress banner/progress spam in system logs.
         cmd << "ffmpeg -hide_banner -loglevel error -nostats -y ";
@@ -461,7 +527,7 @@ public:
             << "-r " << fps << " "
             << "-i - ";
 
-        cmd << "-c:v h264_rkmpp "
+        cmd << "-c:v " << ffmpegVideoEncoder << " "
             << "-rc_mode CQP "
             << "-qp_init 30 "
             << "-qp_max 38 "
@@ -471,6 +537,8 @@ public:
 
         cmd << "\"" << savePath << "\"";
 
+        std::cout << "[FFmpeg] CAMERA_CODEC=" << cameraCodec
+                  << " -> " << ffmpegVideoEncoder << std::endl;
         std::cout << "[FFmpeg] Command: " << cmd.str() << std::endl;
 
         pipe_ = popen(cmd.str().c_str(), "w");
