@@ -83,8 +83,9 @@
 - Fays 校验失败：查看 episode 下 `validation_error.log`
 - 录制锁：`/tmp/umi_recording.lock`
 - PTP 状态：`/dev/shm/umi_ptp_status`
+- 开机自恢复日志：`/var/log/ugripper/boot_install.log`（先比较/升级 backup 中的 `ugripper-usb-updater`，再检查 `ugripper` 恢复）
 
-## 9. USB 升级语言与编码器配置
+## 10. USB 升级语言与编码器配置
 - `auto_update/usb_auto_update.sh` 挂载升级 U 盘后会检查根目录 `config.txt`。
 - 支持配置键：`LANGUAGE`/`VOICE_LANG`（大小写不敏感），支持值：`zh|cn|chinese|中文` 与 `en|english`。
 - 识别成功后写入 `/etc/environment`：`UGRIPPER_LANG=<zh|en>`。
