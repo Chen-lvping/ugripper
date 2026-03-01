@@ -50,6 +50,8 @@ AUDIO_PIPE="/tmp/umi_audio_pipe"
 SENSOR_RECORDER_BIN="./build/src/sensor_recorder/sensor_recorder"
 FAYS_RECORD_SCRIPT="./build/faysSense_vi_kit/scripts/run_fays_record.sh"
 TRIPLE_CAMERA_CODEC="${TRIPLE_CAMERA_CODEC:-h264}"   # h264 | h265
+DURATION_GAP_THRESHOLD_SEC=5.0          # 时长误差阈值（秒）
+VIDEO_SPAN_PROBE_TIMEOUT_SEC=1.2        # 视频跨度探测超时（秒）
 
 # --- GPIO 配置 ---
 PIN_BTN_UP="PIN_36"      # 上按键（原有）
@@ -295,6 +297,8 @@ TODAY=$(date +%Y%m%d)
 
 LOG_FILE_LOCAL="$LOG_DIR_LOCAL/umi_sys_${DEVICE_SN_LOWER}_${TODAY}.log"
 LOG_FILE_DISK="$LOG_DIR_DISK/umi_sys_${DEVICE_SN_LOWER}_${TODAY}.log"
+LOG_SYNC_POS_FILE="/tmp/umi_sys_${DEVICE_SN_LOWER}_${TODAY}.pos"
+LOG_SYNC_LOCK_FILE="/tmp/umi_sys_${DEVICE_SN_LOWER}_${TODAY}.lock"
 
 # -------------------------
 # 清理旧日志（非今天的）
@@ -320,42 +324,63 @@ cleanup_old_logs
 echo "[INFO]:Logging locally to: $LOG_FILE_LOCAL"
 exec > >(tee -a "$LOG_FILE_LOCAL") 2>&1
 
-# 3. 定义后台同步函数
+# 3. 定义增量同步函数
+# 作用：仅同步 src 新增字节到 dest，不做整文件重写
+sync_logs_once() {
+    local src="$1"
+    local dest="$2"
+    local state_file="$3"
+    local lock_file="$4"
+    local last_pos=0
+    local curr_size=0
+
+    [ -f "$src" ] || return 0
+
+    # 关键：检查挂载点是否存活，避免写入失效路径。
+    if ! mountpoint -q "$DISK_DIR"; then
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$dest")" 2>/dev/null || return 1
+
+    {
+        flock -x 9
+
+        if [ -f "$state_file" ]; then
+            last_pos=$(cat "$state_file" 2>/dev/null || echo 0)
+        fi
+        curr_size=$(stat -c%s "$src" 2>/dev/null || echo 0)
+
+        # 日志轮转或重建后，游标回退到 0
+        if [ "$curr_size" -lt "$last_pos" ]; then
+            last_pos=0
+        fi
+
+        [ "$curr_size" -gt "$last_pos" ] || exit 0
+
+        # 仅追加新增内容（增量），避免整文件重复写入。
+        tail -c +$((last_pos + 1)) "$src" >> "$dest" 2>/dev/null || exit 1
+        printf "%s" "$curr_size" > "$state_file"
+    } 9>"$lock_file"
+}
+
+# 4. 定义后台同步函数
 # 作用：定期检查硬盘是否在，如果在，就把新增日志搬运过去
 sync_logs_to_disk() {
     local src="$1"
     local dest="$2"
-    local last_pos=0
-    
+    local state_file="$3"
+    local lock_file="$4"
+
     while true; do
-        # 仅当源文件存在且有大小变化时才尝试写入
-        if [ -f "$src" ]; then
-            local curr_size=$(stat -c%s "$src" 2>/dev/null || echo 0)
-            
-            if [ "$curr_size" -gt "$last_pos" ]; then
-                # 关键：检查挂载点是否存活，避免往 broken pipe 写
-                if mountpoint -q "$DISK_DIR"; then
-                    # 确保目标目录存在
-                    mkdir -p "$(dirname "$dest")" 2>/dev/null
-                    
-                    # 计算增量并追加到硬盘 (tail -c +N 从第N个字节开始输出)
-                    # 只追加新内容，写完立即释放文件句柄
-                    tail -c +$((last_pos + 1)) "$src" >> "$dest" 2>/dev/null
-                    
-                    # 只有写入成功才更新游标，防止数据丢失
-                    if [ $? -eq 0 ]; then
-                        last_pos=$curr_size
-                    fi
-                fi
-            fi
-        fi
+        sync_logs_once "$src" "$dest" "$state_file" "$lock_file" || true
         # 每 5 秒同步一次，降低 IO 压力
         sleep 5
     done
 }
 
-# 4. 启动后台同步进程并记录 PID
-sync_logs_to_disk "$LOG_FILE_LOCAL" "$LOG_FILE_DISK" &
+# 5. 启动后台同步进程并记录 PID
+sync_logs_to_disk "$LOG_FILE_LOCAL" "$LOG_FILE_DISK" "$LOG_SYNC_POS_FILE" "$LOG_SYNC_LOCK_FILE" &
 PID_LOG_SYNC=$!
 
 
@@ -579,10 +604,10 @@ monitor_system_health() {
         fi
     fi
 
-    # Fays：仅在已启用场景下，掉线即报错。
+    # Fays：作为必需设备，缺失即持续报错（服务保持运行）。
     # 注意这里读取共享缓存（/dev/shm/umi_fays_present），避免后台监控进程
     # 使用到主循环中的进程内变量，导致断连状态不可见。
-    if [ "$FAYS_ENABLED" = true ] && ! is_fays_ftdi_present; then
+    if ! is_fays_ftdi_present; then
         has_error=true
         error_msg+=" Fays camera lost;"
         if [ "$error_rank" -gt 2 ]; then
@@ -903,7 +928,6 @@ record_audio() {
     fi
 
     sync -f "$DISK_DIR"
-    /usr/sbin/blockdev --flushbufs "$(findmnt -n -o SOURCE --target "$DISK_DIR")"
     
     # 播放录制完成提示音
     notify_audio "audio_recording_stop"
@@ -1167,7 +1191,7 @@ get_video_timestamp_span_sec() {
 
     [ -f "$file_path" ] || return 1
 
-    probe_output=$(timeout 2 ffprobe -v error \
+    probe_output=$(timeout "$VIDEO_SPAN_PROBE_TIMEOUT_SEC" ffprobe -v error \
         -show_entries format=start_time,duration \
         -of default=noprint_wrappers=1:nokey=1 \
         "$file_path" 2>/dev/null | sed '/^[[:space:]]*$/d')
@@ -1189,6 +1213,56 @@ get_video_timestamp_span_sec() {
     # 只要 duration_val > start_ts，就按 end-start 归一化。
     if awk -v s="$start_ts" -v d="$duration_val" 'BEGIN { exit (d > s) ? 0 : 1 }'; then
         span_ts=$(awk -v s="$start_ts" -v e="$duration_val" 'BEGIN { printf "%.6f", e - s }')
+    fi
+
+    if ! awk -v x="$span_ts" 'BEGIN { exit (x+0>0) ? 0 : 1 }'; then
+        return 1
+    fi
+
+    printf "%s" "$span_ts"
+    return 0
+}
+
+get_mcap_summary_span_sec() {
+    local file_path="$1"
+    local span_ts=""
+    local -a py_cmd
+
+    [ -f "$file_path" ] || return 1
+
+    if [ -x "./.venv/bin/python" ]; then
+        py_cmd=("./.venv/bin/python")
+    else
+        py_cmd=(uv run python)
+    fi
+
+    # 只读取 MCAP summary 统计中的最早/最晚消息时间戳，不扫描全量消息。
+    span_ts=$(timeout 2 "${py_cmd[@]}" - "$file_path" <<'PY' 2>/dev/null || true
+import sys
+from mcap.reader import make_reader
+
+mcap_path = sys.argv[1]
+
+try:
+    with open(mcap_path, "rb") as fh:
+        summary = make_reader(fh).get_summary()
+
+    if summary is None or summary.statistics is None:
+        raise RuntimeError("missing summary statistics")
+
+    start_ns = int(summary.statistics.message_start_time)
+    end_ns = int(summary.statistics.message_end_time)
+    if end_ns <= start_ns:
+        raise RuntimeError("invalid message time range")
+
+    print(f"{(end_ns - start_ns) / 1_000_000_000:.6f}")
+except Exception:
+    sys.exit(1)
+PY
+)
+
+    if [ -z "$span_ts" ]; then
+        return 1
     fi
 
     if ! awk -v x="$span_ts" 'BEGIN { exit (x+0>0) ? 0 : 1 }'; then
@@ -1350,6 +1424,22 @@ validate_recording() {
     local dir=$1
     local validation_pass=true
     local error_details=""
+    local span_tmp_dir=""
+    local cam_span_file=""
+    local fays_span_file=""
+    local tact_left_span_file=""
+    local tact_right_span_file=""
+    local sensor_mcap_span_file=""
+    local pid_cam_span=""
+    local pid_fays_span=""
+    local pid_tact_left_span=""
+    local pid_tact_right_span=""
+    local pid_sensor_mcap_span=""
+    local cam_file="$dir/cam.mkv"
+    local fays_file="$dir/fays_stereo_output.mkv"
+    local tact_left_file="$dir/tact_left.mkv"
+    local tact_right_file="$dir/tact_right.mkv"
+    local sensor_mcap_file="$dir/sensor_data.mcap"
 
     echo "[INFO]:Validating data in: $dir"
 
@@ -1379,15 +1469,43 @@ validate_recording() {
         fi
     done
 
+    span_tmp_dir=$(mktemp -d /tmp/umi_validate_span.XXXXXX 2>/dev/null || mktemp -d)
+    cam_span_file="$span_tmp_dir/cam.span"
+    fays_span_file="$span_tmp_dir/fays.span"
+    tact_left_span_file="$span_tmp_dir/tact_left.span"
+    tact_right_span_file="$span_tmp_dir/tact_right.span"
+    sensor_mcap_span_file="$span_tmp_dir/sensor.span"
+
+    if [ "$CURRENT_RECORDING_EXPECT_FAYS" = true ] && [ -f "$cam_file" ]; then
+        (get_video_timestamp_span_sec "$cam_file" >"$cam_span_file" 2>/dev/null || true) &
+        pid_cam_span=$!
+    fi
+    if [ "$CURRENT_RECORDING_EXPECT_FAYS" = true ] && [ -f "$fays_file" ]; then
+        (get_video_timestamp_span_sec "$fays_file" >"$fays_span_file" 2>/dev/null || true) &
+        pid_fays_span=$!
+    fi
+    if [ -f "$sensor_mcap_file" ]; then
+        (get_mcap_summary_span_sec "$sensor_mcap_file" >"$sensor_mcap_span_file" 2>/dev/null || true) &
+        pid_sensor_mcap_span=$!
+        if [ -f "$tact_left_file" ]; then
+            (get_video_timestamp_span_sec "$tact_left_file" >"$tact_left_span_file" 2>/dev/null || true) &
+            pid_tact_left_span=$!
+        fi
+        if [ -f "$tact_right_file" ]; then
+            (get_video_timestamp_span_sec "$tact_right_file" >"$tact_right_span_file" 2>/dev/null || true) &
+            pid_tact_right_span=$!
+        fi
+    fi
+
     # --- 1.5 Fays 与主相机视频起止时间差校验 ---
     if [ "$CURRENT_RECORDING_EXPECT_FAYS" = true ]; then
-        local cam_file="$dir/cam.mkv"
-        local fays_file="$dir/fays_stereo_output.mkv"
         if [ -f "$cam_file" ] && [ -f "$fays_file" ]; then
             local cam_span=""
             local fays_span=""
-            cam_span=$(get_video_timestamp_span_sec "$cam_file" || true)
-            fays_span=$(get_video_timestamp_span_sec "$fays_file" || true)
+            [ -n "$pid_cam_span" ] && wait "$pid_cam_span" 2>/dev/null || true
+            [ -n "$pid_fays_span" ] && wait "$pid_fays_span" 2>/dev/null || true
+            [ -f "$cam_span_file" ] && cam_span=$(cat "$cam_span_file")
+            [ -f "$fays_span_file" ] && fays_span=$(cat "$fays_span_file")
 
             if [ -z "$cam_span" ] || [ -z "$fays_span" ]; then
                 validation_pass=false
@@ -1396,7 +1514,7 @@ validate_recording() {
             else
                 local duration_gap
                 duration_gap=$(awk -v c="$cam_span" -v f="$fays_span" 'BEGIN { printf "%.3f", c - f }')
-                if awk -v g="$duration_gap" 'BEGIN { exit (g > 10.0) ? 0 : 1 }'; then
+                if awk -v g="$duration_gap" -v t="$DURATION_GAP_THRESHOLD_SEC" 'BEGIN { exit (g > t) ? 0 : 1 }'; then
                     validation_pass=false
                     error_details="${error_details} Fays video too short by timestamp span (cam=${cam_span}s, fays=${fays_span}s, gap=${duration_gap}s);"
                     echo "[ERROR]:Fays video too short by timestamp span (cam=${cam_span}s, fays=${fays_span}s, gap=${duration_gap}s)."
@@ -1433,6 +1551,63 @@ validate_recording() {
         fi
     done
 
+    # --- 2.5 tact 视频与传感器 MCAP 时长一致性校验 ---
+    if [ -f "$sensor_mcap_file" ]; then
+        local sensor_mcap_span=""
+        [ -n "$pid_sensor_mcap_span" ] && wait "$pid_sensor_mcap_span" 2>/dev/null || true
+        [ -f "$sensor_mcap_span_file" ] && sensor_mcap_span=$(cat "$sensor_mcap_span_file")
+        if [ -z "$sensor_mcap_span" ]; then
+            validation_pass=false
+            error_details="${error_details} Failed to read sensor_data.mcap summary span;"
+            echo "[ERROR]:Failed to read sensor_data.mcap summary span."
+        else
+            local tact_name=""
+            local tact_span_file=""
+            local tact_pid=""
+            for tact_name in tact_left.mkv tact_right.mkv; do
+                local tact_file="$dir/$tact_name"
+                [ -f "$tact_file" ] || continue
+
+                case "$tact_name" in
+                    tact_left.mkv)
+                        tact_span_file="$tact_left_span_file"
+                        tact_pid="$pid_tact_left_span"
+                        ;;
+                    tact_right.mkv)
+                        tact_span_file="$tact_right_span_file"
+                        tact_pid="$pid_tact_right_span"
+                        ;;
+                    *)
+                        tact_span_file=""
+                        tact_pid=""
+                        ;;
+                esac
+
+                local tact_span=""
+                [ -n "$tact_pid" ] && wait "$tact_pid" 2>/dev/null || true
+                [ -n "$tact_span_file" ] && [ -f "$tact_span_file" ] && tact_span=$(cat "$tact_span_file")
+                if [ -z "$tact_span" ]; then
+                    validation_pass=false
+                    error_details="${error_details} Failed to read ${tact_name} timestamp span;"
+                    echo "[ERROR]:Failed to read ${tact_name} timestamp span."
+                    continue
+                fi
+
+                local duration_gap_abs=""
+                duration_gap_abs=$(awk -v v="$tact_span" -v m="$sensor_mcap_span" 'BEGIN { d=v-m; if (d<0) d=-d; printf "%.3f", d }')
+                if awk -v g="$duration_gap_abs" -v t="$DURATION_GAP_THRESHOLD_SEC" 'BEGIN { exit (g > t) ? 0 : 1 }'; then
+                    validation_pass=false
+                    error_details="${error_details} ${tact_name} vs sensor_data.mcap span gap too large (video=${tact_span}s, mcap=${sensor_mcap_span}s, gap=${duration_gap_abs}s);"
+                    echo "[ERROR]:${tact_name} vs sensor_data.mcap span gap too large (video=${tact_span}s, mcap=${sensor_mcap_span}s, gap=${duration_gap_abs}s)."
+                else
+                    echo "[INFO]:PASS: ${tact_name} vs sensor_data.mcap span check (video=${tact_span}s, mcap=${sensor_mcap_span}s, gap=${duration_gap_abs}s)."
+                fi
+            done
+        fi
+    fi
+
+    rm -rf "$span_tmp_dir"
+
     # --- 3. 结果处理 ---
     if [ "$validation_pass" = false ]; then
         echo ">>> VALIDATION FAILED: $error_details"
@@ -1445,8 +1620,10 @@ validate_recording() {
         
         # 强制让灯光保持 Error 状态一小段时间，避免马上被 monitor 覆盖
         sleep 3
+        return 1
     else
         echo ">>> VALIDATION PASSED."
+        return 0
     fi
 }
 
@@ -1459,6 +1636,10 @@ stop_recording() {
 
     time_stamp=$(date +"%Y-%m-%d %H:%M:%S")
     echo "[INFO]:Recording stopping at: $time_stamp on $CURRENT_SIDE_LOWER"
+
+    # 先默认回 READY，如果校验失败，校验函数会覆盖为 ERROR
+    set_state "READY"
+    notify_audio "recording_stop"
 
     # 先通知 FaysSense 停止落盘（进程保持常驻预热）
     if [ "$FAYS_RECORDING_ACTIVE" = true ]; then
@@ -1500,28 +1681,33 @@ stop_recording() {
     # 复位录制：在录制结束后对 info.json 打 tag
     mark_reset_tag_to_info || true
 
-    # 强制同步数据到磁盘
-    echo "[INFO]:Syncing data to disk..."
-    notify_audio "writing"
-    set_state "INIT"  # 临时切换状态指示sync
-    sync -f "$DISK_DIR"
-    #sync 全盘sync好像有概率等待很久，改为只sync数据盘目录
-    /usr/sbin/blockdev --flushbufs "$(findmnt -n -o SOURCE --target "$DISK_DIR")"
-
-    # Interrupt writing prompt with ready.
-    notify_audio "ready"
-
     IS_RECORDING=false
     echo "[INFO]:>>> RECORDING STOPPED. Processes terminated."
 
-    # 先默认回 READY，如果校验失败，校验函数会覆盖为 ERROR
-    set_state "READY"
-    notify_audio "recording_stop"
+    local validation_failed=false
 
     # 再运行校验 (如果失败，它会把灯变红)
     if [ -d "$TARGET_DIR" ]; then
-        validate_recording "$TARGET_DIR"
+        if ! validate_recording "$TARGET_DIR"; then
+            validation_failed=true
+        fi
     fi
+
+    # 校验结束后再刷盘，确保 validation_error.log 等校验产物落盘。
+    echo "[INFO]:Syncing data to disk after validation..."
+    notify_audio "writing"
+    set_state "INIT"
+    sync -f "$DISK_DIR"
+    set_state "READY"
+    notify_audio "ready"
+
+    # 若校验失败，恢复错误态，避免被写盘状态覆盖。
+    if [ "$validation_failed" = true ]; then
+        set_error_state "$ERROR_DATA_INTEGRITY"
+    fi
+
+    # 校验结束后立即做一次增量日志刷盘，降低拔盘前日志未落盘概率。
+    sync_logs_once "$LOG_FILE_LOCAL" "$LOG_FILE_DISK" "$LOG_SYNC_POS_FILE" "$LOG_SYNC_LOCK_FILE" || true
 
     # 清空 PID
     PID_CAM=""
@@ -1656,7 +1842,7 @@ if is_fays_ftdi_present; then
 else
     FAYS_ENABLED=false
     FAYS_USB_PRESENT=false
-    echo "[INFO]:Fays FTDI not detected at startup. Running without Fays recording."
+    echo "[WARNING]:Fays FTDI not detected at startup. Keep service running and stay in error state until recovered."
 fi
 
 refresh_fays_presence_cache

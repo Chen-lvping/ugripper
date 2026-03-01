@@ -32,11 +32,11 @@
 | Encoder 校准 | `src/sensor_recorder` | `./build/src/sensor_recorder/zeroing` | 执行编码器归零，供自动校准流程调用。 | 无（设备状态变更） |
 
 编排要点：
-- `run_record.sh` 启动后先检测 FTDI：存在则拉起 Fays daemon；缺失则进入无 Fays 模式。
+- `run_record.sh` 启动后先检测 FTDI：存在则拉起 Fays daemon；缺失则持续 `ERROR_2` 报错并等待恢复（服务不退出）。
 - `start_recording()` 在 Fays 已启用时发送 `START|<episode_dir>`，否则跳过 Fays，仅拉起 `PID_CAM` 与 `PID_SENSOR`。
 - `stop_recording()` 仅在本次 Fays 会话 active 时发送 `STOP`，停止 `PID_CAM` 与 `PID_SENSOR`，Fays 进程保持常驻。
 - `cleanup()` 才发送 `EXIT` 关闭 Fays 常驻进程。
-- 录制后校验固定覆盖 `cam/tact` 视频与 `sensor_data.mcap`；若本次 episode 期望 Fays 数据，再校验 `fays_stereo_output.mkv` 与 `fays_data.mcap`。
+- 录制后校验固定覆盖 `cam/tact` 视频与 `sensor_data.mcap`；若本次 episode 期望 Fays 数据，再校验 `fays_stereo_output.mkv` 与 `fays_data.mcap`。时长一致性阈值统一为 5 秒：`cam` vs `fays`（仅判定 Fays 不可短于 cam 超阈值）与 `tact_left/right` vs `sensor_data.mcap`（绝对误差）。
 
 ### 2.3 Right/Left 协同控制
 - 通信：TCP `12345` 端口。

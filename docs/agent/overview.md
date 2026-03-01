@@ -31,7 +31,7 @@
 - 控制 FIFO：`/tmp/umi_fays_cmd`
 
 ### 4.2 运行维护策略
-- 启动时若未检测到 FTDI，可无 Fays 继续录制。
+- 启动时若未检测到 FTDI，服务保持运行并持续报错（ERROR_2）；Fays 恢复后自动拉起 daemon。
 - 运行中检测到 Fays 插入会自动拉起 daemon。
 - 录制中若 daemon 恢复，仅恢复就绪，不补发当前 episode 的 `START`。
 
@@ -51,7 +51,8 @@
 - 基础校验：`cam.mkv`、`tact_left.mkv`、`tact_right.mkv`、`sensor_data.mcap` 必须存在且有效。
 - 若该次期望 Fays：还需 `fays_stereo_output.mkv`、`fays_data.mcap`。
 - Fays 时长校验：使用 `ffprobe` 的时间戳跨度（`end-start`）比较 `cam.mkv` 与 `fays_stereo_output.mkv`。
-- 失败条件：Fays 比 cam 短超过 10 秒，或任一跨度读取失败。
+- Fays 失败条件：Fays 比 cam 短超过 5 秒，或任一跨度读取失败。
+- tact 时长校验：读取 `sensor_data.mcap` summary 的消息起止时间，与 `tact_left.mkv`、`tact_right.mkv` 的时间戳跨度分别比较，任一绝对误差超过 5 秒判失败。
 
 ## 6. 状态与告警
 - LED 状态：`INIT`、`READY`、`RECORDING`、`ERROR_1~ERROR_5`。
