@@ -35,6 +35,18 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", \
 # ====================== FAYS FTDI CAMERA ==================
 # Future Technology Devices International, Ltd FTDI Superspeed Video Bridge
 # VID:PID = 0403:602e
+# Interface 00: Stereo channel -> /dev/fays_stereo
+# Interface 02: IMU channel    -> /dev/fays_imu
+SUBSYSTEM=="video4linux", KERNEL=="video*", \
+  ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", \
+  ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  SYMLINK+="fays_stereo"
+
+SUBSYSTEM=="video4linux", KERNEL=="video*", \
+  ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", \
+  ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="fays_imu"
+
 SUBSYSTEM=="video4linux", KERNEL=="video*", \
   ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", \
   MODE="0777", GROUP="video"

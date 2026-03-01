@@ -32,7 +32,7 @@
 | Encoder 校准 | `src/sensor_recorder` | `./build/src/sensor_recorder/zeroing` | 执行编码器归零，供自动校准流程调用。 | 无（设备状态变更） |
 
 编排要点：
-- `run_record.sh` 启动后先检测 FTDI：存在则拉起 Fays daemon；缺失则持续 `ERROR_2` 报错并等待恢复（服务不退出）。
+- `run_record.sh` 启动后先检测 FTDI：存在则拉起 Fays daemon；缺失则持续 `ERROR_2` 报错并等待恢复（服务不退出）。检测依据为 udev 固定映射的 `/dev/fays_stereo` 与 `/dev/fays_imu`。
 - `start_recording()` 在 Fays 已启用时发送 `START|<episode_dir>`，否则跳过 Fays，仅拉起 `PID_CAM` 与 `PID_SENSOR`。
 - `stop_recording()` 仅在本次 Fays 会话 active 时发送 `STOP`，停止 `PID_CAM` 与 `PID_SENSOR`，Fays 进程保持常驻。
 - `cleanup()` 才发送 `EXIT` 关闭 Fays 常驻进程。
@@ -105,6 +105,7 @@
 - `/dev/shm/umi_ptp_status`：PTP 监控 JSON。
 - `/tmp/umi_led_pipe`, `/tmp/umi_audio_pipe`：状态通知 FIFO。
 - `/tmp/umi_fays_cmd`：FaysSense 常驻进程命令 FIFO（`START|...`/`STOP`/`EXIT`）。
+- `/dev/shm/umi_fays_present`：Fays 在位缓存（`1/0`），由后台监控循环定期刷新。
 - `/run/ugripper_installing_from_usb.lock`：升级保护锁。
 
 ## 5. 构建与打包链路（`build_deb.sh`）
@@ -148,7 +149,7 @@
   - `/usr/local/opencv-4.2.0-linux-aarch64/lib`
 - 硬件映射：
   - `/dev/cam_main`, `/dev/left_tcam`, `/dev/right_tcam`
-  - FaysSense FTDI 设备对应 `/dev/video*`（运行时自动分配）
+  - FaysSense FTDI 设备固定映射为 `/dev/fays_stereo` 与 `/dev/fays_imu`（底层仍映射到动态 `/dev/video*`）
   - `/dev/ttyS2`（IMU）, `/dev/ttyS7`（Encoder）
   - 音频卡 `rockchipes8388`
   - 按键 `PIN_36` / `PIN_38`

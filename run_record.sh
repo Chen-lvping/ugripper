@@ -1025,13 +1025,8 @@ force_stop_pid() {
 }
 
 detect_fays_ftdi_present_raw() {
-    if ! command -v v4l2-ctl >/dev/null 2>&1; then
-        return 1
-    fi
-
-    local devices
-    devices=$(v4l2-ctl --list-devices 2>/dev/null || true)
-    echo "$devices" | grep -q "FTDI Superspeed Video Bridge"
+    # 通过固定 symlink 检测 Fays 在位，避免周期性设备全量枚举。
+    [ -e "/dev/fays_stereo" ] && [ -e "/dev/fays_imu" ]
 }
 
 refresh_fays_presence_cache() {
@@ -1728,9 +1723,6 @@ stop_recording() {
     echo "[INFO]:Syncing data to disk after validation..."
     notify_audio "writing"
     set_state "INIT"
-    sync -f "$DISK_DIR"
-    set_state "READY"
-    notify_audio "ready"
 
     # 若校验失败，恢复错误态，避免被写盘状态覆盖。
     if [ "$validation_failed" = true ]; then
@@ -1749,6 +1741,10 @@ stop_recording() {
 
     # 删除录制锁文件
     rm -f "$RECORDING_LOCK_FILE"
+
+    sync -f "$DISK_DIR"
+    set_state "READY"
+    notify_audio "ready"
 }
 
 request_system_shutdown() {

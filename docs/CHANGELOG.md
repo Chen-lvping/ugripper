@@ -1,24 +1,22 @@
 # Changelog
 
-## Unreleased
-- 新增 U 盘标定导入：`usb_auto_update.sh` 检测 `ugripper_calib/<DEVICE_SN>/` 后调用 `auto_calibration/import_camera_calibration.sh`，导入 `camchain.yaml + imucam.txt` 到 Lerobot 风格 `calibration.json`。
-- 标定持久化路径改为 `/etc/ugripper/config/calibration/calibration.json`，支持多次插入 U 盘重复覆盖更新。
-- `run_record.sh` 每次开录前刷新持久化标定，并将当前有效标定写入该 episode 的 `calibration.json`（替换原先占位内容）。
-- 开机自恢复流程增强：`boot_check_install.sh` 先比较并升级 `/opt/backup` 中更高版本的 `ugripper-usb-updater`，再检查 `ugripper` 是否需要恢复安装。
+## v1.1.8 - 2026-03-01
+- 新增 U 盘标定导入与持久化：支持按 `DEVICE_SN` 导入 `camchain/imucam`，写入 `/etc/ugripper/config/calibration/calibration.json`，并在每次开录前刷新到 episode `calibration.json`。
+- 强化开机自恢复：`boot_check_install.sh` 优先升级 `/opt/backup` 中更新版本的 `ugripper-usb-updater`，再执行主包恢复检查。
+- Fays 在位检测改为 udev 固定映射：新增 `/dev/fays_stereo` 与 `/dev/fays_imu`，`run_record.sh` 基于 symlink 刷新 `/dev/shm/umi_fays_present`，避免周期性 `v4l2-ctl` 枚举。
+- 录制链路与校验增强：Fays 缺失持续报 `ERROR_2`；时长校验统一收紧到 5 秒（含 `cam vs fays` 与 `tact vs sensor_data.mcap`）；USB `config.txt` 新增语言与编码器配置同步到 `/etc/environment`。
+
+## v1.1.7 - 2026-02-28
+- Fays 视频编码调整为 RK3576 硬编码 `h264_rkmpp`，输出 H.264，降低 CPU 占用。
+- 三路相机录制脚本统一为 `camera_record/triple_camera_record.py`，新增 `--codec <h264|h265>` 参数，`run_record.sh` 默认使用 `h264`。
 
 ## v1.1.6 - 2026-02-27
-- Fays 视频编码从 `libx264` 回退为 RK3576 硬编码 `h264_rkmpp`，降低 CPU 占用。
-- 三路相机录制脚本统一为 `camera_record/triple_camera_record.py`，新增 `--codec <h264|h265>` 可选编码，`run_record.sh` 默认使用 `h264`。
-- `fays_record_example` 视频编码从 `hevc_rkmpp` 切换为 `libx264` CPU 软编码，输出 H.264，降低硬件编码器占用。
 - 调整 Fays 维护策略：支持运行时自动拉起 daemon/FIFO；若在录制中恢复，仅恢复就绪，不补发 `START`、不续写当前 episode。
-- `run_record.sh` 数据完整性校验增强：统一时长误差阈值为 5 秒；`cam.mkv` 与 `fays_stereo_output.mkv` 的短缺阈值从 10 秒收紧到 5 秒，并新增 `tact_left.mkv`/`tact_right.mkv` 与 `sensor_data.mcap` 的时长误差校验（MCAP 仅读取 summary 起止时间，不做全量扫描）。
-- Fays 缺失策略调整：不再视为"正常无 Fays 模式"；启动或运行中缺失时持续触发 `ERROR_2` 报错并保持服务运行（不修改 `start_recording` 现有启动路径）。
+- `run_record.sh` 新增按时间戳跨度的数据完整性校验：对期望 Fays 的 episode，对比 `cam.mkv` 与 `fays_stereo_output.mkv` 的 `end-start` 时长；若 Fays 短超过 10 秒或跨度无法读取则判定失败。
 - 重构 `fays_record_example` 录制链路：IMU/视频读取线程只负责采集和入队，`fays_data.mcap` 的 `Open/Close/Log` 统一由独立 MCAP 写线程处理，并按 session 隔离写入。
 - 入队路径改为“本地 pending + 非阻塞批量重试”，锁竞争时先缓存后重试，降低高负载下的样本丢失风险。
 - 增加 Fays USB 节点监控：`record.cpp` 轮询配置中的视频节点，断连时打印错误并主动退出，由上层维护流程重建。
 - `led_manager.py` 中 `RECORDING` 状态调整为 1Hz 绿色闪烁。
-- USB 自动升级新增语言配置读取：若升级 U 盘根目录存在 `config.txt` 且配置 `LANGUAGE/VOICE_LANG`，会更新 `/etc/environment` 的 `UGRIPPER_LANG`（`zh|en`）；`audio_play.py` 按该变量优先播放 `audio_en`，缺失文件自动回退中文目录。
-- USB 自动升级新增编码器配置读取：若 `config.txt` 指定 `CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC`，会更新 `/etc/environment` 的 `CAMERA_CODEC`（`h264|h265`）；`run_record.sh` 和 `fays_record_example` 均按该值选择编码器，Fays 端直接读取 `/etc/environment` 不依赖进程环境继承。
 
 ## v1.1.5 - 2026-02-26
 - 新增报错灯效分级：`ERROR_1~ERROR_5`，按严重度区分并使用红灯“长+短码”循环编码（`ERROR_1`=长短，`ERROR_2`=长短短，依次类推）。

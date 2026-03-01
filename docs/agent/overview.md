@@ -35,6 +35,7 @@
 
 ### 4.2 运行维护策略
 - 启动时若未检测到 FTDI，服务保持运行并持续报错（ERROR_2）；Fays 恢复后自动拉起 daemon。
+- FTDI 在位检测由 `run_record.sh` 直接检查 `/dev/fays_stereo` 与 `/dev/fays_imu`（由 udev 规则固定映射）并写入 `/dev/shm/umi_fays_present`。
 - 运行中检测到 Fays 插入会自动拉起 daemon。
 - 录制中若 daemon 恢复，仅恢复就绪，不补发当前 episode 的 `START`。
 
