@@ -13,9 +13,12 @@
 
 ## 3. 主流程（`run_record.sh`）
 1. 启动时初始化目录、LED/Audio FIFO、GPIO、Fays 可用性。
+ - 加载持久化标定文件：`/etc/ugripper/config/calibration/calibration.json`（缺失时回退 fake 模板）。
 2. 后台 `monitor_loop` 运行健康检查（约 50ms 一次）并维护错误灯效状态。
 3. `start_recording`：
 - Right 先下发网络 `START` 给 Left。
+- 开录前刷新一次持久化标定（支持 U 盘重复导入后立即生效）。
+- 将当前有效标定复制到 `episode/calibration.json`（Lerobot 风格）。
 - 可用时启动 Fays 当前 episode（`run_fays_record.sh start <dir>`）。
 - 启动三路相机：`camera_record/triple_camera_record.py --codec <h264|h265>`（从 `/etc/environment` 的 `CAMERA_CODEC` 加载，默认 `h264`）。
 - 启动传感器：`build/src/sensor_recorder/sensor_recorder`。
@@ -67,7 +70,14 @@
 - `build/src/sensor_recorder/zeroing`
 - `build/faysSense_vi_kit/fays_record_example`
 
-## 8. 常用排障入口
+## 8. U 盘标定导入
+- 入口：`auto_update/usb_auto_update.sh`（由 udev + `usb-auto-update@.service` 触发）。
+- 检测目录：`ugripper_calib/<DEVICE_SN>/`（按设备 SN 匹配）。
+- 文件：`*camchain*.yaml`（主摄）+ `*imucam*.txt`（Fays 双目 + IMU）。
+- 导入脚本：`auto_calibration/import_camera_calibration.sh`。
+- 持久化输出：`/etc/ugripper/config/calibration/calibration.json`。
+- 支持多次导入覆盖更新；后续 episode 在开录时读取最新持久化参数。
+## 9. 常用排障入口
 - 服务日志：`journalctl -u ugripper.service -f`
 - 内核 USB/UVC：`journalctl -k -f | egrep 'usb|uvcvideo|xhci|reset|disconnect|error -71'`
 - Fays 校验失败：查看 episode 下 `validation_error.log`

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+- 新增 U 盘标定导入：`usb_auto_update.sh` 检测 `ugripper_calib/<DEVICE_SN>/` 后调用 `auto_calibration/import_camera_calibration.sh`，导入 `camchain.yaml + imucam.txt` 到 Lerobot 风格 `calibration.json`。
+- 标定持久化路径改为 `/etc/ugripper/config/calibration/calibration.json`，支持多次插入 U 盘重复覆盖更新。
+- `run_record.sh` 每次开录前刷新持久化标定，并将当前有效标定写入该 episode 的 `calibration.json`（替换原先占位内容）。
+
 ## v1.1.6 - 2026-02-27
 - Fays 视频编码从 `libx264` 回退为 RK3576 硬编码 `h264_rkmpp`，降低 CPU 占用。
 - 三路相机录制脚本统一为 `camera_record/triple_camera_record.py`，新增 `--codec <h264|h265>` 可选编码，`run_record.sh` 默认使用 `h264`。

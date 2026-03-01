@@ -396,10 +396,13 @@ echo "[INFO]:Initializing Data Structure..."
 DIR_RUNTIME="/tmp/umi_episode_runtime"
 DIR_META="$DIR_RUNTIME/metadata"
 DIR_CALIB="$DIR_RUNTIME/calibration"
+DIR_PERSIST_CALIB="/etc/ugripper/config/calibration"
+PERSIST_CALIB_FILE="$DIR_PERSIST_CALIB/calibration.json"
 DIR_DATA="$DATA_ROOT/data"
 
 mkdir -p "$DIR_META"
 mkdir -p "$DIR_CALIB"
+mkdir -p "$DIR_PERSIST_CALIB"
 mkdir -p "$DIR_DATA"
 
 # 1. 生成 metadata
@@ -417,9 +420,13 @@ EOF
 echo "[INFO]:Metadata metadata.json prepared."
 
 # 2. 拷贝 calibration 文件
-# 从 ./config/fake*Calib.json 拷贝到 calibration/xxx.json
-if [ -f "./config/fakeCamCalib.json" ]; then
+# cam: 优先使用 /etc/ugripper/config/calibration/calibration.json
+#      首次无持久化文件时回退 fake 并写入持久化路径
+if [ -f "$PERSIST_CALIB_FILE" ]; then
+    cp -f "$PERSIST_CALIB_FILE" "$DIR_CALIB/cam.json"
+elif [ -f "./config/fakeCamCalib.json" ]; then
     cp -f "./config/fakeCamCalib.json" "$DIR_CALIB/cam.json"
+    cp -f "./config/fakeCamCalib.json" "$PERSIST_CALIB_FILE"
 fi
 if [ -f "./config/fakeEncoderCalib.json" ]; then
     cp -f "./config/fakeEncoderCalib.json" "$DIR_CALIB/encoder.json"
@@ -454,9 +461,6 @@ handle_global_placeholders() {
         fi
     fi
 }
-
-# 立即执行一次全局占位符处理
-handle_global_placeholders
 
 # ================= 硬件序列号校验与初始化 =================
 check_tactile_hardware() {
@@ -539,10 +543,27 @@ check_tactile_hardware() {
     fi
 }
 
-# --- 逻辑分支 ---
-# 执行校验
-check_tactile_hardware "/dev/left_tcam" "Left Tactile"
-check_tactile_hardware "/dev/right_tcam" "Right Tactile"
+# 读取持久化 calibration.json，应用运行态占位符与触觉 SN 对齐。
+# 该函数在每次开始录制前调用，保证多次插入 U 盘导入后无需重启服务即可生效。
+refresh_runtime_calibration() {
+    if [ -f "$PERSIST_CALIB_FILE" ]; then
+        cp -f "$PERSIST_CALIB_FILE" "$DIR_CALIB/cam.json"
+    elif [ -f "./config/fakeCamCalib.json" ]; then
+        cp -f "./config/fakeCamCalib.json" "$DIR_CALIB/cam.json"
+    fi
+
+    if [ ! -f "$DIR_CALIB/cam.json" ]; then
+        echo "[WARNING]:Runtime calibration source missing."
+        return
+    fi
+
+    handle_global_placeholders
+    check_tactile_hardware "/dev/left_tcam" "Left Tactile"
+    check_tactile_hardware "/dev/right_tcam" "Right Tactile"
+}
+
+# 启动阶段先执行一次
+refresh_runtime_calibration
 
 # ================= GPIO 初始化说明 =================
 # Right 侧 GPIO 已在启动阶段完成有效性检查与初始化；Left 侧无需按键 GPIO。
@@ -784,14 +805,12 @@ prepare_episode_manifest_files() {
         echo "[WARNING]:Metadata source missing: $META_FILE"
     fi
 
-    local calib_items=()
-    [ -f "$DIR_CALIB/cam.json" ] && calib_items+=("\"cam\"")
-    [ -f "$DIR_CALIB/imu.json" ] && calib_items+=("\"imu\"")
-    [ -f "$DIR_CALIB/encoder.json" ] && calib_items+=("\"encoder\"")
-
-    local joined_calib
-    joined_calib=$(IFS=,; echo "${calib_items[*]}")
-    printf '[%s]\n' "$joined_calib" > "$episode_calib_file"
+    if [ -f "$DIR_CALIB/cam.json" ]; then
+        cp -f "$DIR_CALIB/cam.json" "$episode_calib_file"
+    else
+        echo "[WARNING]:Calibration source missing: $DIR_CALIB/cam.json"
+        printf '{}\n' > "$episode_calib_file"
+    fi
 }
 
 # 函数：在当前 episode 的 info.json 上写入复位 tag
@@ -1332,7 +1351,10 @@ start_recording() {
     # 2. 准备目录
     prepare_directory "$sync_dir_name"
 
-    # 2.1 录制开始时，将 metadata/calibration 写入当前 episode 目录
+    # 2.1 每次开录前刷新 calibration.json（支持 U 盘重复导入后的热更新）
+    refresh_runtime_calibration
+
+    # 2.2 录制开始时，将 metadata/calibration 写入当前 episode 目录
     prepare_episode_manifest_files "$TARGET_DIR"
     
     # 3. 如果是 Master，需要通知 Slave

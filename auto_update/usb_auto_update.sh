@@ -386,6 +386,32 @@ else
 fi
 
 # ========================================================
+# 0. 标定文件导入（检测 ugripper_calib/<DEVICE_SN>/）
+# ========================================================
+CALIB_IMPORT_SCRIPT="/opt/ugripper/auto_calibration/import_camera_calibration.sh"
+if [ -d "$MOUNT_POINT/ugripper_calib" ]; then
+  log "检测到 ugripper_calib，尝试导入 calibration.json。"
+
+  if [ ! -x "$CALIB_IMPORT_SCRIPT" ]; then
+    log "标定导入脚本不存在或不可执行：$CALIB_IMPORT_SCRIPT"
+    exit 1
+  fi
+
+  if "$CALIB_IMPORT_SCRIPT" "$MOUNT_POINT"; then
+    log "标定导入成功，跳过本次升级流程。"
+    exit 0
+  else
+    rc=$?
+    if [ "$rc" -eq 10 ]; then
+      log "U盘存在 ugripper_calib，但未找到当前设备SN对应目录，继续升级流程。"
+    else
+      log "标定导入失败（退出码=$rc），终止流程。"
+      exit 1
+    fi
+  fi
+fi
+
+# ========================================================
 # 0. 校准触发（检测 calibration.txt）
 # ========================================================
 if [ -f "$MOUNT_POINT/calibration.txt" ]; then
