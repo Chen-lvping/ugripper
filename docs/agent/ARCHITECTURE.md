@@ -52,6 +52,7 @@
 
 ### 3.1 自动校准
 - `auto_update/99-usb-auto-update.rules` 触发 `usb-auto-update@.service`，由 `auto_update/usb_auto_update.sh` 检查 U 盘根目录是否存在 `calibration.txt`。
+- 同一入口新增“标定导入”分支：若 U 盘存在 `ugripper_calib/<DEVICE_SN>/`，执行 `auto_calibration/import_camera_calibration.sh`，将主摄/Fays/IMU 参数写入 `/etc/ugripper/config/calibration/calibration.json`（支持重复导入覆盖更新）。
 - 存在 `calibration.txt` 时触发 `ugripper-calibration.service`（`run_calibration.sh`）：
   - 停止主服务。
   - 启动 LED/音频提示。
@@ -80,8 +81,8 @@
 ### 4.1 目录结构
 `/mnt/data_disk/<device_sn_lower>/`
 - `metadata/metadata.json`
-- `calibration/cam.json`, `encoder.json`, `imu.json`
 - `data/episode_YYYYMMDD_NNNN/`
+  - `calibration.json`（当前 episode 实际使用的 Lerobot 标定快照）
   - `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`
   - `cam.csv`, `tact_left.csv`, `tact_right.csv`
   - `fays_stereo_output.mkv`, `fays_data.mcap`（仅在该 episode 启用 Fays 时）
@@ -89,8 +90,13 @@
   - `audio_pre.wav`, `audio_post.wav`（可选）
   - `validation_error.log`（校验失败时）
 
+`/etc/ugripper/config/calibration/`
+- `calibration.json`（持久化主摄 + Fays 双目 + IMU 标定）
+- `imported/<DEVICE_SN>/<timestamp>/`（导入原始文件归档）
+
 ### 4.2 配置注入
-- 主相机/触觉配置：`run_record.sh` 动态替换 `cam.json` 中主相机与触觉序列号占位符。
+- 主标定持久化：`/etc/ugripper/config/calibration/calibration.json`。`postinst` 仅首次缺失时用 `config/fakeCamCalib.json` 初始化，不覆盖已有文件。
+- 主相机/触觉配置：`run_record.sh` 在每次开录前读取持久化 `calibration.json`，动态替换主相机与触觉序列号占位符，再写入当前 episode 的 `calibration.json`。
 - FaysSense 配置：`run_fays_record.sh daemon` 阶段根据设备探测结果修改 `build/faysSense_vi_kit/config/fays_vikit.yaml`，后续录制阶段仅发送命令。
 
 ### 4.3 状态文件与锁
