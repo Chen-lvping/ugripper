@@ -30,6 +30,110 @@ log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
 }
 
+trim_text() {
+  local text="$1"
+  text="${text#"${text%%[![:space:]]*}"}"
+  text="${text%"${text##*[![:space:]]}"}"
+  printf '%s' "$text"
+}
+
+normalize_language() {
+  local raw="$1"
+  local normalized
+
+  normalized="$(trim_text "$raw")"
+  normalized="${normalized#\"}"
+  normalized="${normalized%\"}"
+  normalized="${normalized#\'}"
+  normalized="${normalized%\'}"
+  normalized="$(trim_text "$normalized")"
+  normalized="${normalized,,}"
+
+  case "$normalized" in
+    en|english|en_us|en_gb)
+      printf 'en'
+      return 0
+      ;;
+    zh|cn|zh_cn|chinese|zh_hans|zh-hans|中文)
+      printf 'zh'
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+parse_language_from_config() {
+  local config_file="$1"
+  local line key value lang
+
+  [ -f "$config_file" ] || return 1
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(trim_text "$line")"
+    [ -z "$line" ] && continue
+
+    case "$line" in
+      \#*|\;*)
+        continue
+        ;;
+    esac
+
+    if [ "${line#*=}" = "$line" ]; then
+      continue
+    fi
+
+    key="$(trim_text "${line%%=*}")"
+    value="$(trim_text "${line#*=}")"
+    key="${key,,}"
+
+    case "$key" in
+      language|voice_lang|voice_language|lang)
+        if lang="$(normalize_language "$value")"; then
+          printf '%s' "$lang"
+          return 0
+        fi
+        ;;
+    esac
+  done < "$config_file"
+
+  return 1
+}
+
+set_ugripper_language() {
+  local lang="$1"
+  local env_file="/etc/environment"
+  local env_key="UGRIPPER_LANG"
+  local env_line="${env_key}=${lang}"
+
+  if [ ! -e "$env_file" ]; then
+    if ! printf '%s\n' "$env_line" > "$env_file"; then
+      log "写入 $env_file 失败，语言设置未生效。"
+      return 1
+    fi
+    export UGRIPPER_LANG="$lang"
+    log "已创建 $env_file 并写入 $env_line"
+    return 0
+  fi
+
+  if grep -qE "^${env_key}=" "$env_file"; then
+    if ! sed -i -E "s|^${env_key}=.*$|${env_line}|" "$env_file"; then
+      log "更新 $env_file 中 ${env_key} 失败。"
+      return 1
+    fi
+    log "已更新 $env_file 中 ${env_key}=${lang}"
+  else
+    if ! printf '\n%s\n' "$env_line" >> "$env_file"; then
+      log "追加 ${env_key} 到 $env_file 失败。"
+      return 1
+    fi
+    log "已追加 $env_line 到 $env_file"
+  fi
+
+  export UGRIPPER_LANG="$lang"
+  return 0
+}
+
 stop_service_fast() {
   local service_name="$1"
   local timeout_sec="${2:-6}"
@@ -140,6 +244,23 @@ if mount "$DEV_NODE" "$MOUNT_POINT" -o ro; then
 else
   log "挂载失败：$DEV_NODE"
   exit 1
+fi
+
+CONFIG_FILE="$MOUNT_POINT/config.txt"
+if [ -f "$CONFIG_FILE" ]; then
+  log "检测到 config.txt，检查语言配置。"
+  CONFIG_LANG="$(parse_language_from_config "$CONFIG_FILE" || true)"
+  if [ -n "$CONFIG_LANG" ]; then
+    if set_ugripper_language "$CONFIG_LANG"; then
+      log "已应用语言配置：UGRIPPER_LANG=$CONFIG_LANG"
+    else
+      log "语言配置写入失败，继续后续流程。"
+    fi
+  else
+    log "config.txt 未找到有效语言设置（支持 LANGUAGE/VOICE_LANG，值为 zh/en），跳过。"
+  fi
+else
+  log "未检测到 config.txt，跳过语言配置。"
 fi
 
 # ========================================================

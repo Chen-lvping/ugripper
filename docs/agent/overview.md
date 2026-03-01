@@ -73,3 +73,9 @@
 - Fays 校验失败：查看 episode 下 `validation_error.log`
 - 录制锁：`/tmp/umi_recording.lock`
 - PTP 状态：`/dev/shm/umi_ptp_status`
+
+## 9. USB 升级语言配置
+- `auto_update/usb_auto_update.sh` 挂载升级 U 盘后会检查根目录 `config.txt`。
+- 支持配置键：`LANGUAGE`/`VOICE_LANG`（大小写不敏感），支持值：`zh|cn|chinese|中文` 与 `en|english`。
+- 识别成功后写入 `/etc/environment`：`UGRIPPER_LANG=<zh|en>`。
+- `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音：`en` 优先 `audio_en/`，文件缺失时回退 `audio/`。

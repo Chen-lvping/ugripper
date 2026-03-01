@@ -11,6 +11,7 @@
 - 入队路径改为“本地 pending + 非阻塞批量重试”，锁竞争时先缓存后重试，降低高负载下的样本丢失风险。
 - 增加 Fays USB 节点监控：`record.cpp` 轮询配置中的视频节点，断连时打印错误并主动退出，由上层维护流程重建。
 - `led_manager.py` 中 `RECORDING` 状态调整为 1Hz 绿色闪烁。
+- USB 自动升级新增语言配置读取：若升级 U 盘根目录存在 `config.txt` 且配置 `LANGUAGE/VOICE_LANG`，会更新 `/etc/environment` 的 `UGRIPPER_LANG`（`zh|en`）；`audio_play.py` 按该变量优先播放 `audio_en`，缺失文件自动回退中文目录。
 
 ## v1.1.5 - 2026-02-26
 - 新增报错灯效分级：`ERROR_1~ERROR_5`，按严重度区分并使用红灯“长+短码”循环编码（`ERROR_1`=长短，`ERROR_2`=长短短，依次类推）。
