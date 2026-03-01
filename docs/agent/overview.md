@@ -82,3 +82,4 @@
 - Fays 校验失败：查看 episode 下 `validation_error.log`
 - 录制锁：`/tmp/umi_recording.lock`
 - PTP 状态：`/dev/shm/umi_ptp_status`
+- 开机自恢复日志：`/var/log/ugripper/boot_install.log`（先比较/升级 backup 中的 `ugripper-usb-updater`，再检查 `ugripper` 恢复）
