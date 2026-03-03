@@ -440,6 +440,61 @@ private:
     std::mutex mtx_;
 };
 
+struct VideoFrame {
+    cv::Mat image;
+    uint64_t faysTsNs;
+    uint64_t publishTimeNs;
+};
+
+class VideoFrameQueue {
+public:
+    static constexpr size_t kDefaultCapacity = 8;
+
+    explicit VideoFrameQueue(size_t capacity = kDefaultCapacity)
+        : capacity_(capacity), stopped_(false), dropCount_(0) {}
+
+    bool Push(VideoFrame&& frame) {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (stopped_) return false;
+        if (queue_.size() >= capacity_) {
+            queue_.pop_front();
+            const uint64_t count = dropCount_.fetch_add(1, std::memory_order_relaxed) + 1;
+            if ((count & (count - 1)) == 0 || count % 50 == 0) {
+                std::cerr << "[Video] Encode queue full, dropped oldest frame (total drops: "
+                          << count << ")" << std::endl;
+            }
+        }
+        queue_.push_back(std::move(frame));
+        cv_.notify_one();
+        return true;
+    }
+
+    bool Pop(VideoFrame& out) {
+        std::unique_lock<std::mutex> lock(mtx_);
+        cv_.wait(lock, [this] { return !queue_.empty() || stopped_; });
+        if (queue_.empty()) return false;
+        out = std::move(queue_.front());
+        queue_.pop_front();
+        return true;
+    }
+
+    void Stop() {
+        std::lock_guard<std::mutex> lock(mtx_);
+        stopped_ = true;
+        cv_.notify_all();
+    }
+
+    uint64_t GetDropCount() const { return dropCount_.load(std::memory_order_relaxed); }
+
+private:
+    const size_t capacity_;
+    std::deque<VideoFrame> queue_;
+    std::mutex mtx_;
+    std::condition_variable cv_;
+    bool stopped_;
+    std::atomic<uint64_t> dropCount_;
+};
+
 class FFmpegRecorder {
 public:
     FFmpegRecorder() : pipe_(nullptr) {}
@@ -479,17 +534,19 @@ public:
             std::cerr << "[FFmpeg] Failed to open pipe!" << std::endl;
             return false;
         }
+        const int fd = fileno(pipe_);
+        if (fd >= 0) {
+            constexpr int kTargetPipeSz = 1048576;
+            const int actual = fcntl(fd, F_SETPIPE_SZ, kTargetPipeSz);
+            if (actual > 0) {
+                std::cout << "[FFmpeg] Pipe buffer expanded to " << actual << " bytes" << std::endl;
+            }
+        }
         return true;
     }
 
     void Write(const cv::Mat& frame) {
         if (!pipe_ || frame.empty()) {
-            return;
-        }
-        if (frame.channels() == 1) {
-            cv::Mat bgrFrame;
-            cv::cvtColor(frame, bgrFrame, cv::COLOR_GRAY2BGR);
-            fwrite(bgrFrame.data, 1, bgrFrame.total() * bgrFrame.elemSize(), pipe_);
             return;
         }
         fwrite(frame.data, 1, frame.total() * frame.elemSize(), pipe_);
@@ -538,6 +595,7 @@ public:
         mptrImuThr_ = std::thread(&FaysRecorder::ImuOnlineCapture, this);
         mptrMcapWriterThr_ = std::thread(&FaysRecorder::McapWriteThread, this);
         mptrImgThr_ = std::thread(&FaysRecorder::ImgOnlineCapture, this);
+        mptrEncThr_ = std::thread(&FaysRecorder::VideoEncodeThread, this);
         mptrUsbWatchThr_ = std::thread(&FaysRecorder::UsbConnectionWatchdog, this);
     }
 
@@ -551,6 +609,12 @@ public:
         if (mptrImgThr_.joinable()) {
             mptrImgThr_.join();
         }
+
+        videoFrameQueue_.Stop();
+        if (mptrEncThr_.joinable()) {
+            mptrEncThr_.join();
+        }
+
         if (mptrUsbWatchThr_.joinable()) {
             mptrUsbWatchThr_.join();
         }
@@ -567,6 +631,8 @@ public:
 
         std::cout << "[IMU] Final stats - Gaps: " << imuGapCount_
                   << ", Rollbacks: " << imuRollbackCount_ << std::endl;
+        std::cout << "[Video] Final stats - Encode queue drops: "
+                  << videoFrameQueue_.GetDropCount() << std::endl;
 
         FAYS_VIK_DestroyHandle(mptrHandle_);
         std::cout << "[FaysRecorder] Destroyed handle" << std::endl;
@@ -903,13 +969,7 @@ private:
         const std::string version = FAYS_VIK_GetVersion(mptrHandle_);
         std::cout << "[SDK] Version: " << version << std::endl;
 
-        const int RECORD_FPS = 25;
         const uint64_t VIDEO_THRESHOLD_NS = 60000000;
-        bool videoSessionOpen = false;
-        uint32_t frameIndex = 0;
-        uint64_t activeVideoSessionId = 0;
-        std::string sessionOutputDir;
-        std::deque<CamTsQueuedSample> pendingCamSamples;
 
         std::cout << "[Record] Waiting for Stereo frames..." << std::endl;
 
@@ -939,54 +999,78 @@ private:
                 const int type = (mImgData_.channel == 1) ? CV_8UC1 : CV_8UC3;
                 cv::Mat img(mImgData_.height, mImgData_.width, type, mImgData_.data);
 
-                std::string outputDir;
-                uint64_t sessionId = 0;
-                const bool shouldRecord = GetRecordingState(&outputDir, &sessionId);
-
-                if (shouldRecord && sessionId != 0) {
-                    if (videoSessionOpen && sessionId != activeVideoSessionId) {
-                        mRecorder_.Stop();
-                        videoSessionOpen = false;
-                        sessionOutputDir.clear();
-                        activeVideoSessionId = 0;
-                    }
-                    if (!videoSessionOpen && img.cols > 0 && img.rows > 0) {
-                        std::cout << "[Record] Input Info: " << img.cols << "x" << img.rows
-                                  << " Channels: " << img.channels() << std::endl;
-                        if (mRecorder_.Start(outputDir + "fays_stereo_output.mkv", img.cols, img.rows, RECORD_FPS)) {
-                            sessionOutputDir = outputDir;
-                            videoSessionOpen = true;
-                            activeVideoSessionId = sessionId;
-                            frameIndex = 0;
-                        }
-                    }
-
-                    if (videoSessionOpen) {
-                        mRecorder_.Write(img);
-                        const uint64_t publishTimeNs = AlignFaysTsToSystem(mImgData_.timestamp);
-                        CamTsQueuedSample camSample{};
-                        camSample.faysTsNs = mImgData_.timestamp;
-                        camSample.publishTimeNs = publishTimeNs;
-                        camSample.frameIndex = frameIndex;
-                        camSample.sessionId = activeVideoSessionId;
-                        pendingCamSamples.push_back(camSample);
-                        camTsQueue_.TryPushBatch(pendingCamSamples);
-
-                        frameIndex++;
-                    }
-                } else if (videoSessionOpen) {
-                    mRecorder_.Stop();
-                    videoSessionOpen = false;
-                    activeVideoSessionId = 0;
-                    sessionOutputDir.clear();
-                }
+                VideoFrame vf;
+                vf.image = img.clone();
+                vf.faysTsNs = mImgData_.timestamp;
+                vf.publishTimeNs = AlignFaysTsToSystem(mImgData_.timestamp);
+                videoFrameQueue_.Push(std::move(vf));
             }
 
-            if (!pendingCamSamples.empty()) {
-                camTsQueue_.TryPushBatch(pendingCamSamples);
-            }
             if (!gotFrame) {
                 std::this_thread::sleep_for(std::chrono::microseconds(200));
+            }
+        }
+
+        videoFrameQueue_.Stop();
+    }
+
+    void VideoEncodeThread() {
+        constexpr int RECORD_FPS = 25;
+        bool videoSessionOpen = false;
+        uint32_t frameIndex = 0;
+        uint64_t activeVideoSessionId = 0;
+        std::string sessionOutputDir;
+        std::deque<CamTsQueuedSample> pendingCamSamples;
+        cv::Mat bgrBuffer;
+
+        VideoFrame vf;
+        while (videoFrameQueue_.Pop(vf)) {
+            std::string outputDir;
+            uint64_t sessionId = 0;
+            const bool shouldRecord = GetRecordingState(&outputDir, &sessionId);
+
+            if (shouldRecord && sessionId != 0) {
+                if (videoSessionOpen && sessionId != activeVideoSessionId) {
+                    mRecorder_.Stop();
+                    videoSessionOpen = false;
+                    sessionOutputDir.clear();
+                    activeVideoSessionId = 0;
+                }
+                if (!videoSessionOpen && vf.image.cols > 0 && vf.image.rows > 0) {
+                    std::cout << "[Record] Input Info: " << vf.image.cols << "x" << vf.image.rows
+                              << " Channels: " << vf.image.channels() << std::endl;
+                    if (mRecorder_.Start(outputDir + "fays_stereo_output.mkv",
+                                         vf.image.cols, vf.image.rows, RECORD_FPS)) {
+                        sessionOutputDir = outputDir;
+                        videoSessionOpen = true;
+                        activeVideoSessionId = sessionId;
+                        frameIndex = 0;
+                    }
+                }
+
+                if (videoSessionOpen) {
+                    if (vf.image.channels() == 1) {
+                        cv::cvtColor(vf.image, bgrBuffer, cv::COLOR_GRAY2BGR);
+                        mRecorder_.Write(bgrBuffer);
+                    } else {
+                        mRecorder_.Write(vf.image);
+                    }
+
+                    CamTsQueuedSample camSample{};
+                    camSample.faysTsNs = vf.faysTsNs;
+                    camSample.publishTimeNs = vf.publishTimeNs;
+                    camSample.frameIndex = frameIndex;
+                    camSample.sessionId = activeVideoSessionId;
+                    pendingCamSamples.push_back(camSample);
+                    camTsQueue_.TryPushBatch(pendingCamSamples);
+
+                    frameIndex++;
+                }
+            } else if (videoSessionOpen) {
+                mRecorder_.Stop();
+                videoSessionOpen = false;
+                activeVideoSessionId = 0;
+                sessionOutputDir.clear();
             }
         }
 
@@ -1004,10 +1088,12 @@ private:
 private:
     void* mptrHandle_;
     std::thread mptrImgThr_;
+    std::thread mptrEncThr_;
     std::thread mptrImuThr_;
     std::thread mptrMcapWriterThr_;
     std::thread mptrUsbWatchThr_;
 
+    VideoFrameQueue videoFrameQueue_;
     AtrakImage mImgData_;
     std::atomic<bool> mbIsRunning_;
     std::atomic<bool> recordingEnabled_;
