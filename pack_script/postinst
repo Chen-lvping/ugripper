@@ -23,6 +23,8 @@ SHUTDOWN_TRIGGER_SCRIPT="${APP_DIR}/auto_update/trigger_shutdown.sh"
 SHUTDOWN_TRIGGER_SERVICE="umi-shutdown-trigger.service"
 SHUTDOWN_TRIGGER_PATH="umi-shutdown-trigger.path"
 NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
+CALIB_PERSIST_DIR="/etc/ugripper/config/calibration"
+CALIB_PERSIST_FILE="${CALIB_PERSIST_DIR}/calibration.json"
 
 stop_service_fast() {
     local service_name="$1"
@@ -263,6 +265,12 @@ chmod +x "$MONITOR_SCRIPT"
 chmod +x "$APP_DIR/run_record.sh"
 chmod +x "$SHUTDOWN_TRIGGER_SCRIPT"
 chmod -R 777 "$APP_DIR"
+
+# 初始化持久化标定目录：仅首次缺失时写入默认 fake calibration
+mkdir -p "$CALIB_PERSIST_DIR"
+if [ ! -f "$CALIB_PERSIST_FILE" ] && [ -f "$APP_DIR/config/fakeCamCalib.json" ]; then
+    cp -f "$APP_DIR/config/fakeCamCalib.json" "$CALIB_PERSIST_FILE"
+fi
 
 systemctl daemon-reload
 

@@ -35,6 +35,18 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", \
 # ====================== FAYS FTDI CAMERA ==================
 # Future Technology Devices International, Ltd FTDI Superspeed Video Bridge
 # VID:PID = 0403:602e
+# Interface 00: Stereo channel -> /dev/fays_stereo
+# Interface 02: IMU channel    -> /dev/fays_imu
+SUBSYSTEM=="video4linux", KERNEL=="video*", \
+  ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", \
+  ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  SYMLINK+="fays_stereo"
+
+SUBSYSTEM=="video4linux", KERNEL=="video*", \
+  ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", \
+  ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="fays_imu"
+
 SUBSYSTEM=="video4linux", KERNEL=="video*", \
   ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", \
   MODE="0777", GROUP="video"
@@ -46,7 +58,11 @@ SUBSYSTEM=="usb", \
 # ========================
 # 2. 存储设备映射 (U盘 / 硬盘)
 # ========================
-# 固定 USB 物理端口：4-1
+# 固定 USB 物理端口：4-1 USB3.0 / 3-1.1 USB2.0
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", \
 KERNELS=="4-1", ENV{ID_FS_USAGE}=="filesystem", \
+RUN+="/bin/sh -c '/usr/bin/systemctl reset-failed mnt-data_disk.mount; /usr/bin/systemd-mount --no-block --collect -o uid=1000,gid=1000,noatime $devnode /mnt/data_disk'"
+
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", \
+KERNELS=="3-1.1", ENV{ID_FS_USAGE}=="filesystem", \
 RUN+="/bin/sh -c '/usr/bin/systemctl reset-failed mnt-data_disk.mount; /usr/bin/systemd-mount --no-block --collect -o uid=1000,gid=1000,noatime $devnode /mnt/data_disk'"

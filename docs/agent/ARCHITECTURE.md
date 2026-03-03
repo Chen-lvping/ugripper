@@ -26,17 +26,17 @@
 ### 2.2 录制进程编排
 | 模块 | 所在目录 | 启动方式 | 主要职责 | 主要输出 |
 | --- | --- | --- | --- | --- |
-| 三路相机录制 | `camera_record/triple_camera_record.py` | `uv run ... --codec <h264|h265> --output-dir <episode>` | 录制主摄 + 左右触觉视频（默认 H264，可选 H265）并写时间戳 CSV。 | `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`, 对应 `*.csv` |
-| FaysSense 常驻录制 | `faysSense_vi_kit/scripts/run_fays_record.sh` + `fays_record_example` | 检测到 FTDI 时启动 `daemon`，录制时 `start <episode>`，停止时 `stop` | Fays 作为可选设备：启动缺失不阻断主流程；运行中支持热插拔检测与 daemon 自动重连。时间戳统一写入 `fays_data.mcap`：topic `i` 为 IMU，topic `c` 为相机时间戳；`logTime` 使用 Fays 时钟，`publishTime` 由 IMU 对齐到系统时钟。 | `fays_stereo_output.mkv`, `fays_data.mcap`（启用 Fays 时） |
+| 三路相机录制 | `camera_record/triple_camera_record.py` | `uv run ... --codec <h264|h265> --output-dir <episode>` | 录制主摄 + 左右触觉视频并写时间戳 CSV；编码器由 `run_record.sh` 从 `/etc/environment` 的 `CAMERA_CODEC` 读取（默认 H264）。 | `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`, 对应 `*.csv` |
+| FaysSense 常驻录制 | `faysSense_vi_kit/scripts/run_fays_record.sh` + `fays_record_example` | 检测到 FTDI 时启动 `daemon`，录制时 `start <episode>`，停止时 `stop` | Fays 作为可选设备：启动缺失不阻断主流程；运行中支持热插拔检测与 daemon 自动重连。视频编码器由 `fays_record_example` 直接读取 `/etc/environment` 的 `CAMERA_CODEC`（`h264_rkmpp`/`hevc_rkmpp`）。时间戳统一写入 `fays_data.mcap`：topic `i` 为 IMU，topic `c` 为相机时间戳；`logTime` 使用 Fays 时钟，`publishTime` 由 IMU 对齐到系统时钟。 | `fays_stereo_output.mkv`, `fays_data.mcap`（启用 Fays 时） |
 | 统一传感器录制 | `src/sensor_recorder` | `./build/src/sensor_recorder/sensor_recorder <episode>` | 同时采集串口 IMU + 编码器，写统一 MCAP。 | `sensor_data.mcap` (`imu_raw`/`encoder`) |
 | Encoder 校准 | `src/sensor_recorder` | `./build/src/sensor_recorder/zeroing` | 执行编码器归零，供自动校准流程调用。 | 无（设备状态变更） |
 
 编排要点：
-- `run_record.sh` 启动后先检测 FTDI：存在则拉起 Fays daemon；缺失则进入无 Fays 模式。
+- `run_record.sh` 启动后先检测 FTDI：存在则拉起 Fays daemon；缺失则持续 `ERROR_2` 报错并等待恢复（服务不退出）。检测依据为 udev 固定映射的 `/dev/fays_stereo` 与 `/dev/fays_imu`。
 - `start_recording()` 在 Fays 已启用时发送 `START|<episode_dir>`，否则跳过 Fays，仅拉起 `PID_CAM` 与 `PID_SENSOR`。
 - `stop_recording()` 仅在本次 Fays 会话 active 时发送 `STOP`，停止 `PID_CAM` 与 `PID_SENSOR`，Fays 进程保持常驻。
 - `cleanup()` 才发送 `EXIT` 关闭 Fays 常驻进程。
-- 录制后校验固定覆盖 `cam/tact` 视频与 `sensor_data.mcap`；若本次 episode 期望 Fays 数据，再校验 `fays_stereo_output.mkv` 与 `fays_data.mcap`。
+- 录制后校验固定覆盖 `cam/tact` 视频与 `sensor_data.mcap`；若本次 episode 期望 Fays 数据，再校验 `fays_stereo_output.mkv` 与 `fays_data.mcap`。时长一致性阈值统一为 5 秒：`cam` vs `fays`（仅判定 Fays 不可短于 cam 超阈值）与 `tact_left/right` vs `sensor_data.mcap`（绝对误差）。
 
 ### 2.3 Right/Left 协同控制
 - 通信：TCP `12345` 端口。
@@ -52,6 +52,7 @@
 
 ### 3.1 自动校准
 - `auto_update/99-usb-auto-update.rules` 触发 `usb-auto-update@.service`，由 `auto_update/usb_auto_update.sh` 检查 U 盘根目录是否存在 `calibration.txt`。
+- 同一入口新增“标定导入”分支：若 U 盘存在 `ugripper_calib/<DEVICE_SN>/`，执行 `auto_calibration/import_camera_calibration.sh`，将主摄/Fays/IMU 参数写入 `/etc/ugripper/config/calibration/calibration.json`（支持重复导入覆盖更新）。
 - 存在 `calibration.txt` 时触发 `ugripper-calibration.service`（`run_calibration.sh`）：
   - 停止主服务。
   - 启动 LED/音频提示。
@@ -68,7 +69,8 @@
 ### 3.3 自动更新与自愈
 - `auto_update/99-usb-auto-update.rules` + `usb-auto-update@.service`：U 盘插入自动触发统一入口脚本（先判定 `calibration.txt` 是否触发校准，再进入升级逻辑）。
 - 升级窗口内 `usb_auto_update.sh` 会创建 `/run/ugripper_installing_from_usb.lock`，暂停 network monitor，并在结束后恢复。
-- `auto_update/boot_check_install.sh` + `ugripper-boot-install.service`：开机检测主包缺失时从 `/opt/backup` 自恢复。
+- `usb_auto_update.sh` 挂载后会读取升级盘根目录 `config.txt`：`LANGUAGE/VOICE_LANG` 写入 `UGRIPPER_LANG`（`zh|en`）供音频播报语言选择；`CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC` 写入 `CAMERA_CODEC`（`h264|h265`）供 triple camera 与 Fays 编码选择。
+- `auto_update/boot_check_install.sh` + `ugripper-boot-install.service`：开机先比较 `/opt/backup` 中 `ugripper-usb-updater` 版本并在更高时先升级 updater，再检查 `ugripper` 是否缺失/异常并执行自恢复。
 
 ### 3.4 关机权限隔离
 - 业务脚本只写 `/tmp/umi_shutdown_request`。
@@ -80,8 +82,8 @@
 ### 4.1 目录结构
 `/mnt/data_disk/<device_sn_lower>/`
 - `metadata/metadata.json`
-- `calibration/cam.json`, `encoder.json`, `imu.json`
 - `data/episode_YYYYMMDD_NNNN/`
+  - `calibration.json`（当前 episode 实际使用的 Lerobot 标定快照）
   - `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`
   - `cam.csv`, `tact_left.csv`, `tact_right.csv`
   - `fays_stereo_output.mkv`, `fays_data.mcap`（仅在该 episode 启用 Fays 时）
@@ -89,8 +91,13 @@
   - `audio_pre.wav`, `audio_post.wav`（可选）
   - `validation_error.log`（校验失败时）
 
+`/etc/ugripper/config/calibration/`
+- `calibration.json`（持久化主摄 + Fays 双目 + IMU 标定）
+- `imported/<DEVICE_SN>/<timestamp>/`（导入原始文件归档）
+
 ### 4.2 配置注入
-- 主相机/触觉配置：`run_record.sh` 动态替换 `cam.json` 中主相机与触觉序列号占位符。
+- 主标定持久化：`/etc/ugripper/config/calibration/calibration.json`。`postinst` 仅首次缺失时用 `config/fakeCamCalib.json` 初始化，不覆盖已有文件。
+- 主相机/触觉配置：`run_record.sh` 在每次开录前读取持久化 `calibration.json`，动态替换主相机与触觉序列号占位符，再写入当前 episode 的 `calibration.json`。
 - FaysSense 配置：`run_fays_record.sh daemon` 阶段根据设备探测结果修改 `build/faysSense_vi_kit/config/fays_vikit.yaml`，后续录制阶段仅发送命令。
 
 ### 4.3 状态文件与锁
@@ -98,6 +105,7 @@
 - `/dev/shm/umi_ptp_status`：PTP 监控 JSON。
 - `/tmp/umi_led_pipe`, `/tmp/umi_audio_pipe`：状态通知 FIFO。
 - `/tmp/umi_fays_cmd`：FaysSense 常驻进程命令 FIFO（`START|...`/`STOP`/`EXIT`）。
+- `/dev/shm/umi_fays_present`：Fays 在位缓存（`1/0`），由后台监控循环定期刷新。
 - `/run/ugripper_installing_from_usb.lock`：升级保护锁。
 
 ## 5. 构建与打包链路（`build_deb.sh`）
@@ -141,7 +149,7 @@
   - `/usr/local/opencv-4.2.0-linux-aarch64/lib`
 - 硬件映射：
   - `/dev/cam_main`, `/dev/left_tcam`, `/dev/right_tcam`
-  - FaysSense FTDI 设备对应 `/dev/video*`（运行时自动分配）
+  - FaysSense FTDI 设备固定映射为 `/dev/fays_stereo` 与 `/dev/fays_imu`（底层仍映射到动态 `/dev/video*`）
   - `/dev/ttyS2`（IMU）, `/dev/ttyS7`（Encoder）
   - 音频卡 `rockchipes8388`
   - 按键 `PIN_36` / `PIN_38`
