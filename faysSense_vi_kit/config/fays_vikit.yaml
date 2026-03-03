@@ -11,7 +11,7 @@ rgb_white_balance_b: 2.1  #1.66
 rgb_rotate: 0
 
 # Stereo device number
-stereo_dev_port: /dev/video20
+stereo_dev_port: /dev/fays_stereo
 # The width of the stereo camera image[640/1280]
 stereo_single_cam_width: 640
 # The width of the stereo camera image[400/800]
@@ -38,6 +38,6 @@ left_cam_rotate_180: 0
 right_cam_rotate_180: 1
 
 # Imu device number
-imu_dev_port: /dev/video26
+imu_dev_port: /dev/fays_imu
 # The gravity acceleration value of the device location
 gravity: 9.7946   

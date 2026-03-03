@@ -18,12 +18,14 @@
 #include <iomanip>
 #include <cstddef>
 #include <iterator>
+#include <sstream>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
 #include <mcap/writer.hpp>
+#include <limits.h>
 #include "fays_atrak/fays_atrak_types.h"
 #include "fays_atrak/fays_atrak_vimod.h"
 
@@ -669,6 +671,15 @@ public:
     }
 
 private:
+    struct UsbWatchdogStatus {
+        size_t consecutiveFailures = 0;
+        std::chrono::steady_clock::time_point firstFailureTs;
+        std::string lastFailureSignature;
+    };
+
+    static constexpr int kUsbWatchdogPollIntervalMs = 100;
+    static constexpr int kUsbDisconnectDebounceMs = 500;
+
     static std::string TrimCopy(const std::string& input) {
         const std::string whitespace = " \t\r\n";
         const size_t start = input.find_first_not_of(whitespace);
@@ -709,8 +720,58 @@ private:
         return "";
     }
 
+    static std::string ErrnoToString(int err) {
+        if (err == 0) {
+            return "0";
+        }
+        std::ostringstream oss;
+        oss << err << "(" << std::strerror(err) << ")";
+        return oss.str();
+    }
+
+    static std::string ReadSymlinkTarget(const std::string& path, int* outErrno = nullptr) {
+        char linkTarget[PATH_MAX];
+        errno = 0;
+        const ssize_t len = readlink(path.c_str(), linkTarget, sizeof(linkTarget) - 1);
+        if (len < 0) {
+            if (outErrno != nullptr) {
+                *outErrno = errno;
+            }
+            return "";
+        }
+
+        linkTarget[len] = '\0';
+        if (outErrno != nullptr) {
+            *outErrno = 0;
+        }
+        return std::string(linkTarget);
+    }
+
+    static bool ResolveDevicePath(const std::string& path, std::string* outResolved, int* outErrno = nullptr) {
+        char resolvedPath[PATH_MAX];
+        errno = 0;
+        if (realpath(path.c_str(), resolvedPath) == nullptr) {
+            if (outResolved != nullptr) {
+                outResolved->clear();
+            }
+            if (outErrno != nullptr) {
+                *outErrno = errno;
+            }
+            return false;
+        }
+        if (outResolved != nullptr) {
+            *outResolved = std::string(resolvedPath);
+        }
+        if (outErrno != nullptr) {
+            *outErrno = 0;
+        }
+        return true;
+    }
+
     void LoadMonitoredDevicePaths(const std::string& configPath) {
         monitoredDevicePaths_.clear();
+        monitoredResolvedPaths_.clear();
+        monitoredWatchdogStatus_.clear();
 
         const std::string stereoPort = ReadConfigValue(configPath, "stereo_dev_port");
         const std::string imuPort = ReadConfigValue(configPath, "imu_dev_port");
@@ -728,25 +789,130 @@ private:
         }
 
         for (const auto& devPath : monitoredDevicePaths_) {
-            std::cout << "[USB] Watching device node: " << devPath << std::endl;
+            int resolveErrno = 0;
+            int linkErrno = 0;
+            std::string resolved;
+            const bool resolvedOk = ResolveDevicePath(devPath, &resolved, &resolveErrno);
+            const std::string symlinkTarget = ReadSymlinkTarget(devPath, &linkErrno);
+            monitoredResolvedPaths_.push_back(resolvedOk ? resolved : "");
+            monitoredWatchdogStatus_.emplace_back();
+
+            if (!resolvedOk) {
+                std::cerr << "[USB] Watching device node: " << devPath
+                          << " (target unresolved at startup, realpath_errno=" << ErrnoToString(resolveErrno)
+                          << ", readlink_target="
+                          << (symlinkTarget.empty() ? "<unavailable>" : symlinkTarget)
+                          << ", readlink_errno=" << ErrnoToString(linkErrno) << ")"
+                          << std::endl;
+                continue;
+            }
+
+            std::cout << "[USB] Watching device node: " << devPath
+                      << " -> " << resolved << std::endl;
         }
     }
 
     void UsbConnectionWatchdog() {
         while (mbIsRunning_) {
-            for (const auto& devPath : monitoredDevicePaths_) {
+            for (size_t idx = 0; idx < monitoredDevicePaths_.size(); ++idx) {
+                const std::string& devPath = monitoredDevicePaths_[idx];
                 if (devPath.empty()) {
                     continue;
                 }
+
+                if (idx >= monitoredResolvedPaths_.size()) {
+                    monitoredResolvedPaths_.resize(idx + 1);
+                }
+                if (idx >= monitoredWatchdogStatus_.size()) {
+                    monitoredWatchdogStatus_.resize(idx + 1);
+                }
+                std::string& baseline = monitoredResolvedPaths_[idx];
+                UsbWatchdogStatus& status = monitoredWatchdogStatus_[idx];
+
+                int accessErrno = 0;
+                int resolveErrno = 0;
+                int linkErrno = 0;
+                std::string resolved;
+                std::string failureType;
+                std::string failureSignature;
+
+                const std::string symlinkTarget = ReadSymlinkTarget(devPath, &linkErrno);
+
+                errno = 0;
                 if (access(devPath.c_str(), F_OK) != 0) {
-                    std::cerr << "[USB] Fays USB disconnected, missing node: " << devPath
+                    accessErrno = errno;
+                    failureType = "missing_node";
+                } else if (!ResolveDevicePath(devPath, &resolved, &resolveErrno)) {
+                    failureType = "unresolved_target";
+                } else if (!baseline.empty() && resolved != baseline) {
+                    failureType = "target_remapped";
+                }
+
+                if (failureType.empty()) {
+                    if (baseline.empty()) {
+                        baseline = resolved;
+                    }
+
+                    if (status.consecutiveFailures > 0) {
+                        const auto unstableMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - status.firstFailureTs).count();
+                        std::cout << "[USB] Watchdog recovered: path=" << devPath
+                                  << ", resolved=" << resolved
+                                  << ", unstable_ms=" << unstableMs
+                                  << ", previous_consecutive_failures=" << status.consecutiveFailures
+                                  << std::endl;
+                    }
+
+                    status.consecutiveFailures = 0;
+                    status.lastFailureSignature.clear();
+                    continue;
+                }
+
+                failureSignature = failureType + "|" + baseline + "|" + resolved + "|" +
+                                   ErrnoToString(accessErrno) + "|" + ErrnoToString(resolveErrno) +
+                                   "|" + ErrnoToString(linkErrno) + "|" + symlinkTarget;
+
+                const auto now = std::chrono::steady_clock::now();
+                if (status.consecutiveFailures == 0) {
+                    status.firstFailureTs = now;
+                }
+                status.consecutiveFailures++;
+
+                const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now - status.firstFailureTs).count();
+                const bool signatureChanged = (failureSignature != status.lastFailureSignature);
+                if (signatureChanged || status.consecutiveFailures == 1) {
+                    uint64_t sessionId = 0;
+                    const bool isRecording = GetRecordingState(nullptr, &sessionId);
+                    std::cerr << "[USB] Watchdog anomaly: type=" << failureType
+                              << ", path=" << devPath
+                              << ", baseline_target=" << (baseline.empty() ? "<unset>" : baseline)
+                              << ", current_target=" << (resolved.empty() ? "<unresolved>" : resolved)
+                              << ", symlink_target=" << (symlinkTarget.empty() ? "<unavailable>" : symlinkTarget)
+                              << ", access_errno=" << ErrnoToString(accessErrno)
+                              << ", realpath_errno=" << ErrnoToString(resolveErrno)
+                              << ", readlink_errno=" << ErrnoToString(linkErrno)
+                              << ", recording=" << (isRecording ? "1" : "0")
+                              << ", session_id=" << sessionId
+                              << ", consecutive_failures=" << status.consecutiveFailures
+                              << ", elapsed_ms=" << elapsedMs
+                              << ", debounce_ms=" << kUsbDisconnectDebounceMs
+                              << std::endl;
+                    status.lastFailureSignature = failureSignature;
+                }
+
+                if (elapsedMs >= kUsbDisconnectDebounceMs) {
+                    std::cerr << "[USB] Fays USB disconnect confirmed after debounce: path=" << devPath
+                              << ", failure_type=" << failureType
+                              << ", elapsed_ms=" << elapsedMs
+                              << ", consecutive_failures=" << status.consecutiveFailures
                               << ". Exiting fays_record_example." << std::endl;
                     Stop();
                     std::fflush(nullptr);
                     std::exit(2);
                 }
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(std::chrono::milliseconds(kUsbWatchdogPollIntervalMs));
         }
     }
 
@@ -1092,6 +1258,8 @@ private:
     std::atomic<int64_t> imuToSysOffsetNs_;
     std::atomic<bool> hasImuTimeOffset_;
     std::vector<std::string> monitoredDevicePaths_;
+    std::vector<std::string> monitoredResolvedPaths_;
+    std::vector<UsbWatchdogStatus> monitoredWatchdogStatus_;
 };
 
 void signalHandler(int signal) {

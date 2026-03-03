@@ -1038,8 +1038,10 @@ refresh_fays_presence_cache() {
 }
 
 is_fays_ftdi_present() {
+    local cache_value=""
     if [ -f "$FAYS_PRESENT_CACHE_FILE" ]; then
-        [ "$(cat "$FAYS_PRESENT_CACHE_FILE" 2>/dev/null)" = "1" ]
+        cache_value="$(cat "$FAYS_PRESENT_CACHE_FILE" 2>/dev/null || true)"
+        [ "$cache_value" != "0" ]
         return
     fi
     detect_fays_ftdi_present_raw

@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.1.9 - 2026-03-02
+- Fays 端口策略改为固定 symlink：`run_fays_record.sh` 不再扫描 `/dev/video*` 并动态改写 yaml，启动前仅校验 `/dev/fays_stereo` 与 `/dev/fays_imu`。
+- `fays_vikit.yaml` 固定为 `stereo_dev_port=/dev/fays_stereo`、`imu_dev_port=/dev/fays_imu`，避免热插拔后 `videoN` 漂移导致录制空文件。
+- `fays_record_example` 的 USB watchdog 新增“symlink 目标漂移”检测：运行中若映射目标变化，按断连处理并退出，由上层维护流程重建。
+- 强化 `fays_record_example` 的 USB watchdog 日志：异常时输出 `access/readlink/realpath` 错误码、symlink 目标、baseline 目标、录制态与 session 信息，便于定位断连原因。
+- USB watchdog 新增 500ms 去抖确认：避免单次 symlink/udev 短抖动即误判退出；仅在连续异常超过窗口后才按断连退出并交由上层重建。
+- 调整 `run_record.sh` 的 Fays 在位缓存读取策略：`is_fays_ftdi_present()` 仅将缓存值 `0` 视为不在位；读取失败、空值或异常值按在位（fail-open）处理。
+
 ## v1.1.8 - 2026-03-01
 - 新增 U 盘标定导入与持久化：支持按 `DEVICE_SN` 导入 `camchain/imucam`，写入 `/etc/ugripper/config/calibration/calibration.json`，并在每次开录前刷新到 episode `calibration.json`。
 - 强化开机自恢复：`boot_check_install.sh` 优先升级 `/opt/backup` 中更新版本的 `ugripper-usb-updater`，再执行主包恢复检查。

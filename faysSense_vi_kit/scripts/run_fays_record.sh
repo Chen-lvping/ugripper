@@ -9,6 +9,8 @@ EXECUTABLE="$BUILD_DIR/fays_record_example"
 CMD_FIFO="/tmp/umi_fays_cmd"
 ARCH="$(uname -m)"
 LOCAL_FAYS_LIB_DIR="$BUILD_DIR/lib/fays_atrak/${ARCH}/Release"
+FAYS_STEREO_SYMLINK="/dev/fays_stereo"
+FAYS_IMU_SYMLINK="/dev/fays_imu"
 CMD_SEND_TIMEOUT_SEC="${FAYS_CMD_TIMEOUT_SEC:-0.35}"
 
 append_ld_library_path() {
@@ -23,60 +25,54 @@ append_ld_library_path() {
     fi
 }
 
-configure_fays_ports() {
-    local devices
-    local FTDI_devices
-    local video_ports
-    local port_cnt
+ensure_fixed_fays_symlinks() {
+    local missing=0
 
-    devices=$(v4l2-ctl --list-devices)
-    FTDI_devices=$(echo "$devices" | awk '/FTDI Superspeed Video Bridge/{flag=1; next} /^[^[:space:]]/{flag=0} flag' | grep '/dev/video')
-    video_ports=($(echo "$FTDI_devices" | grep -oP '/dev/video\K[0-9]+'))
-    port_cnt=${#video_ports[@]}
-
-    if [ "$port_cnt" = 4 ]; then
-        local stereo_port imu_port all_videos max_num rgb_num
-        stereo_port="/dev/video${video_ports[0]}"
-        imu_port="/dev/video${video_ports[2]}"
-
-        all_videos=($(ls /dev/video* 2>/dev/null | grep -oP '/dev/video\K[0-9]+'))
-        if [ ${#all_videos[@]} -gt 0 ]; then
-            max_num=$(printf "%s\n" "${all_videos[@]}" | sort -n | tail -n 1)
-        else
-            max_num=-1
-        fi
-        rgb_num=$((max_num + 1))
-        while [ -e "/dev/video${rgb_num}" ]; do
-            rgb_num=$((rgb_num + 1))
-        done
-
-        echo "Detected 4-port device."
-        echo "Updating config file with:"
-        echo "  stereo_dev_port: $stereo_port"
-        echo "  imu_dev_port: $imu_port"
-        echo "  rgb_dev_port: NULL"
-
-        sed -i -E "s|^rgb_dev_port:.*|rgb_dev_port: NULL|" "$CONFIG_FILE"
-        sed -i -E "s|^stereo_dev_port:.*|stereo_dev_port: ${stereo_port}|" "$CONFIG_FILE"
-        sed -i -E "s|^imu_dev_port:.*|imu_dev_port: ${imu_port}|" "$CONFIG_FILE"
-    elif [ "$port_cnt" = 6 ]; then
-        local rgb_port stereo_port imu_port
-        rgb_port="/dev/video${video_ports[0]}"
-        stereo_port="/dev/video${video_ports[2]}"
-        imu_port="/dev/video${video_ports[4]}"
-
-        echo "Detected 6-port device."
-        echo "Updating config file with:"
-        echo "  rgb_port: $rgb_port"
-        echo "  stereo_dev_port: $stereo_port"
-        echo "  imu_dev_port: $imu_port"
-
-        sed -i -E "s|^rgb_dev_port:.*|rgb_dev_port: ${rgb_port}|" "$CONFIG_FILE"
-        sed -i -E "s|^stereo_dev_port:.*|stereo_dev_port: ${stereo_port}|" "$CONFIG_FILE"
-        sed -i -E "s|^imu_dev_port:.*|imu_dev_port: ${imu_port}|" "$CONFIG_FILE"
-    else
-        echo "Warning: Unexpected number of video ports found for FTDI device. Found $port_cnt ports."
+    if [ ! -e "$FAYS_STEREO_SYMLINK" ]; then
+        echo "Error: Missing Fays stereo symlink: $FAYS_STEREO_SYMLINK"
+        missing=1
     fi
+
+    if [ ! -e "$FAYS_IMU_SYMLINK" ]; then
+        echo "Error: Missing Fays IMU symlink: $FAYS_IMU_SYMLINK"
+        missing=1
+    fi
+
+    if [ "$missing" -ne 0 ]; then
+        echo "Hint: check udev rule camera_record/99-fixed-usb-map.rules and USB connection."
+        return 1
+    fi
+
+    echo "Using fixed Fays symlink ports:"
+    echo "  stereo_dev_port: $FAYS_STEREO_SYMLINK -> $(readlink -f "$FAYS_STEREO_SYMLINK")"
+    echo "  imu_dev_port: $FAYS_IMU_SYMLINK -> $(readlink -f "$FAYS_IMU_SYMLINK")"
+
+    return 0
+}
+
+verify_config_uses_fixed_symlinks() {
+    local stereo_cfg
+    local imu_cfg
+
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "Error: Config file not found: $CONFIG_FILE"
+        return 1
+    fi
+
+    stereo_cfg=$(sed -n 's/^stereo_dev_port:[[:space:]]*//p' "$CONFIG_FILE" | head -n1 | tr -d '"' | xargs)
+    imu_cfg=$(sed -n 's/^imu_dev_port:[[:space:]]*//p' "$CONFIG_FILE" | head -n1 | tr -d '"' | xargs)
+
+    if [ "$stereo_cfg" != "$FAYS_STEREO_SYMLINK" ]; then
+        echo "Error: Config mismatch: stereo_dev_port=$stereo_cfg (expected $FAYS_STEREO_SYMLINK)"
+        return 1
+    fi
+
+    if [ "$imu_cfg" != "$FAYS_IMU_SYMLINK" ]; then
+        echo "Error: Config mismatch: imu_dev_port=$imu_cfg (expected $FAYS_IMU_SYMLINK)"
+        return 1
+    fi
+
+    return 0
 }
 
 ensure_fifo() {
@@ -120,7 +116,8 @@ MODE="${1:-}"
 
 case "$MODE" in
     daemon)
-        configure_fays_ports
+        ensure_fixed_fays_symlinks || exit 1
+        verify_config_uses_fixed_symlinks || exit 1
         ensure_fifo || exit 1
         echo "Starting Fays daemon mode..."
         echo "  Config file: $CONFIG_FILE"
@@ -154,7 +151,8 @@ case "$MODE" in
             exit 1
         fi
 
-        configure_fays_ports
+        ensure_fixed_fays_symlinks || exit 1
+        verify_config_uses_fixed_symlinks || exit 1
         echo "Starting Fays one-shot recording mode..."
         echo "  Config file: $CONFIG_FILE"
         echo "  Output directory: $OUTPUT_DIR"
