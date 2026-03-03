@@ -589,6 +589,8 @@ public:
         PrintCalibrationInfo(mptrHandle_);
 
         LoadMonitoredDevicePaths(configPath);
+        const std::string fpsStr = ReadConfigValue(configPath, "stereo_fps");
+        recordFps_ = fpsStr.empty() ? 25 : std::stoi(fpsStr);
         std::cout << "[FaysRecorder] Created handle with config: " << configPath << std::endl;
         std::cout << "[FaysRecorder] Standby mode ready. Waiting for START command." << std::endl;
 
@@ -1015,7 +1017,6 @@ private:
     }
 
     void VideoEncodeThread() {
-        constexpr int RECORD_FPS = 25;
         bool videoSessionOpen = false;
         uint32_t frameIndex = 0;
         uint64_t activeVideoSessionId = 0;
@@ -1040,7 +1041,7 @@ private:
                     std::cout << "[Record] Input Info: " << vf.image.cols << "x" << vf.image.rows
                               << " Channels: " << vf.image.channels() << std::endl;
                     if (mRecorder_.Start(outputDir + "fays_stereo_output.mkv",
-                                         vf.image.cols, vf.image.rows, RECORD_FPS)) {
+                                         vf.image.cols, vf.image.rows, recordFps_)) {
                         sessionOutputDir = outputDir;
                         videoSessionOpen = true;
                         activeVideoSessionId = sessionId;
@@ -1102,6 +1103,7 @@ private:
     mutable std::mutex recordingMtx_;
     std::string recordingOutputDir_;
 
+    int recordFps_;
     FFmpegRecorder mRecorder_;
     FaysDataLogger mDataLogger_;
     ImuQueue imuQueue_;
