@@ -17,10 +17,6 @@
 #endif
 
 
-#ifdef __cplusplus
-extern "C" {
-#endif 
-
 
 /****************************************************************************
  *  standard Fays ViKit SDK
@@ -54,6 +50,24 @@ FAYS_VIK_API      int     FAYS_VIK_CreateHandleWithConfig           (void** hand
 FAYS_VIK_API      int     FAYS_VIK_DestroyHandle                    (void* handle);
 
 /**
+ * @brief Get device information.
+ * 
+ * @param[in] handle
+ * @param[out] pInfo Device information.
+ * @return Whether getting device information is successful or not.
+ */
+FAYS_VIK_API      int     FAYS_VIK_GetDeviceInfo                  (void* handle, AtrakDeviceInfo* pInfo);
+
+/**
+ * @brief Get calibration parameters.
+ * 
+ * @param[in] handle
+ * @param[out] pCalib Calibration parameters.
+ * @return Whether getting calibration parameters is successful or not.
+ */
+FAYS_VIK_API      int     FAYS_VIK_GetCalibrationParam            (void* handle, AtrakCalibrationParam* pCalib);
+
+/**
  * @brief Get grayscale camera image (The image is stitched together).
  * 
  * @param[in] handle
@@ -85,12 +99,11 @@ FAYS_VIK_API      int     FAYS_VIK_SetStereoGain                    (void* handl
 FAYS_VIK_API      int     FAYS_VIK_SetStereoExposure                (void* handle, double exposureValue);
 
 /**
- * @brief Set the camera frame rate to 30FPS.
+ * @attention  Feature not open yet.
+ * @brief Set the camera frame rate.
  * 
  * @param[in] handle
  * @note Only supports setting FPS through root.
- * @note Currently only supports setting to 30FPS.
- * @note After the stereo camera is powered off and restarted, it will be restored to 60 FPS by default.
  * @return Set whether FPS is successful or not.
  */
 FAYS_VIK_API      int     FAYS_VIK_SetStereoFPS                     (void* handle, int fps);
@@ -201,6 +214,12 @@ FAYS_VIK_API const char* FAYS_VIK_GetVersion                        (void* handl
  */
 FAYS_VIK_API  int FAYS_VIK_RegisterImuCallback            (void* handle, FAYS_VIK_ImuCallback imuCallback);
 
-#ifdef __cplusplus
-}
-#endif 
+
+/**
+ * @brief Dump calibration parameters to a yaml file.
+ * 
+ * @param[in] handle The handle to the ViKit instance.
+ * @param[in] outdir The output directory path.
+ * @return Dump success or failure.
+ */
+FAYS_VIK_API  int FAYS_VIK_DumpCalib           (void* handle, const std::string& outdir = "./");

@@ -71,6 +71,10 @@ file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/scripts
      DESTINATION ${CMAKE_CURRENT_BINARY_DIR}
      FILES_MATCHING PATTERN "*.sh")
 
+# Copy shared libraries to build directory
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/lib
+     DESTINATION ${CMAKE_CURRENT_BINARY_DIR})
+
 # Make scripts executable
 file(GLOB SCRIPT_FILES "${CMAKE_CURRENT_BINARY_DIR}/scripts/*.sh")
 foreach(SCRIPT ${SCRIPT_FILES})

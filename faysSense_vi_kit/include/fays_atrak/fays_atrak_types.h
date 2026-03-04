@@ -7,6 +7,7 @@
 
 #include <stdint.h>
 
+#define FAYS_ATRAK_MAX_CAMERAS 3
 #define FAYS_ATRAK_MAX_TRACK_INSTANCES 1
 #define FAYS_ATRAK_MAX_APRIL_INSTANCES 10
 #define FAYS_ATRAK_MONO_MAX_BYTES (1280 * 800 * 2)
@@ -59,14 +60,14 @@ enum ATRAK_IMG_ENCODING : short
 
 enum ATRAK_DISTORTION_MODEL : uint8_t
 {
-    ADM_UNKOWN = 0,
+    ADM_UNKNOWN = 0,
     ADM_KB8,
     ADM_RADTAN
 };
 
 enum ATRAK_CAM_MODEL : uint8_t
 {
-    ACM_UNKOWN = 0,
+    ACM_UNKNOWN = 0,
     ACM_PINHOLE,
 };
 
@@ -253,7 +254,7 @@ typedef struct AtrakCamExtrinsics {
  * 
  */
 typedef struct AtrakCamIntrinsics {
-    uint8_t cam_model;
+    ATRAK_CAM_MODEL cam_model;
     uint32_t width;
     uint32_t height;
     float fx;
@@ -268,7 +269,7 @@ typedef struct AtrakCamIntrinsics {
  * @note support Radial-Tangential and Equidistant models
  */
 typedef struct AtrakCamDistortions {
-    uint8_t distortion_model;
+    ATRAK_DISTORTION_MODEL distortion_model;
     float dis[8];
 } AtrakCamDistortions;
 
@@ -291,5 +292,37 @@ typedef struct AtrakCamParam {
 typedef struct AtrakCamChainParam {
     uint32_t num_of_cams;
     uint32_t downsize_ratio;
-    AtrakCamParam cameras[3];
+    AtrakCamParam cameras[FAYS_ATRAK_MAX_CAMERAS];
 } AtrakCamChainParam;
+
+/**
+ * @brief IMU calib parameters
+ */
+typedef struct AtrakImuParam{
+    double accelerometer_noise_density;  
+    double accelerometer_random_walk;    
+    double gyroscope_noise_density;      
+    double gyroscope_random_walk;       
+    float update_rate;             
+} AtrakImuParam;
+
+/**
+ * @brief Cams and IMU calib parameters (from rom)
+ */
+typedef struct AtrakCalibrationParam{
+    AtrakCamChainParam cameras;
+    AtrakImuParam imu;
+} AtrakCalibrationParam;
+
+/**
+ * @brief Device Info (from rom)
+ */
+typedef struct AtrakDeviceInfo
+{
+    char firmware_version[16];
+    char device_model[16];            
+    char serial_number[32];         
+    uint32_t camera_nums;
+    uint32_t imu_nums;           
+    uint32_t reserved[32];
+} AtrakDeviceInfo;
