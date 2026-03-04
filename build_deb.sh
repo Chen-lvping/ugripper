@@ -178,6 +178,12 @@ done
 echo "=== [5/5] 生成 DEB 包 ==="
 dpkg-deb --build "$BUILD_ROOT" "${APP_NAME}_${VERSION}_${ARCH}.deb"
 
+# Refresh source baseline manifest for auto-release-deb diff detection.
+MANIFEST_WRITER=".codex/skills/auto-release-deb/scripts/write_source_manifest.sh"
+if [ -x "$MANIFEST_WRITER" ]; then
+    bash "$MANIFEST_WRITER" --target ugripper --output "$BUILD_ROOT/.auto_release_ugripper.manifest" || true
+fi
+
 echo "Build Success: ${APP_NAME}_${VERSION}_${ARCH}.deb"
 if [ "$QUICK_MODE" = true ]; then
     echo "Note: Quick Mode used. .env excluded. .venv reused if present."

@@ -4,29 +4,47 @@ set -euo pipefail
 usage() {
   cat <<'USAGE'
 Usage:
-  bash .codex/skills/auto-release-deb/scripts/auto_release_deb.sh [--no-files]
+  bash .codex/skills/auto-release-deb/scripts/auto_release_deb.sh [--no-files] [--ugripper-manifest PATH] [--updater-manifest PATH]
 
 Options:
-  --no-files  Do not print the changed file list.
-  -h, --help  Show this help message.
+  --no-files                 Do not print the changed file list.
+  --ugripper-manifest PATH   Baseline manifest path for ugripper (default: temp_build_deb/.auto_release_ugripper.manifest).
+  --updater-manifest PATH    Baseline manifest path for updater (default: temp_build_usb_updater/.auto_release_updater.manifest).
+  -h, --help                 Show this help message.
 USAGE
 }
 
-collect_changed_files() {
-  if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    return 0
-  fi
+manifest_changed_paths() {
+  local old_manifest="$1"
+  local new_manifest="$2"
 
-  {
-    git diff --name-only --relative HEAD 2>/dev/null || true
-    git ls-files --others --exclude-standard 2>/dev/null || true
-  } | sed '/^$/d' | sort -u
+  awk -F '\t' '
+    NR==FNR {
+      old[$2]=$1
+      next
+    }
+    {
+      new[$2]=$1
+    }
+    END {
+      for (p in old) {
+        if (!(p in new) || old[p] != new[p]) {
+          print p
+        }
+      }
+      for (p in new) {
+        if (!(p in old)) {
+          print p
+        }
+      }
+    }
+  ' "$old_manifest" "$new_manifest" | sed '/^$/d' | sort -u
 }
 
-is_meta_only_file() {
+is_full_build_trigger_file() {
   local file="$1"
   case "$file" in
-    docs/*|.codex/*|*.md|*.txt|LICENSE|.gitignore)
+    *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.cmake|CMakeLists.txt|*/CMakeLists.txt)
       return 0
       ;;
     *)
@@ -36,12 +54,30 @@ is_meta_only_file() {
 }
 
 PRINT_FILES=true
+UGRIPPER_BASELINE_MANIFEST="temp_build_deb/.auto_release_ugripper.manifest"
+UPDATER_BASELINE_MANIFEST="temp_build_usb_updater/.auto_release_updater.manifest"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-files)
       PRINT_FILES=false
       shift
+      ;;
+    --ugripper-manifest)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --ugripper-manifest" >&2
+        exit 1
+      fi
+      UGRIPPER_BASELINE_MANIFEST="$2"
+      shift 2
+      ;;
+    --updater-manifest)
+      if [[ $# -lt 2 ]]; then
+        echo "Missing value for --updater-manifest" >&2
+        exit 1
+      fi
+      UPDATER_BASELINE_MANIFEST="$2"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -62,31 +98,68 @@ else
   cd "$(cd "$script_dir/../../../.." && pwd)"
 fi
 
-mapfile -t changed_files < <(collect_changed_files)
+manifest_writer=".codex/skills/auto-release-deb/scripts/write_source_manifest.sh"
+if [[ ! -x "$manifest_writer" ]]; then
+  echo "ERROR: manifest writer not found or not executable: $manifest_writer" >&2
+  exit 1
+fi
+
+current_ugripper_manifest="$(mktemp)"
+current_updater_manifest="$(mktemp)"
+trap 'rm -f "$current_ugripper_manifest" "$current_updater_manifest"' EXIT
+
+bash "$manifest_writer" --target ugripper --output "$current_ugripper_manifest"
+bash "$manifest_writer" --target updater --output "$current_updater_manifest"
 
 affects_ugripper=false
 affects_updater=false
-
 needs_full_ugripper=false
 ugripper_reason=""
+updater_reason=""
 full_build_trigger=""
 
-for file in "${changed_files[@]}"; do
-  if [[ "$file" == auto_update/* || "$file" == "usb_updater_build.sh" ]]; then
-    affects_updater=true
-  fi
+ugripper_baseline_status="ready"
+updater_baseline_status="ready"
 
-  if ! is_meta_only_file "$file"; then
+ugripper_changed_files=()
+updater_changed_files=()
+changed_files=()
+
+if [[ ! -f "$UGRIPPER_BASELINE_MANIFEST" ]]; then
+  ugripper_baseline_status="missing"
+  affects_ugripper=true
+  needs_full_ugripper=true
+  full_build_trigger="manifest-missing"
+else
+  if ! cmp -s "$UGRIPPER_BASELINE_MANIFEST" "$current_ugripper_manifest"; then
     affects_ugripper=true
+    mapfile -t ugripper_changed_files < <(manifest_changed_paths "$UGRIPPER_BASELINE_MANIFEST" "$current_ugripper_manifest")
+    for file in "${ugripper_changed_files[@]}"; do
+      if is_full_build_trigger_file "$file"; then
+        needs_full_ugripper=true
+        full_build_trigger="$file"
+        break
+      fi
+    done
   fi
+fi
 
-  case "$file" in
-    *.c|*.cc|*.cpp|*.cxx|*.h|*.hh|*.hpp|*.cmake|CMakeLists.txt|*/CMakeLists.txt)
-      needs_full_ugripper=true
-      full_build_trigger="$file"
-      ;;
-  esac
-done
+if [[ ! -f "$UPDATER_BASELINE_MANIFEST" ]]; then
+  updater_baseline_status="missing"
+  affects_updater=true
+else
+  if ! cmp -s "$UPDATER_BASELINE_MANIFEST" "$current_updater_manifest"; then
+    affects_updater=true
+    mapfile -t updater_changed_files < <(manifest_changed_paths "$UPDATER_BASELINE_MANIFEST" "$current_updater_manifest")
+  fi
+fi
+
+all_changed_files=()
+all_changed_files+=("${ugripper_changed_files[@]}")
+all_changed_files+=("${updater_changed_files[@]}")
+if [[ ${#all_changed_files[@]} -gt 0 ]]; then
+  mapfile -t changed_files < <(printf '%s\n' "${all_changed_files[@]}" | sed '/^$/d' | sort -u)
+fi
 
 missing_binaries=()
 for bin_path in \
@@ -100,7 +173,10 @@ done
 
 ugripper_mode="skip"
 if [[ "$affects_ugripper" == true ]]; then
-  if [[ "$needs_full_ugripper" == true ]]; then
+  if [[ "$ugripper_baseline_status" == "missing" ]]; then
+    ugripper_mode="full"
+    ugripper_reason="baseline manifest missing: ${UGRIPPER_BASELINE_MANIFEST}; force full build"
+  elif [[ "$needs_full_ugripper" == true ]]; then
     ugripper_mode="full"
     ugripper_reason="detected C/C++/CMake change at ${full_build_trigger}"
   elif [[ ${#missing_binaries[@]} -gt 0 ]]; then
@@ -108,18 +184,22 @@ if [[ "$affects_ugripper" == true ]]; then
     ugripper_reason="quick-mode binaries missing: ${missing_binaries[*]}"
   else
     ugripper_mode="quick"
-    ugripper_reason="no C/C++/CMake changes and quick-mode binaries are ready"
+    ugripper_reason="source delta detected against temp_build_deb manifest; no C/C++/CMake changes"
   fi
 else
-  ugripper_reason="no runtime/package-impacting changes for ugripper"
+  ugripper_reason="no source delta against temp_build_deb manifest"
 fi
 
 updater_mode="skip"
 if [[ "$affects_updater" == true ]]; then
   updater_mode="full"
-  updater_reason="detected updater-related changes (auto_update/* or usb_updater_build.sh)"
+  if [[ "$updater_baseline_status" == "missing" ]]; then
+    updater_reason="baseline manifest missing: ${UPDATER_BASELINE_MANIFEST}; force updater build"
+  else
+    updater_reason="source delta detected against temp_build_usb_updater manifest"
+  fi
 else
-  updater_reason="no updater-related changes"
+  updater_reason="no source delta against temp_build_usb_updater manifest"
 fi
 
 if [[ "$affects_ugripper" == true && "$affects_updater" == true ]]; then
@@ -134,6 +214,9 @@ fi
 
 echo "Release scope analysis completed"
 echo "Version bump: not performed by auto-release-deb"
+echo "Diff base: temp_build manifests"
+echo "Ugripper baseline manifest: ${UGRIPPER_BASELINE_MANIFEST} (${ugripper_baseline_status})"
+echo "Updater baseline manifest: ${UPDATER_BASELINE_MANIFEST} (${updater_baseline_status})"
 echo "Scope: ${scope}"
 
 echo "Ugripper build mode: ${ugripper_mode}"

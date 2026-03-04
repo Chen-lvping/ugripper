@@ -11,22 +11,28 @@ description: 在代码修改完成后，自动确认改动影响范围，并判�
 
 ## 默认规则
 1. 本 skill 不修改任何版本号（`build_deb.sh` / `usb_updater_build.sh` 都不改）。
-2. 自动识别改动范围：
+2. 改动识别不依赖 git 提交历史，基于自动生成的源码 manifest 对比：
+   - `ugripper` 基线：`temp_build_deb/.auto_release_ugripper.manifest`
+   - `updater` 基线：`temp_build_usb_updater/.auto_release_updater.manifest`
+   - 基线由自动判定脚本 `write_source_manifest.sh` 生成与更新。
+   - 若某基线缺失，对应包按安全策略强制建议构建。
+3. 自动识别改动范围：
    - 是否影响 `ugripper` 主包。
    - 是否影响 `ugripper-usb-updater` 包。
-3. 自动判断 `ugripper` 构建模式：
+4. 自动判断 `ugripper` 构建模式：
    - 命中 C/C++/CMake 改动时，判定为全量构建（`./build_deb.sh`）。
    - 未命中上述改动且 quick 所需二进制齐全时，判定可快速构建（`./build_deb.sh -q`）。
    - quick 所需二进制缺失时，回退全量构建。
-4. `updater` 无 quick 模式：
+5. `updater` 无 quick 模式：
    - 只要命中 updater 相关改动，判定需要执行 `./usb_updater_build.sh`（全量）。
-5. `docs/CHANGELOG.md` 不由本 skill 维护；功能改动日志由 `add-feature` 流程维护。
-6. 默认在判定后执行建议构建命令；仅当用户明确要求“只判定不编译/跳过编译”时，才只输出建议不执行。
-7. 若本 skill 已执行构建，上层调用流程（如 `add-feature`）不得重复执行同一批构建命令。
+6. `docs/CHANGELOG.md` 不由本 skill 维护；功能改动日志由 `add-feature` 流程维护。
+7. 默认在判定后执行建议构建命令；仅当用户明确要求“只判定不编译/跳过编译”时，才只输出建议不执行。
+8. 若本 skill 已执行构建，上层调用流程（如 `add-feature`）不得重复执行同一批构建命令。
 
 ## 执行步骤
 1. 在仓库根目录执行：
    - `bash .codex/skills/auto-release-deb/scripts/auto_release_deb.sh`
+   - 可选：`--ugripper-manifest <PATH>` / `--updater-manifest <PATH>` 覆盖默认 manifest 路径。
 2. 根据脚本输出执行建议构建命令（若存在）：
    - `./build_deb.sh` 或 `./build_deb.sh -q`
    - `./usb_updater_build.sh`

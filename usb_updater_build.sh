@@ -143,6 +143,12 @@ chmod 755 "${BUILD_DIR}/DEBIAN/postrm"
 echo "开始构建 .deb 包..."
 dpkg-deb --build "$BUILD_DIR" "${PKG_DIR}.deb"
 
+# Refresh source baseline manifest for auto-release-deb diff detection.
+MANIFEST_WRITER=".codex/skills/auto-release-deb/scripts/write_source_manifest.sh"
+if [ -x "$MANIFEST_WRITER" ]; then
+    bash "$MANIFEST_WRITER" --target updater --output "$BUILD_DIR/.auto_release_updater.manifest" || true
+fi
+
 echo "========================================"
 echo "构建完成！"
 ls -lh "${PKG_DIR}.deb"
