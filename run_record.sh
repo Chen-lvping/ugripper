@@ -98,10 +98,13 @@ AUDIO_PIPE="/tmp/umi_audio_pipe"
 # --- 传感器录制配置 ---
 SENSOR_RECORDER_BIN="./build/src/sensor_recorder/sensor_recorder"
 FAYS_RECORD_SCRIPT="./build/faysSense_vi_kit/scripts/run_fays_record.sh"
+FAYS_TAIL_IMU_CHECK_SCRIPT="./py_script/fays_tail_imu_check.py"
 CAMERA_CODEC="$(get_env_value "CAMERA_CODEC" || true)"
 CAMERA_CODEC="${CAMERA_CODEC,,}"
 CAMERA_CODEC="${CAMERA_CODEC:-h264}"   # h264 | h265
 DURATION_GAP_THRESHOLD_SEC=5.0          # 时长误差阈值（秒）
+FAYS_TAIL_CAM_CHECK_FRAMES=5            # Fays MCAP 末尾抽检的相机帧数
+FAYS_TAIL_IMU_LAG_THRESHOLD_SEC=1.0     # Fays 末尾 IMU 相对相机尾帧允许最大滞后（秒）
 VIDEO_SPAN_PROBE_TIMEOUT_SEC=1.2        # 视频跨度探测超时（秒）
 
 # --- GPIO 配置 ---
@@ -1379,6 +1382,36 @@ PY
     return 0
 }
 
+check_fays_mcap_tail_imu_alive() {
+    local file_path="$1"
+    local tail_cam_frames="${2:-5}"
+    local imu_lag_threshold_sec="${3:-1.0}"
+    local check_script="${FAYS_TAIL_IMU_CHECK_SCRIPT:-./py_script/fays_tail_imu_check.py}"
+    local check_output=""
+    local -a py_cmd
+
+    [ -f "$file_path" ] || return 1
+    if [ ! -f "$check_script" ]; then
+        printf "FAIL helper script missing: %s" "$check_script"
+        return 1
+    fi
+
+    if [ -x "./.venv/bin/python" ]; then
+        py_cmd=("./.venv/bin/python")
+    else
+        py_cmd=(uv run python)
+    fi
+
+    check_output=$(timeout 3 "${py_cmd[@]}" "$check_script" \
+        --mcap "$file_path" \
+        --tail-cam-frames "$tail_cam_frames" \
+        --max-lag-sec "$imu_lag_threshold_sec" 2>/dev/null || true)
+
+    [ -n "$check_output" ] || return 1
+    printf "%s" "$check_output"
+    [[ "$check_output" == PASS* ]]
+}
+
 stop_fays_daemon() {
     if ! is_pid_alive "$PID_FAYS_DAEMON"; then
         PID_FAYS_DAEMON=""
@@ -1570,18 +1603,14 @@ validate_recording() {
     local tact_left_file="$dir/tact_left.mkv"
     local tact_right_file="$dir/tact_right.mkv"
     local sensor_mcap_file="$dir/sensor_data.mcap"
+    local fays_mcap_file="$dir/fays_data.mcap"
 
     echo "[INFO]:Validating data in: $dir"
 
     # --- 1. 检查 MKV 文件大小 ---
     # 检查 cam.mkv, tact_left.mkv, tact_right.mkv 是否存在且大小不为 0
     # 注意：根据实际生成的文件名可能需要调整，这里假设文件名如下
-    local mkv_files=("cam.mkv" "tact_left.mkv" "tact_right.mkv")
-    if [ "$CURRENT_RECORDING_EXPECT_FAYS" = true ]; then
-        mkv_files+=("fays_stereo_output.mkv")
-    else
-        echo "[INFO]:Skip Fays MKV validation for this episode (Fays not expected)."
-    fi
+    local mkv_files=("cam.mkv" "tact_left.mkv" "tact_right.mkv" "fays_stereo_output.mkv")
     
     for fname in "${mkv_files[@]}"; do
         local fpath="$dir/$fname"
@@ -1606,11 +1635,11 @@ validate_recording() {
     tact_right_span_file="$span_tmp_dir/tact_right.span"
     sensor_mcap_span_file="$span_tmp_dir/sensor.span"
 
-    if [ "$CURRENT_RECORDING_EXPECT_FAYS" = true ] && [ -f "$cam_file" ]; then
+    if [ -f "$cam_file" ]; then
         (get_video_timestamp_span_sec "$cam_file" >"$cam_span_file" 2>/dev/null || true) &
         pid_cam_span=$!
     fi
-    if [ "$CURRENT_RECORDING_EXPECT_FAYS" = true ] && [ -f "$fays_file" ]; then
+    if [ -f "$fays_file" ]; then
         (get_video_timestamp_span_sec "$fays_file" >"$fays_span_file" 2>/dev/null || true) &
         pid_fays_span=$!
     fi
@@ -1628,40 +1657,33 @@ validate_recording() {
     fi
 
     # --- 1.5 Fays 与主相机视频起止时间差校验 ---
-    if [ "$CURRENT_RECORDING_EXPECT_FAYS" = true ]; then
-        if [ -f "$cam_file" ] && [ -f "$fays_file" ]; then
-            local cam_span=""
-            local fays_span=""
-            [ -n "$pid_cam_span" ] && wait "$pid_cam_span" 2>/dev/null || true
-            [ -n "$pid_fays_span" ] && wait "$pid_fays_span" 2>/dev/null || true
-            [ -f "$cam_span_file" ] && cam_span=$(cat "$cam_span_file")
-            [ -f "$fays_span_file" ] && fays_span=$(cat "$fays_span_file")
+    if [ -f "$cam_file" ] && [ -f "$fays_file" ]; then
+        local cam_span=""
+        local fays_span=""
+        [ -n "$pid_cam_span" ] && wait "$pid_cam_span" 2>/dev/null || true
+        [ -n "$pid_fays_span" ] && wait "$pid_fays_span" 2>/dev/null || true
+        [ -f "$cam_span_file" ] && cam_span=$(cat "$cam_span_file")
+        [ -f "$fays_span_file" ] && fays_span=$(cat "$fays_span_file")
 
-            if [ -z "$cam_span" ] || [ -z "$fays_span" ]; then
+        if [ -z "$cam_span" ] || [ -z "$fays_span" ]; then
+            validation_pass=false
+            error_details="${error_details} Failed to read video timestamp span (cam=${cam_span:-NA}, fays=${fays_span:-NA});"
+            echo "[ERROR]:Failed to read video timestamp span (cam=${cam_span:-NA}, fays=${fays_span:-NA})."
+        else
+            local duration_gap
+            duration_gap=$(awk -v c="$cam_span" -v f="$fays_span" 'BEGIN { printf "%.3f", c - f }')
+            if awk -v g="$duration_gap" -v t="$DURATION_GAP_THRESHOLD_SEC" 'BEGIN { exit (g > t) ? 0 : 1 }'; then
                 validation_pass=false
-                error_details="${error_details} Failed to read video timestamp span (cam=${cam_span:-NA}, fays=${fays_span:-NA});"
-                echo "[ERROR]:Failed to read video timestamp span (cam=${cam_span:-NA}, fays=${fays_span:-NA})."
+                error_details="${error_details} Fays video too short by timestamp span (cam=${cam_span}s, fays=${fays_span}s, gap=${duration_gap}s);"
+                echo "[ERROR]:Fays video too short by timestamp span (cam=${cam_span}s, fays=${fays_span}s, gap=${duration_gap}s)."
             else
-                local duration_gap
-                duration_gap=$(awk -v c="$cam_span" -v f="$fays_span" 'BEGIN { printf "%.3f", c - f }')
-                if awk -v g="$duration_gap" -v t="$DURATION_GAP_THRESHOLD_SEC" 'BEGIN { exit (g > t) ? 0 : 1 }'; then
-                    validation_pass=false
-                    error_details="${error_details} Fays video too short by timestamp span (cam=${cam_span}s, fays=${fays_span}s, gap=${duration_gap}s);"
-                    echo "[ERROR]:Fays video too short by timestamp span (cam=${cam_span}s, fays=${fays_span}s, gap=${duration_gap}s)."
-                else
-                    echo "[INFO]:PASS: video timestamp-span check (cam=${cam_span}s, fays=${fays_span}s, gap=${duration_gap}s)."
-                fi
+                echo "[INFO]:PASS: video timestamp-span check (cam=${cam_span}s, fays=${fays_span}s, gap=${duration_gap}s)."
             fi
         fi
     fi
 
     # --- 2. 检查 MCAP 文件 ---
-    local mcap_files=("sensor_data.mcap")
-    if [ "$CURRENT_RECORDING_EXPECT_FAYS" = true ]; then
-        mcap_files+=("fays_data.mcap")
-    else
-        echo "[INFO]:Skip Fays MCAP validation for this episode (Fays not expected)."
-    fi
+    local mcap_files=("sensor_data.mcap" "fays_data.mcap")
     for mcap_name in "${mcap_files[@]}"; do
         local mcap_file="$dir/$mcap_name"
         if [ -f "$mcap_file" ]; then
@@ -1680,6 +1702,19 @@ validate_recording() {
             error_details="${error_details} ${mcap_name} missing;"
         fi
     done
+
+    # --- 2.2 Fays MCAP 末尾 IMU 存活校验 ---
+    if [ -f "$fays_mcap_file" ]; then
+        local fays_tail_check=""
+        if fays_tail_check=$(check_fays_mcap_tail_imu_alive "$fays_mcap_file" "$FAYS_TAIL_CAM_CHECK_FRAMES" "$FAYS_TAIL_IMU_LAG_THRESHOLD_SEC"); then
+            echo "[INFO]:PASS: fays_data.mcap tail IMU check (${fays_tail_check#PASS })."
+        else
+            validation_pass=false
+            fays_tail_check="${fays_tail_check:-empty output}"
+            error_details="${error_details} fays_data.mcap tail imu check failed (${fays_tail_check});"
+            echo "[ERROR]:fays_data.mcap tail IMU check failed (${fays_tail_check})."
+        fi
+    fi
 
     # --- 2.5 tact 视频与传感器 MCAP 时长一致性校验 ---
     if [ -f "$sensor_mcap_file" ]; then

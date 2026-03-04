@@ -56,10 +56,10 @@
 - `info.json`：基础字段由相机录制进程写入；Slave 侧在停录后追加 `paired_master_sn`。
 
 ## 5. 校验规则（episode 结束）
-- 基础校验：`cam.mkv`、`tact_left.mkv`、`tact_right.mkv`、`sensor_data.mcap` 必须存在且有效。
-- 若该次期望 Fays：还需 `fays_stereo_output.mkv`、`fays_data.mcap`。
+- 基础校验：`cam.mkv`、`tact_left.mkv`、`tact_right.mkv`、`sensor_data.mcap`、`fays_stereo_output.mkv`、`fays_data.mcap` 必须存在且有效。
 - Fays 时长校验：使用 `ffprobe` 的时间戳跨度（`end-start`）比较 `cam.mkv` 与 `fays_stereo_output.mkv`。
 - Fays 失败条件：Fays 比 cam 短超过 5 秒，或任一跨度读取失败。
+- Fays MCAP 末尾校验：`fays_data.mcap` 必须同时包含 topic `i`/`c` 且消息数大于 0，并检查最后几帧 `c` 所在尾段仍有 `i`（IMU）覆盖；若末尾 IMU 断流则判失败。
 - tact 时长校验：读取 `sensor_data.mcap` summary 的消息起止时间，与 `tact_left.mkv`、`tact_right.mkv` 的时间戳跨度分别比较，任一绝对误差超过 5 秒判失败。
 
 ## 6. 状态与告警
