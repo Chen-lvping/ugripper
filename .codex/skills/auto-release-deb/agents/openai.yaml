@@ -1,4 +1,4 @@
 interface:
   display_name: "Auto Release Deb"
-  short_description: "代码改动后自动升版本并执行 build_deb"
-  default_prompt: "Use $auto-release-deb after code changes to bump build_deb.sh VERSION (default +.z) and run build_deb.sh with auto -q selection."
+  short_description: "确认发布影响范围并判断 ugripper/updater 构建策略"
+  default_prompt: "Use $auto-release-deb after code changes to analyze impacted packages and decide whether ugripper needs full build or quick build, and whether updater needs full build. Do not bump versions in this skill."
