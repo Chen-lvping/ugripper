@@ -1305,7 +1305,9 @@ static void RunControlLoop(FaysRecorder& recorder, const std::string& fifoPath) 
     std::cout << "[Control] Supported commands: START|<output_dir>, STOP, EXIT" << std::endl;
 
     while (recorder.IsRunning()) {
-        int fd = open(fifoPath.c_str(), O_RDONLY);
+        // Keep FIFO opened in RDWR mode so open() won't block waiting for an external writer.
+        // This makes the control endpoint visible immediately after daemon startup.
+        int fd = open(fifoPath.c_str(), O_RDWR);
         if (fd < 0) {
             std::cerr << "[Control] Failed to open FIFO: " << std::strerror(errno) << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(500));

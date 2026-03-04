@@ -1073,7 +1073,7 @@ start_fays_daemon() {
         return 1
     fi
 
-    # 等待 daemon 打开控制 FIFO 读端，避免紧接着 START 写入超时。
+    # 等待 daemon 打开控制 FIFO 读端(相机启动大概3s），避免紧接着 START 写入超时。
     local _ready=0
     for _ in $(seq 1 20); do
         if is_pid_alive "$PID_FAYS_DAEMON" && [ -p "/tmp/umi_fays_cmd" ] && \
@@ -1081,7 +1081,7 @@ start_fays_daemon() {
             _ready=1
             break
         fi
-        sleep 0.1
+        sleep 0.5
     done
     if [ "$_ready" -ne 1 ]; then
         echo "[WARNING]:Fays daemon started but control FIFO reader not ready yet."
