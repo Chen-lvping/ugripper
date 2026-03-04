@@ -33,15 +33,15 @@
 
 编排要点：
 - `run_record.sh` 启动后先检测 FTDI：存在则拉起 Fays daemon；缺失则持续 `ERROR_2` 报错并等待恢复（服务不退出）。检测依据为 udev 固定映射的 `/dev/fays_stereo` 与 `/dev/fays_imu`。
-- `start_recording()` 在 Fays 已启用时发送 `START|<episode_dir>`，否则跳过 Fays，仅拉起 `PID_CAM` 与 `PID_SENSOR`。
+- Right 侧 `start_recording()` 会先向 Left 发送 `START|<episode_dir>|<master_sn>`，Left 在本次 episode 内记录该 `master_sn`。
 - `stop_recording()` 仅在本次 Fays 会话 active 时发送 `STOP`，停止 `PID_CAM` 与 `PID_SENSOR`，Fays 进程保持常驻。
 - `cleanup()` 才发送 `EXIT` 关闭 Fays 常驻进程。
 - 录制后校验固定覆盖 `cam/tact` 视频与 `sensor_data.mcap`；若本次 episode 期望 Fays 数据，再校验 `fays_stereo_output.mkv` 与 `fays_data.mcap`。时长一致性阈值统一为 5 秒：`cam` vs `fays`（仅判定 Fays 不可短于 cam 超阈值）与 `tact_left/right` vs `sensor_data.mcap`（绝对误差）。
 
 ### 2.3 Right/Left 协同控制
 - 通信：TCP `12345` 端口。
-- 指令：`START|episode_xxxx` / `STOP|0`。
-- 机制：Right 侧发送指令，Left 侧 `nc -l -p 12345` 监听后执行本地 `start_recording/stop_recording`。
+- 指令：`START|episode_xxxx|master_sn` / `STOP|0`。
+- 机制：Right 侧发送指令，Left 侧 `nc -l -p 12345` 监听后执行本地 `start_recording/stop_recording`，并在停录后将 `paired_master_sn` 写入当前 episode 的 `info.json`。
 
 ### 2.4 反馈与状态通道
 - `led_manager.py`：监听 `/tmp/umi_led_pipe`，呈现 `INIT/READY/RECORDING/ERROR/EXIT`。
@@ -85,6 +85,7 @@
 - `data/episode_YYYYMMDD_NNNN/`
   - `calibration.json`（当前 episode 实际使用的 Lerobot 标定快照）
   - `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`
+  - `info.json`（相机进程写入基础时间字段；Slave 停录后追加 `paired_master_sn`）
   - `cam.csv`, `tact_left.csv`, `tact_right.csv`
   - `fays_stereo_output.mkv`, `fays_data.mcap`（仅在该 episode 启用 Fays 时）
   - `sensor_data.mcap`

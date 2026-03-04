@@ -8,7 +8,7 @@
 
 ## 2. 角色分工（双臂）
 - Right（Master）：按键控制、音频提示、发网络命令给 Left。
-- Left（Slave）：监听 `START|episode_xxx` / `STOP|0`，按命令同步录制。
+- Left（Slave）：监听 `START|episode_xxx|master_sn` / `STOP|0`，按命令同步录制。
 - 同步端口：`12345`（`nc`）。
 
 ## 3. 主流程（`run_record.sh`）
@@ -16,7 +16,7 @@
  - 加载持久化标定文件：`/etc/ugripper/config/calibration/calibration.json`（缺失时回退 fake 模板）。
 2. 后台 `monitor_loop` 运行健康检查（约 50ms 一次）并维护错误灯效状态。
 3. `start_recording`：
-- Right 先下发网络 `START` 给 Left。
+- Right 先下发网络 `START|<episode_dir>|<master_sn>` 给 Left。
 - 开录前刷新一次持久化标定（支持 U 盘重复导入后立即生效）。
 - 将当前有效标定复制到 `episode/calibration.json`（Lerobot 风格）。
 - 可用时启动 Fays 当前 episode（`run_fays_record.sh start <dir>`）。
@@ -24,6 +24,7 @@
 - 启动传感器：`build/src/sensor_recorder/sensor_recorder`。
 4. `stop_recording`：
 - Right 下发 `STOP` 给 Left。
+- Left 在停录后会将本次配对到的 `master_sn` 写入当前 episode 的 `info.json.paired_master_sn`。
 - 停止 Fays 当前会话（daemon 保持常驻）。
 - 停止相机与传感器进程，落盘 `sync`，执行录制完整性校验。
 
@@ -50,6 +51,7 @@
 - `fays_data.mcap`：
 - topic `i`：Fays IMU
 - topic `c`：Fays 相机帧序号+时间戳
+- `info.json`：基础字段由相机录制进程写入；Slave 侧在停录后追加 `paired_master_sn`。
 
 ## 5. 校验规则（episode 结束）
 - 基础校验：`cam.mkv`、`tact_left.mkv`、`tact_right.mkv`、`sensor_data.mcap` 必须存在且有效。

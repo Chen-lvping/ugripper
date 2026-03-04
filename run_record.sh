@@ -86,6 +86,7 @@ NEXT_RESET_SOURCE_EPISODE_DIR=""   # 下一次录制的复位来源目录（由�
 CURRENT_RECORDING_IS_RESET=false    # 当前录制是否为复位录制
 CURRENT_RECORDING_RESET_SOURCE_DIR="" # 当前复位录制的来源目录
 CURRENT_RECORDING_EXPECT_FAYS=false   # 当前录制是否期望存在 Fays 数据
+CURRENT_RECORDING_PAIRED_MASTER_SN="" # 当前录制在 Slave 侧配对到的 Master SN
 FAYS_ENABLED=false                    # 是否启用 Fays（启动可缺省，插入后可自动启用）
 FAYS_USB_PRESENT=false                # 最近一次检测到的 Fays FTDI USB 存在状态
 FAYS_RECORDING_ACTIVE=false           # 当前是否已向 Fays 下发 START
@@ -856,6 +857,44 @@ mark_reset_tag_to_info() {
     return 1
 }
 
+# 函数：在 Slave 侧当前 episode 的 info.json 写入配对 Master SN
+mark_paired_master_sn_to_info() {
+    if [ "$CURRENT_SIDE_LOWER" != "left" ]; then
+        return 0
+    fi
+
+    if [ -z "$CURRENT_RECORDING_PAIRED_MASTER_SN" ]; then
+        echo "[INFO]:Skip paired_master_sn write: no master SN received for this episode."
+        return 0
+    fi
+
+    if [ -z "$TARGET_DIR" ] || [ ! -d "$TARGET_DIR" ]; then
+        echo "[WARNING]:Skip paired_master_sn write: invalid TARGET_DIR ($TARGET_DIR)."
+        return 1
+    fi
+
+    local info_file="$TARGET_DIR/info.json"
+    if [ ! -f "$info_file" ]; then
+        echo "[WARNING]:Skip paired_master_sn write: info.json not found at $info_file"
+        return 1
+    fi
+
+    local tmp_file="$info_file.tmp"
+
+    if jq \
+        --arg master_sn "$CURRENT_RECORDING_PAIRED_MASTER_SN" \
+        '.paired_master_sn = $master_sn' \
+        "$info_file" > "$tmp_file"; then
+        mv "$tmp_file" "$info_file"
+        echo "[INFO]:paired_master_sn written to info.json: $CURRENT_RECORDING_PAIRED_MASTER_SN"
+        return 0
+    fi
+
+    echo "[ERROR]:Failed to write paired_master_sn to info.json"
+    rm -f "$tmp_file"
+    return 1
+}
+
 # 函数：启动音频录制
 record_audio() {
     # 如果是 Left (Slave)，直接禁用录音功能
@@ -1326,8 +1365,10 @@ stop_fays_daemon() {
 
 # 函数：启动所有录制进程
 # 参数1 (可选): 强制指定的目录名 (用于 Slave)
+# 参数2 (可选): 本次录制在 Slave 侧配对到的 Master SN
 start_recording() {
     local sync_dir_name=$1
+    local paired_master_sn=$2
     local reset_source_candidate="${NEXT_RESET_SOURCE_EPISODE_DIR:-}"
 
     CURRENT_RECORDING_IS_RESET=false
@@ -1335,6 +1376,17 @@ start_recording() {
     CURRENT_RECORDING_EXPECT_FAYS=false
     FAYS_RECORDING_ACTIVE=false
     NEXT_RESET_SOURCE_EPISODE_DIR=""
+    CURRENT_RECORDING_PAIRED_MASTER_SN=""
+
+    if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
+        # Slave 不校验 SN 白名单：接收到任意 Master SN 都记录为当前 episode 配对来源。
+        if [ -n "$paired_master_sn" ]; then
+            CURRENT_RECORDING_PAIRED_MASTER_SN="$paired_master_sn"
+            echo "[INFO]:Slave paired master SN for this episode: $CURRENT_RECORDING_PAIRED_MASTER_SN"
+        else
+            echo "[WARNING]:Slave START command missing master SN, paired_master_sn will not be written."
+        fi
+    fi
 
     if [ -n "$reset_source_candidate" ] && [ -d "$reset_source_candidate" ]; then
         CURRENT_RECORDING_IS_RESET=true
@@ -1358,8 +1410,9 @@ start_recording() {
     if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
         # 获取纯文件夹名
         local dirname=$(basename "$TARGET_DIR")
-        # 发送 START 指令和文件夹名
-        send_network_command "START" "$dirname"
+        local master_sn="${DEVICE_SN:-unknown_master_sn}"
+        # 发送 START 指令、文件夹名和 master SN
+        send_network_command "START" "${dirname}|${master_sn}"
     fi
 
     # 4. 处理预录制音频 (仅 Master)
@@ -1706,6 +1759,9 @@ stop_recording() {
     [ -n "$PID_CAM" ] && wait "$PID_CAM" 2>/dev/null || true
     [ -n "$PID_SENSOR" ] && wait "$PID_SENSOR" 2>/dev/null || true
 
+    # Slave 录制：在录制结束后将配对 Master SN 写入 info.json
+    mark_paired_master_sn_to_info || true
+
     # 复位录制：在录制结束后对 info.json 打 tag
     mark_reset_tag_to_info || true
 
@@ -1740,6 +1796,7 @@ stop_recording() {
     CURRENT_RECORDING_IS_RESET=false
     CURRENT_RECORDING_RESET_SOURCE_DIR=""
     CURRENT_RECORDING_EXPECT_FAYS=false
+    CURRENT_RECORDING_PAIRED_MASTER_SN=""
 
     # 删除录制锁文件
     rm -f "$RECORDING_LOCK_FILE"
@@ -1900,20 +1957,19 @@ if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
         
         # === 网络监听 ===
         # 监听 TCP 端口，收到数据后退出 nc
-        # 格式: START|episode_xxxx 或 STOP|0
+        # 格式: START|episode_xxxx|master_sn 或 STOP|0
         raw_msg=$(nc -l -p "$SYNC_PORT" -w 1)
         
         if [ -n "$raw_msg" ]; then
-            cmd=$(echo "$raw_msg" | awk -F'|' '{print $1}')
-            arg=$(echo "$raw_msg" | awk -F'|' '{print $2}')
+            IFS='|' read -r cmd arg master_sn _ <<< "$raw_msg"
             
-            echo "[INFO]:Received Network Command: $cmd Args: $arg"
+            echo "[INFO]:Received Network Command: $cmd Args: $arg MasterSN: ${master_sn:-N/A}"
 
             case "$cmd" in
                 "START")
                     if [ "$IS_RECORDING" = false ]; then
                         echo "[INFO]:Trigger: Start Recording (Sync Dir: $arg)"
-                        start_recording "$arg"
+                        start_recording "$arg" "$master_sn"
                     else
                         echo "[WARNING]:Ignored: Already recording."
                     fi

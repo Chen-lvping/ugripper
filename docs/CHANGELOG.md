@@ -3,6 +3,9 @@
 ## v1.1.10 - 2026-03-04
 - `led_manager.py` 将 `READY` 呼吸灯与 `RECORDING` 闪灯改为基于系统时间相位驱动，左右夹爪在系统时间同步后可保持同相灯效。
 - `READY` 呼吸灯改为低开销三角波（整数运算），替代 `sin` 计算，降低常驻 CPU 开销。
+- `run_record.sh` 扩展主从启动指令为 `START|episode_xxxx|master_sn`，Master 触发录制时会附带本机 `DEVICE_SN`。
+- Left 侧录制流程不限制 Master SN，接收到任意 `master_sn` 均作为本次配对来源。
+- Left 停录后会向当前 episode 的 `info.json` 写入 `paired_master_sn`，用于后处理追溯主从配对关系。
 
 ## v1.1.9 - 2026-03-02
 - Fays 端口策略改为固定 symlink：`run_fays_record.sh` 不再扫描 `/dev/video*` 并动态改写 yaml，启动前仅校验 `/dev/fays_stereo` 与 `/dev/fays_imu`。
