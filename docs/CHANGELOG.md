@@ -12,6 +12,7 @@
 - 导入失败反馈增强：统一导入阶段任一项失败时切换 `ERROR_1` 红灯错误态提示，再执行服务重启。
 - `run_record.sh` 的 episode 结束校验改为强制检查 Fays 文件存在性：`fays_stereo_output.mkv` 与 `fays_data.mcap` 不再按“本轮是否期望 Fays”跳过。
 - 新增 `fays_data.mcap` 末尾 IMU 存活校验：要求 topic `i`/`c` 存在且有消息，并检查最后几帧相机时间段内仍有 IMU；可识别 IMU 末尾断流但文件仍存在的场景。
+- 修复长时录制下 Fays MCAP 末尾校验误判：`fays_tail_imu_check.py` 改为基于 summary 尾部 chunk 索引逆向读取，仅解析末尾少量 chunk，不再全量扫描导致超时。
 
 ## v1.1.9 - 2026-03-02
 - Fays 端口策略改为固定 symlink：`run_fays_record.sh` 不再扫描 `/dev/video*` 并动态改写 yaml，启动前仅校验 `/dev/fays_stereo` 与 `/dev/fays_imu`。

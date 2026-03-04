@@ -128,6 +128,10 @@ mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder"
 cp build/src/sensor_recorder/sensor_recorder "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true
 cp build/src/sensor_recorder/zeroing "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true
 
+# py_script is excluded from rsync by default; restore required runtime checker explicitly.
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/py_script"
+cp py_script/fays_tail_imu_check.py "$BUILD_ROOT/$INSTALL_DIR/py_script/" || true
+
 # 4. 部署 Udev 规则
 cp camera_record/99-fixed-usb-map.rules "$BUILD_ROOT/etc/udev/rules.d/" || true
 cp src/sensor_recorder/99-serial.rules "$BUILD_ROOT/etc/udev/rules.d/" || true

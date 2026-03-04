@@ -1388,6 +1388,7 @@ check_fays_mcap_tail_imu_alive() {
     local imu_lag_threshold_sec="${3:-1.0}"
     local check_script="${FAYS_TAIL_IMU_CHECK_SCRIPT:-./py_script/fays_tail_imu_check.py}"
     local check_output=""
+    local check_rc=0
     local -a py_cmd
 
     [ -f "$file_path" ] || return 1
@@ -1405,9 +1406,24 @@ check_fays_mcap_tail_imu_alive() {
     check_output=$(timeout 3 "${py_cmd[@]}" "$check_script" \
         --mcap "$file_path" \
         --tail-cam-frames "$tail_cam_frames" \
-        --max-lag-sec "$imu_lag_threshold_sec" 2>/dev/null || true)
+        --max-lag-sec "$imu_lag_threshold_sec" 2>&1)
+    check_rc=$?
 
-    [ -n "$check_output" ] || return 1
+    if [ "$check_rc" -eq 124 ]; then
+        printf "FAIL helper timeout after 3s"
+        return 1
+    fi
+
+    if [ -z "$check_output" ]; then
+        printf "FAIL helper empty output (rc=%s)" "$check_rc"
+        return 1
+    fi
+
+    if [ "$check_rc" -ne 0 ]; then
+        printf "%s" "$check_output"
+        return 1
+    fi
+
     printf "%s" "$check_output"
     [[ "$check_output" == PASS* ]]
 }
