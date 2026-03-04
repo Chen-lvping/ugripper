@@ -1,6 +1,6 @@
 ---
 name: auto-release-deb
-description: 在代码修改完成后，自动确认改动影响范围，并判断 ugripper 与 updater 是否需要全量构建；不再负责版本号修改。
+description: 在代码修改完成后，自动确认改动影响范围，并判断 ugripper 与 updater 的构建方式；默认执行建议编译命令；不负责版本号修改。
 ---
 
 # auto-release-deb
@@ -21,16 +21,21 @@ description: 在代码修改完成后，自动确认改动影响范围，并判�
 4. `updater` 无 quick 模式：
    - 只要命中 updater 相关改动，判定需要执行 `./usb_updater_build.sh`（全量）。
 5. `docs/CHANGELOG.md` 不由本 skill 维护；功能改动日志由 `add-feature` 流程维护。
+6. 默认在判定后执行建议构建命令；仅当用户明确要求“只判定不编译/跳过编译”时，才只输出建议不执行。
+7. 若本 skill 已执行构建，上层调用流程（如 `add-feature`）不得重复执行同一批构建命令。
 
 ## 执行步骤
 1. 在仓库根目录执行：
    - `bash .codex/skills/auto-release-deb/scripts/auto_release_deb.sh`
-2. 向用户汇报：
+2. 根据脚本输出执行建议构建命令（若存在）：
+   - `./build_deb.sh` 或 `./build_deb.sh -q`
+   - `./usb_updater_build.sh`
+3. 向用户汇报：
    - 改动范围（ugripper / updater / both / none）。
    - `ugripper` 是否必须全量构建，以及原因。
    - `updater` 是否需要构建，以及原因。
-   - 建议构建命令（仅建议，不自动执行）。
+   - 建议构建命令与实际执行结果（成功/失败）。
 
 ## 输出约束
 - 汇报中必须明确“未改版本号”。
-- 若用户仅询问判定结果，不得自行执行构建命令。
+- 若用户明确仅询问判定结果或要求跳过编译，不执行构建命令并显式说明“按用户要求仅判定”。

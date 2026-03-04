@@ -1,6 +1,6 @@
 ---
 name: add-feature
-description: 为 ugripper 项目执行新增功能（add feature）类需求的标准工作流。用于用户提出“add feature / 加功能 / 新增功能”等请求时：先阅读 docs/agent/overview.md 理解当前实现，再先给实现计划并等待确认，然后以 heredoc 方式修改代码，并同步创建或维护 docs 文档；收尾阶段需根据用户指示或改动复杂度决定是否更新 build_deb.sh 与 usb_updater_build.sh 版本号。
+description: 为 ugripper 项目执行新增功能（add feature）类需求的标准工作流。用于用户提出“add feature / 加功能 / 新增功能”等请求时：先阅读 docs/agent/overview.md 理解当前实现，再先给实现计划并等待确认，然后以 heredoc 方式修改代码，并同步创建或维护 docs 文档；收尾阶段需根据用户指示或改动复杂度决定是否更新 build_deb.sh 与 usb_updater_build.sh 版本号，并默认联动 auto-release-deb 完成建议编译。
 ---
 
 # add-feature
@@ -10,7 +10,9 @@ description: 为 ugripper 项目执行新增功能（add feature）类需求的�
 1. 先阅读 `docs/agent/overview.md`，再开始设计方案。
 2. 输出“实现计划 + 影响文件列表 + 文档同步计划”，进入等待开工状态。
 3. 只有收到用户**明确的确认并开始指令**后，才开始改代码与文档。
-4. 代码改完后，先做版本号决策（是否修改 `build_deb.sh` / `usb_updater_build.sh`），再给最终汇报。
+4. 代码改完后，先做版本号决策（是否修改 `build_deb.sh` / `usb_updater_build.sh`）。
+5. 功能修改确认后，默认调用 `auto-release-deb`（由该 skill 完成判定与编译）。
+6. 编译完成后，再给最终汇报。
 
 ## 计划反馈阶段处理（强约束）
 
@@ -57,7 +59,16 @@ description: 为 ugripper 项目执行新增功能（add feature）类需求的�
 6. 汇报要求：
    - 必须说明“改/不改版本号”的决策理由。
    - 若有修改，必须给出每个脚本的旧版本 -> 新版本。
-7. 若用户还要求“本次是否需要全量构建/如何打包”，调用 `auto-release-deb` 仅做构建范围判定，不在 `add-feature` 内重复该判定逻辑。
+7. 构建范围判定与编译执行统一由 `auto-release-deb` 负责；`add-feature` 不在内部重复判定或重复编译。
+
+## 发布与编译联动规则（新增）
+
+1. 在 feature 改动落地并确认后，默认执行：
+   - `bash .codex/skills/auto-release-deb/scripts/auto_release_deb.sh`
+2. `add-feature` 只消费 `auto-release-deb` 的判定与执行结果，不再自行执行任何构建命令。
+3. 若判定 `scope=none`，则不执行编译并在汇报中说明原因。
+4. 仅当用户明确要求“只判定不编译 / 跳过编译”时，允许不执行编译。
+5. 任何编译失败都要汇报失败命令与关键错误，并停止后续步骤，等待用户指示。
 
 ## 验收与检查默认策略
 
@@ -72,5 +83,6 @@ description: 为 ugripper 项目执行新增功能（add feature）类需求的�
 1. 代码改动摘要（按文件）。
 2. 文档改动摘要（按文件）。
 3. 版本号决策与结果（含旧版 -> 新版，或不修改原因）。
-4. 已执行检查与未执行测试说明。
-5. 建议的手动验收步骤。
+4. auto-release-deb 判定结果与实际执行的编译命令（含成功/失败）。
+5. 已执行检查与未执行测试说明。
+6. 建议的手动验收步骤。
