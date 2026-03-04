@@ -36,7 +36,7 @@
 - Master 侧 `start_recording()` 会先向 Slave 发送 `START|<episode_dir>|<master_sn>`，Slave 在本次 episode 内记录该 `master_sn`。
 - `stop_recording()` 仅在本次 Fays 会话 active 时发送 `STOP`，停止 `PID_CAM` 与 `PID_SENSOR`，Fays 进程保持常驻。
 - `cleanup()` 才发送 `EXIT` 关闭 Fays 常驻进程。
-- 录制后校验固定覆盖 `cam/tact` 视频与 `sensor_data.mcap`；若本次 episode 期望 Fays 数据，再校验 `fays_stereo_output.mkv` 与 `fays_data.mcap`。时长一致性阈值统一为 5 秒：`cam` vs `fays`（仅判定 Fays 不可短于 cam 超阈值）与 `tact_left/right` vs `sensor_data.mcap`（绝对误差）。
+- 录制后校验固定覆盖 `cam/tact` 视频、`sensor_data.mcap`、`fays_stereo_output.mkv` 与 `fays_data.mcap`。时长一致性阈值统一为 5 秒：`cam` vs `fays`（仅判定 Fays 不可短于 cam 超阈值）与 `tact_left/right` vs `sensor_data.mcap`（绝对误差）；`fays_data.mcap` 额外检查末尾几帧相机数据是否仍有 IMU 覆盖。
 
 ### 2.3 Master/Slave 协同控制
 - 通信：TCP `12345` 端口。
@@ -52,7 +52,7 @@
 
 ### 3.1 自动校准
 - `auto_update/99-usb-auto-update.rules` 触发 `usb-auto-update@.service`，由 `auto_update/usb_auto_update.sh` 检查 U 盘根目录是否存在 `calibration.txt`。
-- 同一入口新增“标定导入”分支：若 U 盘存在 `ugripper_calib/<DEVICE_SN>/`，执行 `auto_calibration/import_camera_calibration.sh`，将主摄/Fays/IMU 参数写入 `/etc/ugripper/config/calibration/calibration.json`（支持重复导入覆盖更新）。
+- 同一入口新增“标定导入”分支：若 U 盘存在 `ugripper_calib/<DEVICE_SN>/`，执行 `auto_calibration/import_camera_calibration.sh`，将主摄/Fays/IMU 参数写入 `/etc/ugripper/config/calibration/calibration.json`（支持重复导入覆盖更新），并可与 `config.txt` 配置导入在同一次流程中兼容执行。
 - 存在 `calibration.txt` 时触发 `ugripper-calibration.service`（`run_calibration.sh`）：
   - 停止主服务。
   - 启动 LED/音频提示。
@@ -70,7 +70,8 @@
 - `auto_update/99-usb-auto-update.rules` + `usb-auto-update@.service`：U 盘插入自动触发统一入口脚本（先判定 `calibration.txt` 是否触发校准，再进入升级逻辑）。
 - 升级窗口内 `usb_auto_update.sh` 会创建 `/run/ugripper_installing_from_usb.lock`，暂停 network monitor，并在结束后恢复。
 - `usb_auto_update.sh` 挂载后会读取升级盘根目录 `config.txt`：`LANGUAGE/VOICE_LANG` 写入 `UGRIPPER_LANG`（`zh|en`）；`CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC` 写入 `CAMERA_CODEC`（`h264|h265`）；`DEVICE_ROLE/ROLE` 写入 `DEVICE_ROLE`（`master|slave`）。
-- 配置写入时序：先停止 `ugripper.service`，启动独立 LED helper，进入 `CALIB_RUN` 黄灯快闪并至少持续 2 秒，随后 `CALIB_DONE` 绿灯完成态 1 秒，再重启 `ugripper.service`。
+- 统一导入时序（配置 + 标定）：先停止 `ugripper.service`，启动独立 LED helper，进入 `CALIB_RUN` 黄灯快闪并至少持续 2 秒；全部导入成功时亮一次 `CALIB_DONE` 绿灯完成态 1 秒，随后仅重启一次 `ugripper.service`。
+- 若导入阶段任一项失败，切换 `ERROR_1` 红灯错误态提示后再重启 `ugripper.service`，避免服务停滞。
 - `auto_update/boot_check_install.sh` + `ugripper-boot-install.service`：开机先比较 `/opt/backup` 中 `ugripper-usb-updater` 版本并在更高时先升级 updater，再检查 `ugripper` 是否缺失/异常并执行自恢复。
 
 ### 3.4 关机权限隔离

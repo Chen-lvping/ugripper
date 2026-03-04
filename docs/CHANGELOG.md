@@ -8,7 +8,8 @@
 - Left 停录后会向当前 episode 的 `info.json` 写入 `paired_master_sn`，用于后处理追溯主从配对关系。
 - 新增 `DEVICE_ROLE` 配置：`run_record.sh` 支持按 `master/slave` 角色分流控制逻辑，解耦物理侧 `DEVICE_SIDE` 与主从角色，允许 Left 设备作为 Master。
 - `usb_auto_update.sh` 新增 `config.txt` 键 `DEVICE_ROLE/ROLE`（值 `master|slave`），识别后写入 `/etc/environment` 的 `DEVICE_ROLE`。
-- 配置应用流程增强：更新 `config.txt` 时先停止 `ugripper.service`，复用 `CALIB_RUN` 黄灯快闪至少 2 秒，随后 `CALIB_DONE` 绿灯完成态 1 秒，再重启 `ugripper.service`。
+- USB 导入流程兼容增强：`config.txt` 与 `ugripper_calib` 允许在同一次触发中统一导入，全部导入完成后仅亮一次完成灯并重启一次 `ugripper.service`。
+- 导入失败反馈增强：统一导入阶段任一项失败时切换 `ERROR_1` 红灯错误态提示，再执行服务重启。
 - `run_record.sh` 的 episode 结束校验改为强制检查 Fays 文件存在性：`fays_stereo_output.mkv` 与 `fays_data.mcap` 不再按“本轮是否期望 Fays”跳过。
 - 新增 `fays_data.mcap` 末尾 IMU 存活校验：要求 topic `i`/`c` 存在且有消息，并检查最后几帧相机时间段内仍有 IMU；可识别 IMU 末尾断流但文件仍存在的场景。
 

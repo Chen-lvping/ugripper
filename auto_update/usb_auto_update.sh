@@ -25,6 +25,7 @@ ENFORCE_BY_PATH="0"   # 1=强制校验；0=不校验
 SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LED_SCRIPT="$SCRIPT_ROOT/led_manager.py"
 LED_PIPE="/tmp/umi_led_pipe"
+CALIB_IMPORT_SCRIPT="/opt/ugripper/auto_calibration/import_camera_calibration.sh"
 LED_RUN_USER="radxa"
 PID_LED_SHELL=""
 
@@ -453,19 +454,22 @@ restart_ugripper_if_needed() {
   return 1
 }
 
-apply_config_with_led_feedback() {
+apply_imports_with_led_feedback() {
   local cfg_lang="$1"
   local cfg_codec="$2"
   local cfg_role="$3"
+  local do_calib_import="$4"
   local yellow_start_ts=0
   local yellow_elapsed=0
-  local config_applied=0
+  local has_failure=0
+  local any_imported=0
+  local calib_rc=0
 
   enter_upgrade_window
   stop_record_stack_fast
 
   if ! start_led_helper; then
-    log "LED helper 启动失败，将继续执行配置写入。"
+    log "LED helper 启动失败，将继续执行导入流程。"
   fi
 
   yellow_start_ts=$(date +%s)
@@ -475,27 +479,45 @@ apply_config_with_led_feedback() {
   if [ -n "$cfg_lang" ]; then
     if set_ugripper_language "$cfg_lang"; then
       log "已应用语言配置：UGRIPPER_LANG=$cfg_lang"
-      config_applied=1
+      any_imported=1
     else
       log "语言配置写入失败。"
+      has_failure=1
     fi
   fi
 
   if [ -n "$cfg_codec" ]; then
     if set_camera_codec "$cfg_codec"; then
       log "已应用编码器配置：CAMERA_CODEC=$cfg_codec"
-      config_applied=1
+      any_imported=1
     else
       log "编码器配置写入失败。"
+      has_failure=1
     fi
   fi
 
   if [ -n "$cfg_role" ]; then
     if set_device_role "$cfg_role"; then
       log "已应用设备角色配置：DEVICE_ROLE=$cfg_role"
-      config_applied=1
+      any_imported=1
     else
       log "设备角色配置写入失败。"
+      has_failure=1
+    fi
+  fi
+
+  if [ "$do_calib_import" = "1" ]; then
+    log "检测到 ugripper_calib，开始导入 calibration.json。"
+    if [ ! -x "$CALIB_IMPORT_SCRIPT" ]; then
+      log "标定导入脚本不存在或不可执行：$CALIB_IMPORT_SCRIPT"
+      has_failure=1
+    elif "$CALIB_IMPORT_SCRIPT" "$MOUNT_POINT"; then
+      log "标定导入成功。"
+      any_imported=1
+    else
+      calib_rc=$?
+      log "标定导入失败（退出码=$calib_rc）。"
+      has_failure=1
     fi
   fi
 
@@ -504,27 +526,31 @@ apply_config_with_led_feedback() {
     sleep $((2 - yellow_elapsed))
   fi
 
-  # 复用校准灯效：CALIB_DONE 为绿灯完成态
-  set_led_state "CALIB_DONE"
-  sleep 1
+  if [ "$has_failure" -eq 1 ]; then
+    # 导入失败时进入红灯告警
+    set_led_state "ERROR_1"
+    sleep 2
+  else
+    # 复用校准灯效：CALIB_DONE 为绿灯完成态
+    set_led_state "CALIB_DONE"
+    sleep 1
+  fi
   stop_led_helper
 
-  if [ "$config_applied" -ne 1 ]; then
-    log "配置项未成功写入，仍尝试重启服务恢复运行。"
+  if [ "$any_imported" -ne 1 ]; then
+    log "未成功导入任何内容，仍尝试重启服务恢复运行。"
   fi
 
-  log "配置写入完成，重启 ugripper.service。"
+  log "导入流程完成，重启 ugripper.service（仅一次）。"
   if systemctl restart ugripper.service >/dev/null 2>&1; then
     log "ugripper.service 重启成功。"
     NEED_UGRIPPER_RESTART=0
-    if [ "$config_applied" -eq 1 ]; then
-      return 0
-    fi
-    return 1
+  else
+    log "ugripper.service 重启失败。"
+    has_failure=1
   fi
 
-  log "ugripper.service 重启失败。"
-  return 1
+  [ "$has_failure" -eq 0 ]
 }
 
 cleanup() {
@@ -590,6 +616,7 @@ else
 fi
 
 CONFIG_FILE="$MOUNT_POINT/config.txt"
+HAS_CALIB_IMPORT=0
 if [ -f "$CONFIG_FILE" ]; then
   log "检测到 config.txt，检查语言/编码器/设备角色配置。"
   CONFIG_LANG="$(parse_language_from_config "$CONFIG_FILE" || true)"
@@ -612,42 +639,22 @@ if [ -f "$CONFIG_FILE" ]; then
   else
     log "config.txt 未找到有效设备角色设置（支持 DEVICE_ROLE/ROLE，值为 master/slave），跳过。"
   fi
-
-  if [ -n "$CONFIG_LANG" ] || [ -n "$CONFIG_CAMERA_CODEC" ] || [ -n "$CONFIG_DEVICE_ROLE" ]; then
-    if ! apply_config_with_led_feedback "$CONFIG_LANG" "$CONFIG_CAMERA_CODEC" "$CONFIG_DEVICE_ROLE"; then
-      log "配置更新流程存在失败项，继续后续流程。"
-    fi
-  else
-    log "config.txt 未检测到可应用配置，跳过配置写入与重启。"
-  fi
 else
   log "未检测到 config.txt，跳过语言/编码器/设备角色配置。"
 fi
 
-# ========================================================
-# 0. 标定文件导入（检测 ugripper_calib/<DEVICE_SN>/）
-# ========================================================
-CALIB_IMPORT_SCRIPT="/opt/ugripper/auto_calibration/import_camera_calibration.sh"
 if [ -d "$MOUNT_POINT/ugripper_calib" ]; then
-  log "检测到 ugripper_calib，尝试导入 calibration.json。"
+  HAS_CALIB_IMPORT=1
+fi
 
-  if [ ! -x "$CALIB_IMPORT_SCRIPT" ]; then
-    log "标定导入脚本不存在或不可执行：$CALIB_IMPORT_SCRIPT"
-    exit 1
-  fi
-
-  if "$CALIB_IMPORT_SCRIPT" "$MOUNT_POINT"; then
-    log "标定导入成功，跳过本次升级流程。"
-    exit 0
+if [ -n "${CONFIG_LANG:-}" ] || [ -n "${CONFIG_CAMERA_CODEC:-}" ] || [ -n "${CONFIG_DEVICE_ROLE:-}" ] || [ "$HAS_CALIB_IMPORT" -eq 1 ]; then
+  if ! apply_imports_with_led_feedback "${CONFIG_LANG:-}" "${CONFIG_CAMERA_CODEC:-}" "${CONFIG_DEVICE_ROLE:-}" "$HAS_CALIB_IMPORT"; then
+    log "导入流程存在失败项（已执行失败红灯），继续后续流程。"
   else
-    rc=$?
-    if [ "$rc" -eq 10 ]; then
-      log "U盘存在 ugripper_calib，但未找到当前设备SN对应目录，继续升级流程。"
-    else
-      log "标定导入失败（退出码=$rc），终止流程。"
-      exit 1
-    fi
+    log "导入流程成功完成。"
   fi
+else
+  log "未检测到可导入配置或标定目录，跳过统一导入流程。"
 fi
 
 # ========================================================

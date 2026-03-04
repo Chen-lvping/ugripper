@@ -84,6 +84,8 @@
 - 导入脚本：`auto_calibration/import_camera_calibration.sh`。
 - 持久化输出：`/etc/ugripper/config/calibration/calibration.json`。
 - 支持多次导入覆盖更新；后续 episode 在开录时读取最新持久化参数。
+- 可与 `config.txt` 配置导入在同一次 U 盘流程中并行执行，导入完成后统一重启一次 `ugripper.service`。
+- 若任一导入项失败，会切换红灯错误态（`ERROR_1`）提示后再执行服务重启。
 ## 9. 常用排障入口
 - 服务日志：`journalctl -u ugripper.service -f`
 - 内核 USB/UVC：`journalctl -k -f | egrep 'usb|uvcvideo|xhci|reset|disconnect|error -71'`
@@ -100,7 +102,8 @@
 - 编码器识别成功后写入 `/etc/environment`：`CAMERA_CODEC=<h264|h265>`。
 - 支持角色配置键：`DEVICE_ROLE`/`ROLE`（大小写不敏感），支持值：`master|slave`。
 - 角色识别成功后写入 `/etc/environment`：`DEVICE_ROLE=<master|slave>`。
-- 应用配置时序：先停止 `ugripper.service`，复用校准黄灯快闪态（`CALIB_RUN`）并至少保持 2 秒，随后复用校准完成绿灯态（`CALIB_DONE`）1 秒，再重启 `ugripper.service`。
+- 导入时序（配置 + 标定兼容）：先停止 `ugripper.service`，复用校准黄灯快闪态（`CALIB_RUN`）并至少保持 2 秒，全部导入成功后复用校准完成绿灯态（`CALIB_DONE`）1 秒，仅重启一次 `ugripper.service`。
+- 若导入阶段存在失败，会改为红灯错误态（`ERROR_1`）闪烁提示，再重启 `ugripper.service`。
 - `run_record.sh` 使用 `CAMERA_CODEC` 驱动三路相机编码参数。
 - `fays_record_example` 直接读取 `/etc/environment` 的 `CAMERA_CODEC`，不依赖进程继承环境变量。
 - `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音：`en` 优先 `audio_en/`，文件缺失时回退 `audio/`。
