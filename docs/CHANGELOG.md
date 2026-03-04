@@ -1,5 +1,9 @@
 # Changelog
 
+## v1.1.10 - 2026-03-04
+- `led_manager.py` 将 `READY` 呼吸灯与 `RECORDING` 闪灯改为基于系统时间相位驱动，左右夹爪在系统时间同步后可保持同相灯效。
+- `READY` 呼吸灯改为低开销三角波（整数运算），替代 `sin` 计算，降低常驻 CPU 开销。
+
 ## v1.1.9 - 2026-03-02
 - Fays 端口策略改为固定 symlink：`run_fays_record.sh` 不再扫描 `/dev/video*` 并动态改写 yaml，启动前仅校验 `/dev/fays_stereo` 与 `/dev/fays_imu`。
 - `fays_vikit.yaml` 固定为 `stereo_dev_port=/dev/fays_stereo`、`imu_dev_port=/dev/fays_imu`，避免热插拔后 `videoN` 漂移导致录制空文件。

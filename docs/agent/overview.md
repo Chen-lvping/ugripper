@@ -60,7 +60,9 @@
 
 ## 6. 状态与告警
 - LED 状态：`INIT`、`READY`、`RECORDING`、`ERROR_1~ERROR_5`。
-- `RECORDING`：1Hz 绿色闪烁。
+- `READY`：绿色呼吸灯（约 3 秒周期，基于系统时间相位）。
+- `RECORDING`：1Hz 绿色闪烁（基于系统时间相位）。
+- 左右臂系统时间同步后，`READY/RECORDING` 灯效可保持同相。
 - 错误等级：`ERROR_1`（数据完整性）到 `ERROR_5`（运行时错误）。
 
 ## 7. 构建与打包

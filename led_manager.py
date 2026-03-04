@@ -1,9 +1,7 @@
 #!/usr/bin/env python3
 import os
 import time
-import math
 import sys
-import select
 import errno
 import signal
 
@@ -15,6 +13,10 @@ PWM_CONFIG = {
 }
 PWM_BASE_PATH = "/sys/class/pwm"
 PIPE_PATH = "/tmp/umi_led_pipe"  # 通信管道路径
+
+READY_BREATH_PERIOD_MS = 3000
+RECORDING_BLINK_PERIOD_MS = 1000
+RECORDING_BLINK_ON_MS = 500
 
 
 class PwmChannel:
@@ -44,7 +46,7 @@ class PwmChannel:
         try:
             with open(path, "w") as f:
                 f.write(str(value))
-        except OSError as e:
+        except OSError:
             pass
 
     def _export_channel(self):
@@ -83,8 +85,8 @@ class PwmChannel:
 
     def shutdown(self):
         try:
-            self.set_level(0) # 关灯
-        except:
+            self.set_level(0)  # 关灯
+        except Exception:
             pass
 
 
@@ -213,10 +215,10 @@ class LedStateMachine:
             try:
                 os.close(self.pipe_fd)
                 self.pipe_fd = None
-            except:
+            except Exception:
                 pass
-        
-        if hasattr(self, 'led'):
+
+        if hasattr(self, "led"):
             self.led.close()
 
     def get_error_level(self):
@@ -234,6 +236,25 @@ class LedStateMachine:
                 pass
 
         return 5
+
+    def current_epoch_ms(self):
+        return time.time_ns() // 1_000_000
+
+    def ready_brightness_u8(self, now_ms):
+        # 用系统时间做三角波，左右系统时钟同步后可保持同相。
+        phase_ms = now_ms % READY_BREATH_PERIOD_MS
+        half_ms = READY_BREATH_PERIOD_MS // 2
+
+        if phase_ms < half_ms:
+            level = (phase_ms * 255) // half_ms
+        else:
+            level = ((READY_BREATH_PERIOD_MS - phase_ms) * 255) // half_ms
+
+        if level < 0:
+            return 0
+        if level > 255:
+            return 255
+        return level
 
     def render_error_pattern(self, t):
         """
@@ -277,21 +298,20 @@ class LedStateMachine:
     def update_effect(self):
         """根据当前状态渲染灯效"""
         t = self.tick
+        now_ms = self.current_epoch_ms()
 
         if self.state == "INIT":
             # 蓝色常亮
             self.led.set_rgb(0, 122, 255)
 
         elif self.state == "READY":
-            # 绿色呼吸 (周期约 3秒)
-            # 使用 sin 函数生成 0.0 到 1.0 的平滑曲线
-            brightness = (math.sin(t * 0.04) + 1) / 2
-
-            self.led.set_scaled_rgb(0, 255, 20, brightness)
+            # 绿色呼吸（周期约 3 秒），使用系统时间相位 + 整数运算降低开销。
+            level = self.ready_brightness_u8(now_ms)
+            self.led.set_rgb(0, level, (20 * level) // 255)
 
         elif self.state == "RECORDING":
-            # 录制中：绿色闪烁（1Hz）
-            if (t % 50) < 25:
+            # 录制中：绿色闪烁（1Hz），基于系统时间相位。
+            if (now_ms % RECORDING_BLINK_PERIOD_MS) < RECORDING_BLINK_ON_MS:
                 self.led.set_rgb(0, 255, 0)
             else:
                 self.led.set_rgb(0, 0, 0)
@@ -331,15 +351,17 @@ class LedStateMachine:
 # ================= 全局实例与信号处理 =================
 app = None
 
+
 def signal_handler(signum, frame):
     """处理系统信号 (SIGINT, SIGTERM)"""
     sig_name = "SIGTERM" if signum == signal.SIGTERM else "SIGINT"
     print(f"\nReceived signal: {sig_name}. Shutting down...")
-    
+
     if app:
         app.cleanup()
-    
+
     sys.exit(0)
+
 
 if __name__ == "__main__":
     signal.signal(signal.SIGINT, signal_handler)
