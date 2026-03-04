@@ -27,15 +27,64 @@ DEVICE_SN_LOWER="${DEVICE_SN,,}"
 DATA_ROOT="/mnt/data_disk/${DEVICE_SN_LOWER:-noname_device}" 
 
 # --- 网络配置 (双臂协同) ---
-# 通过环境变量/etc/environment获取当前设备角色，默认为 Right (Master)
+# DEVICE_SIDE：物理左右；DEVICE_ROLE：控制角色（master/slave）
 DEVICE_SIDE="$(get_env_value "DEVICE_SIDE" || true)"
-
-CURRENT_SIDE=${DEVICE_SIDE:-Right}
+CURRENT_SIDE="${DEVICE_SIDE:-Right}"
 CURRENT_SIDE_LOWER="${CURRENT_SIDE,,}"
+
+if [ "$CURRENT_SIDE_LOWER" != "left" ] && [ "$CURRENT_SIDE_LOWER" != "right" ]; then
+    echo "[WARNING]:Invalid DEVICE_SIDE='$CURRENT_SIDE', fallback to Right."
+    CURRENT_SIDE="Right"
+    CURRENT_SIDE_LOWER="right"
+fi
+
+DEVICE_ROLE="$(get_env_value "DEVICE_ROLE" || true)"
+CURRENT_ROLE_LOWER="${DEVICE_ROLE,,}"
+
+if [ -z "$CURRENT_ROLE_LOWER" ]; then
+    # 兼容旧配置：未设置 DEVICE_ROLE 时，沿用 Right=Master / Left=Slave
+    if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
+        CURRENT_ROLE_LOWER="master"
+    else
+        CURRENT_ROLE_LOWER="slave"
+    fi
+fi
+
+if [ "$CURRENT_ROLE_LOWER" != "master" ] && [ "$CURRENT_ROLE_LOWER" != "slave" ]; then
+    echo "[WARNING]:Invalid DEVICE_ROLE='$DEVICE_ROLE', fallback by DEVICE_SIDE."
+    if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
+        CURRENT_ROLE_LOWER="master"
+    else
+        CURRENT_ROLE_LOWER="slave"
+    fi
+fi
+
+IS_MASTER=false
+if [ "$CURRENT_ROLE_LOWER" == "master" ]; then
+    IS_MASTER=true
+fi
 
 IP_RIGHT="192.168.1.100"
 IP_LEFT="192.168.1.101"
 SYNC_PORT=12345
+
+if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
+    LOCAL_IP="$IP_RIGHT"
+    PEER_SIDE_LOWER="left"
+    SYNC_TARGET_IP="$IP_LEFT"
+else
+    LOCAL_IP="$IP_LEFT"
+    PEER_SIDE_LOWER="right"
+    SYNC_TARGET_IP="$IP_RIGHT"
+fi
+
+if [ "$IS_MASTER" = true ]; then
+    MASTER_SIDE_LOWER="$CURRENT_SIDE_LOWER"
+    MASTER_IP="$LOCAL_IP"
+else
+    MASTER_SIDE_LOWER="$PEER_SIDE_LOWER"
+    MASTER_IP="$SYNC_TARGET_IP"
+fi
 
 # --- LED 控制配置 ---
 LED_SCRIPT="./led_manager.py"
@@ -215,9 +264,9 @@ fi
 # 创建临时音频目录
 mkdir -p "$AUDIO_TEMP_DIR"
 
-# ================= GPIO 启动有效性检查 (仅 Right 需要) =================
-if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
-    echo "[INFO]:Pre-check GPIO validity for Master (Right)..."
+# ================= GPIO 启动有效性检查 (仅 Master 需要) =================
+if [ "$IS_MASTER" = true ]; then
+    echo "[INFO]:Pre-check GPIO validity for Master (${CURRENT_SIDE_LOWER^^})..."
 
     gpio_error_reported=false
     last_gpio_error_msg=""
@@ -414,7 +463,7 @@ cat <<EOF > "$META_FILE"
     "device_model": "ugripper",
     "device_id": "${DEVICE_SN}",
     "collector": "default_user",
-    "device_side": "${DEVICE_SIDE:-Right}",
+    "device_side": "${CURRENT_SIDE}",
     "data_path": "data/episode_{date:08d}_{episode_index:04d}"
 }
 EOF
@@ -567,9 +616,9 @@ refresh_runtime_calibration() {
 refresh_runtime_calibration
 
 # ================= GPIO 初始化说明 =================
-# Right 侧 GPIO 已在启动阶段完成有效性检查与初始化；Left 侧无需按键 GPIO。
-if [ "$CURRENT_SIDE_LOWER" != "right" ]; then
-    echo "[INFO]:GPIO initialization skipped for Slave (Left)."
+# Master 侧 GPIO 已在启动阶段完成有效性检查与初始化；Slave 侧无需按键 GPIO。
+if [ "$IS_MASTER" != true ]; then
+    echo "[INFO]:GPIO initialization skipped for Slave role (${CURRENT_SIDE_LOWER})."
 fi
 
 # ================= 函数定义 =================
@@ -616,11 +665,11 @@ monitor_system_health() {
         fi
     fi
 
-    # 对端连接
-    if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
-        if ! ping -c 1 -W 1 "$IP_RIGHT" >/dev/null 2>&1; then
+    # 对端连接（仅 Slave 角色检查 Master 可达性）
+    if [ "$IS_MASTER" != true ]; then
+        if ! ping -c 1 -W 1 "$MASTER_IP" >/dev/null 2>&1; then
             has_error=true
-            error_msg+=" Right device unreachable;"
+            error_msg+=" Master device unreachable;"
             if [ "$error_rank" -gt 3 ]; then
                 error_state="$ERROR_NET_SYNC"
                 error_rank=3
@@ -671,7 +720,7 @@ monitor_system_health() {
     # ===============================
     # 3. 无 ERROR → 检查 PTP 同步
     # ===============================
-    if [ "$CURRENT_SIDE_LOWER" == "left" ] && [ -f "/dev/shm/umi_ptp_status" ]; then
+    if [ "$IS_MASTER" != true ] && [ -f "/dev/shm/umi_ptp_status" ]; then
         ptp_state=$(jq -r '.state // "UNKNOWN"' /dev/shm/umi_ptp_status)
         ptp_offset=$(jq -r '.offset // 0' /dev/shm/umi_ptp_status | awk '{print ($1<0)?-$1:$1}')
 
@@ -750,11 +799,11 @@ send_network_command() {
     local arg=$2
     local payload="${cmd}|${arg}"
 
-    # 只发送，不在主流程等待 Left 响应/连接结果。
+    # 只发送，不在主流程等待对端响应/连接结果。
     (
-        printf "%s\n" "$payload" | nc "$IP_LEFT" "$SYNC_PORT" >/dev/null 2>&1 || true
+        printf "%s\n" "$payload" | nc "$SYNC_TARGET_IP" "$SYNC_PORT" >/dev/null 2>&1 || true
     ) &
-    echo "Sent to Left (async): ${payload}"
+    echo "Sent to peer (${PEER_SIDE_LOWER}) (async): ${payload}"
 }
 
 # 函数：计算新路径并创建文件夹
@@ -897,9 +946,9 @@ mark_paired_master_sn_to_info() {
 
 # 函数：启动音频录制
 record_audio() {
-    # 如果是 Left (Slave)，直接禁用录音功能
-    if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
-        echo "[INFO]:Audio recording disabled on Slave (Left) side."
+    # Slave 角色不录制语音
+    if [ "$IS_MASTER" != true ]; then
+        echo "[INFO]:Audio recording disabled on Slave role (${CURRENT_SIDE_LOWER})."
         return
     fi
 
@@ -1406,8 +1455,8 @@ start_recording() {
     # 2.2 录制开始时，将 metadata/calibration 写入当前 episode 目录
     prepare_episode_manifest_files "$TARGET_DIR"
     
-    # 3. 如果是 Master，需要通知 Slave
-    if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
+    # 3. 如果是 Master，需要通知对端 Slave
+    if [ "$IS_MASTER" = true ]; then
         # 获取纯文件夹名
         local dirname=$(basename "$TARGET_DIR")
         local master_sn="${DEVICE_SN:-unknown_master_sn}"
@@ -1416,7 +1465,7 @@ start_recording() {
     fi
 
     # 4. 处理预录制音频 (仅 Master)
-    if [ "$CURRENT_SIDE_LOWER" == "right" ] && [ -n "$PRE_AUDIO_FILE" ] && [ -f "$PRE_AUDIO_FILE" ]; then
+    if [ "$IS_MASTER" = true ] && [ -n "$PRE_AUDIO_FILE" ] && [ -f "$PRE_AUDIO_FILE" ]; then
         mv "$PRE_AUDIO_FILE" "$TARGET_DIR/audio_pre.wav"
         PRE_AUDIO_FILE=""
     fi
@@ -1711,12 +1760,12 @@ validate_recording() {
 # 函数：停止所有录制进程
 stop_recording() {
     # 1. 如果是 Master，先通知 Slave 停止
-    if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
+    if [ "$IS_MASTER" = true ]; then
         send_network_command "STOP" "0"
     fi
 
     time_stamp=$(date +"%Y-%m-%d %H:%M:%S")
-    echo "[INFO]:Recording stopping at: $time_stamp on $CURRENT_SIDE_LOWER"
+    echo "[INFO]:Recording stopping at: $time_stamp on role=$CURRENT_ROLE_LOWER side=$CURRENT_SIDE_LOWER"
 
     # 先默认回 READY，如果校验失败，校验函数会覆盖为 ERROR
     set_state "READY"
@@ -1918,7 +1967,7 @@ cleanup() {
 # 注意：增加 EXIT 捕获可以确保脚本因任何原因退出时都尝试关灯
 trap cleanup SIGINT SIGTERM EXIT
 
-# ================= 逻辑分流：Master (Right) vs Slave (Left) =================
+# ================= 逻辑分流：Master vs Slave =================
 if is_fays_ftdi_present; then
     FAYS_ENABLED=true
     FAYS_USB_PRESENT=true
@@ -1936,13 +1985,13 @@ monitor_loop &        # 后台运行硬件监控（含 Fays 在位缓存刷新�
 MONITOR_PID=$!
 echo "[INFO]:Hardware monitor PID: $MONITOR_PID"
 
-if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
-    # ================= Slave (Left) 逻辑 =================
+if [ "$IS_MASTER" != true ]; then
+    # ================= Slave 逻辑 =================
     echo "=========================================="
-    echo "RUNNING AS SLAVE (LEFT)"
+    echo "RUNNING AS SLAVE (${CURRENT_SIDE_LOWER^^})"
     #echo " - Physical buttons DISABLED"
     #echo " - Audio recording DISABLED"
-    echo " - Waiting for commands from RIGHT ($IP_RIGHT)..."
+    echo " - Waiting for commands from MASTER (${MASTER_SIDE_LOWER^^}, $MASTER_IP)..."
     echo "=========================================="
 
     set_state "READY"
@@ -1991,10 +2040,10 @@ if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
     done
 
 else
-    # ================= Master (Right) 逻辑 =================
+    # ================= Master 逻辑 =================
     echo "=========================================="
-    echo "RUNNING AS MASTER (RIGHT)"
-    #echo " - Up click: Start/Stop data recording (syncs Left)"
+    echo "RUNNING AS MASTER (${CURRENT_SIDE_LOWER^^})"
+    #echo " - Up click: Start/Stop data recording (syncs peer)"
     #echo " - Up long press: Record pre-annotation audio"
     #echo " - Down long press: Record post-annotation audio"
     #echo " - Both long press: System shutdown"

@@ -4,7 +4,7 @@
 
 ## 1. 系统概览
 - **目标**：在 Radxa 嵌入式平台上可靠同步录制视觉、触觉、FaysSense 双目、IMU、编码器等多模态数据，并提供现场 LED/音频反馈。
-- **运行角色**：双臂协同（Right=主控, Left=从控）。右臂负责按键交互、音频提示，并驱动左臂同步录制。
+- **运行角色**：双臂协同，物理侧与控制角色解耦。`DEVICE_SIDE` 表示物理 `left/right`，`DEVICE_ROLE` 表示控制角色 `master/slave`（未配置时兼容旧逻辑：Right=Master、Left=Slave）。
 - **部署形态**：脚本、C++ 二进制和资源打包到 `/opt/ugripper`，通过 systemd 与 udev 触发器驱动；数据写入 `/mnt/data_disk/<device_id>/`。
 
 ## 2. 核心运行组件
@@ -33,18 +33,18 @@
 
 编排要点：
 - `run_record.sh` 启动后先检测 FTDI：存在则拉起 Fays daemon；缺失则持续 `ERROR_2` 报错并等待恢复（服务不退出）。检测依据为 udev 固定映射的 `/dev/fays_stereo` 与 `/dev/fays_imu`。
-- Right 侧 `start_recording()` 会先向 Left 发送 `START|<episode_dir>|<master_sn>`，Left 在本次 episode 内记录该 `master_sn`。
+- Master 侧 `start_recording()` 会先向 Slave 发送 `START|<episode_dir>|<master_sn>`，Slave 在本次 episode 内记录该 `master_sn`。
 - `stop_recording()` 仅在本次 Fays 会话 active 时发送 `STOP`，停止 `PID_CAM` 与 `PID_SENSOR`，Fays 进程保持常驻。
 - `cleanup()` 才发送 `EXIT` 关闭 Fays 常驻进程。
 - 录制后校验固定覆盖 `cam/tact` 视频与 `sensor_data.mcap`；若本次 episode 期望 Fays 数据，再校验 `fays_stereo_output.mkv` 与 `fays_data.mcap`。时长一致性阈值统一为 5 秒：`cam` vs `fays`（仅判定 Fays 不可短于 cam 超阈值）与 `tact_left/right` vs `sensor_data.mcap`（绝对误差）。
 
-### 2.3 Right/Left 协同控制
+### 2.3 Master/Slave 协同控制
 - 通信：TCP `12345` 端口。
 - 指令：`START|episode_xxxx|master_sn` / `STOP|0`。
-- 机制：Right 侧发送指令，Left 侧 `nc -l -p 12345` 监听后执行本地 `start_recording/stop_recording`，并在停录后将 `paired_master_sn` 写入当前 episode 的 `info.json`。
+- 机制：Master 侧发送指令，Slave 侧 `nc -l -p 12345` 监听后执行本地 `start_recording/stop_recording`，并在停录后将 `paired_master_sn` 写入当前 episode 的 `info.json`。
 
 ### 2.4 反馈与状态通道
-- `led_manager.py`：监听 `/tmp/umi_led_pipe`，呈现 `INIT/READY/RECORDING/ERROR/EXIT`。
+- `led_manager.py`：监听 `/tmp/umi_led_pipe`，呈现 `INIT/READY/RECORDING/ERROR/EXIT` 与 `CALIB_PRE/CALIB_RUN/CALIB_DONE`。
 - `audio/audio_play.py`：监听 `/tmp/umi_audio_pipe`，播放提示音。
 - `run_record.sh` 与校准流程均通过 FIFO 向 LED/AUDIO 发状态，形成跨进程低耦合通信。
 
@@ -69,7 +69,8 @@
 ### 3.3 自动更新与自愈
 - `auto_update/99-usb-auto-update.rules` + `usb-auto-update@.service`：U 盘插入自动触发统一入口脚本（先判定 `calibration.txt` 是否触发校准，再进入升级逻辑）。
 - 升级窗口内 `usb_auto_update.sh` 会创建 `/run/ugripper_installing_from_usb.lock`，暂停 network monitor，并在结束后恢复。
-- `usb_auto_update.sh` 挂载后会读取升级盘根目录 `config.txt`：`LANGUAGE/VOICE_LANG` 写入 `UGRIPPER_LANG`（`zh|en`）供音频播报语言选择；`CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC` 写入 `CAMERA_CODEC`（`h264|h265`）供 triple camera 与 Fays 编码选择。
+- `usb_auto_update.sh` 挂载后会读取升级盘根目录 `config.txt`：`LANGUAGE/VOICE_LANG` 写入 `UGRIPPER_LANG`（`zh|en`）；`CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC` 写入 `CAMERA_CODEC`（`h264|h265`）；`DEVICE_ROLE/ROLE` 写入 `DEVICE_ROLE`（`master|slave`）。
+- 配置写入时序：先停止 `ugripper.service`，启动独立 LED helper，进入 `CALIB_RUN` 黄灯快闪并至少持续 2 秒，随后 `CALIB_DONE` 绿灯完成态 1 秒，再重启 `ugripper.service`。
 - `auto_update/boot_check_install.sh` + `ugripper-boot-install.service`：开机先比较 `/opt/backup` 中 `ugripper-usb-updater` 版本并在更高时先升级 updater，再检查 `ugripper` 是否缺失/异常并执行自恢复。
 
 ### 3.4 关机权限隔离

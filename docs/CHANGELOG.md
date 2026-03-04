@@ -6,6 +6,9 @@
 - `run_record.sh` 扩展主从启动指令为 `START|episode_xxxx|master_sn`，Master 触发录制时会附带本机 `DEVICE_SN`。
 - Left 侧录制流程不限制 Master SN，接收到任意 `master_sn` 均作为本次配对来源。
 - Left 停录后会向当前 episode 的 `info.json` 写入 `paired_master_sn`，用于后处理追溯主从配对关系。
+- 新增 `DEVICE_ROLE` 配置：`run_record.sh` 支持按 `master/slave` 角色分流控制逻辑，解耦物理侧 `DEVICE_SIDE` 与主从角色，允许 Left 设备作为 Master。
+- `usb_auto_update.sh` 新增 `config.txt` 键 `DEVICE_ROLE/ROLE`（值 `master|slave`），识别后写入 `/etc/environment` 的 `DEVICE_ROLE`。
+- 配置应用流程增强：更新 `config.txt` 时先停止 `ugripper.service`，复用 `CALIB_RUN` 黄灯快闪至少 2 秒，随后 `CALIB_DONE` 绿灯完成态 1 秒，再重启 `ugripper.service`。
 
 ## v1.1.9 - 2026-03-02
 - Fays 端口策略改为固定 symlink：`run_fays_record.sh` 不再扫描 `/dev/video*` 并动态改写 yaml，启动前仅校验 `/dev/fays_stereo` 与 `/dev/fays_imu`。

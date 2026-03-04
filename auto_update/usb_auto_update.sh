@@ -22,6 +22,12 @@ NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 ENFORCE_BY_PATH="0"   # 1=强制校验；0=不校验
 # ===========================================
 
+SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+LED_SCRIPT="$SCRIPT_ROOT/led_manager.py"
+LED_PIPE="/tmp/umi_led_pipe"
+LED_RUN_USER="radxa"
+PID_LED_SHELL=""
+
 mkdir -p "$(dirname "$LOG_FILE")"
 
 IN_UPGRADE_WINDOW=0
@@ -79,6 +85,32 @@ normalize_camera_codec() {
   case "$normalized" in
     h264|h265)
       printf '%s' "$normalized"
+      return 0
+      ;;
+  esac
+
+  return 1
+}
+
+normalize_device_role() {
+  local raw="$1"
+  local normalized
+
+  normalized="$(trim_text "$raw")"
+  normalized="${normalized#\"}"
+  normalized="${normalized%\"}"
+  normalized="${normalized#\'}"
+  normalized="${normalized%\'}"
+  normalized="$(trim_text "$normalized")"
+  normalized="${normalized,,}"
+
+  case "$normalized" in
+    master|m)
+      printf 'master'
+      return 0
+      ;;
+    slave|s)
+      printf 'slave'
       return 0
       ;;
   esac
@@ -160,6 +192,43 @@ parse_camera_codec_from_config() {
   return 1
 }
 
+parse_device_role_from_config() {
+  local config_file="$1"
+  local line key value role
+
+  [ -f "$config_file" ] || return 1
+
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="$(trim_text "$line")"
+    [ -z "$line" ] && continue
+
+    case "$line" in
+      \#*|\;*)
+        continue
+        ;;
+    esac
+
+    if [ "${line#*=}" = "$line" ]; then
+      continue
+    fi
+
+    key="$(trim_text "${line%%=*}")"
+    value="$(trim_text "${line#*=}")"
+    key="${key,,}"
+
+    case "$key" in
+      device_role|role)
+        if role="$(normalize_device_role "$value")"; then
+          printf '%s' "$role"
+          return 0
+        fi
+        ;;
+    esac
+  done < "$config_file"
+
+  return 1
+}
+
 set_ugripper_language() {
   local lang="$1"
   local env_file="/etc/environment"
@@ -228,6 +297,40 @@ set_camera_codec() {
   return 0
 }
 
+set_device_role() {
+  local role="$1"
+  local env_file="/etc/environment"
+  local env_key="DEVICE_ROLE"
+  local env_line="${env_key}=${role}"
+
+  if [ ! -e "$env_file" ]; then
+    if ! printf '%s\n' "$env_line" > "$env_file"; then
+      log "写入 $env_file 失败，设备角色设置未生效。"
+      return 1
+    fi
+    export DEVICE_ROLE="$role"
+    log "已创建 $env_file 并写入 $env_line"
+    return 0
+  fi
+
+  if grep -qE "^${env_key}=" "$env_file"; then
+    if ! sed -i -E "s|^${env_key}=.*$|${env_line}|" "$env_file"; then
+      log "更新 $env_file 中 ${env_key} 失败。"
+      return 1
+    fi
+    log "已更新 $env_file 中 ${env_key}=${role}"
+  else
+    if ! printf '\n%s\n' "$env_line" >> "$env_file"; then
+      log "追加 ${env_key} 到 $env_file 失败。"
+      return 1
+    fi
+    log "已追加 $env_line 到 $env_file"
+  fi
+
+  export DEVICE_ROLE="$role"
+  return 0
+}
+
 stop_service_fast() {
   local service_name="$1"
   local timeout_sec="${2:-6}"
@@ -255,6 +358,62 @@ stop_record_stack_fast() {
   fi
 
   rm -f /tmp/umi_audio_pipe /tmp/umi_led_pipe /tmp/umi_recording.lock || true
+}
+
+kill_tree() {
+  local pid="$1"
+  local child=""
+
+  [ -n "$pid" ] || return 0
+
+  for child in $(pgrep -P "$pid" 2>/dev/null || true); do
+    kill_tree "$child"
+  done
+
+  if kill -0 "$pid" >/dev/null 2>&1; then
+    kill -TERM "$pid" >/dev/null 2>&1 || true
+    sleep 0.05
+    kill -KILL "$pid" >/dev/null 2>&1 || true
+  fi
+}
+
+start_led_helper() {
+  if [ ! -f "$LED_SCRIPT" ]; then
+    log "LED 脚本不存在：$LED_SCRIPT，跳过配置灯效。"
+    return 1
+  fi
+
+  rm -f "$LED_PIPE"
+  mkfifo "$LED_PIPE"
+  chmod 666 "$LED_PIPE"
+
+  if id "$LED_RUN_USER" >/dev/null 2>&1; then
+    runuser -u "$LED_RUN_USER" -- bash -lc "uv run '$LED_SCRIPT'" >/dev/null 2>&1 &
+  else
+    uv run "$LED_SCRIPT" >/dev/null 2>&1 &
+  fi
+
+  PID_LED_SHELL=$!
+  sleep 0.3
+  return 0
+}
+
+set_led_state() {
+  local state="$1"
+
+  if [ ! -p "$LED_PIPE" ]; then
+    return 1
+  fi
+
+  timeout 0.2 bash -c 'printf "%s\n" "$1" > "$2"' _ "$state" "$LED_PIPE" >/dev/null 2>&1 || true
+}
+
+stop_led_helper() {
+  if [ -n "$PID_LED_SHELL" ]; then
+    kill_tree "$PID_LED_SHELL"
+    PID_LED_SHELL=""
+  fi
+  rm -f "$LED_PIPE" || true
 }
 
 enter_upgrade_window() {
@@ -294,10 +453,85 @@ restart_ugripper_if_needed() {
   return 1
 }
 
+apply_config_with_led_feedback() {
+  local cfg_lang="$1"
+  local cfg_codec="$2"
+  local cfg_role="$3"
+  local yellow_start_ts=0
+  local yellow_elapsed=0
+  local config_applied=0
+
+  enter_upgrade_window
+  stop_record_stack_fast
+
+  if ! start_led_helper; then
+    log "LED helper 启动失败，将继续执行配置写入。"
+  fi
+
+  yellow_start_ts=$(date +%s)
+  # 复用校准灯效：CALIB_RUN 为黄灯快闪
+  set_led_state "CALIB_RUN"
+
+  if [ -n "$cfg_lang" ]; then
+    if set_ugripper_language "$cfg_lang"; then
+      log "已应用语言配置：UGRIPPER_LANG=$cfg_lang"
+      config_applied=1
+    else
+      log "语言配置写入失败。"
+    fi
+  fi
+
+  if [ -n "$cfg_codec" ]; then
+    if set_camera_codec "$cfg_codec"; then
+      log "已应用编码器配置：CAMERA_CODEC=$cfg_codec"
+      config_applied=1
+    else
+      log "编码器配置写入失败。"
+    fi
+  fi
+
+  if [ -n "$cfg_role" ]; then
+    if set_device_role "$cfg_role"; then
+      log "已应用设备角色配置：DEVICE_ROLE=$cfg_role"
+      config_applied=1
+    else
+      log "设备角色配置写入失败。"
+    fi
+  fi
+
+  yellow_elapsed=$(( $(date +%s) - yellow_start_ts ))
+  if [ "$yellow_elapsed" -lt 2 ]; then
+    sleep $((2 - yellow_elapsed))
+  fi
+
+  # 复用校准灯效：CALIB_DONE 为绿灯完成态
+  set_led_state "CALIB_DONE"
+  sleep 1
+  stop_led_helper
+
+  if [ "$config_applied" -ne 1 ]; then
+    log "配置项未成功写入，仍尝试重启服务恢复运行。"
+  fi
+
+  log "配置写入完成，重启 ugripper.service。"
+  if systemctl restart ugripper.service >/dev/null 2>&1; then
+    log "ugripper.service 重启成功。"
+    NEED_UGRIPPER_RESTART=0
+    if [ "$config_applied" -eq 1 ]; then
+      return 0
+    fi
+    return 1
+  fi
+
+  log "ugripper.service 重启失败。"
+  return 1
+}
+
 cleanup() {
   if mountpoint -q "$MOUNT_POINT"; then
     umount "$MOUNT_POINT" || true
   fi
+  stop_led_helper
   leave_upgrade_window
 }
 trap cleanup EXIT
@@ -357,32 +591,37 @@ fi
 
 CONFIG_FILE="$MOUNT_POINT/config.txt"
 if [ -f "$CONFIG_FILE" ]; then
-  log "检测到 config.txt，检查语言与编码器配置。"
+  log "检测到 config.txt，检查语言/编码器/设备角色配置。"
   CONFIG_LANG="$(parse_language_from_config "$CONFIG_FILE" || true)"
   if [ -n "$CONFIG_LANG" ]; then
-    if set_ugripper_language "$CONFIG_LANG"; then
-      log "已应用语言配置：UGRIPPER_LANG=$CONFIG_LANG"
-      NEED_UGRIPPER_RESTART=1
-    else
-      log "语言配置写入失败，继续后续流程。"
-    fi
+    log "解析到语言配置：UGRIPPER_LANG=$CONFIG_LANG"
   else
     log "config.txt 未找到有效语言设置（支持 LANGUAGE/VOICE_LANG，值为 zh/en），跳过。"
   fi
 
   CONFIG_CAMERA_CODEC="$(parse_camera_codec_from_config "$CONFIG_FILE" || true)"
   if [ -n "$CONFIG_CAMERA_CODEC" ]; then
-    if set_camera_codec "$CONFIG_CAMERA_CODEC"; then
-      log "已应用编码器配置：CAMERA_CODEC=$CONFIG_CAMERA_CODEC"
-      NEED_UGRIPPER_RESTART=1
-    else
-      log "编码器配置写入失败，继续后续流程。"
-    fi
+    log "解析到编码器配置：CAMERA_CODEC=$CONFIG_CAMERA_CODEC"
   else
     log "config.txt 未找到有效编码器设置（支持 CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC，值为 h264/h265），跳过。"
   fi
+
+  CONFIG_DEVICE_ROLE="$(parse_device_role_from_config "$CONFIG_FILE" || true)"
+  if [ -n "$CONFIG_DEVICE_ROLE" ]; then
+    log "解析到设备角色配置：DEVICE_ROLE=$CONFIG_DEVICE_ROLE"
+  else
+    log "config.txt 未找到有效设备角色设置（支持 DEVICE_ROLE/ROLE，值为 master/slave），跳过。"
+  fi
+
+  if [ -n "$CONFIG_LANG" ] || [ -n "$CONFIG_CAMERA_CODEC" ] || [ -n "$CONFIG_DEVICE_ROLE" ]; then
+    if ! apply_config_with_led_feedback "$CONFIG_LANG" "$CONFIG_CAMERA_CODEC" "$CONFIG_DEVICE_ROLE"; then
+      log "配置更新流程存在失败项，继续后续流程。"
+    fi
+  else
+    log "config.txt 未检测到可应用配置，跳过配置写入与重启。"
+  fi
 else
-  log "未检测到 config.txt，跳过语言与编码器配置。"
+  log "未检测到 config.txt，跳过语言/编码器/设备角色配置。"
 fi
 
 # ========================================================

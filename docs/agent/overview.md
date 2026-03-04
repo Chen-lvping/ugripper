@@ -7,8 +7,10 @@
 - 数据根目录：`/mnt/data_disk/<device_sn>/data/episode_*`。
 
 ## 2. 角色分工（双臂）
-- Right（Master）：按键控制、音频提示、发网络命令给 Left。
-- Left（Slave）：监听 `START|episode_xxx|master_sn` / `STOP|0`，按命令同步录制。
+- `DEVICE_SIDE`：物理侧（`left|right`）。
+- `DEVICE_ROLE`：控制角色（`master|slave`，未配置时兼容旧逻辑：Right=Master、Left=Slave）。
+- Master：按键控制、音频提示、发网络命令给对端。
+- Slave：监听 `START|episode_xxx|master_sn` / `STOP|0`，按命令同步录制。
 - 同步端口：`12345`（`nc`）。
 
 ## 3. 主流程（`run_record.sh`）
@@ -16,15 +18,15 @@
  - 加载持久化标定文件：`/etc/ugripper/config/calibration/calibration.json`（缺失时回退 fake 模板）。
 2. 后台 `monitor_loop` 运行健康检查（约 50ms 一次）并维护错误灯效状态。
 3. `start_recording`：
-- Right 先下发网络 `START|<episode_dir>|<master_sn>` 给 Left。
+- Master 先下发网络 `START|<episode_dir>|<master_sn>` 给 Slave。
 - 开录前刷新一次持久化标定（支持 U 盘重复导入后立即生效）。
 - 将当前有效标定复制到 `episode/calibration.json`（Lerobot 风格）。
 - 可用时启动 Fays 当前 episode（`run_fays_record.sh start <dir>`）。
 - 启动三路相机：`camera_record/triple_camera_record.py --codec <h264|h265>`（从 `/etc/environment` 的 `CAMERA_CODEC` 加载，默认 `h264`）。
 - 启动传感器：`build/src/sensor_recorder/sensor_recorder`。
 4. `stop_recording`：
-- Right 下发 `STOP` 给 Left。
-- Left 在停录后会将本次配对到的 `master_sn` 写入当前 episode 的 `info.json.paired_master_sn`。
+- Master 下发 `STOP` 给 Slave。
+- Slave 在停录后会将本次配对到的 `master_sn` 写入当前 episode 的 `info.json.paired_master_sn`。
 - 停止 Fays 当前会话（daemon 保持常驻）。
 - 停止相机与传感器进程，落盘 `sync`，执行录制完整性校验。
 
@@ -90,12 +92,15 @@
 - PTP 状态：`/dev/shm/umi_ptp_status`
 - 开机自恢复日志：`/var/log/ugripper/boot_install.log`（先比较/升级 backup 中的 `ugripper-usb-updater`，再检查 `ugripper` 恢复）
 
-## 10. USB 升级语言与编码器配置
+## 10. USB 升级配置（语言/编码器/主从角色）
 - `auto_update/usb_auto_update.sh` 挂载升级 U 盘后会检查根目录 `config.txt`。
 - 支持配置键：`LANGUAGE`/`VOICE_LANG`（大小写不敏感），支持值：`zh|cn|chinese|中文` 与 `en|english`。
 - 识别成功后写入 `/etc/environment`：`UGRIPPER_LANG=<zh|en>`。
 - 支持编码器配置键：`CAMERA_CODEC`/`VIDEO_CODEC`/`TRIPLE_CAMERA_CODEC`/`CODEC`（大小写不敏感），支持值：`h264|h265`。
 - 编码器识别成功后写入 `/etc/environment`：`CAMERA_CODEC=<h264|h265>`。
+- 支持角色配置键：`DEVICE_ROLE`/`ROLE`（大小写不敏感），支持值：`master|slave`。
+- 角色识别成功后写入 `/etc/environment`：`DEVICE_ROLE=<master|slave>`。
+- 应用配置时序：先停止 `ugripper.service`，复用校准黄灯快闪态（`CALIB_RUN`）并至少保持 2 秒，随后复用校准完成绿灯态（`CALIB_DONE`）1 秒，再重启 `ugripper.service`。
 - `run_record.sh` 使用 `CAMERA_CODEC` 驱动三路相机编码参数。
 - `fays_record_example` 直接读取 `/etc/environment` 的 `CAMERA_CODEC`，不依赖进程继承环境变量。
 - `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音：`en` 优先 `audio_en/`，文件缺失时回退 `audio/`。
