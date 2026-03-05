@@ -1,5 +1,13 @@
 # Changelog
 
+## v1.1.12 - 2026-03-05
+- `sensor_recorder` 新增“开录首条 encoder 样本”日志：首次写入 encoder 数据时打印 `raw/rad/speed/timestamp`，便于快速确认编码器链路已工作。
+
+## v1.1.11 - 2026-03-05
+- `run_record.sh` 新增 Fays 开机启动防抖：若开机检测到 Fays，先延时 `FAYS_STARTUP_DELAY_SEC`（默认 3 秒）再拉起 daemon，降低上电早期枚举抖动带来的失败概率。
+- 新增低开销 Fays USB 速率检测：通过 sysfs `speed` 每秒刷新 `/dev/shm/umi_fays_usb_speed_mbps`，不做全量 USB 枚举。
+- health check 增强：Fays 在位但速率跌落到 `FAYS_USB_ERROR5_MBPS`（默认 480Mb/s）及以下时，上报 `ERROR_5`。
+
 ## v1.1.10 - 2026-03-04
 - `led_manager.py` 将 `READY` 呼吸灯与 `RECORDING` 闪灯改为基于系统时间相位驱动，左右夹爪在系统时间同步后可保持同相灯效。
 - `READY` 呼吸灯改为低开销三角波（整数运算），替代 `sin` 计算，降低常驻 CPU 开销。

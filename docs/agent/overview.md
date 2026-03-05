@@ -24,6 +24,7 @@
 - 可用时启动 Fays 当前 episode（`run_fays_record.sh start <dir>`）。
 - 启动三路相机：`camera_record/triple_camera_record.py --codec <h264|h265>`（从 `/etc/environment` 的 `CAMERA_CODEC` 加载，默认 `h264`）。
 - 启动传感器：`build/src/sensor_recorder/sensor_recorder`。
+- `sensor_recorder` 在录制开始后写入首条 encoder 样本时，会打印一次 `raw/rad/speed/timestamp` 到服务日志，便于现场快速确认编码器链路是否正常。
 4. `stop_recording`：
 - Master 下发 `STOP` 给 Slave。
 - Slave 在停录后会将本次配对到的 `master_sn` 写入当前 episode 的 `info.json.paired_master_sn`。
@@ -38,7 +39,10 @@
 
 ### 4.2 运行维护策略
 - 启动时若未检测到 FTDI，服务保持运行并持续报错（ERROR_2）；Fays 恢复后自动拉起 daemon。
+- 启动若检测到 Fays，会先延时 `FAYS_STARTUP_DELAY_SEC`（默认 3 秒）再启动 daemon，降低开机早期枚举抖动导致的异常。
 - FTDI 在位检测由 `run_record.sh` 直接检查 `/dev/fays_stereo` 与 `/dev/fays_imu`（由 udev 规则固定映射）并写入 `/dev/shm/umi_fays_present`。
+- 低开销链路速率检测：后台每秒刷新 `/dev/shm/umi_fays_usb_speed_mbps`（从 sysfs `speed` 读取，不做全量 USB 枚举）。
+- health check 会把 Fays USB 速率跌落到 `FAYS_USB_ERROR5_MBPS`（默认 480Mb/s）及以下判为 `ERROR_5`。
 - 运行中检测到 Fays 插入会自动拉起 daemon。
 - 录制中若 daemon 恢复，仅恢复就绪，不补发当前 episode 的 `START`。
 

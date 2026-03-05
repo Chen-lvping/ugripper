@@ -27,12 +27,13 @@
 | 模块 | 所在目录 | 启动方式 | 主要职责 | 主要输出 |
 | --- | --- | --- | --- | --- |
 | 三路相机录制 | `camera_record/triple_camera_record.py` | `uv run ... --codec <h264|h265> --output-dir <episode>` | 录制主摄 + 左右触觉视频并写时间戳 CSV；编码器由 `run_record.sh` 从 `/etc/environment` 的 `CAMERA_CODEC` 读取（默认 H264）。 | `cam.mkv`, `tact_left.mkv`, `tact_right.mkv`, 对应 `*.csv` |
-| FaysSense 常驻录制 | `faysSense_vi_kit/scripts/run_fays_record.sh` + `fays_record_example` | 检测到 FTDI 时启动 `daemon`，录制时 `start <episode>`，停止时 `stop` | Fays 作为可选设备：启动缺失不阻断主流程；运行中支持热插拔检测与 daemon 自动重连。视频编码器由 `fays_record_example` 直接读取 `/etc/environment` 的 `CAMERA_CODEC`（`h264_rkmpp`/`hevc_rkmpp`）。时间戳统一写入 `fays_data.mcap`：topic `i` 为 IMU，topic `c` 为相机时间戳；`logTime` 使用 Fays 时钟，`publishTime` 由 IMU 对齐到系统时钟。 | `fays_stereo_output.mkv`, `fays_data.mcap`（启用 Fays 时） |
+| FaysSense 常驻录制 | `faysSense_vi_kit/scripts/run_fays_record.sh` + `fays_record_example` | 检测到 FTDI 时启动 `daemon`，录制时 `start <episode>`，停止时 `stop` | 启动时支持延时拉起 daemon（默认 3 秒）以规避开机上电早期枚举抖动；运行中持续刷新 Fays 在位 + USB 速率缓存。若速率跌落到 480Mb/s（USB2）及以下，health check 置 `ERROR_5`。视频编码器由 `fays_record_example` 直接读取 `/etc/environment` 的 `CAMERA_CODEC`（`h264_rkmpp`/`hevc_rkmpp`）。时间戳统一写入 `fays_data.mcap`：topic `i` 为 IMU，topic `c` 为相机时间戳；`logTime` 使用 Fays 时钟，`publishTime` 由 IMU 对齐到系统时钟。 | `fays_stereo_output.mkv`, `fays_data.mcap`（启用 Fays 时） |
 | 统一传感器录制 | `src/sensor_recorder` | `./build/src/sensor_recorder/sensor_recorder <episode>` | 同时采集串口 IMU + 编码器，写统一 MCAP。 | `sensor_data.mcap` (`imu_raw`/`encoder`) |
 | Encoder 校准 | `src/sensor_recorder` | `./build/src/sensor_recorder/zeroing` | 执行编码器归零，供自动校准流程调用。 | 无（设备状态变更） |
 
 编排要点：
-- `run_record.sh` 启动后先检测 FTDI：存在则拉起 Fays daemon；缺失则持续 `ERROR_2` 报错并等待恢复（服务不退出）。检测依据为 udev 固定映射的 `/dev/fays_stereo` 与 `/dev/fays_imu`。
+- `run_record.sh` 启动后先检测 FTDI：存在则延时 `FAYS_STARTUP_DELAY_SEC`（默认 3 秒）后拉起 Fays daemon；缺失则持续 `ERROR_2` 报错并等待恢复（服务不退出）。检测依据为 udev 固定映射的 `/dev/fays_stereo` 与 `/dev/fays_imu`。
+- 后台监控每秒刷新 `/dev/shm/umi_fays_present` 与 `/dev/shm/umi_fays_usb_speed_mbps`，不做全量 USB 枚举；速率跌落到 `FAYS_USB_ERROR5_MBPS`（默认 480Mb/s）及以下时上报 `ERROR_5`。
 - Master 侧 `start_recording()` 会先向 Slave 发送 `START|<episode_dir>|<master_sn>`，Slave 在本次 episode 内记录该 `master_sn`。
 - `stop_recording()` 仅在本次 Fays 会话 active 时发送 `STOP`，停止 `PID_CAM` 与 `PID_SENSOR`，Fays 进程保持常驻。
 - `cleanup()` 才发送 `EXIT` 关闭 Fays 常驻进程。
@@ -101,7 +102,7 @@
 ### 4.2 配置注入
 - 主标定持久化：`/etc/ugripper/config/calibration/calibration.json`。`postinst` 仅首次缺失时用 `config/fakeCamCalib.json` 初始化，不覆盖已有文件。
 - 主相机/触觉配置：`run_record.sh` 在每次开录前读取持久化 `calibration.json`，动态替换主相机与触觉序列号占位符，再写入当前 episode 的 `calibration.json`。
-- FaysSense 配置：`run_fays_record.sh daemon` 阶段根据设备探测结果修改 `build/faysSense_vi_kit/config/fays_vikit.yaml`，后续录制阶段仅发送命令。
+- FaysSense 配置：`build/faysSense_vi_kit/config/fays_vikit.yaml` 使用固定 `/dev/fays_stereo` 与 `/dev/fays_imu`，`run_fays_record.sh` 启动前只做一致性校验，不动态改写配置文件。
 
 ### 4.3 状态文件与锁
 - `/tmp/umi_recording.lock`：录制锁，保护 NTP 与其他高风险操作。
@@ -109,6 +110,7 @@
 - `/tmp/umi_led_pipe`, `/tmp/umi_audio_pipe`：状态通知 FIFO。
 - `/tmp/umi_fays_cmd`：FaysSense 常驻进程命令 FIFO（`START|...`/`STOP`/`EXIT`）。
 - `/dev/shm/umi_fays_present`：Fays 在位缓存（`1/0`），由后台监控循环定期刷新。
+- `/dev/shm/umi_fays_usb_speed_mbps`：Fays USB 速率缓存（Mb/s），由后台监控循环定期刷新。
 - `/run/ugripper_installing_from_usb.lock`：升级保护锁。
 
 ## 5. 构建与打包链路（`build_deb.sh`）
