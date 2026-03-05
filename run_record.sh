@@ -106,6 +106,8 @@ DURATION_GAP_THRESHOLD_SEC=5.0          # 时长误差阈值（秒）
 FAYS_TAIL_CAM_CHECK_FRAMES=5            # Fays MCAP 末尾抽检的相机帧数
 FAYS_TAIL_IMU_LAG_THRESHOLD_SEC=1.0     # Fays 末尾 IMU 相对相机尾帧允许最大滞后（秒）
 VIDEO_SPAN_PROBE_TIMEOUT_SEC=1.2        # 视频跨度探测超时（秒）
+FAYS_STARTUP_DELAY_SEC="${FAYS_STARTUP_DELAY_SEC:-3}"            # 开机时 Fays daemon 启动前延时（秒）
+FAYS_USB_ERROR5_MBPS="${FAYS_USB_ERROR5_MBPS:-480}"              # Fays 链路跌落到该速率及以下时上报 ERROR_5
 
 # --- GPIO 配置 ---
 PIN_BTN_UP="PIN_36"      # 上按键（原有）
@@ -146,6 +148,7 @@ FAYS_LAST_MONITOR_TS=0                # Fays 热插拔监控节流时间戳（�
 CLEANUP_RUNNING=false                 # 防止 cleanup trap 重入
 LAST_MONITOR_ERROR_MSG=""             # 最近一次监控错误详情（用于去重日志）
 FAYS_PRESENT_CACHE_FILE="/dev/shm/umi_fays_present"  # Fays 在位检测缓存（1=在位，0=不在位）
+FAYS_USB_SPEED_CACHE_FILE="/dev/shm/umi_fays_usb_speed_mbps"  # Fays USB 速率缓存（Mb/s）
 MONITOR_PID=""
 RECORDING_LOCK_FILE="/tmp/umi_recording.lock" # 录制锁文件
 # ERROR 灯效分级定义（数字越小越严重）
@@ -164,6 +167,7 @@ ERROR_RUNTIME="ERROR_5"
 rm -f "$RECORDING_LOCK_FILE"
 rm -f "$SHUTDOWN_REQUEST_FILE"
 rm -f "$FAYS_PRESENT_CACHE_FILE"
+rm -f "$FAYS_USB_SPEED_CACHE_FILE"
 
 # PTP状态参数
 PTP_WAIT_START_TS=0
@@ -690,6 +694,17 @@ monitor_system_health() {
             error_state="$ERROR_HW_ABNORMAL"
             error_rank=2
         fi
+    else
+        local fays_usb_speed=""
+        fays_usb_speed="$(get_fays_usb_speed_mbps 2>/dev/null || true)"
+        if is_fays_usb_speed_error5 "$fays_usb_speed"; then
+            has_error=true
+            error_msg+=" Fays USB speed dropped to USB2 (<=${FAYS_USB_ERROR5_MBPS}Mb/s);"
+            if [ "$error_rank" -gt 5 ]; then
+                error_state="$ERROR_RUNTIME"
+                error_rank=5
+            fi
+        fi
     fi
 
     # ===============================
@@ -789,6 +804,7 @@ monitor_loop() {
         now_ts=$(date +%s)
         if [ "$now_ts" -ne "$last_probe_ts" ]; then
             refresh_fays_presence_cache
+            refresh_fays_usb_speed_cache
             last_probe_ts="$now_ts"
         fi
         monitor_system_health
@@ -1136,6 +1152,112 @@ is_fays_ftdi_present() {
         return
     fi
     detect_fays_ftdi_present_raw
+}
+
+resolve_fays_usb_sysfs_path_from_node() {
+    local dev_node="$1"
+    local dev_real=""
+    local video_name=""
+    local video_sysfs=""
+    local path_cursor=""
+    local path_parent=""
+
+    dev_real="$(readlink -f "$dev_node" 2>/dev/null || true)"
+    [ -n "$dev_real" ] || return 1
+
+    video_name="${dev_real##*/}"
+    video_sysfs="/sys/class/video4linux/${video_name}/device"
+    [ -e "$video_sysfs" ] || return 1
+
+    path_cursor="$(readlink -f "$video_sysfs" 2>/dev/null || true)"
+    [ -n "$path_cursor" ] || return 1
+
+    while [ "$path_cursor" != "/" ]; do
+        if [ -f "${path_cursor}/idVendor" ] && [ -f "${path_cursor}/idProduct" ] && [ -f "${path_cursor}/speed" ]; then
+            printf "%s\n" "$path_cursor"
+            return 0
+        fi
+        path_parent="$(dirname "$path_cursor")"
+        [ "$path_parent" != "$path_cursor" ] || break
+        path_cursor="$path_parent"
+    done
+
+    return 1
+}
+
+detect_fays_usb_sysfs_path_raw() {
+    local path=""
+    path="$(resolve_fays_usb_sysfs_path_from_node "/dev/fays_stereo" || true)"
+    if [ -n "$path" ]; then
+        printf "%s\n" "$path"
+        return 0
+    fi
+
+    path="$(resolve_fays_usb_sysfs_path_from_node "/dev/fays_imu" || true)"
+    if [ -n "$path" ]; then
+        printf "%s\n" "$path"
+        return 0
+    fi
+
+    return 1
+}
+
+detect_fays_usb_speed_raw() {
+    local usb_sysfs=""
+    local speed_raw=""
+
+    usb_sysfs="$(detect_fays_usb_sysfs_path_raw || true)"
+    [ -n "$usb_sysfs" ] || return 1
+    [ -r "${usb_sysfs}/speed" ] || return 1
+
+    speed_raw="$(cat "${usb_sysfs}/speed" 2>/dev/null | tr -d '\r\n' | xargs || true)"
+    [ -n "$speed_raw" ] || return 1
+
+    if ! awk -v s="$speed_raw" 'BEGIN { exit ((s+0) > 0) ? 0 : 1 }'; then
+        return 1
+    fi
+
+    printf "%s\n" "$speed_raw"
+    return 0
+}
+
+refresh_fays_usb_speed_cache() {
+    local speed_raw=""
+    speed_raw="$(detect_fays_usb_speed_raw || true)"
+
+    if [ -n "$speed_raw" ]; then
+        echo "$speed_raw" > "$FAYS_USB_SPEED_CACHE_FILE"
+    else
+        echo "NA" > "$FAYS_USB_SPEED_CACHE_FILE"
+    fi
+}
+
+get_fays_usb_speed_mbps() {
+    local speed_raw=""
+
+    if [ -f "$FAYS_USB_SPEED_CACHE_FILE" ]; then
+        speed_raw="$(cat "$FAYS_USB_SPEED_CACHE_FILE" 2>/dev/null | tr -d '\r\n' | xargs || true)"
+        if [ -n "$speed_raw" ] && [ "$speed_raw" != "NA" ]; then
+            printf "%s\n" "$speed_raw"
+            return 0
+        fi
+        return 1
+    fi
+
+    speed_raw="$(detect_fays_usb_speed_raw || true)"
+    [ -n "$speed_raw" ] || return 1
+    printf "%s\n" "$speed_raw"
+    return 0
+}
+
+is_fays_usb_speed_error5() {
+    local speed_mbps="$1"
+    if [ -z "$speed_mbps" ]; then
+        speed_mbps="$(get_fays_usb_speed_mbps 2>/dev/null || true)"
+    fi
+    [ -n "$speed_mbps" ] || return 1
+
+    awk -v speed="$speed_mbps" -v threshold="$FAYS_USB_ERROR5_MBPS" 'BEGIN { exit ((speed+0) <= (threshold+0)) ? 0 : 1 }'
 }
 
 start_fays_daemon() {
@@ -1868,6 +1990,12 @@ stop_recording() {
     IS_RECORDING=false
     echo "[INFO]:>>> RECORDING STOPPED. Processes terminated."
 
+    # 运行校验前先保证数据落盘
+    echo "[INFO]:Syncing data to disk after validation..."
+    notify_audio "writing"
+    set_state "INIT"
+    sync -f "$DISK_DIR"
+
     local validation_failed=false
 
     # 再运行校验 (如果失败，它会把灯变红)
@@ -1876,11 +2004,6 @@ stop_recording() {
             validation_failed=true
         fi
     fi
-
-    # 校验结束后再刷盘，确保 validation_error.log 等校验产物落盘。
-    echo "[INFO]:Syncing data to disk after validation..."
-    notify_audio "writing"
-    set_state "INIT"
 
     # 若校验失败，恢复错误态，避免被写盘状态覆盖。
     if [ "$validation_failed" = true ]; then
@@ -1901,6 +2024,7 @@ stop_recording() {
     # 删除录制锁文件
     rm -f "$RECORDING_LOCK_FILE"
 
+    # 校验结束后再刷盘，确保 validation_error.log 等校验产物落盘。
     sync -f "$DISK_DIR"
     set_state "READY"
     notify_audio "ready"
@@ -2009,6 +2133,7 @@ cleanup() {
     rm -rf "$AUDIO_TEMP_DIR"
     rm -f "$LED_PIPE" "$AUDIO_PIPE"
     rm -f "$RECORDING_LOCK_FILE"
+    rm -f "$FAYS_PRESENT_CACHE_FILE" "$FAYS_USB_SPEED_CACHE_FILE"
 
     echo "[INFO]:Cleanup done."
     exit 0
@@ -2022,6 +2147,10 @@ trap cleanup SIGINT SIGTERM EXIT
 if is_fays_ftdi_present; then
     FAYS_ENABLED=true
     FAYS_USB_PRESENT=true
+    if awk -v d="$FAYS_STARTUP_DELAY_SEC" 'BEGIN { exit ((d+0) > 0) ? 0 : 1 }'; then
+        echo "[INFO]:Fays detected at boot. Delay ${FAYS_STARTUP_DELAY_SEC}s before daemon startup for USB stabilization."
+        sleep "$FAYS_STARTUP_DELAY_SEC"
+    fi
     if ! start_fays_daemon; then
         echo "[WARNING]:Fays detected but daemon failed during startup. Will retry automatically."
     fi
@@ -2032,7 +2161,8 @@ else
 fi
 
 refresh_fays_presence_cache
-monitor_loop &        # 后台运行硬件监控（含 Fays 在位缓存刷新）
+refresh_fays_usb_speed_cache
+monitor_loop &        # 后台运行硬件监控（含 Fays 在位/速率缓存刷新）
 MONITOR_PID=$!
 echo "[INFO]:Hardware monitor PID: $MONITOR_PID"
 

@@ -202,6 +202,7 @@ int main(int argc, char *argv[]) {
 
     uint32_t imuSequence = 0;
     uint32_t encoderSequence = 0;
+    bool firstEncoderLogged = false;
 
     int warmupCounter = 0;
     while (!g_stopFlag.load()) {
@@ -262,6 +263,17 @@ int main(int argc, char *argv[]) {
             if (!writeStatus.ok()) {
                 std::cerr << "Failed to write encoder frame: " << writeStatus.message << std::endl;
                 break;
+            }
+
+            if (!firstEncoderLogged) {
+                std::cout << "[Encoder] First sample at recording start: "
+                          << "raw=" << state.currentPosition
+                          << ", rad=" << state.currentPositionRad
+                          << ", speed_raw=" << state.currentSpeed
+                          << ", speed_rad=" << state.currentSpeedRad
+                          << ", ts_ns=" << timestamp_ns
+                          << std::endl;
+                firstEncoderLogged = true;
             }
 
             wroteData = true;
