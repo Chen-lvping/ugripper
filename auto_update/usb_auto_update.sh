@@ -22,8 +22,7 @@ NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 ENFORCE_BY_PATH="0"   # 1=强制校验；0=不校验
 # ===========================================
 
-SCRIPT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LED_SCRIPT="$SCRIPT_ROOT/led_manager.py"
+LED_SCRIPT="/opt/ugripper/led_manager.py"
 LED_PIPE="/tmp/umi_led_pipe"
 CALIB_IMPORT_SCRIPT="/opt/ugripper/auto_calibration/import_camera_calibration.sh"
 LED_RUN_USER="radxa"
