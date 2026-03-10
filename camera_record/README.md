@@ -4,10 +4,10 @@
 
 ### 正式录制脚本 - `triple_camera_record.py`
 
-面向 Rockchip RK3576 平台的三相机同步录制工具，使用主摄 FFmpeg + 触觉 GStreamer 混合链路。
+面向 Rockchip RK3576 平台的三相机同步录制工具，使用主摄 FFmpeg + 触觉 Hybrid 混合链路。
 
 - 主相机：`ffmpeg v4l2(NV12 1920x1080) -> h26x_rkmpp`
-- 触觉相机：`v4l2src(MJPEG) -> mppjpegdec -> mpph26xenc`
+- 触觉相机：`v4l2src(MJPEG) -> mppjpegdec -> appsink -> ffmpeg h26x_rkmpp(CQP)`
 - 编码格式：默认 `h264`，可选 `h265`
 - 输出容器：`.mkv`
 

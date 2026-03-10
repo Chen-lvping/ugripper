@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """
-三相机同步录制工具（主摄 FFmpeg + 触觉 GStreamer 混合实现）。
+三相机同步录制工具（主摄 FFmpeg + 触觉 Hybrid 实现）。
 
 - 主相机：FFmpeg `v4l2(NV12) -> h26x_rkmpp -> mkv`
-- 触觉相机：GStreamer `v4l2src(MJPEG) -> mppjpegdec -> mpph26xenc -> mkv`
+- 触觉相机：GStreamer `v4l2src(MJPEG) -> mppjpegdec -> appsink`，再由 FFmpeg `h26x_rkmpp(CQP)` 编码
 - 时间戳恢复方式：frame_system_time_us = frame_pts_us + <camera>_record_time_offset_us
 
 说明：
-- 主摄回退到旧 FFmpeg 链路，避免 Gst 主摄码率偏高且不涉及硬件解码收益。
-- 触觉相机继续使用 Gst，以保留 MJPEG 硬件解码带来的 CPU 收益。
+- 主摄保留旧 FFmpeg 链路，避免 Gst 主摄码率偏高且不涉及硬件解码收益。
+- 触觉相机使用 Gst 做 MJPEG 硬件解码，再交给 FFmpeg 保留 CQP 编码行为。
 - 不再输出 CSV。
 """
 
@@ -42,14 +42,6 @@ from gi.repository import GLib, Gst
 
 BOOT_TIME_OFFSET_US = int((time.time() - time.monotonic()) * 1_000_000)
 FFMPEG_PTS_RE = re.compile(r"pts:\s*(\d+)\s+pts_time:")
-
-
-def get_gst_encoder_element(codec: str) -> str:
-    return "mpph264enc" if codec == "h264" else "mpph265enc"
-
-
-def get_gst_parser_element(codec: str) -> str:
-    return "h264parse" if codec == "h264" else "h265parse"
 
 
 def get_ffmpeg_encoder_name(codec: str) -> str:
@@ -87,20 +79,23 @@ class TripleCameraRecorder:
         self.codec = codec
         self.duration = duration
         self.loop = GLib.MainLoop()
-        self.pipeline: Optional[Gst.Pipeline] = None
-        self.bus = None
         self.stop_requested = False
-        self.eos_sent = False
-        self.force_quit_source = 0
         self.started_all = False
         self.info_written = False
         self.error_message: Optional[str] = None
         self.global_start_time = 0.0
+        self.lock = threading.Lock()
+
         self.cam_process: Optional[subprocess.Popen] = None
         self.cam_log_thread: Optional[threading.Thread] = None
         self.cam_stop_event = threading.Event()
-        self.cam_failed = False
-        self.lock = threading.Lock()
+
+        self.tactile_pipelines: Dict[str, Gst.Pipeline] = {}
+        self.tactile_buses = {}
+        self.tactile_ffmpeg_processes: Dict[str, subprocess.Popen] = {}
+        self.tactile_ffmpeg_watchers: Dict[str, threading.Thread] = {}
+        self.tactile_ffmpeg_stop_events: Dict[str, threading.Event] = {}
+        self.tactile_appsinks = {}
 
         os.makedirs(self.output_dir, exist_ok=True)
         self.configs = self._build_configs()
@@ -147,36 +142,6 @@ class TripleCameraRecorder:
         print(f"\n[Camera] 收到 {sig_name} 信号，正在安全停止录制...", flush=True)
         GLib.idle_add(self.request_stop, False)
 
-    def _get_gst_encoder_properties(self, camera_name: str) -> str:
-        return "rc-mode=fixqp qp-init=30 qp-max=38 qp-min=24 qp-max-i=38 qp-min-i=20"
-
-    def _build_tactile_branch(self, config: CameraConfig) -> str:
-        encoder = get_gst_encoder_element(self.codec)
-        parser = get_gst_parser_element(self.codec)
-        enc_props = self._get_gst_encoder_properties(config.name)
-        probe_name = f"probe_{config.name}"
-        caps = (
-            f"image/jpeg,width={config.width},height={config.height},"
-            f"framerate={config.fps}/1"
-        )
-        return (
-            f"v4l2src device={config.device} do-timestamp=false ! "
-            f"{caps} ! "
-            f"identity name={probe_name} signal-handoffs=true silent=true ! "
-            f"queue ! jpegparse ! mppjpegdec ! "
-            f"video/x-raw,format=NV12 ! "
-            f"{encoder} {enc_props} ! "
-            f"{parser} ! "
-            f"matroskamux ! filesink location={gst_quote(config.output)}"
-        )
-
-    def _build_tactile_pipeline_description(self) -> str:
-        return " ".join(
-            self._build_tactile_branch(config)
-            for config in self.configs
-            if config.format == "mjpeg"
-        )
-
     def _build_cam_ffmpeg_cmd(self, config: CameraConfig):
         encoder = get_ffmpeg_encoder_name(self.codec)
         return [
@@ -213,6 +178,56 @@ class TripleCameraRecorder:
             "18",
             config.output,
         ]
+
+    def _build_tactile_ffmpeg_cmd(self, config: CameraConfig):
+        encoder = get_ffmpeg_encoder_name(self.codec)
+        return [
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostats",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "nv12",
+            "-video_size",
+            f"{config.width}x{config.height}",
+            "-framerate",
+            str(config.fps),
+            "-i",
+            "-",
+            "-c:v",
+            encoder,
+            "-rc_mode",
+            "CQP",
+            "-qp_init",
+            "30",
+            "-qp_max",
+            "38",
+            "-qp_min",
+            "24",
+            "-qp_max_i",
+            "38",
+            "-qp_min_i",
+            "20",
+            config.output,
+        ]
+
+    def _build_tactile_pipeline_description(self, config: CameraConfig) -> str:
+        caps = (
+            f"image/jpeg,width={config.width},height={config.height},"
+            f"framerate={config.fps}/1"
+        )
+        sink_name = f"appsink_{config.name}"
+        return (
+            f"v4l2src device={config.device} do-timestamp=true ! "
+            f"{caps} ! "
+            f"queue ! jpegparse ! mppjpegdec ! "
+            f"video/x-raw,format=NV12,width={config.width},height={config.height},framerate={config.fps}/1 ! "
+            f"queue ! appsink name={sink_name} emit-signals=true sync=false max-buffers=4 drop=true"
+        )
 
     def _write_info_json(self):
         info_path = os.path.join(self.output_dir, "info.json")
@@ -255,7 +270,6 @@ class TripleCameraRecorder:
         runtime = self.cameras[camera_name]
         if runtime.first_pts_ns is not None:
             return
-        runtime.frame_count += 1
         runtime.first_pts_ns = pts_ns
         runtime.first_system_time_us = system_time_us
         runtime.first_system_time_str = datetime.fromtimestamp(
@@ -268,15 +282,6 @@ class TripleCameraRecorder:
         )
         self._maybe_write_camera_offsets()
         self._maybe_mark_started()
-
-    def _on_handoff(self, _identity, buffer, camera_name: str):
-        pts_ns = int(buffer.pts)
-        if pts_ns < 0:
-            return
-        runtime = self.cameras[camera_name]
-        runtime.frame_count += 1
-        if runtime.first_pts_ns is None:
-            self._mark_first_frame(camera_name, pts_ns, time.time_ns() // 1000)
 
     def _cam_log_loop(self):
         process = self.cam_process
@@ -297,10 +302,9 @@ class TripleCameraRecorder:
                     system_time_us = BOOT_TIME_OFFSET_US + pts_us
                     self._mark_first_frame("cam", pts_us * 1000, system_time_us)
         if process.poll() not in (None, 0) and not self.stop_requested:
-            self.cam_failed = True
             self.error_message = f"cam ffmpeg exited with code {process.poll()}"
             print(f"[FFmpeg][ERROR] {self.error_message}", flush=True)
-            GLib.idle_add(self.loop.quit)
+            GLib.idle_add(self.request_stop, False)
 
     def _start_cam_ffmpeg(self):
         config = next(config for config in self.configs if config.name == "cam")
@@ -342,6 +346,95 @@ class TripleCameraRecorder:
             self.cam_log_thread.join(timeout=1)
         self.cam_process = None
 
+    def _start_tactile_ffmpeg(self, config: CameraConfig):
+        cmd = self._build_tactile_ffmpeg_cmd(config)
+        print(f"[{config.name}] 启动 Hybrid 编码 FFmpeg: {' '.join(cmd)}", flush=True)
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+        self.tactile_ffmpeg_processes[config.name] = process
+        stop_event = threading.Event()
+        self.tactile_ffmpeg_stop_events[config.name] = stop_event
+
+        def watch_ffmpeg() -> None:
+            try:
+                process.wait()
+            finally:
+                if process.returncode not in (None, 0) and not stop_event.is_set() and not self.stop_requested:
+                    self.error_message = f"{config.name} ffmpeg exited with code {process.returncode}"
+                    print(f"[FFmpeg][ERROR] {self.error_message}", flush=True)
+                    GLib.idle_add(self.request_stop, False)
+
+        watcher = threading.Thread(target=watch_ffmpeg, daemon=True)
+        watcher.start()
+        self.tactile_ffmpeg_watchers[config.name] = watcher
+
+    def _stop_tactile_ffmpeg(self, camera_name: str):
+        stop_event = self.tactile_ffmpeg_stop_events.get(camera_name)
+        if stop_event is not None:
+            stop_event.set()
+        process = self.tactile_ffmpeg_processes.get(camera_name)
+        if process is None:
+            return
+        if process.stdin:
+            try:
+                process.stdin.close()
+            except Exception:
+                pass
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+        watcher = self.tactile_ffmpeg_watchers.get(camera_name)
+        if watcher is not None:
+            watcher.join(timeout=1)
+        self.tactile_ffmpeg_processes.pop(camera_name, None)
+        self.tactile_ffmpeg_watchers.pop(camera_name, None)
+        self.tactile_ffmpeg_stop_events.pop(camera_name, None)
+
+    def _on_tactile_sample(self, sink, camera_name: str):
+        sample = sink.emit("pull-sample")
+        if sample is None:
+            return Gst.FlowReturn.ERROR
+        buffer = sample.get_buffer()
+        if buffer is None:
+            return Gst.FlowReturn.ERROR
+
+        runtime = self.cameras[camera_name]
+        runtime.frame_count += 1
+        if runtime.first_pts_ns is None:
+            self._mark_first_frame(camera_name, 0, time.time_ns() // 1000)
+
+        process = self.tactile_ffmpeg_processes.get(camera_name)
+        if process is None or process.stdin is None or process.poll() is not None:
+            self.error_message = f"{camera_name} ffmpeg process unavailable"
+            print(f"[Hybrid][ERROR] {self.error_message}", flush=True)
+            GLib.idle_add(self.request_stop, False)
+            return Gst.FlowReturn.ERROR
+
+        success, map_info = buffer.map(Gst.MapFlags.READ)
+        if not success:
+            return Gst.FlowReturn.ERROR
+        try:
+            process.stdin.write(map_info.data)
+        except BrokenPipeError:
+            self.error_message = f"{camera_name} ffmpeg stdin broken pipe"
+            print(f"[Hybrid][ERROR] {self.error_message}", flush=True)
+            GLib.idle_add(self.request_stop, False)
+            return Gst.FlowReturn.ERROR
+        finally:
+            buffer.unmap(map_info)
+        return Gst.FlowReturn.OK
+
     def _maybe_mark_started(self):
         if self.started_all:
             return
@@ -377,33 +470,74 @@ class TripleCameraRecorder:
                 flush=True,
             )
 
-    def _on_bus_message(self, _bus, message):
+    def _on_bus_message(self, _bus, message, camera_name: str):
         if message.type == Gst.MessageType.ERROR:
             err, debug_info = message.parse_error()
-            self.error_message = f"{err} | {debug_info}"
+            self.error_message = f"{camera_name}: {err} | {debug_info}"
             print(f"[GST][ERROR] {self.error_message}", flush=True)
-            self.loop.quit()
+            self.request_stop(False)
         elif message.type == Gst.MessageType.EOS:
-            print("[GST] 收到 EOS，准备退出", flush=True)
-            self.loop.quit()
+            print(f"[GST] {camera_name} 收到 EOS", flush=True)
         return True
 
-    def _force_quit(self):
-        print("[GST] 等待 EOS 超时，强制退出主循环", flush=True)
-        self.loop.quit()
-        self.force_quit_source = 0
-        return False
+    def _start_tactile_pipelines(self) -> bool:
+        for config in self.configs:
+            if config.format != "mjpeg":
+                continue
+            self._start_tactile_ffmpeg(config)
+            pipeline_desc = self._build_tactile_pipeline_description(config)
+            print(f"[{config.name}] Hybrid Gst Pipeline: {pipeline_desc}", flush=True)
+            try:
+                pipeline = Gst.parse_launch(pipeline_desc)
+            except GLib.Error as error:
+                self.error_message = f"{config.name} pipeline create failed: {error}"
+                print(f"[GST][ERROR] {self.error_message}", flush=True)
+                return False
+            bus = pipeline.get_bus()
+            bus.add_signal_watch()
+            bus.connect("message", self._on_bus_message, config.name)
+            appsink = pipeline.get_by_name(f"appsink_{config.name}")
+            if appsink is None:
+                self.error_message = f"{config.name} appsink not found"
+                print(f"[GST][ERROR] {self.error_message}", flush=True)
+                return False
+            appsink.connect("new-sample", self._on_tactile_sample, config.name)
+            result = pipeline.set_state(Gst.State.PLAYING)
+            if result == Gst.StateChangeReturn.FAILURE:
+                self.error_message = f"{config.name} pipeline start failed"
+                print(f"[GST][ERROR] {self.error_message}", flush=True)
+                pipeline.set_state(Gst.State.NULL)
+                return False
+            self.tactile_pipelines[config.name] = pipeline
+            self.tactile_buses[config.name] = bus
+            self.tactile_appsinks[config.name] = appsink
+        return True
+
+    def _stop_tactile_pipelines(self):
+        for camera_name, pipeline in list(self.tactile_pipelines.items()):
+            try:
+                pipeline.set_state(Gst.State.NULL)
+            except Exception:
+                pass
+            bus = self.tactile_buses.get(camera_name)
+            if bus is not None:
+                try:
+                    bus.remove_signal_watch()
+                except Exception:
+                    pass
+        self.tactile_pipelines.clear()
+        self.tactile_buses.clear()
+        self.tactile_appsinks.clear()
+        for camera_name in [config.name for config in self.configs if config.format == "mjpeg"]:
+            self._stop_tactile_ffmpeg(camera_name)
 
     def request_stop(self, _from_timeout: bool):
         if self.stop_requested:
             return False
         self.stop_requested = True
+        self._stop_tactile_pipelines()
         self._stop_cam_ffmpeg()
-        if self.pipeline is not None and not self.eos_sent:
-            self.eos_sent = True
-            print("[GST] 发送 EOS 停止录制", flush=True)
-            self.pipeline.send_event(Gst.Event.new_eos())
-            self.force_quit_source = GLib.timeout_add_seconds(5, self._force_quit)
+        self.loop.quit()
         return False
 
     def run(self) -> int:
@@ -411,7 +545,7 @@ class TripleCameraRecorder:
         self._write_info_json()
 
         print("=" * 70, flush=True)
-        print(f"三相机同步录制系统 ({self.codec.upper()} 混合链路: CAM=FFmpeg, TACT=GST)", flush=True)
+        print(f"三相机同步录制系统 ({self.codec.upper()} 混合链路: CAM=FFmpeg, TACT=GstDecode+FFmpegCQP)", flush=True)
         print("=" * 70, flush=True)
         print(f"输出目录: {self.output_dir}", flush=True)
         print(f"主进程 PID: {os.getpid()}  (Shell可用 kill -2 {os.getpid()} 停止)", flush=True)
@@ -421,34 +555,11 @@ class TripleCameraRecorder:
             print("录制时长: 无限制 (等待外部信号停止)", flush=True)
         print("=" * 70, flush=True)
 
-        pipeline_desc = self._build_tactile_pipeline_description()
-        print("[GST] 触觉 Pipeline 已创建", flush=True)
-        try:
-            self.pipeline = Gst.parse_launch(pipeline_desc)
-        except GLib.Error as error:
-            print(f"[GST][ERROR] Pipeline 创建失败: {error}", flush=True)
-            return 1
-
-        self.bus = self.pipeline.get_bus()
-        self.bus.add_signal_watch()
-        self.bus.connect("message", self._on_bus_message)
-
-        for config in self.configs:
-            if config.format != "mjpeg":
-                continue
-            identity = self.pipeline.get_by_name(f"probe_{config.name}")
-            if identity is None:
-                print(f"[GST][ERROR] 未找到 identity: probe_{config.name}", flush=True)
-                return 1
-            identity.connect("handoff", self._on_handoff, config.name)
-
         if self.duration > 0:
             GLib.timeout_add_seconds(self.duration, self.request_stop, True)
 
-        result = self.pipeline.set_state(Gst.State.PLAYING)
-        if result == Gst.StateChangeReturn.FAILURE:
-            print("[GST][ERROR] Pipeline 启动失败", flush=True)
-            self.pipeline.set_state(Gst.State.NULL)
+        if not self._start_tactile_pipelines():
+            self._stop_tactile_pipelines()
             return 1
 
         self._start_cam_ffmpeg()
@@ -456,12 +567,8 @@ class TripleCameraRecorder:
         try:
             self.loop.run()
         finally:
-            if self.force_quit_source:
-                GLib.source_remove(self.force_quit_source)
-                self.force_quit_source = 0
+            self._stop_tactile_pipelines()
             self._stop_cam_ffmpeg()
-            if self.pipeline is not None:
-                self.pipeline.set_state(Gst.State.NULL)
             self._maybe_write_camera_offsets()
 
         return 1 if self.error_message else 0
@@ -469,7 +576,7 @@ class TripleCameraRecorder:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="三相机同步录制工具 (主摄 FFmpeg + 触觉 GStreamer 混合实现)"
+        description="三相机同步录制工具 (主摄 FFmpeg + 触觉 Hybrid 实现)"
     )
     parser.add_argument("-d", "--duration", type=int, default=0, help="录制时长(秒)，0表示无限制")
     parser.add_argument("--output-dir", type=str, required=True, help="数采统一的完整输出目录路径")
