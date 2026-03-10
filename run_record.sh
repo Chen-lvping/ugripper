@@ -21,10 +21,28 @@ get_env_value() {
     printf '%s' "$value"
 }
 
+get_installed_pkg_version() {
+    local pkg_name="$1"
+    local pkg_version=""
+
+    if command -v dpkg-query >/dev/null 2>&1; then
+        pkg_version="$(dpkg-query -W -f='${Version}' "$pkg_name" 2>/dev/null || true)"
+    fi
+
+    if [ -z "$pkg_version" ]; then
+        pkg_version="unknown"
+    fi
+
+    printf '%s' "$pkg_version"
+}
+
 DEVICE_SN="$(get_env_value "DEVICE_SN" || true)"
 DEVICE_SN_LOWER="${DEVICE_SN,,}"
 
 DATA_ROOT="/mnt/data_disk/${DEVICE_SN_LOWER:-noname_device}" 
+DATA_FORMAT_VERSION="1"
+UGRIPPER_PKG_VERSION="$(get_installed_pkg_version "ugripper")"
+UGRIPPER_USB_UPDATER_PKG_VERSION="$(get_installed_pkg_version "ugripper-usb-updater")"
 
 # --- 网络配置 (双臂协同) ---
 # DEVICE_SIDE：物理左右；DEVICE_ROLE：控制角色（master/slave）
@@ -479,6 +497,11 @@ cat <<EOF > "$META_FILE"
     "device_type": "UMI",
     "device_model": "ugripper",
     "device_id": "${DEVICE_SN}",
+    "device_role": "${CURRENT_ROLE_LOWER}",
+    "camera_codec": "${CAMERA_CODEC}",
+    "ugripper_version": "${UGRIPPER_PKG_VERSION}",
+    "ugripper_usb_updater_version": "${UGRIPPER_USB_UPDATER_PKG_VERSION}",
+    "data_format_version": "${DATA_FORMAT_VERSION}",
     "collector": "default_user",
     "device_side": "${CURRENT_SIDE}",
     "data_path": "data/episode_{date:08d}_{episode_index:04d}"

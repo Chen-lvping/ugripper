@@ -20,9 +20,10 @@
 3. `start_recording`：
 - Master 先下发网络 `START|<episode_dir>|<master_sn>` 给 Slave。
 - 开录前刷新一次持久化标定（支持 U 盘重复导入后立即生效）。
+- 将当前运行时元数据复制到 `episode/metadata.json`，其中包含 `device_role`、`camera_codec`、`ugripper_version`、`ugripper_usb_updater_version` 与 `data_format_version`，便于后处理识别数据来源与结构版本。
 - 将当前有效标定复制到 `episode/calibration.json`（Lerobot 风格）。
 - 可用时启动 Fays 当前 episode（`run_fays_record.sh start <dir>`）。
-- 启动三路相机：`camera_record/triple_camera_record.py --codec <h264|h265>`（从 `/etc/environment` 的 `CAMERA_CODEC` 加载，默认 `h264`）。主相机走 `ffmpeg v4l2(NV12 1920x1080)->h26x_rkmpp`，左右触觉走 `v4l2src(MJPEG)->mppjpegdec->mpph26xenc`。录制不再输出 CSV，视频帧系统时间统一由 `info.json` 中各相机的 `*_record_time_offset_us` 与视频帧 `PTS` 还原。
+- 启动三路相机：`camera_record/triple_camera_record.py --codec <h264|h265>`（从 `/etc/environment` 的 `CAMERA_CODEC` 加载，默认 `h264`）。主相机走 `ffmpeg v4l2(NV12 1920x1080)->h26x_rkmpp`，左右触觉走 `v4l2src(MJPEG)->mppjpegdec->appsink->ffmpeg h26x_rkmpp(CQP)`。录制不再输出 CSV，视频帧系统时间统一由 `info.json` 中各相机的 `*_record_time_offset_us` 与视频帧 `PTS` 还原。
 - 启动传感器：`build/src/sensor_recorder/sensor_recorder`。
 - `sensor_recorder` 在录制开始后写入首条 encoder 样本时，会打印一次 `raw/rad/speed/timestamp` 到服务日志，便于现场快速确认编码器链路是否正常。
 4. `stop_recording`：
@@ -48,7 +49,7 @@
 - 录制中若 daemon 恢复，仅恢复就绪，不补发当前 episode 的 `START`。
 
 ### 4.3 `fays_record_example` 线程模型（`record.cpp`）
-- `ImgOnlineCapture`：读取双目帧，`VideoEncodeThread` 通过 `gst-launch-1.0 (fdsrc -> videoparse -> videoconvert -> mpph26xenc -> h26xparse -> matroskamux)` 写 `fays_stereo_output.mkv`（编码器按 `/etc/environment` 的 `CAMERA_CODEC` 选择：`mpph264enc`/`mpph265enc`）。
+- `ImgOnlineCapture`：读取双目帧，`VideoEncodeThread` 通过 `ffmpeg (rawvideo bgr24 -> h26x_rkmpp CQP)` 写 `fays_stereo_output.mkv`（编码器按 `/etc/environment` 的 `CAMERA_CODEC` 选择：`h264_rkmpp`/`hevc_rkmpp`）。
 - `ImuOnlineCapture`：读取 IMU 并入队。
 - `McapWriteThread`：统一处理 `fays_data.mcap` 的 `Open/Close/Log`（按 session 隔离）。
 - `UsbConnectionWatchdog`：监控配置中的视频节点，断连时报错并退出进程。

@@ -1,3 +1,6 @@
+## Unreleased - 2026-03-10
+- `run_record.sh` 生成的 `metadata.json` 新增 `device_role`、`camera_codec`、`ugripper_version`、`ugripper_usb_updater_version` 与 `data_format_version`，便于后处理识别当前主包版本、USB updater 版本与数据结构版本。
+
 ## v1.0.6 - 2026-03-10
 - `auto_update/boot_check_install.sh` 现在会对 `ugripper` 主包执行与 `ugripper-usb-updater` 相同的开机版本比较：当 `/opt/backup` 中备份包版本更高时自动升级；若主包未安装或状态异常，则继续执行恢复安装。
 
@@ -85,3 +88,6 @@
 - 新增 `auto-release-deb` skill：支持代码改动后自动更新 `build_deb.sh` 版本并执行打包。
 - 版本策略明确为默认只升级 `.z`，仅在显式指定时升级 `.y/.x`。
 - 新增自动判定 `build_deb.sh -q` 与标准模式的规则（基于改动类型与关键二进制是否存在）。
+- 三路相机录制调整为主摄 FFmpeg + 触觉 Hybrid（Gst/MPP 解 MJPEG + FFmpeg rkmpp CQP 编码），以兼顾触觉 CPU 占用与 FFmpeg CQP 体积表现。
+- `fays_record_example` 视频录制链路改回 FFmpeg `rawvideo -> h26x_rkmpp(CQP)`，不再使用 Gst `fixqp` 编码。
+
