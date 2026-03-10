@@ -163,6 +163,41 @@ def find_float_after(text, pattern):
     return float(m.group(1)) if m else None
 
 
+def extract_residuals(text):
+    lines = text.splitlines()
+    start_idx = None
+    for idx, line in enumerate(lines):
+        if line.strip() == "Residuals":
+            start_idx = idx
+            break
+
+    if start_idx is None:
+        return {}
+
+    residuals = {}
+    patterns = {
+        "reprojection_error_cam0_mean_px": rf"Reprojection error \(cam0\) \[px\]:\s*mean\s*({num_re})",
+        "reprojection_error_cam1_mean_px": rf"Reprojection error \(cam1\) \[px\]:\s*mean\s*({num_re})",
+        "gyro_error_mean_rad_s": rf"Gyroscope error \(imu0\) \[rad/s\]:\s*mean\s*({num_re})",
+        "acc_error_mean_m_s2": rf"Accelerometer error \(imu0\) \[m/s\^2\]:\s*mean\s*({num_re})",
+    }
+
+    for line in lines[start_idx + 1:]:
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped in {"Transformation (cam0):", "Transformation (cam1):", "IMU configuration", "cam0", "cam1"}:
+            break
+        for key, pattern in patterns.items():
+            if key in residuals:
+                continue
+            match = re.search(pattern, line)
+            if match:
+                residuals[key] = float(match.group(1))
+
+    return residuals
+
+
 def parse_cam_cfg(text, label):
     m = re.search(
         rf"^\s*{re.escape(label)}\s*$\n^\s*-+\s*$\n(.*?)(?=^\s*cam\d\s*$|^\s*IMU configuration\s*$|\Z)",
@@ -225,6 +260,7 @@ def parse_imu_cfg(text):
 
 def parse_imucam(path):
     text = load_text(path)
+    residuals = extract_residuals(text)
 
     cam0 = parse_cam_cfg(text, "cam0")
     cam1 = parse_cam_cfg(text, "cam1")
@@ -242,12 +278,7 @@ def parse_imucam(path):
             "timeshift_cam0_to_imu0_sec": find_float_after(text, rf"timeshift cam0 to imu0:.*?\n\s*({num_re})"),
             "timeshift_cam1_to_imu0_sec": find_float_after(text, rf"timeshift cam1 to imu0:.*?\n\s*({num_re})"),
         },
-        "residuals": {
-            "reprojection_error_cam0_mean_px": find_float_after(text, rf"Reprojection error \(cam0\):\s*mean\s*({num_re})"),
-            "reprojection_error_cam1_mean_px": find_float_after(text, rf"Reprojection error \(cam1\):\s*mean\s*({num_re})"),
-            "gyro_error_mean_rad_s": find_float_after(text, rf"Gyroscope error \(imu0\):\s*mean\s*({num_re})"),
-            "acc_error_mean_m_s2": find_float_after(text, rf"Accelerometer error \(imu0\):\s*mean\s*({num_re})"),
-        },
+        "residuals": residuals,
         "imu0": parse_imu_cfg(text),
     }
 

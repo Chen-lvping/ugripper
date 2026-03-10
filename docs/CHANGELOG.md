@@ -3,6 +3,7 @@
 ## v1.1.13 - 2026-03-09
 - 三路相机录制链路调整：主摄使用 `ffmpeg v4l2(NV12 1920x1080)->h26x_rkmpp`，左右触觉改为 `v4l2src(MJPEG)->mppjpegdec->appsink->ffmpeg h26x_rkmpp(CQP)`。
 - Fays 录制链路回退为 `ffmpeg rawvideo -> h26x_rkmpp`，并修复标定导入时 Fays 图像 `fps` 的来源：优先读取 `fays_vikit.yaml` 的 `stereo_fps`，缺失时写 `unknown`，不再默认写 `60`。
+- 修复 `import_camera_calibration.sh` 的 `Residuals` 提取逻辑：按行解析带单位结果，避免导入后 `residuals` 变成 `null`。
 - `metadata.json` 新增 `device_role`、`camera_codec`、`ugripper_version`、`ugripper_usb_updater_version` 与 `data_format_version`，便于后处理识别数据来源、编码配置与版本信息。
 - 开机自恢复增强：`boot_check_install.sh` 会像 `ugripper-usb-updater` 一样比较 `/opt/backup` 中的 `ugripper` 版本，备份包更高时自动升级；主包缺失或状态异常时继续执行恢复安装。
 - 录制附加信息与停录日志增强：`info.json` 新增各路视频 `*_record_time_offset_us`，`stop_recording` 新增分阶段耗时日志，便于定位写盘与校验耗时。
