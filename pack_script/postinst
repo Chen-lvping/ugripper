@@ -275,9 +275,9 @@ fi
 systemctl daemon-reload
 
 udevadm control --reload-rules
-# 加载触觉传感器相关规则
-udevadm trigger
-# 不再触发 block add，避免升级期间重复触发 usb-auto-update
+# 仅重触发视频设备，应用相机相关 udev 规则；避免触发 block add 导致升级期间重复执行 usb-auto-update
+udevadm trigger --subsystem-match=video4linux
+# 不主动触发 block add，存储设备规则等待后续真实插拔事件生效
 
 # NTP 同步服务（仅right启动）
 if [ "$(echo "$DEVICE_SIDE" | tr '[:upper:]' '[:lower:]')" == "right" ]; then

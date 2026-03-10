@@ -1,0 +1,103 @@
+# ========================
+# RK3588 USB sensor groups
+# ========================
+# 命名约定：
+# - 右侧 hub 可插右上 / 右下物理口：USB2=5-1|1-1，USB3=6-1|8-1
+# - 左侧 hub 可插左上 / 左下物理口：USB2=9-1|11-1，USB3=10-1|12-1
+# - hub 内部端口约定：
+#   * .4.1 -> tcam_l
+#   * .4.2 -> tcam_r
+#   * .4.4 -> cam_main (YuZhuo, 27c2:0530)
+#   * .2   -> stereo (USB3 路径；节点命名不绑定厂家)
+# 摄像头通常会生成两个节点 (videoN, videoN+1)，这里只取 index=0 的主节点。
+
+# ========================
+# 1. USB cameras
+# ========================
+# ---- Right tactile cameras ----
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.1", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="right_tcam_l"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.1", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="right_tcam_l"
+
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.2", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="right_tcam_r"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.2", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="right_tcam_r"
+
+# ---- Left tactile cameras ----
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.1", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="left_tcam_l"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.1", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="left_tcam_l"
+
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.2", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="left_tcam_r"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="left_tcam_r"
+
+# ---- Right main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.4", \
+  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
+  SYMLINK+="right_cam_main"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.4", \
+  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
+  SYMLINK+="right_cam_main"
+
+# ---- Left main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.4", \
+  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
+  SYMLINK+="left_cam_main"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", \
+  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
+  SYMLINK+="left_cam_main"
+
+# ---- Right stereo camera ----
+# 这里仅按右侧 USB3 hub 的固定内部端口 .2 匹配，不把厂家名写进节点命名。
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.2", ATTR{index}=="0", \
+  SYMLINK+="right_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.2", ATTR{index}=="0", \
+  SYMLINK+="right_stereo"
+
+# ---- Left stereo camera ----
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.2", ATTR{index}=="0", \
+  SYMLINK+="left_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.2", ATTR{index}=="0", \
+  SYMLINK+="left_stereo"
+
+# ========================
+# 2. Storage devices
+# ========================
+# 数据盘允许插在四个物理 USB 口中的任意一个；按物理口祖先 KERNELS 匹配，避免依赖漂移的 /dev/sdX。
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="1-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemctl reset-failed mnt-data_disk.mount; /usr/bin/systemd-mount --no-block --collect -o uid=1000,gid=1000,noatime $devnode /mnt/data_disk'"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="5-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemctl reset-failed mnt-data_disk.mount; /usr/bin/systemd-mount --no-block --collect -o uid=1000,gid=1000,noatime $devnode /mnt/data_disk'"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="9-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemctl reset-failed mnt-data_disk.mount; /usr/bin/systemd-mount --no-block --collect -o uid=1000,gid=1000,noatime $devnode /mnt/data_disk'"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="11-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemctl reset-failed mnt-data_disk.mount; /usr/bin/systemd-mount --no-block --collect -o uid=1000,gid=1000,noatime $devnode /mnt/data_disk'"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="6-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemctl reset-failed mnt-data_disk.mount; /usr/bin/systemd-mount --no-block --collect -o uid=1000,gid=1000,noatime $devnode /mnt/data_disk'"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="8-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemctl reset-failed mnt-data_disk.mount; /usr/bin/systemd-mount --no-block --collect -o uid=1000,gid=1000,noatime $devnode /mnt/data_disk'"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="10-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemctl reset-failed mnt-data_disk.mount; /usr/bin/systemd-mount --no-block --collect -o uid=1000,gid=1000,noatime $devnode /mnt/data_disk'"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="12-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemctl reset-failed mnt-data_disk.mount; /usr/bin/systemd-mount --no-block --collect -o uid=1000,gid=1000,noatime $devnode /mnt/data_disk'"

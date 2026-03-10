@@ -133,7 +133,7 @@ mkdir -p "$BUILD_ROOT/$INSTALL_DIR/py_script"
 cp py_script/fays_tail_imu_check.py "$BUILD_ROOT/$INSTALL_DIR/py_script/" || true
 
 # 4. 部署 Udev 规则
-cp camera_record/99-fixed-usb-map.rules "$BUILD_ROOT/etc/udev/rules.d/" || true
+cp config/99-fixed-usb-map.rules "$BUILD_ROOT/etc/udev/rules.d/" || true
 cp src/sensor_recorder/99-serial.rules "$BUILD_ROOT/etc/udev/rules.d/" || true
 
 echo "=== [4/5] 处理配置脚本与变量替换 ==="

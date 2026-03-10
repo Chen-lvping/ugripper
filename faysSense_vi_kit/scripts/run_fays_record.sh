@@ -39,7 +39,7 @@ ensure_fixed_fays_symlinks() {
     fi
 
     if [ "$missing" -ne 0 ]; then
-        echo "Hint: check udev rule camera_record/99-fixed-usb-map.rules and USB connection."
+        echo "Hint: check udev rule config/99-fixed-usb-map.rules and USB connection."
         return 1
     fi
 
