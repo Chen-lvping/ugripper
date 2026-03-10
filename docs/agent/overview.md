@@ -89,7 +89,7 @@
 - 检测目录：`ugripper_calib/<DEVICE_SN>/`（按设备 SN 匹配）。
 - 文件：`*camchain*.yaml`（主摄）+ `*imucam*.txt`（Fays 双目 + IMU）。
 - 导入脚本：`auto_calibration/import_camera_calibration.sh`。
-- 持久化输出：`/etc/ugripper/config/calibration/calibration.json`。
+- 持久化输出：`/etc/ugripper/config/calibration/calibration.json`；其中 Fays 图像条目的 `fps` 优先从 `fays_vikit.yaml` 的 `stereo_fps` 读取，缺失时写为 `unknown`，不再默认填 `60`。
 - `imucam` 中 IMU 标定会导入连续/离散噪声密度（`Noise density` / `Noise density (discrete)`）及随机游走参数。
 - 支持多次导入覆盖更新；后续 episode 在开录时读取最新持久化参数。
 - 可与 `config.txt` 配置导入在同一次 U 盘流程中并行执行，导入完成后统一重启一次 `ugripper.service`。

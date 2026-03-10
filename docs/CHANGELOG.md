@@ -1,21 +1,11 @@
-## Unreleased - 2026-03-10
-- `run_record.sh` 生成的 `metadata.json` 新增 `device_role`、`camera_codec`、`ugripper_version`、`ugripper_usb_updater_version` 与 `data_format_version`，便于后处理识别当前主包版本、USB updater 版本与数据结构版本。
-
-## v1.0.6 - 2026-03-10
-- `auto_update/boot_check_install.sh` 现在会对 `ugripper` 主包执行与 `ugripper-usb-updater` 相同的开机版本比较：当 `/opt/backup` 中备份包版本更高时自动升级；若主包未安装或状态异常，则继续执行恢复安装。
-
-## v1.1.14 - 2026-03-10
-- 补充 U 盘标定导入的 IMU 离散噪声密度字段：`import_camera_calibration.sh` 现会从 `output-results-imucam.txt` 中解析并写入 `Accelerometer/Gyroscope` 的 `Noise density (discrete)`。
-
 # Changelog
 
 ## v1.1.13 - 2026-03-09
-- `faysSense_vi_kit/example/record.cpp` 的 Fays 视频录制链路从 `ffmpeg rawvideo -> h26x_rkmpp` 切换为 `gst-launch-1.0 fdsrc -> videoparse -> videoconvert -> mpph26xenc -> h26xparse -> matroskamux`，保留原有 MCAP 时间戳写入逻辑。
-- `camera_record/triple_camera_record.py` 调整为混合链路：主摄回退到 `ffmpeg v4l2(NV12 1920x1080)->h26x_rkmpp`，左右触觉继续使用 `v4l2src(MJPEG)->mppjpegdec->mpph26xenc`。
-- 录制输出不再生成 CSV，`info.json` 在保留原有 `boot_time_offset` / `boot_time_offset_us` 的基础上，新增 `cam/tact_left/tact_right_record_time_offset_us`，用于通过 `PTS + offset` 恢复各路视频帧系统时间。
-- 删除临时验证脚本 `camera_record/gst_triple_camera_sync_test.py`，将验证过的 Gst 链路并入正式录制脚本。
-- `run_record.sh` 的 `stop_recording` 新增分阶段耗时日志，区分 Fays 停止、录制进程退出、metadata 收尾、校验前写盘、录制校验、日志刷盘、状态清理、最终写盘与 ready 通知。
-- 便于现场直接从服务日志判断停录慢点主要落在“数据写入/刷盘”还是“校验”阶段。
+- 三路相机录制链路调整：主摄使用 `ffmpeg v4l2(NV12 1920x1080)->h26x_rkmpp`，左右触觉改为 `v4l2src(MJPEG)->mppjpegdec->appsink->ffmpeg h26x_rkmpp(CQP)`。
+- Fays 录制链路回退为 `ffmpeg rawvideo -> h26x_rkmpp`，并修复标定导入时 Fays 图像 `fps` 的来源：优先读取 `fays_vikit.yaml` 的 `stereo_fps`，缺失时写 `unknown`，不再默认写 `60`。
+- `metadata.json` 新增 `device_role`、`camera_codec`、`ugripper_version`、`ugripper_usb_updater_version` 与 `data_format_version`，便于后处理识别数据来源、编码配置与版本信息。
+- 开机自恢复增强：`boot_check_install.sh` 会像 `ugripper-usb-updater` 一样比较 `/opt/backup` 中的 `ugripper` 版本，备份包更高时自动升级；主包缺失或状态异常时继续执行恢复安装。
+- 录制附加信息与停录日志增强：`info.json` 新增各路视频 `*_record_time_offset_us`，`stop_recording` 新增分阶段耗时日志，便于定位写盘与校验耗时。
 
 ## v1.1.12 - 2026-03-05
 - `sensor_recorder` 新增“开录首条 encoder 样本”日志：首次写入 encoder 数据时打印 `raw/rad/speed/timestamp`，便于快速确认编码器链路已工作。

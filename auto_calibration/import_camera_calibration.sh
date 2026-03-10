@@ -75,14 +75,30 @@ fi
 
 mkdir -p "$PERSIST_CALIB_DIR"
 
-python3 - "$PERSIST_CALIB_FILE" "$FALLBACK_CAM_JSON" "$CAMCHAIN_FILE" "$IMUCAM_FILE" "$PERSIST_CALIB_FILE" "$DEVICE_SN" <<'PY'
+FAYS_CONFIG_FILE=""
+for candidate in     "$PROJECT_ROOT/build/faysSense_vi_kit/config/fays_vikit.yaml"     "$PROJECT_ROOT/faysSense_vi_kit/config/fays_vikit.yaml"; do
+    if [ -f "$candidate" ]; then
+        FAYS_CONFIG_FILE="$candidate"
+        break
+    fi
+done
+
+FAYS_STEREO_FPS="unknown"
+if [ -n "$FAYS_CONFIG_FILE" ]; then
+    fays_fps_raw="$(awk -F: '/^[[:space:]]*stereo_fps[[:space:]]*:/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "$FAYS_CONFIG_FILE" || true)"
+    if [ -n "$fays_fps_raw" ]; then
+        FAYS_STEREO_FPS="$fays_fps_raw"
+    fi
+fi
+
+python3 - "$PERSIST_CALIB_FILE" "$FALLBACK_CAM_JSON" "$CAMCHAIN_FILE" "$IMUCAM_FILE" "$PERSIST_CALIB_FILE" "$DEVICE_SN" "$FAYS_STEREO_FPS" <<'PY'
 import json
 import pathlib
 import re
 import sys
 from datetime import datetime, timezone
 
-base_json, fallback_json, camchain_file, imucam_file, output_json, device_sn = sys.argv[1:]
+base_json, fallback_json, camchain_file, imucam_file, output_json, device_sn, fays_stereo_fps = sys.argv[1:]
 num_re = r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?"
 
 
@@ -243,9 +259,22 @@ def resolve_shape(existing, default_h, default_w):
     return default_h, default_w
 
 
-def ensure_image_entry(existing, width, height, fx, fy, cx, cy, camera_model, distortion_model, distortion_coeffs):
+def normalize_fps_value(value):
+    if value in (None, ""):
+        return "unknown"
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return "unknown"
+        if re.fullmatch(r"[-+]?\d+", stripped):
+            return int(stripped)
+        return stripped
+    return value
+
+
+def ensure_image_entry(existing, width, height, fx, fy, cx, cy, camera_model, distortion_model, distortion_coeffs, fps_override=None):
     base = existing if isinstance(existing, dict) else {}
-    fps = base.get("fps", 60)
+    fps = normalize_fps_value(fps_override if fps_override is not None else base.get("fps"))
 
     return {
         "shape": [height, width, 3],
@@ -315,6 +344,7 @@ for idx in (0, 1):
         cam_cfg["camera_model"],
         cam_cfg["distortion_model"],
         cam_cfg["distortion_coeffs"],
+        fps_override=fays_stereo_fps,
     )
 
 imu_key = "observation.imu.fays_imu0"
