@@ -22,7 +22,7 @@
 - 开录前刷新一次持久化标定（支持 U 盘重复导入后立即生效）。
 - 将当前有效标定复制到 `episode/calibration.json`（Lerobot 风格）。
 - 可用时启动 Fays 当前 episode（`run_fays_record.sh start <dir>`）。
-- 启动三路相机：`camera_record/triple_camera_record.py --codec <h264|h265>`（从 `/etc/environment` 的 `CAMERA_CODEC` 加载，默认 `h264`）。
+- 启动三路相机：`camera_record/triple_camera_record.py --codec <h264|h265>`（从 `/etc/environment` 的 `CAMERA_CODEC` 加载，默认 `h264`）。主相机走 `ffmpeg v4l2(NV12 1920x1080)->h26x_rkmpp`，左右触觉走 `v4l2src(MJPEG)->mppjpegdec->mpph26xenc`。录制不再输出 CSV，视频帧系统时间统一由 `info.json` 中各相机的 `*_record_time_offset_us` 与视频帧 `PTS` 还原。
 - 启动传感器：`build/src/sensor_recorder/sensor_recorder`。
 - `sensor_recorder` 在录制开始后写入首条 encoder 样本时，会打印一次 `raw/rad/speed/timestamp` 到服务日志，便于现场快速确认编码器链路是否正常。
 4. `stop_recording`：
@@ -30,6 +30,7 @@
 - Slave 在停录后会将本次配对到的 `master_sn` 写入当前 episode 的 `info.json.paired_master_sn`。
 - 停止 Fays 当前会话（daemon 保持常驻）。
 - 停止相机与传感器进程，落盘 `sync`，执行录制完整性校验。
+- `stop_recording` 会输出分阶段耗时日志，区分 `fays_stop`、`process_stop`、`metadata_finalize`、`data_sync_before_validation`、`validation`、`log_sync`、`state_cleanup`、`data_sync_final` 与 `ready_notify`，便于现场判断停录慢点落在“写盘”还是“校验”。
 
 ## 4. Fays 当前实现
 ### 4.1 进程与命令
@@ -47,7 +48,7 @@
 - 录制中若 daemon 恢复，仅恢复就绪，不补发当前 episode 的 `START`。
 
 ### 4.3 `fays_record_example` 线程模型（`record.cpp`）
-- `ImgOnlineCapture`：读取双目帧并写 `fays_stereo_output.mkv`（ffmpeg 编码器按 `/etc/environment` 的 `CAMERA_CODEC` 选择：`h264_rkmpp`/`hevc_rkmpp`）。
+- `ImgOnlineCapture`：读取双目帧，`VideoEncodeThread` 通过 `gst-launch-1.0 (fdsrc -> videoparse -> videoconvert -> mpph26xenc -> h26xparse -> matroskamux)` 写 `fays_stereo_output.mkv`（编码器按 `/etc/environment` 的 `CAMERA_CODEC` 选择：`mpph264enc`/`mpph265enc`）。
 - `ImuOnlineCapture`：读取 IMU 并入队。
 - `McapWriteThread`：统一处理 `fays_data.mcap` 的 `Open/Close/Log`（按 session 隔离）。
 - `UsbConnectionWatchdog`：监控配置中的视频节点，断连时报错并退出进程。
@@ -88,6 +89,7 @@
 - 文件：`*camchain*.yaml`（主摄）+ `*imucam*.txt`（Fays 双目 + IMU）。
 - 导入脚本：`auto_calibration/import_camera_calibration.sh`。
 - 持久化输出：`/etc/ugripper/config/calibration/calibration.json`。
+- `imucam` 中 IMU 标定会导入连续/离散噪声密度（`Noise density` / `Noise density (discrete)`）及随机游走参数。
 - 支持多次导入覆盖更新；后续 episode 在开录时读取最新持久化参数。
 - 可与 `config.txt` 配置导入在同一次 U 盘流程中并行执行，导入完成后统一重启一次 `ugripper.service`。
 - 若任一导入项失败，会切换红灯错误态（`ERROR_1`）提示后再执行服务重启。
@@ -97,7 +99,7 @@
 - Fays 校验失败：查看 episode 下 `validation_error.log`
 - 录制锁：`/tmp/umi_recording.lock`
 - PTP 状态：`/dev/shm/umi_ptp_status`
-- 开机自恢复日志：`/var/log/ugripper/boot_install.log`（先比较/升级 backup 中的 `ugripper-usb-updater`，再检查 `ugripper` 恢复）
+- 开机自恢复日志：`/var/log/ugripper/boot_install.log`（先比较/升级 backup 中的 `ugripper-usb-updater`，再比较/升级 `ugripper`；若 `ugripper` 未安装或状态异常则执行恢复安装）
 
 ## 10. USB 升级配置（语言/编码器/主从角色）
 - `auto_update/usb_auto_update.sh` 挂载升级 U 盘后会检查根目录 `config.txt`。

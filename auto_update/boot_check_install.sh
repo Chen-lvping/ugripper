@@ -107,23 +107,36 @@ else
 fi
 
 # =====================================================
-# B) 再检查 ugripper 是否需要恢复安装
+# B) 再检查/升级 ugripper
+#    - 已安装且 backup 版本更高：升级
+#    - 未安装或状态异常：恢复安装
 # =====================================================
+BEST_UGRIPPER_DEB=$(find_best_backup_deb "$UGRIPPER_DEB_PATTERN")
+if [ -z "$BEST_UGRIPPER_DEB" ]; then
+    log "未在 backup 中找到 [$UGRIPPER_PKG_NAME] 匹配包 ($UGRIPPER_DEB_PATTERN)，跳过 ugripper 检查。"
+    exit 0
+fi
+
+BACKUP_UGRIPPER_VER=$(dpkg-deb -f "$BEST_UGRIPPER_DEB" Version 2>/dev/null || true)
 UGRIPPER_STATUS=$(get_pkg_status "$UGRIPPER_PKG_NAME")
+INSTALLED_UGRIPPER_VER=$(get_installed_version "$UGRIPPER_PKG_NAME")
+
 if [[ "$UGRIPPER_STATUS" == "install ok installed" ]]; then
-    log "[$UGRIPPER_PKG_NAME] 已安装且状态正常，跳过恢复。"
+    if dpkg --compare-versions "$BACKUP_UGRIPPER_VER" gt "$INSTALLED_UGRIPPER_VER"; then
+        log "[$UGRIPPER_PKG_NAME] 检测到可升级：installed=$INSTALLED_UGRIPPER_VER, backup=$BACKUP_UGRIPPER_VER"
+        if install_deb_with_log "$UGRIPPER_PKG_NAME" "$BEST_UGRIPPER_DEB"; then
+            log "[$UGRIPPER_PKG_NAME] 升级成功。"
+        else
+            log "严重错误：[$UGRIPPER_PKG_NAME] 升级失败，请检查 backup 包是否损坏。"
+            exit 1
+        fi
+    else
+        log "[$UGRIPPER_PKG_NAME] 无需升级：installed=$INSTALLED_UGRIPPER_VER, backup=$BACKUP_UGRIPPER_VER"
+    fi
     exit 0
 fi
 
 log "警告：检测到 [$UGRIPPER_PKG_NAME] 未安装或状态异常（status=${UGRIPPER_STATUS:-unknown}），准备执行自动恢复..."
-
-BEST_UGRIPPER_DEB=$(find_best_backup_deb "$UGRIPPER_DEB_PATTERN")
-if [ -z "$BEST_UGRIPPER_DEB" ]; then
-    log "错误：在搜索路径中未找到 [$UGRIPPER_PKG_NAME] 匹配包 ($UGRIPPER_DEB_PATTERN)。无法恢复。"
-    exit 1
-fi
-
-BACKUP_UGRIPPER_VER=$(dpkg-deb -f "$BEST_UGRIPPER_DEB" Version 2>/dev/null || true)
 log "找到 [$UGRIPPER_PKG_NAME] 恢复包：$BEST_UGRIPPER_DEB (version=${BACKUP_UGRIPPER_VER:-unknown})"
 
 if install_deb_with_log "$UGRIPPER_PKG_NAME" "$BEST_UGRIPPER_DEB"; then
