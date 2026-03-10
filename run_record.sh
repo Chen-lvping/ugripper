@@ -245,6 +245,16 @@ notify_audio() {
     write_pipe_message "$AUDIO_PIPE" "$action" 0.10 || true
 }
 
+timing_now() {
+    date +%s.%N
+}
+
+timing_elapsed_sec() {
+    local start_ts=$1
+    local end_ts=${2:-$(timing_now)}
+    awk -v start_ts="$start_ts" -v end_ts="$end_ts" 'BEGIN { printf "%.3f", end_ts - start_ts }'
+}
+
 # 设置初始状态：初始化中
 set_state "INIT"
 
@@ -1932,6 +1942,12 @@ validate_recording() {
 
 # 函数：停止所有录制进程
 stop_recording() {
+    local stop_recording_begin_ts=""
+    local step_begin_ts=""
+    local step_elapsed_sec=""
+    local total_elapsed_sec=""
+    local validation_failed=false
+
     # 1. 如果是 Master，先通知 Slave 停止
     if [ "$IS_MASTER" = true ]; then
         send_network_command "STOP" "0"
@@ -1941,16 +1957,21 @@ stop_recording() {
     echo "[INFO]:Recording stopping at: $time_stamp on role=$CURRENT_ROLE_LOWER side=$CURRENT_SIDE_LOWER"
 
     # 先默认回 READY，如果校验失败，校验函数会覆盖为 ERROR
-    set_state "READY"
+    set_state "INIT"
+    stop_recording_begin_ts=$(timing_now)
     notify_audio "recording_stop"
 
     # 先通知 FaysSense 停止落盘（进程保持常驻预热）
+    step_begin_ts=$(timing_now)
     if [ "$FAYS_RECORDING_ACTIVE" = true ]; then
         stop_fays_recording_session || true
         FAYS_RECORDING_ACTIVE=false
     fi
+    step_elapsed_sec=$(timing_elapsed_sec "$step_begin_ts")
+    echo "[INFO]:stop_recording phase=fays_stop elapsed=${step_elapsed_sec}s"
 
     # 发送 SIGINT
+    step_begin_ts=$(timing_now)
     for pid in "$PID_CAM" "$PID_SENSOR"; do
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
             kill -2 "$pid"
@@ -1980,6 +2001,10 @@ stop_recording() {
     # 回收子进程，避免僵尸
     [ -n "$PID_CAM" ] && wait "$PID_CAM" 2>/dev/null || true
     [ -n "$PID_SENSOR" ] && wait "$PID_SENSOR" 2>/dev/null || true
+    step_elapsed_sec=$(timing_elapsed_sec "$step_begin_ts")
+    echo "[INFO]:stop_recording phase=process_stop elapsed=${step_elapsed_sec}s"
+
+    step_begin_ts=$(timing_now)
 
     # Slave 录制：在录制结束后将配对 Master SN 写入 info.json
     mark_paired_master_sn_to_info || true
@@ -1989,20 +2014,27 @@ stop_recording() {
 
     IS_RECORDING=false
     echo "[INFO]:>>> RECORDING STOPPED. Processes terminated."
+    step_elapsed_sec=$(timing_elapsed_sec "$step_begin_ts")
+    echo "[INFO]:stop_recording phase=metadata_finalize elapsed=${step_elapsed_sec}s"
 
     # 运行校验前先保证数据落盘
-    echo "[INFO]:Syncing data to disk after validation..."
+    echo "[INFO]:Syncing data to disk before validation..."
     notify_audio "writing"
-    set_state "INIT"
+    step_begin_ts=$(timing_now)
     sync -f "$DISK_DIR"
-
-    local validation_failed=false
+    step_elapsed_sec=$(timing_elapsed_sec "$step_begin_ts")
+    echo "[INFO]:stop_recording phase=data_sync_before_validation elapsed=${step_elapsed_sec}s"
 
     # 再运行校验 (如果失败，它会把灯变红)
     if [ -d "$TARGET_DIR" ]; then
+        step_begin_ts=$(timing_now)
         if ! validate_recording "$TARGET_DIR"; then
             validation_failed=true
         fi
+        step_elapsed_sec=$(timing_elapsed_sec "$step_begin_ts")
+        echo "[INFO]:stop_recording phase=validation elapsed=${step_elapsed_sec}s"
+    else
+        echo "[INFO]:stop_recording phase=validation skipped (target dir missing: $TARGET_DIR)"
     fi
 
     # 若校验失败，恢复错误态，避免被写盘状态覆盖。
@@ -2011,7 +2043,12 @@ stop_recording() {
     fi
 
     # 校验结束后立即做一次增量日志刷盘，降低拔盘前日志未落盘概率。
+    step_begin_ts=$(timing_now)
     sync_logs_once "$LOG_FILE_LOCAL" "$LOG_FILE_DISK" "$LOG_SYNC_POS_FILE" "$LOG_SYNC_LOCK_FILE" || true
+    step_elapsed_sec=$(timing_elapsed_sec "$step_begin_ts")
+    echo "[INFO]:stop_recording phase=log_sync elapsed=${step_elapsed_sec}s"
+
+    step_begin_ts=$(timing_now)
 
     # 清空 PID
     PID_CAM=""
@@ -2023,11 +2060,23 @@ stop_recording() {
 
     # 删除录制锁文件
     rm -f "$RECORDING_LOCK_FILE"
+    step_elapsed_sec=$(timing_elapsed_sec "$step_begin_ts")
+    echo "[INFO]:stop_recording phase=state_cleanup elapsed=${step_elapsed_sec}s"
 
     # 校验结束后再刷盘，确保 validation_error.log 等校验产物落盘。
+    step_begin_ts=$(timing_now)
     sync -f "$DISK_DIR"
+    step_elapsed_sec=$(timing_elapsed_sec "$step_begin_ts")
+    echo "[INFO]:stop_recording phase=data_sync_final elapsed=${step_elapsed_sec}s"
+
+    step_begin_ts=$(timing_now)
     set_state "READY"
     notify_audio "ready"
+    step_elapsed_sec=$(timing_elapsed_sec "$step_begin_ts")
+    echo "[INFO]:stop_recording phase=ready_notify elapsed=${step_elapsed_sec}s"
+
+    total_elapsed_sec=$(timing_elapsed_sec "$stop_recording_begin_ts")
+    echo "[INFO]:stop_recording total elapsed=${total_elapsed_sec}s (from notify_audio 'recording_stop' to stop_recording end)"
 }
 
 request_system_shutdown() {

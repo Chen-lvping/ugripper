@@ -1,48 +1,46 @@
 # Camera Record
 
-## 安装依赖
-
-```bash
-pip install av
-
-sudo cp 99-fixed-usb-map.rules /etc/udev/rules.d/
-
-sudo udevadm control --reload-rules
-sudo udevadm trigger
-
-```
-安装ffmpeg-rockchip
-https://github.com/nyanmisaka/ffmpeg-rockchip/wiki/Compilation
-
-
 ## 录制工具
 
-### 硬件加速版（推荐）- `triple_camera_record.py`
+### 正式录制脚本 - `triple_camera_record.py`
 
-针对 Rockchip RK3576 平台优化，使用全链路硬件编码。
+面向 Rockchip RK3576 平台的三相机同步录制工具，使用主摄 FFmpeg + 触觉 GStreamer 混合链路。
 
-*   **编码格式**: 默认 H.264，可选 H.265（`--codec h264|h265`）
-*   **优势**: CPU 占用低，支持断电保护容器 `.mkv`。
+- 主相机：`ffmpeg v4l2(NV12 1920x1080) -> h26x_rkmpp`
+- 触觉相机：`v4l2src(MJPEG) -> mppjpegdec -> mpph26xenc`
+- 编码格式：默认 `h264`，可选 `h265`
+- 输出容器：`.mkv`
 
 **使用方法：**
 
 ```bash
-# 录制 60 秒，使用默认 H.264 硬编码
-python triple_camera_record.py --output-dir raw_data -d 60
-
-# 录制 60 秒，显式使用 H.265 硬编码
+python triple_camera_record.py --output-dir raw_data
 python triple_camera_record.py --output-dir raw_data -d 60 --codec h265
 ```
 
 ## 输出结构
 
-```
+```text
 raw_data/
 └── episode_YYYYMMDD_DEVICEID_XXXX/
-    ├── cam.mkv          # 主摄视频
-    ├── cam.csv          # 主摄时间戳
-    ├── tact_left.mkv    # 左触觉视频
-    ├── tact_left.csv    # 左触觉时间戳
-    ├── tact_right.mkv   # 右触觉视频
-    └── tact_right.csv   # 右触觉时间戳
+    ├── cam.mkv
+    ├── tact_left.mkv
+    ├── tact_right.mkv
+    └── info.json
+```
+
+## 时间戳恢复
+
+脚本不会额外输出 CSV。
+
+`info.json` 在保留原有 `boot_time_offset` / `boot_time_offset_us` 的基础上，新增：
+
+- `cam_record_time_offset_us`
+- `tact_left_record_time_offset_us`
+- `tact_right_record_time_offset_us`
+
+后处理按以下公式恢复视频帧对应的系统时间：
+
+```text
+frame_system_time_us = frame_pts_us + <camera>_record_time_offset_us
 ```

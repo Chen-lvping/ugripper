@@ -560,11 +560,11 @@ private:
     std::atomic<uint64_t> dropCount_;
 };
 
-class FFmpegRecorder {
+class GstRecorder {
 public:
-    FFmpegRecorder() : pipe_(nullptr) {}
+    GstRecorder() : pipe_(nullptr) {}
 
-    ~FFmpegRecorder() { Stop(); }
+    ~GstRecorder() { Stop(); }
 
     bool Start(const std::string& savePath, int width, int height, int fps) {
         if (pipe_) {
@@ -572,36 +572,37 @@ public:
         }
 
         const std::string cameraCodec = ReadCameraCodecFromEnvironmentFile();
-        const std::string ffmpegVideoEncoder = (cameraCodec == "h265") ? "hevc_rkmpp" : "h264_rkmpp";
+        const std::string gstVideoEncoder = (cameraCodec == "h265") ? "mpph265enc" : "mpph264enc";
+        const std::string gstVideoParser = (cameraCodec == "h265") ? "h265parse" : "h264parse";
 
         std::stringstream cmd;
-        // Keep ffmpeg output minimal: suppress banner/progress spam in system logs.
-        cmd << "ffmpeg -hide_banner -loglevel error -nostats -y ";
+        cmd << "gst-launch-1.0 -q fdsrc fd=0 blocksize=" << (width * height * 3) << " "
+            << "! queue "
+            << "! videoparse format=bgr width=" << width
+            << " height=" << height
+            << " framerate=" << fps << "/1 "
+            << "! videoconvert "
+            << "! video/x-raw,format=NV12,width=" << width
+            << ",height=" << height
+            << ",framerate=" << fps << "/1 "
+            << "! " << gstVideoEncoder << " "
+            << "rc-mode=fixqp "  // Gst MPP 中与 ffmpeg -rc_mode CQP 对应
+            << "qp-init=30 "
+            << "qp-max=38 "
+            << "qp-min=24 "
+            << "qp-max-i=38 "
+            << "qp-min-i=20 "
+            << "! " << gstVideoParser << " "
+            << "! matroskamux "
+            << "! filesink location=\"" << savePath << "\" sync=false";
 
-        cmd << "-thread_queue_size 512 "
-            << "-f rawvideo -vcodec rawvideo "
-            << "-pix_fmt bgr24 "
-            << "-s " << width << "x" << height << " "
-            << "-r " << fps << " "
-            << "-i - ";
-
-        cmd << "-c:v " << ffmpegVideoEncoder << " "
-            << "-rc_mode CQP "
-            << "-qp_init 30 "
-            << "-qp_max 38 "
-            << "-qp_min 24 "
-            << "-qp_max_i 38 "
-            << "-qp_min_i 20 ";
-
-        cmd << "\"" << savePath << "\"";
-
-        std::cout << "[FFmpeg] CAMERA_CODEC=" << cameraCodec
-                  << " -> " << ffmpegVideoEncoder << std::endl;
-        std::cout << "[FFmpeg] Command: " << cmd.str() << std::endl;
+        std::cout << "[Gst] CAMERA_CODEC=" << cameraCodec
+                  << " -> " << gstVideoEncoder << std::endl;
+        std::cout << "[Gst] Command: " << cmd.str() << std::endl;
 
         pipe_ = popen(cmd.str().c_str(), "w");
         if (!pipe_) {
-            std::cerr << "[FFmpeg] Failed to open pipe!" << std::endl;
+            std::cerr << "[Gst] Failed to open pipe!" << std::endl;
             return false;
         }
         const int fd = fileno(pipe_);
@@ -609,7 +610,7 @@ public:
             constexpr int kTargetPipeSz = 1048576;
             const int actual = fcntl(fd, F_SETPIPE_SZ, kTargetPipeSz);
             if (actual > 0) {
-                std::cout << "[FFmpeg] Pipe buffer expanded to " << actual << " bytes" << std::endl;
+                std::cout << "[Gst] Pipe buffer expanded to " << actual << " bytes" << std::endl;
             }
         }
         return true;
@@ -626,7 +627,7 @@ public:
         if (pipe_) {
             pclose(pipe_);
             pipe_ = nullptr;
-            std::cout << "[FFmpeg] Recording stopped." << std::endl;
+            std::cout << "[Gst] Recording stopped." << std::endl;
         }
     }
 
@@ -1338,7 +1339,7 @@ private:
     std::string recordingOutputDir_;
 
     int recordFps_;
-    FFmpegRecorder mRecorder_;
+    GstRecorder mRecorder_;
     FaysDataLogger mDataLogger_;
     ImuQueue imuQueue_;
     CamTsQueue camTsQueue_;
