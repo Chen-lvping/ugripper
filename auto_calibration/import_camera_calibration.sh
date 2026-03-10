@@ -199,8 +199,10 @@ def parse_imu_cfg(text):
         "model": model_m.group(1).strip() if model_m else None,
         "update_rate_hz": pick(rf"Update rate:\s*({num_re})"),
         "acc_noise_density": pick(rf"Accelerometer:\s*\n\s*Noise density:\s*({num_re})"),
+        "acc_noise_density_discrete": pick(rf"Accelerometer:.*?Noise density \(discrete\):\s*({num_re})"),
         "acc_random_walk": pick(rf"Accelerometer:.*?Random walk:\s*({num_re})"),
         "gyro_noise_density": pick(rf"Gyroscope:\s*\n\s*Noise density:\s*({num_re})"),
+        "gyro_noise_density_discrete": pick(rf"Gyroscope:.*?Noise density \(discrete\):\s*({num_re})"),
         "gyro_random_walk": pick(rf"Gyroscope:.*?Random walk:\s*({num_re})"),
     }
 
@@ -323,8 +325,10 @@ data[imu_key] = {
     "model": imu_cfg.get("model") or existing_imu.get("model") or "calibrated",
     "update_rate_hz": imu_cfg.get("update_rate_hz") or existing_imu.get("update_rate_hz"),
     "acc_noise_density": imu_cfg.get("acc_noise_density") or existing_imu.get("acc_noise_density"),
+    "acc_noise_density_discrete": imu_cfg.get("acc_noise_density_discrete") or existing_imu.get("acc_noise_density_discrete"),
     "acc_random_walk": imu_cfg.get("acc_random_walk") or existing_imu.get("acc_random_walk"),
     "gyro_noise_density": imu_cfg.get("gyro_noise_density") or existing_imu.get("gyro_noise_density"),
+    "gyro_noise_density_discrete": imu_cfg.get("gyro_noise_density_discrete") or existing_imu.get("gyro_noise_density_discrete"),
     "gyro_random_walk": imu_cfg.get("gyro_random_walk") or existing_imu.get("gyro_random_walk"),
 }
 
