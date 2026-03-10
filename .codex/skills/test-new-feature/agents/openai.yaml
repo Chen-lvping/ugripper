@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test New Feature"
+  short_description: "先规划后实现，只同步文档并局部验证新增功能，不做编译发布"
+  default_prompt: "Use $test-new-feature to read docs/agent/overview.md first, plan before coding, wait for explicit start, implement the feature plus docs, and finish with targeted local checks only—no version bump, packaging, or release steps."
