@@ -1,5 +1,8 @@
 # Camera Record
 
+> 历史说明：当前 `run_record.sh` 默认已切到 C++ `camera_recorder`，本目录脚本保留作历史实现与调试参考。
+
+
 ## 录制工具
 
 ### 正式录制脚本 - `triple_camera_record.py`

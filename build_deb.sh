@@ -64,7 +64,8 @@ if [ "$QUICK_MODE" = true ]; then
     echo "--> [SKIP] Skipping C++ compilation."
     if [ ! -f "build/src/sensor_recorder/sensor_recorder" ] || \
        [ ! -f "build/src/sensor_recorder/zeroing" ] || \
-       [ ! -f "build/faysSense_vi_kit/fays_record_example" ]; then
+       [ ! -f "build/faysSense_vi_kit/fays_record_example" ] || \
+       [ ! -f "build/src/camera_recorder/camera_recorder" ]; then
         echo "⚠️  警告: 核心 C++ 二进制缺失！打包可能不可用。"
     fi
 else
@@ -90,6 +91,7 @@ EXCLUDE_LIST=(
     --exclude='faysSense_vi_kit'
     --exclude='build'
     --exclude='src/sensor_recorder'
+    --exclude='src/camera_recorder'
     --exclude='*.deb'
 )
 
@@ -127,6 +129,8 @@ chmod +x "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts/"*.sh 2>/dev/n
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder"
 cp build/src/sensor_recorder/sensor_recorder "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true
 cp build/src/sensor_recorder/zeroing "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/src/camera_recorder"
+cp build/src/camera_recorder/camera_recorder "$BUILD_ROOT/$INSTALL_DIR/build/src/camera_recorder/" || true
 
 # py_script is excluded from rsync by default; restore required runtime checker explicitly.
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/py_script"

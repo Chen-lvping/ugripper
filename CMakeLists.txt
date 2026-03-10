@@ -9,3 +9,4 @@ add_subdirectory(src/third_party/mcap_builder)
 # ========= 子模块 =========
 add_subdirectory(faysSense_vi_kit)
 add_subdirectory(src/sensor_recorder)
+add_subdirectory(src/camera_recorder)

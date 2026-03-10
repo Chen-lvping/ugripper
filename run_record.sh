@@ -115,6 +115,7 @@ AUDIO_PIPE="/tmp/umi_audio_pipe"
 
 # --- 传感器录制配置 ---
 SENSOR_RECORDER_BIN="./build/src/sensor_recorder/sensor_recorder"
+CAMERA_RECORDER_BIN="./build/src/camera_recorder/camera_recorder"
 FAYS_RECORD_SCRIPT="./build/faysSense_vi_kit/scripts/run_fays_record.sh"
 FAYS_TAIL_IMU_CHECK_SCRIPT="./py_script/fays_tail_imu_check.py"
 CAMERA_CODEC="$(get_env_value "CAMERA_CODEC" || true)"
@@ -959,6 +960,24 @@ mark_reset_tag_to_info() {
 }
 
 # 函数：在 Slave 侧当前 episode 的 info.json 写入配对 Master SN
+ensure_camera_recorder_compat_outputs() {
+    if [ -z "$TARGET_DIR" ] || [ ! -d "$TARGET_DIR" ]; then
+        return 1
+    fi
+
+    local main_name="${CURRENT_SIDE_LOWER}_cam_main.mkv"
+    local tact_left_name="${CURRENT_SIDE_LOWER}_tcam_l.mkv"
+    local tact_right_name="${CURRENT_SIDE_LOWER}_tcam_r.mkv"
+
+    ln -sfn "$main_name" "$TARGET_DIR/cam.mkv"
+    ln -sfn "$tact_left_name" "$TARGET_DIR/tact_left.mkv"
+    ln -sfn "$tact_right_name" "$TARGET_DIR/tact_right.mkv"
+
+    if [ ! -f "$TARGET_DIR/info.json" ]; then
+        printf '%s\n' '{}' > "$TARGET_DIR/info.json"
+    fi
+}
+
 mark_paired_master_sn_to_info() {
     if [ "$CURRENT_SIDE_LOWER" != "left" ]; then
         return 0
@@ -1702,6 +1721,13 @@ start_recording() {
         rm -f "$RECORDING_LOCK_FILE"
         return 1
     fi
+    if [ ! -x "$CAMERA_RECORDER_BIN" ]; then
+        echo "[ERROR]:Camera recorder binary not found or not executable: $CAMERA_RECORDER_BIN"
+        set_error_state "$ERROR_RUNTIME"
+        notify_audio "error"
+        rm -f "$RECORDING_LOCK_FILE"
+        return 1
+    fi
 
     # 若启动时未启用 Fays，但录制前设备已插入，则即时启用。
     if [ "$FAYS_ENABLED" != true ] && is_fays_ftdi_present; then
@@ -1736,7 +1762,11 @@ start_recording() {
         echo "[WARNING]:Invalid CAMERA_CODEC=$CAMERA_CODEC, fallback to h264."
         CAMERA_CODEC="h264"
     fi
-    uv run ./camera_record/triple_camera_record.py --codec "$CAMERA_CODEC" --output-dir "$TARGET_DIR" &
+    ensure_camera_recorder_compat_outputs || true
+    "$CAMERA_RECORDER_BIN" \
+        --codec "$CAMERA_CODEC" \
+        --output-dir "$TARGET_DIR" \
+        --only "${CURRENT_SIDE_LOWER}_cam_main,${CURRENT_SIDE_LOWER}_tcam_l,${CURRENT_SIDE_LOWER}_tcam_r" &
     PID_CAM=$!
 
     "$SENSOR_RECORDER_BIN" "$TARGET_DIR" &

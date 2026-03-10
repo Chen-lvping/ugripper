@@ -23,7 +23,7 @@
 - 将当前运行时元数据复制到 `episode/metadata.json`，其中包含 `device_role`、`camera_codec`、`ugripper_version`、`ugripper_usb_updater_version` 与 `data_format_version`，便于后处理识别数据来源与结构版本。
 - 将当前有效标定复制到 `episode/calibration.json`（Lerobot 风格）。
 - 可用时启动 Fays 当前 episode（`run_fays_record.sh start <dir>`）。
-- 启动三路相机：`camera_record/triple_camera_record.py --codec <h264|h265>`（从 `/etc/environment` 的 `CAMERA_CODEC` 加载，默认 `h264`）。主相机走 `ffmpeg v4l2(NV12 1920x1080)->h26x_rkmpp`，左右触觉走 `v4l2src(MJPEG)->mppjpegdec->appsink->ffmpeg h26x_rkmpp(CQP)`。录制不再输出 CSV，视频帧系统时间统一由 `info.json` 中各相机的 `*_record_time_offset_us` 与视频帧 `PTS` 还原。
+- 启动相机录制：`build/src/camera_recorder/camera_recorder --codec <h264|h265> --output-dir <episode> --only <current-side streams>`。当前默认按 `DEVICE_SIDE` 仅录制本侧 `cam_main + tcam_l + tcam_r`，并自动生成兼容旧校验链路的 `cam.mkv`、`tact_left.mkv`、`tact_right.mkv` 与占位 `info.json`。
 - 启动传感器：`build/src/sensor_recorder/sensor_recorder`。
 - `sensor_recorder` 在录制开始后写入首条 encoder 样本时，会打印一次 `raw/rad/speed/timestamp` 到服务日志，便于现场快速确认编码器链路是否正常。
 4. `stop_recording`：
