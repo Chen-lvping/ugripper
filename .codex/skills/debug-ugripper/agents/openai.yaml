@@ -1,4 +1,4 @@
 interface:
   display_name: "Ugripper Debug"
-  short_description: "快速排查 ugripper 录制、Fays 与升级故障"
-  default_prompt: "使用 $debug-ugripper 排查这台 ugripper 设备的录制、Fays、USB 升级或主从同步故障。"
+  short_description: "快速排查 ugripper 录制与升级故障"
+  default_prompt: "使用 $debug-ugripper 排查这台 ugripper 设备的录制、USB 升级或网络或环境故障。"

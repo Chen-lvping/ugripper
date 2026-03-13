@@ -22,8 +22,8 @@ NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 ENFORCE_BY_PATH="0"   # 1=强制校验；0=不校验
 # ===========================================
 
-LED_SCRIPT="/opt/ugripper/led_manager.py"
-LED_PIPE="/tmp/umi_led_pipe"
+HMI_HELPER_BIN="/opt/ugripper/build/src/gripper_hmi/gripper_hmi_test"
+HMI_PORT_ARGS=(--port /dev/right_gripper --port /dev/left_gripper)
 CALIB_IMPORT_SCRIPT="/opt/ugripper/auto_calibration/import_camera_calibration.sh"
 LED_RUN_USER="radxa"
 PID_LED_SHELL=""
@@ -349,15 +349,15 @@ stop_record_stack_fast() {
   # 兜底：防止旧 run_record/音频/灯光进程在安装窗口残留
   if command -v pkill >/dev/null 2>&1; then
     pkill -TERM -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
-    pkill -TERM -f 'led_manager.py' >/dev/null 2>&1 || true
+    pkill -TERM -f 'gripper_hmi_test.*--state' >/dev/null 2>&1 || true
     pkill -TERM -f 'audio/audio_play.py' >/dev/null 2>&1 || true
     sleep 0.3
     pkill -KILL -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
-    pkill -KILL -f 'led_manager.py' >/dev/null 2>&1 || true
+    pkill -KILL -f 'gripper_hmi_test.*--state' >/dev/null 2>&1 || true
     pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
   fi
 
-  rm -f /tmp/umi_audio_pipe /tmp/umi_led_pipe /tmp/umi_recording.lock || true
+  rm -f /tmp/umi_audio_pipe /tmp/umi_recording.lock || true
 }
 
 kill_tree() {
@@ -378,34 +378,31 @@ kill_tree() {
 }
 
 start_led_helper() {
-  if [ ! -f "$LED_SCRIPT" ]; then
-    log "LED 脚本不存在：$LED_SCRIPT，跳过配置灯效。"
+  if [ ! -x "$HMI_HELPER_BIN" ]; then
+    log "HMI helper 不存在：$HMI_HELPER_BIN，跳过配置灯效。"
     return 1
   fi
 
-  rm -f "$LED_PIPE"
-  mkfifo "$LED_PIPE"
-  chmod 666 "$LED_PIPE"
-
-  if id "$LED_RUN_USER" >/dev/null 2>&1; then
-    runuser -u "$LED_RUN_USER" -- bash -lc "uv run '$LED_SCRIPT'" >/dev/null 2>&1 &
-  else
-    uv run "$LED_SCRIPT" >/dev/null 2>&1 &
-  fi
-
-  PID_LED_SHELL=$!
-  sleep 0.3
   return 0
 }
 
 set_led_state() {
   local state="$1"
 
-  if [ ! -p "$LED_PIPE" ]; then
+  if [ ! -x "$HMI_HELPER_BIN" ]; then
     return 1
   fi
 
-  timeout 0.2 bash -c 'printf "%s\n" "$1" > "$2"' _ "$state" "$LED_PIPE" >/dev/null 2>&1 || true
+  stop_led_helper
+
+  if id "$LED_RUN_USER" >/dev/null 2>&1; then
+    runuser -u "$LED_RUN_USER" -- "$HMI_HELPER_BIN" "${HMI_PORT_ARGS[@]}" --state "$state" --led-only --duration 0 >/dev/null 2>&1 &
+  else
+    "$HMI_HELPER_BIN" "${HMI_PORT_ARGS[@]}" --state "$state" --led-only --duration 0 >/dev/null 2>&1 &
+  fi
+
+  PID_LED_SHELL=$!
+  sleep 0.2
 }
 
 stop_led_helper() {
@@ -413,7 +410,6 @@ stop_led_helper() {
     kill_tree "$PID_LED_SHELL"
     PID_LED_SHELL=""
   fi
-  rm -f "$LED_PIPE" || true
 }
 
 enter_upgrade_window() {
@@ -458,6 +454,7 @@ apply_imports_with_led_feedback() {
   local cfg_codec="$2"
   local cfg_role="$3"
   local do_calib_import="$4"
+  local defer_restart_for_calibration="$5"
   local yellow_start_ts=0
   local yellow_elapsed=0
   local has_failure=0
@@ -535,6 +532,16 @@ apply_imports_with_led_feedback() {
     sleep 1
   fi
   stop_led_helper
+
+  if [ "$defer_restart_for_calibration" = "1" ]; then
+    if [ "$has_failure" -eq 1 ]; then
+      log "导入流程存在失败项，但检测到 calibration.txt；继续后续 encoder 校准，并由校准流程统一恢复 ugripper.service。"
+    else
+      log "导入流程完成且检测到 calibration.txt，跳过中间重启，交由后续校准流程统一恢复 ugripper.service。"
+    fi
+    [ "$has_failure" -eq 0 ]
+    return
+  fi
 
   if [ "$any_imported" -ne 1 ]; then
     log "未成功导入任何内容，仍尝试重启服务恢复运行。"
@@ -646,8 +653,14 @@ if [ -d "$MOUNT_POINT/ugripper_calib" ]; then
   HAS_CALIB_IMPORT=1
 fi
 
+HAS_CALIBRATION_TRIGGER=0
+if [ -f "$MOUNT_POINT/calibration.txt" ]; then
+  HAS_CALIBRATION_TRIGGER=1
+  log "检测到 calibration.txt：本次 U 盘流程会在导入阶段后追加 encoder 零位校准。"
+fi
+
 if [ -n "${CONFIG_LANG:-}" ] || [ -n "${CONFIG_CAMERA_CODEC:-}" ] || [ -n "${CONFIG_DEVICE_ROLE:-}" ] || [ "$HAS_CALIB_IMPORT" -eq 1 ]; then
-  if ! apply_imports_with_led_feedback "${CONFIG_LANG:-}" "${CONFIG_CAMERA_CODEC:-}" "${CONFIG_DEVICE_ROLE:-}" "$HAS_CALIB_IMPORT"; then
+  if ! apply_imports_with_led_feedback "${CONFIG_LANG:-}" "${CONFIG_CAMERA_CODEC:-}" "${CONFIG_DEVICE_ROLE:-}" "$HAS_CALIB_IMPORT" "$HAS_CALIBRATION_TRIGGER"; then
     log "导入流程存在失败项（已执行失败红灯），继续后续流程。"
   else
     log "导入流程成功完成。"
@@ -657,14 +670,17 @@ else
 fi
 
 # ========================================================
-# 0. 校准触发（检测 calibration.txt）
+# 0. 校准触发（导入后处理 calibration.txt）
 # ========================================================
-if [ -f "$MOUNT_POINT/calibration.txt" ]; then
-  log "检测到 calibration.txt，触发 ugripper-calibration.service，跳过本次升级流程。"
-  systemctl start ugripper-calibration.service --no-block || {
-    log "触发 ugripper-calibration.service 失败。"
+if [ "$HAS_CALIBRATION_TRIGGER" -eq 1 ]; then
+  log "准备触发 ugripper-calibration.service：仅根目录 calibration.txt 会触发 encoder 零位校准，ugripper_calib 不会误触发。"
+  if systemctl start ugripper-calibration.service --no-block; then
+    log "已触发 ugripper-calibration.service，跳过本次 deb 升级流程。"
+  else
+    log "触发 ugripper-calibration.service 失败，尝试恢复 ugripper.service。"
+    systemctl start ugripper.service >/dev/null 2>&1 || true
     exit 1
-  }
+  fi
   exit 0
 fi
 

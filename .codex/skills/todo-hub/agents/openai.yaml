@@ -1,0 +1,4 @@
+interface:
+  display_name: "TODO Hub"
+  short_description: "管理 docs/todo_list.md、git worktree 与 Codex 子会话的主控技能。"
+  default_prompt: "按 docs/todo_list.md 规划或启动指定任务，维护 worktree、session 与进度看板。"

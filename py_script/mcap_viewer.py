@@ -116,27 +116,6 @@ def format_binary_payload(topic, payload_bytes, log_time_ns, publish_time_ns):
         raw, rad = struct.unpack("<if", payload_bytes[:8])
         return f"PosRaw: {raw:<8} PosRad: {rad:.6f}{time_delta_suffix}"
 
-    # Fays unified MCAP topics
-    if topic == "i":
-        # Current writer uses 6xfloat64. Keep float32 fallback for compatibility.
-        if len(payload_bytes) >= 48:
-            gx, gy, gz, ax, ay, az = struct.unpack("<6d", payload_bytes[:48])
-            return (
-                f"FaysIMU Gyro:({gx:.3f},{gy:.3f},{gz:.3f}) "
-                f"Acc:({ax:.3f},{ay:.3f},{az:.3f})"
-                f"{time_delta_suffix}"
-            )
-        if len(payload_bytes) >= 24:
-            gx, gy, gz, ax, ay, az = struct.unpack("<6f", payload_bytes[:24])
-            return (
-                f"FaysIMU Gyro:({gx:.3f},{gy:.3f},{gz:.3f}) "
-                f"Acc:({ax:.3f},{ay:.3f},{az:.3f})"
-                f"{time_delta_suffix}"
-            )
-
-    if topic == "c" and len(payload_bytes) >= 4:
-        frame_index = struct.unpack("<I", payload_bytes[:4])[0]
-        return f"FaysCamTs FrameIdx:{frame_index}{time_delta_suffix}"
 
     return f"<Binary Data ({len(payload_bytes)} bytes){time_delta_suffix}>"
 

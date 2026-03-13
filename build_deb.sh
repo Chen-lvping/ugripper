@@ -4,7 +4,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ================= 变量定义区域 =================
 APP_NAME="ugripper"
-VERSION="1.1.13"       # 每次发布前修改这里
+VERSION="1.2.1"       # 每次发布前修改这里
 ARCH="arm64"
 INSTALL_DIR="/opt/${APP_NAME}"
 BUILD_ROOT="temp_build_deb"
@@ -64,9 +64,12 @@ if [ "$QUICK_MODE" = true ]; then
     echo "--> [SKIP] Skipping C++ compilation."
     if [ ! -f "build/src/sensor_recorder/sensor_recorder" ] || \
        [ ! -f "build/src/sensor_recorder/zeroing" ] || \
-       [ ! -f "build/faysSense_vi_kit/fays_record_example" ] || \
-       [ ! -f "build/src/camera_recorder/camera_recorder" ]; then
+       [ ! -f "build/src/camera_recorder/camera_recorder" ] || \
+       [ ! -f "build/src/record_runtime/record_runtime" ]; then
         echo "⚠️  警告: 核心 C++ 二进制缺失！打包可能不可用。"
+    fi
+    if [ ! -f "build/src/gripper_hmi/gripper_hmi_test" ]; then
+        echo "ℹ️  提示: gripper_hmi_test 未生成，包内将缺少该测试工具。"
     fi
 else
     echo "--> Building C++ modules (root CMake)..."
@@ -88,8 +91,8 @@ EXCLUDE_LIST=(
     --exclude='build_deb.sh'
     --exclude='pack_script'
     --exclude="$BUILD_ROOT"
-    --exclude='faysSense_vi_kit'
     --exclude='build'
+    --exclude='ref_src'
     --exclude='src/sensor_recorder'
     --exclude='src/camera_recorder'
     --exclude='*.deb'
@@ -117,24 +120,21 @@ rsync -av "${EXCLUDE_LIST[@]}" . "$BUILD_ROOT/$INSTALL_DIR/"
 
 # 2. 手动补回编译好的二进制文件 (from unified build/ directory)
 echo "--> Restoring compiled binaries..."
-mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts"
-mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/config"
-mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/lib"
-cp build/faysSense_vi_kit/fays_record_example "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/" || true
-# Use source scripts so quick mode still gets latest runtime fixes.
-cp faysSense_vi_kit/scripts/*.sh "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts/" || true
-cp build/faysSense_vi_kit/config/*.yaml "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/config/" || true
-cp -a faysSense_vi_kit/lib/fays_atrak "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/lib/" || true
-chmod +x "$BUILD_ROOT/$INSTALL_DIR/build/faysSense_vi_kit/scripts/"*.sh 2>/dev/null || true
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder"
 cp build/src/sensor_recorder/sensor_recorder "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true
 cp build/src/sensor_recorder/zeroing "$BUILD_ROOT/$INSTALL_DIR/build/src/sensor_recorder/" || true
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/src/camera_recorder"
 cp build/src/camera_recorder/camera_recorder "$BUILD_ROOT/$INSTALL_DIR/build/src/camera_recorder/" || true
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/src/gripper_hmi"
+cp build/src/gripper_hmi/gripper_hmi_test "$BUILD_ROOT/$INSTALL_DIR/build/src/gripper_hmi/" || true
+mkdir -p "$BUILD_ROOT/$INSTALL_DIR/build/src/record_runtime"
+cp build/src/record_runtime/record_runtime "$BUILD_ROOT/$INSTALL_DIR/build/src/record_runtime/" || true
 
-# py_script is excluded from rsync by default; restore required runtime checker explicitly.
+# py_script is excluded from rsync by default; restore required runtime/test scripts explicitly.
 mkdir -p "$BUILD_ROOT/$INSTALL_DIR/py_script"
-cp py_script/fays_tail_imu_check.py "$BUILD_ROOT/$INSTALL_DIR/py_script/" || true
+cp py_script/usb_audio_play_test.py "$BUILD_ROOT/$INSTALL_DIR/py_script/" || true
+cp py_script/usb_audio_mic_test.py "$BUILD_ROOT/$INSTALL_DIR/py_script/" || true
+cp py_script/usb_audio_noise_profile.py "$BUILD_ROOT/$INSTALL_DIR/py_script/" || true
 
 # 4. 部署 Udev 规则
 cp config/99-fixed-usb-map.rules "$BUILD_ROOT/etc/udev/rules.d/" || true
@@ -145,8 +145,6 @@ echo "=== [4/5] 处理配置脚本与变量替换 ==="
 cp "$PACK_SCRIPT_DIR/ugripper.service" "$BUILD_ROOT/etc/systemd/system/${APP_NAME}.service"
 cp "auto_calibration/ugripper-calibration.service" "$BUILD_ROOT/etc/systemd/system/ugripper-calibration.service"
 cp "auto_calibration/ugripper-network-monitor.service" "$BUILD_ROOT/etc/systemd/system/ugripper-network-monitor.service"
-cp "time_sync/ugripper-ntp-sync.service" "$BUILD_ROOT/etc/systemd/system/ugripper-ntp-sync.service"
-cp "time_sync/ugripper-ptp-monitor.service" "$BUILD_ROOT/etc/systemd/system/ugripper-ptp-monitor.service"
 cp "auto_update/umi-shutdown-trigger.service" "$BUILD_ROOT/etc/systemd/system/umi-shutdown-trigger.service"
 cp "auto_update/umi-shutdown-trigger.path" "$BUILD_ROOT/etc/systemd/system/umi-shutdown-trigger.path"
 

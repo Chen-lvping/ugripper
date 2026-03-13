@@ -2,14 +2,10 @@
 set -e
 
 SERVICE_NAME="{{APP_NAME}}.service"
-INTERFACE_NAME="end0"
-NM_CONN_ID="${INTERFACE_NAME}-{{APP_NAME}}"
+NM_CONN_PREFIX="ugripper-static-"
+NETWORK_BACKUP_FILE="/var/lib/ugripper/network_manager_backup.env"
 
 # 定义所有涉及的服务名称
-PTP_SERVICE="ptp4l.service"
-PHC_SERVICE="phc2sys.service"
-MONITOR_SERVICE="ugripper-ptp-monitor.service"
-NTP_SYNC_SERVICE="ugripper-ntp-sync.service"
 NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 SHUTDOWN_TRIGGER_SERVICE="umi-shutdown-trigger.service"
 SHUTDOWN_TRIGGER_PATH="umi-shutdown-trigger.path"
@@ -29,15 +25,74 @@ stop_service_fast() {
 force_cleanup_recording_processes() {
     if command -v pkill >/dev/null 2>&1; then
         pkill -TERM -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
-        pkill -TERM -f 'led_manager.py' >/dev/null 2>&1 || true
+        pkill -TERM -f 'gripper_hmi_test.*--state' >/dev/null 2>&1 || true
         pkill -TERM -f 'audio/audio_play.py' >/dev/null 2>&1 || true
         sleep 0.3
         pkill -KILL -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
-        pkill -KILL -f 'led_manager.py' >/dev/null 2>&1 || true
+        pkill -KILL -f 'gripper_hmi_test.*--state' >/dev/null 2>&1 || true
         pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
     fi
 
-    rm -f /tmp/umi_audio_pipe /tmp/umi_led_pipe /tmp/umi_recording.lock || true
+    rm -f /tmp/umi_audio_pipe /tmp/umi_recording.lock || true
+}
+
+restore_backed_up_network_connection() {
+    local backup_name=""
+    local backup_iface=""
+    local backup_ipv4_method=""
+    local backup_ipv4_addresses=""
+    local backup_ipv4_gateway=""
+    local backup_ipv4_never_default=""
+    local backup_ipv6_method=""
+    local backup_autoconnect=""
+
+    if ! command -v nmcli >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [ ! -f "$NETWORK_BACKUP_FILE" ]; then
+        return 0
+    fi
+
+    # shellcheck disable=SC1090
+    . "$NETWORK_BACKUP_FILE"
+
+    backup_name="${BACKUP_CONN_NAME:-}"
+    backup_iface="${BACKUP_IFACE:-}"
+    backup_ipv4_method="${BACKUP_IPV4_METHOD:-manual}"
+    backup_ipv4_addresses="${BACKUP_IPV4_ADDRESSES:-}"
+    backup_ipv4_gateway="${BACKUP_IPV4_GATEWAY:-}"
+    backup_ipv4_never_default="${BACKUP_IPV4_NEVER_DEFAULT:-yes}"
+    backup_ipv6_method="${BACKUP_IPV6_METHOD:-ignore}"
+    backup_autoconnect="${BACKUP_AUTOCONNECT:-yes}"
+
+    if [ -z "$backup_name" ] || [ -z "$backup_iface" ] || [ -z "$backup_ipv4_addresses" ]; then
+        rm -f "$NETWORK_BACKUP_FILE"
+        return 0
+    fi
+
+    if nmcli -t -f NAME connection show 2>/dev/null | grep -Fx "$backup_name" >/dev/null; then
+        nmcli connection mod "$backup_name" \
+            connection.interface-name "$backup_iface" \
+            ipv4.method "$backup_ipv4_method" \
+            ipv4.addresses "$backup_ipv4_addresses" \
+            ipv4.gateway "$backup_ipv4_gateway" \
+            ipv4.never-default "$backup_ipv4_never_default" \
+            ipv6.method "$backup_ipv6_method" \
+            connection.autoconnect "$backup_autoconnect"
+    else
+        nmcli connection add type ethernet ifname "$backup_iface" con-name "$backup_name" \
+            ipv4.method "$backup_ipv4_method" \
+            ipv4.addresses "$backup_ipv4_addresses" \
+            ipv4.gateway "$backup_ipv4_gateway" \
+            ipv4.never-default "$backup_ipv4_never_default" \
+            ipv6.method "$backup_ipv6_method" \
+            connection.autoconnect "$backup_autoconnect"
+    fi
+
+    nmcli connection up "$backup_name" >/dev/null 2>&1 || true
+    rm -f "$NETWORK_BACKUP_FILE"
+    echo "Restored NetworkManager connection $backup_name on $backup_iface"
 }
 
 echo "Removing {{APP_NAME}} configuration..."
@@ -47,10 +102,6 @@ echo "Removing {{APP_NAME}} configuration..."
 # --------------------------------------------------
 stop_service_fast "$SERVICE_NAME" 6
 stop_service_fast "$NETWORK_MONITOR_SERVICE" 4
-stop_service_fast "$MONITOR_SERVICE" 4
-stop_service_fast "$NTP_SYNC_SERVICE" 4
-stop_service_fast "$PHC_SERVICE" 4
-stop_service_fast "$PTP_SERVICE" 4
 force_cleanup_recording_processes
 
 # --------------------------------------------------
@@ -60,41 +111,30 @@ systemctl disable "$SERVICE_NAME" || true
 systemctl disable "$NETWORK_MONITOR_SERVICE" || true
 systemctl disable "$SHUTDOWN_TRIGGER_PATH" || true
 systemctl disable "$SHUTDOWN_TRIGGER_SERVICE" || true
-systemctl disable "$NTP_SYNC_SERVICE" || true
-systemctl disable "$MONITOR_SERVICE" || true
-systemctl disable "$PHC_SERVICE" || true
-systemctl disable "$PTP_SERVICE" || true
-
 # --------------------------------------------------
 # 3) 清理生成的文件
 # --------------------------------------------------
 echo "Cleaning up systemd units and configs..."
 
-# 清理 postinst 中生成的 systemd unit 文件
-rm -f "/etc/systemd/system/$PHC_SERVICE"
-rm -f "/etc/systemd/system/$PTP_SERVICE"
-rm -f "/etc/systemd/system/$SHUTDOWN_TRIGGER_SERVICE"
-rm -f "/etc/systemd/system/$SHUTDOWN_TRIGGER_PATH"
-
-# 清理生成的配置文件
-rm -f "/etc/linuxptp/ptp4l.conf"
-
-# 清理共享内存中的临时状态文件 (PTP Monitor 产生的)
-rm -f "/dev/shm/umi_ptp_status"
 
 # --------------------------------------------------
 # 4) 移除网络配置
 # --------------------------------------------------
 if command -v nmcli >/dev/null 2>&1; then
-    nmcli connection delete "$NM_CONN_ID" || true
+    nmcli -t -f NAME connection show 2>/dev/null | while IFS= read -r conn_name; do
+        case "$conn_name" in
+            ${NM_CONN_PREFIX}*)
+                nmcli connection delete "$conn_name" >/dev/null 2>&1 || true
+                ;;
+        esac
+    done
 fi
 
-# --------------------------------------------------
-# 5) 恢复系统默认行为
-# --------------------------------------------------
-echo "Restoring default NTP behavior..."
-systemd-run --no-block --unit=ugripper-restore-ntp \
-    /usr/bin/timedatectl set-ntp true
+case "${1:-remove}" in
+    remove|purge|deconfigure)
+        restore_backed_up_network_connection
+        ;;
+esac
 
 systemctl daemon-reload
 

@@ -165,7 +165,7 @@ missing_binaries=()
 for bin_path in \
   "build/src/sensor_recorder/sensor_recorder" \
   "build/src/sensor_recorder/zeroing" \
-  "build/faysSense_vi_kit/fays_record_example"; do
+  "build/src/camera_recorder/camera_recorder"; do
   if [[ ! -f "$bin_path" ]]; then
     missing_binaries+=("$bin_path")
   fi

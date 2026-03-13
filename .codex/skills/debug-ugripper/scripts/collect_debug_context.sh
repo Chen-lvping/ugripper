@@ -31,23 +31,13 @@ systemctl is-enabled ugripper.service 2>/dev/null || true
 systemctl status ugripper.service --no-pager -l 2>/dev/null | sed -n '1,80p' || true
 
 section "Processes"
-ps -ef | egrep 'run_record.sh|triple_camera_record.py|sensor_recorder|fays_record_example|run_fays_record.sh' | grep -v grep || true
+ps -ef | egrep 'run_record.sh|triple_camera_record.py|sensor_recorder|camera_recorder' | grep -v grep || true
 
 section "Key files"
 show_file /etc/environment
 show_file /tmp/umi_recording.lock
 show_file /dev/shm/umi_ptp_status
-show_file /dev/shm/umi_fays_present
-show_file /dev/shm/umi_fays_usb_speed_mbps
 
-section "Device nodes"
-for path in /dev/fays_stereo /dev/fays_imu; do
-  if [ -e "$path" ]; then
-    ls -l "$path" 2>/dev/null || true
-  else
-    printf '%s\n' "[missing] $path"
-  fi
-done
 
 section "Recent service logs"
 journalctl -u ugripper.service -n 120 --no-pager 2>/dev/null || true

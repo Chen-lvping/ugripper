@@ -1,117 +1,279 @@
-# Ugripper 项目总览（精简版）
+# Ugripper V2 Overview
 
-## 1. 目标与部署
-- 目标：在 Radxa 上完成多源同步录制（主相机、触觉相机、Fays 双目+IMU、本体传感器）。
-- 安装路径：`/opt/ugripper`。
-- systemd 入口：`pack_script/ugripper.service`，主脚本为 `run_record.sh`。
-- 数据根目录：`/mnt/data_disk/<device_sn>/data/episode_*`。
+本文档是当前仓库在交付、开发、排障和验收时的**唯一主说明**。
+它只描述当前仍成立的系统实现、运行方式、部署入口和运维口径；不再拆分独立的运维文档、差异文档或遗留清单文档。
 
-## 2. 角色分工（双臂）
-- `DEVICE_SIDE`：物理侧（`left|right`）。
-- `DEVICE_ROLE`：控制角色（`master|slave`，未配置时兼容旧逻辑：Right=Master、Left=Slave）。
-- Master：按键控制、音频提示、发网络命令给对端。
-- Slave：监听 `START|episode_xxx|master_sn` / `STOP|0`，按命令同步录制。
-- 同步端口：`12345`（`nc`）。
+## 1. 当前系统一句话
+- 当前系统默认以**单机双手、本地控制**方式运行。
+- 主控制链路已经收口到 `build/src/record_runtime/record_runtime`，`run_record.sh` 只负责进入安装目录并 `exec` 该二进制。
+- 默认录制产物为 **2 路主相机 + 2 路 stereo + 4 路触觉相机 + 左右两份传感器 MCAP**。
+- HMI 按键、RGB 灯效、提示音、pre/post 音频录制、停录校验和双键关机请求都已纳入当前运行时。
+- U 盘流程统一负责 `deb` 升级、`config.txt` 导入、主相机标定导入和 encoder 零位校准触发。
 
-## 3. 主流程（`run_record.sh`）
-1. 启动时初始化目录、LED/Audio FIFO、GPIO、Fays 可用性。
- - 加载持久化标定文件：`/etc/ugripper/config/calibration/calibration.json`（缺失时回退 fake 模板）。
-2. 后台 `monitor_loop` 运行健康检查（约 50ms 一次）并维护错误灯效状态。
-3. `start_recording`：
-- Master 先下发网络 `START|<episode_dir>|<master_sn>` 给 Slave。
-- 开录前刷新一次持久化标定（支持 U 盘重复导入后立即生效）。
-- 将当前运行时元数据复制到 `episode/metadata.json`，其中包含 `device_role`、`camera_codec`、`ugripper_version`、`ugripper_usb_updater_version` 与 `data_format_version`，便于后处理识别数据来源与结构版本。
-- 将当前有效标定复制到 `episode/calibration.json`（Lerobot 风格）。
-- 可用时启动 Fays 当前 episode（`run_fays_record.sh start <dir>`）。
-- 启动相机录制：`build/src/camera_recorder/camera_recorder --codec <h264|h265> --output-dir <episode> --only <current-side streams>`。当前默认按 `DEVICE_SIDE` 仅录制本侧 `cam_main + tcam_l + tcam_r`，并自动生成兼容旧校验链路的 `cam.mkv`、`tact_left.mkv`、`tact_right.mkv` 与占位 `info.json`。
-- 启动传感器：`build/src/sensor_recorder/sensor_recorder`。
-- `sensor_recorder` 在录制开始后写入首条 encoder 样本时，会打印一次 `raw/rad/speed/timestamp` 到服务日志，便于现场快速确认编码器链路是否正常。
-4. `stop_recording`：
-- Master 下发 `STOP` 给 Slave。
-- Slave 在停录后会将本次配对到的 `master_sn` 写入当前 episode 的 `info.json.paired_master_sn`。
-- 停止 Fays 当前会话（daemon 保持常驻）。
-- 停止相机与传感器进程，落盘 `sync`，执行录制完整性校验。
-- `stop_recording` 会输出分阶段耗时日志，区分 `fays_stop`、`process_stop`、`metadata_finalize`、`data_sync_before_validation`、`validation`、`log_sync`、`state_cleanup`、`data_sync_final` 与 `ready_notify`，便于现场判断停录慢点落在“写盘”还是“校验”。
+## 2. 安装布局与入口
+- 安装目录：`/opt/ugripper`
+- 主服务：`pack_script/ugripper.service`
+- 主入口：`/opt/ugripper/run_record.sh`
+- 主运行时：`/opt/ugripper/build/src/record_runtime/record_runtime`
+- 数据目录：`/mnt/data_disk/<device_sn_lower>/data`
+- 持久化标定目录：`/etc/ugripper/config/calibration`
+- 日志目录：`/var/log/ugripper`
+- U 盘升级入口：`auto_update/usb_auto_update.sh`
 
-## 4. Fays 当前实现
-### 4.1 进程与命令
-- 脚本：`faysSense_vi_kit/scripts/run_fays_record.sh`
-- 模式：`daemon | start <dir> | stop | exit`
-- 控制 FIFO：`/tmp/umi_fays_cmd`
+## 3. 模块总览
+| 模块 | 入口 | 当前职责 | 关键输入/输出 |
+| --- | --- | --- | --- |
+| systemd 主服务 | `pack_script/ugripper.service` | 以 `radxa` 用户拉起录制服务 | `/opt/ugripper/run_record.sh` |
+| 薄壳启动脚本 | `run_record.sh` | 切到安装目录并直接 `exec record_runtime` | 无 |
+| 主运行时 | `build/src/record_runtime/record_runtime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
+| 相机录制 | `build/src/camera_recorder/camera_recorder` | 按 YAML 配置启动独立相机录制子进程 | 8 路 `mkv`（默认） |
+| 传感器录制 | `build/src/sensor_recorder/sensor_recorder` | 录制左右 IMU/encoder，分别输出 MCAP | `sensor_data_left.mcap`、`sensor_data_right.mcap` |
+| HMI 类库 | `src/gripper_hmi` | 读取夹爪按键、渲染 RGB 灯效 | 按键快照、RGB 指令 |
+| 音频播放 | `audio/audio_play.py` | 绑定 USB 耳机 sink，播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
+| 音频采集 | `audio/record_usb_audio.py` | 从 USB 耳机麦克风录制原始音频，供 pre/post 处理链路使用 | 临时 wav 文件 |
+| USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级、配置导入、主相机标定导入、encoder 校准触发 | `/etc/environment`、`calibration.json` |
+| 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、执行 encoder zeroing、恢复服务 | `build/src/sensor_recorder/zeroing` |
 
-### 4.2 运行维护策略
-- 启动时若未检测到 FTDI，服务保持运行并持续报错（ERROR_2）；Fays 恢复后自动拉起 daemon。
-- 启动若检测到 Fays，会先延时 `FAYS_STARTUP_DELAY_SEC`（默认 3 秒）再启动 daemon，降低开机早期枚举抖动导致的异常。
-- FTDI 在位检测由 `run_record.sh` 直接检查 `/dev/fays_stereo` 与 `/dev/fays_imu`（由 udev 规则固定映射）并写入 `/dev/shm/umi_fays_present`。
-- 低开销链路速率检测：后台每秒刷新 `/dev/shm/umi_fays_usb_speed_mbps`（从 sysfs `speed` 读取，不做全量 USB 枚举）。
-- health check 会把 Fays USB 速率跌落到 `FAYS_USB_ERROR5_MBPS`（默认 480Mb/s）及以下判为 `ERROR_5`。
-- 运行中检测到 Fays 插入会自动拉起 daemon。
-- 录制中若 daemon 恢复，仅恢复就绪，不补发当前 episode 的 `START`。
+## 4. 启动链路
+1. systemd 启动 `ugripper.service`。
+2. 服务进入 `/opt/ugripper/run_record.sh`。
+3. `run_record.sh` 检查 `./build/src/record_runtime/record_runtime` 是否存在，然后直接 `exec`。
+4. `record_runtime` 启动后读取 `/etc/environment`，至少关注：
+   - `DEVICE_SN`：决定数据目录。
+   - `CAMERA_CODEC`：非法值会回退到 `h264`。
+   - `UGRIPPER_LANG`：决定提示音语言。
+5. 运行时连接左右夹爪 HMI、启动 LED 渲染线程、尝试拉起音频守护进程。
+6. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
 
-### 4.3 `fays_record_example` 线程模型（`record.cpp`）
-- `ImgOnlineCapture`：读取双目帧，`VideoEncodeThread` 通过 `ffmpeg (rawvideo bgr24 -> h26x_rkmpp CQP)` 写 `fays_stereo_output.mkv`（编码器按 `/etc/environment` 的 `CAMERA_CODEC` 选择：`h264_rkmpp`/`hevc_rkmpp`）。
-- `ImuOnlineCapture`：读取 IMU 并入队。
-- `McapWriteThread`：统一处理 `fays_data.mcap` 的 `Open/Close/Log`（按 session 隔离）。
-- `UsbConnectionWatchdog`：监控配置中的视频节点，断连时报错并退出进程。
+## 5. 状态机与按键行为
+### 5.1 空闲态与阈值
+- `READY`：绿色呼吸灯，提示系统可开始录制。
+- 主循环轮询周期约 `20ms`。
+- 长按判定阈值 `800ms`，双键关机提示阈值 `2000ms`，双键执行阈值 `4000ms`。
 
-### 4.4 录制数据
-- `fays_stereo_output.mkv`
-- `fays_data.mcap`：
-- topic `i`：Fays IMU
-- topic `c`：Fays 相机帧序号+时间戳
-- `info.json`：基础字段由相机录制进程写入；Slave 侧在停录后追加 `paired_master_sn`。
+### 5.2 按键动作
+- `BTN_UP` 短按释放：
+  - 空闲时开始普通录制。
+  - 录制中停止当前录制。
+- `BTN_DOWN` 短按释放：
+  - 空闲且存在上一条 episode 时开始 reset 录制。
+  - 空闲但无上一条 episode 时只播报 `no_reset_needed`。
+  - 录制中停止当前录制。
+- `BTN_UP` 长按：空闲时录制 pre audio；录制中忽略。
+- `BTN_DOWN` 长按：空闲时录制 post audio；录制中忽略。
+- 双键长按：
+  - 2 秒时播放 `shutdown` 提示音。
+  - 4 秒时进入 `EXIT`，必要时先停录，然后写 `/tmp/umi_shutdown_request`。
 
-## 5. 校验规则（episode 结束）
-- 基础校验：`cam.mkv`、`tact_left.mkv`、`tact_right.mkv`、`sensor_data.mcap`、`fays_stereo_output.mkv`、`fays_data.mcap` 必须存在且有效。
-- Fays 时长校验：使用 `ffprobe` 的时间戳跨度（`end-start`）比较 `cam.mkv` 与 `fays_stereo_output.mkv`。
-- Fays 失败条件：Fays 比 cam 短超过 5 秒，或任一跨度读取失败。
-- Fays MCAP 末尾校验：`fays_data.mcap` 必须同时包含 topic `i`/`c` 且消息数大于 0，并检查最后几帧 `c` 所在尾段仍有 `i`（IMU）覆盖；若末尾 IMU 断流则判失败。
-- Fays MCAP 读取策略：校验脚本基于 MCAP summary 的尾部 chunk 索引逆向读取，只解析末尾少量 chunk，不做全量消息扫描，避免长录制文件超时误判。
-- tact 时长校验：读取 `sensor_data.mcap` summary 的消息起止时间，与 `tact_left.mkv`、`tact_right.mkv` 的时间戳跨度分别比较，任一绝对误差超过 5 秒判失败。
+## 6. 录制生命周期
+### 6.1 开始录制
+1. 在 `/mnt/data_disk/<device_sn_lower>/data` 下创建新的 `episode_YYYYMMDD_NNNN`。
+2. 写入 `metadata.json`，当前固定包含：
+   - `device_type=UMI`
+   - `device_model=ugripper`
+   - `device_id=<DEVICE_SN>`
+   - `device_role=local`
+   - `camera_codec=<h264|h265>`
+   - `record_runtime=cpp`
+   - `reset_recording=<true|false>`
+3. 将 `/etc/ugripper/config/calibration/calibration.json` 复制到 episode；若缺失则回退 `config/fakeCamCalib.json`。
+4. 生成 `info.json`，并清理旧兼容文件名 `cam.mkv`、`tact_left.mkv`、`tact_right.mkv`。
+5. 若已准备 pre audio，则移动到本次 episode 的 `audio_pre.wav`。
+6. 启动：
+   - `camera_recorder --codec <codec> --output-dir <episode> --only left_cam_main,right_cam_main,left_stereo,right_stereo,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
+   - `sensor_recorder <episode_dir>`
+7. 切换到 `RECORDING` 状态并播放开始提示音。
 
-## 6. 状态与告警
-- LED 状态：`INIT`、`READY`、`RECORDING`、`ERROR_1~ERROR_5`。
-- `READY`：绿色呼吸灯（约 3 秒周期，基于系统时间相位）。
-- `RECORDING`：1Hz 绿色闪烁（基于系统时间相位）。
-- 左右臂系统时间同步后，`READY/RECORDING` 灯效可保持同相。
-- 错误等级：`ERROR_1`（数据完整性）到 `ERROR_5`（运行时错误）。
+### 6.2 相机链路
+- 配置入口：`config/camera_recorder.yaml`。
+- 当前 YAML 定义 8 路相机：左右主摄、左右 stereo、4 路触觉。
+- 当前运行时默认录制全部 8 路：左右主摄 + 左右 stereo + 4 路触觉。
+- 主相机模式是 `direct-copy-h265`：直接封装 H.265 码流。
+- 触觉 / 双目模式保留 `hybrid-decode-encode` / `stereo-hybrid-decode-encode`。
+- 每路相机由独立子进程承载；单路失败不会由 `camera_recorder` 主动连带停掉其他相机。
 
-## 7. 构建与打包
-- CMake 构建：根目录 `CMakeLists.txt` 聚合 `sensor_recorder` 与 `faysSense_vi_kit`。
-- deb 打包脚本：`build_deb.sh`。
-- 关键二进制：
-- `build/src/sensor_recorder/sensor_recorder`
-- `build/src/sensor_recorder/zeroing`
-- `build/faysSense_vi_kit/fays_record_example`
+### 6.3 传感器链路
+- `sensor_recorder` 固定录制：
+  - 右手：`/dev/right_imu`、`/dev/right_encoder`
+  - 左手：`/dev/left_imu`、`/dev/left_encoder`
+- 输出拆成两份 MCAP：
+  - `sensor_data_right.mcap`
+  - `sensor_data_left.mcap`
+- encoder 连接会优先尝试 `1Mbps`，失败后回退 `115200`。
 
-## 8. U 盘标定导入
-- 入口：`auto_update/usb_auto_update.sh`（由 udev + `usb-auto-update@.service` 触发）。
-- 检测目录：`ugripper_calib/<DEVICE_SN>/`（按设备 SN 匹配）。
-- 文件：`*camchain*.yaml`（主摄）+ `*imucam*.txt`（Fays 双目 + IMU）。
-- 导入脚本：`auto_calibration/import_camera_calibration.sh`。
-- 持久化输出：`/etc/ugripper/config/calibration/calibration.json`；其中 Fays 图像条目的 `fps` 优先从 `fays_vikit.yaml` 的 `stereo_fps` 读取，缺失时写为 `unknown`，不再默认填 `60`；`residuals` 则读取 `output-results-imucam.txt` 中 `Residuals` 段的带单位结果（`[px]` / `[rad/s]` / `[m/s^2]`）。
-- `imucam` 中 IMU 标定会导入连续/离散噪声密度（`Noise density` / `Noise density (discrete)`）及随机游走参数。
-- 支持多次导入覆盖更新；后续 episode 在开录时读取最新持久化参数。
-- 可与 `config.txt` 配置导入在同一次 U 盘流程中并行执行，导入完成后统一重启一次 `ugripper.service`。
-- 若任一导入项失败，会切换红灯错误态（`ERROR_1`）提示后再执行服务重启。
-## 9. 常用排障入口
-- 服务日志：`journalctl -u ugripper.service -f`
-- 内核 USB/UVC：`journalctl -k -f | egrep 'usb|uvcvideo|xhci|reset|disconnect|error -71'`
-- Fays 校验失败：查看 episode 下 `validation_error.log`
-- 录制锁：`/tmp/umi_recording.lock`
-- PTP 状态：`/dev/shm/umi_ptp_status`
-- 开机自恢复日志：`/var/log/ugripper/boot_install.log`（先比较/升级 backup 中的 `ugripper-usb-updater`，再比较/升级 `ugripper`；若 `ugripper` 未安装或状态异常则执行恢复安装）
+### 6.4 停止录制
+1. 停止 `sensor_recorder` 与 `camera_recorder`。
+2. 播放 `recording_stop`。
+3. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行 `sync`。
+4. 校验 episode 文件完整性。
+5. 成功则回到 `READY` 并播放 `ready`；完整性失败则进入 `ERROR_1`；运行时异常进入 `ERROR_5`。
 
-## 10. USB 升级配置（语言/编码器/主从角色）
-- `auto_update/usb_auto_update.sh` 挂载升级 U 盘后会检查根目录 `config.txt`。
-- 支持配置键：`LANGUAGE`/`VOICE_LANG`（大小写不敏感），支持值：`zh|cn|chinese|中文` 与 `en|english`。
-- 识别成功后写入 `/etc/environment`：`UGRIPPER_LANG=<zh|en>`。
-- 支持编码器配置键：`CAMERA_CODEC`/`VIDEO_CODEC`/`TRIPLE_CAMERA_CODEC`/`CODEC`（大小写不敏感），支持值：`h264|h265`。
-- 编码器识别成功后写入 `/etc/environment`：`CAMERA_CODEC=<h264|h265>`。
-- 支持角色配置键：`DEVICE_ROLE`/`ROLE`（大小写不敏感），支持值：`master|slave`。
-- 角色识别成功后写入 `/etc/environment`：`DEVICE_ROLE=<master|slave>`。
-- 导入时序（配置 + 标定兼容）：先停止 `ugripper.service`，复用校准黄灯快闪态（`CALIB_RUN`）并至少保持 2 秒，全部导入成功后复用校准完成绿灯态（`CALIB_DONE`）1 秒，仅重启一次 `ugripper.service`。
-- 若导入阶段存在失败，会改为红灯错误态（`ERROR_1`）闪烁提示，再重启 `ugripper.service`。
-- `run_record.sh` 使用 `CAMERA_CODEC` 驱动三路相机编码参数。
-- `fays_record_example` 直接读取 `/etc/environment` 的 `CAMERA_CODEC`，不依赖进程继承环境变量。
-- `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音：`en` 优先 `audio_en/`，文件缺失时回退 `audio/`。
+## 7. Episode 产物与检查
+### 7.1 默认产物
+- 视频：
+  - `left_cam_main.mkv`
+  - `right_cam_main.mkv`
+  - `left_stereo.mkv`
+  - `right_stereo.mkv`
+  - `left_tcam_l.mkv`
+  - `left_tcam_r.mkv`
+  - `right_tcam_l.mkv`
+  - `right_tcam_r.mkv`
+- 传感器：
+  - `sensor_data_left.mcap`
+  - `sensor_data_right.mcap`
+- 元数据：
+  - `metadata.json`
+  - `calibration.json`
+- 条件产物：
+  - `audio_pre.wav`
+  - `audio_post.wav`
+  - `info.json`
+
+### 7.2 最小检查项
+停录后优先检查：
+- 八路 `mkv` 是否存在且文件大小正常。
+- `sensor_data_left.mcap`、`sensor_data_right.mcap` 是否存在。
+- `metadata.json`、`calibration.json` 是否落盘。
+- 若执行了 pre/post 音频录制，对应 wav 是否存在。
+
+说明：`info.json` 当前会生成，但**还不在强校验清单内**；它更适合作为辅助元信息，而不是当前最小验收的硬约束文件。
+
+## 8. 灯效、音频与关键路径
+### 8.1 当前状态灯语义
+- `INIT`：初始化或落盘阶段，蓝灯。
+- `READY`：可录制，绿色呼吸灯。
+- `RECORDING`：录制中，绿色闪烁。
+- `CALIB_PRE` / `CALIB_RUN` / `CALIB_DONE`：供 USB 导入与校准脚本复用。
+- `ERROR_1` ~ `ERROR_5`：红灯长短码，分别用于完整性失败到运行时错误。
+- `EXIT`：关机退出阶段。
+
+### 8.2 关键持久化与临时路径
+- 持久化标定：`/etc/ugripper/config/calibration/calibration.json`
+- 运行时音频 FIFO：`/tmp/umi_audio_pipe`
+- 音频临时目录：`/tmp/umi_audio`
+- 关机触发文件：`/tmp/umi_shutdown_request`
+- 数据目录：`/mnt/data_disk/<device_sn_lower>/data`
+
+### 8.3 音频链路关键行为
+- `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音，并强制通过 PulseAudio 绑定型号为 `0020:0b21` 的 USB 音频设备。
+- 提示音主线程通过 FIFO 收命令后使用 `pygame.mixer` 播放到指定 USB sink；启动时只做一次短静音预热、每段提示音前补前导静音，不再维持常驻静音 keepalive。
+- 播放/录音初始化前会受控执行 `pactl unload-module module-suspend-on-idle`，避免 USB 耳机在长时间空闲或热插拔恢复后出现首段吞音；该动作只收敛在初始化阶段，不在每次提示音、录音或音量键事件里重复切换模块。
+- `py_script/usb_audio_mic_test.py --playback` 默认只做“原生采集 + SoX 后处理导出”，不再默认硬套旧 `noise.prof`；若需去噪，先运行 `py_script/usb_audio_noise_profile.py` 生成当前环境底噪 profile，再显式传入 `--denoise --noise-profile <path>`。
+- 现场回归优先覆盖两类场景：耳机长时间空闲后的首次播放 `python3 py_script/usb_audio_play_test.py`，以及长时间空闲后的首次录音 `python3 py_script/usb_audio_mic_test.py --playback`；两项测试都应在日志中看到 `Disabled PulseAudio suspend modules: ...`。
+- 回滚方式：若需恢复 PulseAudio 默认模块状态，可重启当前用户的 PulseAudio 会话，或重启 `ugripper.service` 让音频守护进程重新按默认环境启动；无需在运行期反复手工切换 `module-suspend-on-idle`。
+- 现场 5 步回归 SOP：1）确认耳机已识别且服务正常，观察 `journalctl -u ugripper.service -n 100` 是否出现 USB 音频初始化日志；2）空闲 3~5 分钟后执行 `python3 py_script/usb_audio_play_test.py`，确认首个测试音不吞头；3）再次空闲 3~5 分钟后执行 `python3 py_script/usb_audio_mic_test.py --playback`，确认录音回放起始段不被截断；4）若需覆盖热恢复，再做一次耳机热插拔后重复步骤 2/3；5）若结果异常，记录 `pactl list short modules`、`pactl list short sinks`、`pactl list short sources` 与 `journalctl -u ugripper.service -n 200` 作为现场。
+
+### 8.4 相关辅助单元
+- `auto_update/umi-shutdown-trigger.path`：监控 `/tmp/umi_shutdown_request`。
+- `auto_update/umi-shutdown-trigger.service`：检测到触发文件后执行 `systemctl poweroff`。
+- `auto_calibration/ugripper-network-monitor.service`：监听网线插拔，当前仅在拔线时重启 `ugripper.service`。
+- `auto_update/boot_check_install.sh`：开机时检查 `/opt/backup` 中的 `deb` 是否需要恢复或升级。
+
+## 9. 配置、安装与 U 盘流程
+### 9.1 当前主要配置入口
+当前主要配置来自 `/etc/environment`。
+
+| 键 | 当前用途 | 备注 |
+| --- | --- | --- |
+| `DEVICE_SN` | 决定数据路径与标定导入匹配目录 | 建议视为必填 |
+| `UGRIPPER_LANG` | 提示音语言 | 由 `config.txt` 导入 |
+| `CAMERA_CODEC` | `camera_recorder` 启动参数 | 仅支持 `h264` / `h265` |
+| `DEVICE_ROLE` | 导入配置键 | 当前录制主流程不依赖该字段 |
+
+说明：`DEVICE_ROLE` 可能仍由 USB 导入脚本写入，但 `record_runtime` 当前写出的 `metadata.json` 固定为 `device_role=local`，录制主流程按本地模式运行。
+
+### 9.2 当前默认项
+| 项目 | 当前默认口径 |
+| --- | --- |
+| 部署形态 | 单机双手、本地录制 |
+| 录制相机集合 | 左右主摄 + 左右 stereo + 4 路触觉 |
+| 设备角色 | episode 元数据固定写 `device_role=local` |
+| 网络 | 业务可在无对端设备时启动 |
+| 静态 IP | 安装脚本仍会配置 `192.168.1.110/24` |
+
+### 9.3 U 盘支持内容
+- 主包升级：根目录放置 `ugripper_*_arm64*.deb`。
+- updater 自升级：根目录放置 `ugripper-usb-updater*.deb`。
+- 配置导入：根目录 `config.txt`。
+- 主相机标定导入：`ugripper_calib/<DEVICE_SN>/`。
+- encoder 零位校准触发：根目录 `calibration.txt`。
+
+### 9.4 U 盘同次插入顺序
+当同一次 U 盘插入同时包含 `config.txt`、`ugripper_calib/` 和 `calibration.txt` 时，当前顺序是：
+1. 导入 `config.txt`
+2. 导入主相机标定
+3. 若存在 `calibration.txt`，则跳过中间重启，直接进入 encoder 校准流程
+4. 校准完成后恢复 `ugripper.service`
+
+### 9.5 安装脚本与网络行为
+`pack_script/postinst` 当前会：
+- 停掉旧的录制相关进程。
+- 若当前有线网口正使用手工配置的非 `ugripper-static-*` 以太网连接，首次安装会先备份该连接，供卸载回退。
+- 初始化持久化标定目录。
+- 重新加载 udev 规则。
+- 启用 `umi-shutdown-trigger.path`。
+- 启用并重启 `ugripper.service`。
+- 启用并重启 `ugripper-network-monitor.service`。
+
+网络相关当前行为：
+- 安装脚本会自动识别当前物理以太网口。
+- 通过 NetworkManager 创建/更新 `ugripper-static-<iface>` 连接。
+- 当前固定下发静态 IP：`192.168.1.110/24`。
+- 若安装前该网口已有激活的手工静态连接，且 IP 也是 `192.168.1.110/24`，安装接管过程通常不会改变现场可见 IP；卸载主包时会删除 `ugripper-static-*` 并恢复安装前备份的原连接。
+- 当前录制启动不依赖对端网络存在。
+
+### 9.6 网线监测行为
+`auto_calibration/monitor_network.sh` 当前行为：
+- 网线拔出：仅重启 `ugripper.service`
+- 网线插入：不重启 `ugripper.service`，也不执行其他额外动作
+- 若存在 `/run/ugripper_installing_from_usb.lock`，则跳过升级窗口内的边沿动作
+
+## 10. 常用检查与排障入口
+### 10.1 服务管理
+```bash
+sudo systemctl status ugripper.service
+sudo systemctl restart ugripper.service
+sudo journalctl -u ugripper.service -f
+```
+
+### 10.2 录制相关进程
+- 主运行时：`record_runtime`
+- 相机录制：`camera_recorder`
+- 传感器录制：`sensor_recorder`
+- 音频播放：`audio/audio_play.py`
+
+### 10.3 U 盘流程日志
+```bash
+sudo tail -n 200 /var/log/ugripper/usb_auto_update.log
+sudo tail -n 200 /var/log/ugripper/boot_install.log
+```
+
+### 10.4 设备映射优先检查
+优先检查以下 symlink / 设备是否存在且方向正确：
+- `/dev/left_cam_main`
+- `/dev/right_cam_main`
+- `/dev/left_tcam_l`
+- `/dev/left_tcam_r`
+- `/dev/right_tcam_l`
+- `/dev/right_tcam_r`
+- `/dev/left_imu`
+- `/dev/right_imu`
+- `/dev/left_encoder`
+- `/dev/right_encoder`
+- `/dev/left_gripper`
+- `/dev/right_gripper`
+
+### 10.5 快速定位建议
+- 不能启动：先看 `ugripper.service` 日志和 `record_runtime` 是否成功拉起。
+- 能录不能停：优先检查 HMI 按键事件、状态机和 `sensor_recorder` / `camera_recorder` 退出路径。
+- 少文件或校验失败：先核对六路视频、双 MCAP、`metadata.json`、`calibration.json` 是否完整。
+- 音频异常：优先看 USB 耳机枚举、PulseAudio sink/source、`module-suspend-on-idle` 是否已在初始化阶段被卸载。
+- U 盘流程异常：先看 `/var/log/ugripper/usb_auto_update.log`，再区分是包安装、配置导入、标定导入还是 encoder 校准失败。
+
+## 11. 当前使用注意点
+- `config/camera_recorder.yaml` 当前 8 路配置全部默认启用；若现场需要裁剪录制集合，应明确同步调整 `record_runtime` 的 `--only` 参数与 episode 校验清单。
+- 仓库内仍有部分后处理脚本依赖旧输出命名或旧假设，不能默认视为当前主链路的一部分。
+- `info.json` 会生成，但当前不属于最小强校验集合。
+- 安装脚本仍会配置静态 IP；这更偏向交付/运维约束，而不是录制主链路前置条件。
+- 校准、导入与恢复动作仍分散在多个 shell 脚本和 service 中；当前功能可用，但维护时需要注意入口分散。

@@ -4,22 +4,13 @@ import os
 import signal
 import sys
 import time
-from pathlib import Path
 
-# Reuse LED mapping from led_manager.py when possible.
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-try:
-    from led_manager import PWM_BASE_PATH, PWM_CONFIG
-except Exception:
-    PWM_BASE_PATH = "/sys/class/pwm"
-    PWM_CONFIG = {
-        "green": {"chip": "pwmchip1", "channel": "0"},
-        "blue": {"chip": "pwmchip0", "channel": "0"},
-        "red": {"chip": "pwmchip3", "channel": "0"},
-    }
+PWM_BASE_PATH = "/sys/class/pwm"
+PWM_CONFIG = {
+    "green": {"chip": "pwmchip1", "channel": "0"},
+    "blue": {"chip": "pwmchip0", "channel": "0"},
+    "red": {"chip": "pwmchip3", "channel": "0"},
+}
 
 
 class PwmChannel:
@@ -68,7 +59,6 @@ class PwmChannel:
         self._write("duty_cycle", int(ns))
 
     def set_level(self, brightness):
-        # Same polarity as led_manager.py: 1.0 => bright, 0.0 => off.
         brightness = max(0.0, min(1.0, float(brightness)))
         duty = int((1.0 - brightness) * self.period_ns)
         self.set_duty_cycle(duty)

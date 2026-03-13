@@ -1,0 +1,236 @@
+#ifndef RECORD_RUNTIME_H
+#define RECORD_RUNTIME_H
+
+#include "gripper_hmi_driver.h"
+#include "gripper_hmi_led_effects.h"
+
+#include <array>
+#include <atomic>
+#include <chrono>
+#include <cstdint>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include <sys/types.h>
+
+struct RecordRuntimeOptions
+{
+    std::vector<std::string> gripperPorts;
+    std::string cameraRecorderBin = "./build/src/camera_recorder/camera_recorder";
+    std::string sensorRecorderBin = "./build/src/sensor_recorder/sensor_recorder";
+    std::string audioPlayScript = "./audio/audio_play.py";
+    std::string audioRecordScript = "./audio/record_usb_audio.py";
+    std::string audioPipe = "/tmp/umi_audio_pipe";
+    std::string audioReadyFile = "/tmp/umi_audio_ready";
+    std::string audioTempDir = "/tmp/umi_audio";
+    std::string noiseProfile = "./audio/noise.prof";
+    std::string shutdownRequestFile = "/tmp/umi_shutdown_request";
+    std::string diskRoot = "/mnt/data_disk";
+    std::string envFile = "/etc/environment";
+    std::string persistCalibrationFile = "/etc/ugripper/config/calibration/calibration.json";
+    std::string fallbackCalibrationFile = "./config/fakeCamCalib.json";
+    std::string cameraCodec = "h264";
+    int pollMs = 20;
+};
+
+class RecordRuntime
+{
+public:
+    explicit RecordRuntime(RecordRuntimeOptions options);
+    ~RecordRuntime();
+
+    bool initialize();
+    int run();
+    void requestStop();
+
+private:
+    struct ButtonSnapshot
+    {
+        bool upPressed = false;
+        bool downPressed = false;
+    };
+
+    enum class LedState
+    {
+        Init,
+        Ready,
+        Recording,
+        Error1,
+        Error2,
+        Error3,
+        Error4,
+        Error5,
+        CalibPre,
+        CalibRun,
+        CalibDone,
+        Exit,
+    };
+
+    class ProcessRunner
+    {
+    public:
+        explicit ProcessRunner(std::string name);
+        ~ProcessRunner();
+
+        bool start(const std::vector<std::string> &arguments);
+        bool isRunning();
+        bool stop(int timeoutMs);
+        bool wait(int timeoutMs);
+        bool sendSignal(int signalNumber);
+        void reset();
+        int lastExitCode() const;
+        int pid() const;
+
+    private:
+        bool pollExit(bool blocking);
+
+        std::string name_;
+        pid_t pid_ = -1;
+        int lastExitCode_ = 0;
+    };
+
+    class GripperPanelManager
+    {
+    public:
+        bool connect(const std::vector<std::string> &ports);
+        void disconnect();
+        bool hasConnectedDevice() const;
+        bool poll(int timeoutMs, ButtonSnapshot *snapshot);
+        void setLedColor(uint8_t red, uint8_t green, uint8_t blue);
+        void turnOff();
+
+    private:
+        static constexpr size_t kBtnUpKeyIndex = 0;
+        static constexpr size_t kBtnDownKeyIndex = 1;
+
+        std::vector<std::unique_ptr<GripperHmiDriver>> drivers_;
+        size_t inputDriverIndex_ = 0;
+        bool hasDedicatedRightInput_ = false;
+    };
+
+    class HmiLedController
+    {
+    public:
+        explicit HmiLedController(GripperPanelManager *panelManager);
+        ~HmiLedController();
+
+        void start();
+        void stop();
+        void setState(LedState state, double progress = 0.0);
+
+    private:
+        void workerLoop();
+
+        GripperPanelManager *panelManager_ = nullptr;
+        std::atomic<bool> running_{false};
+        std::thread worker_;
+        mutable std::mutex stateMutex_;
+        GripperLedEffect effect_{};
+        GripperLedEffectRenderer renderer_{};
+        std::array<uint8_t, 3> lastColor_{0, 0, 0};
+    };
+
+    class EpisodeManager
+    {
+    public:
+        EpisodeManager(std::string diskRoot,
+                       std::string deviceSn,
+                       std::string cameraCodec,
+                       std::string persistCalibrationFile,
+                       std::string fallbackCalibrationFile,
+                       std::string packageVersion,
+                       std::string updaterVersion);
+
+        bool initialize();
+        std::string createNextEpisodeDir();
+        bool prepareEpisode(const std::string &episodeDir,
+                            bool resetRecording,
+                            const std::string &resetSourceDir,
+                            std::string *errorMessage) const;
+        bool validateEpisode(const std::string &episodeDir, std::string *errorMessage) const;
+        const std::string &dataRoot() const;
+
+    private:
+        bool writeMetadata(const std::string &episodeDir,
+                           bool resetRecording,
+                           const std::string &resetSourceDir,
+                           std::string *errorMessage) const;
+        bool copyCalibration(const std::string &episodeDir, std::string *errorMessage) const;
+        bool prepareEpisodeOutputs(const std::string &episodeDir, std::string *errorMessage) const;
+
+        std::string diskRoot_;
+        std::string deviceSn_;
+        std::string deviceSnLower_;
+        std::string cameraCodec_;
+        std::string persistCalibrationFile_;
+        std::string fallbackCalibrationFile_;
+        std::string packageVersion_;
+        std::string updaterVersion_;
+        std::string dataRoot_;
+        std::string episodeRoot_;
+    };
+
+    struct ButtonStateTracker
+    {
+        uint64_t upPressedSinceMs = 0;
+        uint64_t downPressedSinceMs = 0;
+        uint64_t bothPressedSinceMs = 0;
+        bool upLongHandled = false;
+        bool downLongHandled = false;
+        bool dualChordActive = false;
+        bool dualLongHandled = false;
+        bool shutdownPromptPlayed = false;
+    };
+
+    static GripperLedEffect makeLedEffect(LedState state, double progress = 0.0);
+    static std::string readEnvValue(const std::string &envFile, const std::string &key);
+    static std::string queryPackageVersion(const std::string &packageName);
+    static std::string toLower(std::string text);
+    static std::string jsonEscape(const std::string &value);
+    static uint64_t currentSteadyMs();
+    static uint64_t currentEpochMs();
+    static bool fileExistsAndNotEmpty(const std::string &path);
+    static bool runCommandSync(const std::vector<std::string> &arguments);
+
+    bool startRecording(bool resetRecording);
+    bool stopRecording(bool dueToError, const std::string &reason);
+    void handleButtons(const ButtonSnapshot &buttons);
+    bool handleShortUpAction();
+    bool handleShortDownAction();
+    bool handleLongUpAction();
+    bool handleLongDownAction();
+    void handleDualShutdownAction();
+    bool recordAudioClip(const std::string &audioType, bool monitorUpButton);
+    bool attachPendingPreAudio(const std::string &episodeDir);
+    bool checkRecorderProcesses();
+    bool startAudioPlayer();
+    void stopAudioPlayer();
+    void sendAudioCommand(const std::string &command) const;
+    void setLedState(LedState state, double progress = 0.0);
+
+    RecordRuntimeOptions options_;
+    std::atomic<bool> stopRequested_{false};
+    bool initialized_ = false;
+    bool isRecording_ = false;
+    ButtonSnapshot lastButtons_{};
+    ButtonStateTracker buttonTracker_{};
+    uint64_t lastButtonActionMs_ = 0;
+    std::string deviceSn_;
+    std::string packageVersion_;
+    std::string updaterVersion_;
+    std::string currentEpisodeDir_;
+    std::string lastEpisodeDir_;
+    std::string pendingPreAudioFile_;
+    bool audioPlayerStarted_ = false;
+    std::unique_ptr<EpisodeManager> episodeManager_;
+    GripperPanelManager panelManager_;
+    std::unique_ptr<HmiLedController> ledController_;
+    ProcessRunner audioPlayer_{"audio_player"};
+    ProcessRunner cameraRecorder_{"camera_recorder"};
+    ProcessRunner sensorRecorder_{"sensor_recorder"};
+};
+
+#endif

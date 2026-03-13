@@ -1,5 +1,90 @@
 # Changelog
 
+> 说明：`docs/CHANGELOG.md` 只保留历史变更追溯；当前系统说明请优先阅读 `docs/agent/overview.md`。
+>
+> 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
+
+## Unreleased - 2026-03-13
+- 主包安装/卸载的有线网托管改为“接管并可回退”：首次安装前会备份当前激活的手工以太网连接，卸载时删除 `ugripper-static-*` 后恢复原先手动 NetworkManager 配置，避免现场先手工设为 `192.168.1.110` 时被破坏。
+- 收敛 `auto_calibration/monitor_network.sh` 的网线边沿行为：插线时仅记录日志，不再触发 `udevadm trigger` 或重启 `ugripper.service`；拔线时仍只重启 `ugripper.service`。
+- `record_runtime` 默认录制集合从 6 路扩为 8 路：启动 `camera_recorder` 时纳入 `left_stereo` / `right_stereo`，episode 强校验也同步要求两路 stereo `mkv` 落盘。
+- `camera_recorder` 的相机列表从代码内置 `BuildDefaultConfigList()` 改为外部 YAML：默认读取 `config/camera_recorder.yaml`，并支持 `--config-yaml <path>` 切换配置文件。
+- 录制缓冲参数 `input_thread_queue_size` 也下沉到 YAML；当前默认收紧为 stereo `128`、tactile `64`，便于后续现场按配置调优内存占用。
+- `audio/audio_play.py` 移除常驻静音 keepalive，只保留启动短预热与每段提示音前导静音，避免长期占用 USB headset sink 扩大热状态行为面。
+- `audio/pulse_audio_utils.py` 在播放/录音初始化前收敛执行 `pactl unload-module module-suspend-on-idle`：仅在 USB 音频链路建链时关闭 idle suspend，降低长时间空闲或热插拔后的首段吞音。
+- 补充作用边界：`module-suspend-on-idle` 的卸载应作为 USB 音频初始化动作，而不是每次提示音/录音时都重复切换；现场仍可手工执行一次该命令做临时验证。
+## Unreleased - 2026-03-11
+- 删除旧 `led_manager.py`：夹爪灯效统一收口到 `src/gripper_hmi` 的状态渲染器，`record_runtime` 与校准/USB 导入流程都改为直接驱动 HMI RGB。
+- 新 HMI 灯效补齐旧语义：支持 `INIT`、`READY`、`RECORDING`、`CALIB_PRE`、`CALIB_RUN[:progress]`、`CALIB_DONE`、`ERROR_1~ERROR_5`、`EXIT`，并复现错误红灯长短码。
+- `record_runtime` 补回语音/落盘节奏：停录后先播 `recording_stop`，再播 `writing` 并显示 `INIT` 蓝灯；校验通过后重新播 `ready`。
+- `audio/audio_play.py` 改回 `pygame.mixer` 常驻播放方案：启动时强制绑定型号为 `0020:0b21` 的 USB 耳机 sink，预热 mixer 后通过 FIFO 播放提示音，并继续在同一进程中监听耳机 HID 音量键；`record_runtime` 与校准脚本优先使用 `.venv/bin/python3`，无本地虚拟环境时回退 `uv run python3`。
+- episode 输出收口到现场所需最小集合：保留 `info.json`、`metadata.json`、`calibration.json`、六路视频和左右传感器 MCAP，不再生成 `cam.mkv` / `tact_left.mkv` / `tact_right.mkv` 兼容 symlink。
+- `record_runtime` 补齐完整按键状态机：`BTN_UP/BTN_DOWN` 长短按、pre/post 音频录制与双键长按关机请求均已迁入 C++。
+- 录制触发时当前启动左右主摄 + 四路触觉相机，继续不录制左右 stereo；传感器数据拆为 `sensor_data_left.mcap` 与 `sensor_data_right.mcap`，episode 校验同步检查双文件。
+- `src/camera_recorder` 重构为“`main.cpp` + config list + 录制类”模式：按配置选择主相机直录、触觉混合链路、双目混合链路，替代原来集中式命令拼接。
+- 主相机链路改为新相机直出 H.265：`camera_recorder` 直接用 GStreamer 把 `/dev/*_cam_main` 的 H.265 码流封装成 `mkv`，不再做二次编解码。
+- 修正触觉与双目录制链路：放弃 `gst 解码 -> rawvideo pipe -> ffmpeg` 方案，改为 `ffmpeg -f v4l2 -input_format mjpeg -> hevc_rkmpp` 直接链路；双目继续单文件输出，不再做左右拆分。
+- `camera_recorder` 各路视频现为独立子进程/pipe；单路掉线或启动失败只标记本路失败，不会主动连带停掉其他相机录制。
+- 新增 `src/record_runtime`：用 C++ 重写 `run_record.sh` 的核心录制控制，直接用类管理夹爪 HMI 按键、夹爪 LED、`camera_recorder` 与 `sensor_recorder` 子进程。
+- `run_record.sh` 收缩为薄壳启动脚本，默认直接拉起 `build/src/record_runtime/record_runtime`；旧网络同步链路不再纳入主流程。
+- `record_runtime` 当前保留短按录制控制：`BTN_UP` 启停普通录制，`BTN_DOWN` 在空闲时触发 reset 录制、在录制中触发停录；退出前会主动熄灭左右夹爪 LED。
+- `gripper_hmi_test` 默认端口改为 `/dev/right_gripper` 与 `/dev/left_gripper`，并改为纯 udev 规则：按左右 USB kernel 路径锁定 CH9344 设备组，再在同组 tty 中取内核排序最前的口作为 gripper HMI；不再依赖额外 role probe。
+- `right_imu/right_encoder/left_imu/left_encoder` 也切换为纯 udev 规则：按左右 USB kernel 路径锁定 CH9344 设备组，再按组内固定顺序映射（第 2 路 encoder、第 3 路 IMU），不再依赖 `ch9344_role_probe.py`。
+- `GripperHmiDriver` 在断开连接前会主动发送熄灯命令，避免测试程序退出后夹爪 LED 保持常亮。
+- `run_record.sh` 切到单机双手固定布局：不再读取 `DEVICE_SIDE`，相机录制统一一次启动 `left_cam_main/right_cam_main/left_tcam_l/left_tcam_r/right_tcam_l/right_tcam_r` 六路流。
+- episode 校验同步升级为单机双手六路视频模型：要求两路主相机跨度可读、四路触觉视频与 `sensor_data.mcap` 的跨度分别对齐；同时保留 `cam.mkv` / `tact_left.mkv` / `tact_right.mkv` 兼容 symlink（当前指向右手流）。
+- `pack_script/postinst` 与设计文档同步收口旧 `DEVICE_SIDE` 表述，明确当前默认部署为单机双手。
+
+- 收束 U 盘导入与校准时序：同一次插入同时包含 `config.txt`、`ugripper_calib/<DEVICE_SN>/` 与根目录 `calibration.txt` 时，先导入配置与主相机标定，再串行触发 `ugripper-calibration.service` 完成 encoder 零位校准；存在 `calibration.txt` 时不再做中间重启。
+- 明确校准触发边界：`ugripper_calib/` 仅导入主相机标定，不会误触发 encoder 零位校准；encoder 校准仅由 U 盘根目录 `calibration.txt` 触发。
+- 清理 `docs/agent/overview.md` 中旧 Fays 回归测试项：标定导入与相机硬件测试点改为仅覆盖当前主相机/触觉相机链路，并删除已完成的清理 TODO，避免按已移除能力误判失败。
+- 完成 V2 pre/post 音频链路迁移：`run_record.sh` 不再调用 `arecord -D hw:rockchipes8388,0`，改为通过新增 `audio/record_usb_audio.py` 走 USB 耳机麦克风 + PulseAudio 采集，再沿用原 SoX 后处理。
+- `auto_calibration/run_calibration.sh` 移除 `rockchipes8388` 的 `amixer` 初始化残留，校准流程与 V2 USB 音频方案保持一致。
+- 修复 `auto_calibration/monitor_network.sh` 的网线“伪上升沿”：改为等当前物理网卡与 `carrier` 首次可读后再建立基线，并在网卡切换时重新建基线，不再把服务重启后的已插线状态误判成新插入事件。
+- 主包安装链路恢复网络配置：`pack_script/postinst` 会自动识别当前物理网卡，并通过 NetworkManager 配置静态 IP `192.168.1.110/24`；`prerm` 对应清理 `ugripper-static-*` 连接。
+- `run_record.sh` 的 V2 默认行为改为本地控制模式：未配置或非法 `DEVICE_ROLE` 时默认按 `master` 启动，不再隐式假设旧 Right/Left 对端 IP；旧双机 `SYNC_TARGET_IP`/`MASTER_IP` 仅作兼容保留。
+- 新增 `src/gripper_hmi` 模块：参考 `ref_src` 的夹爪串口协议，在项目源码内用 `libserialport` 重写按键读取与 RGB LED 控制类，不再引入 `RingBuffer` / `SerialPort` / `SerialDevice` 抽象。
+- 新增 `gripper_hmi_test` 测试程序，可独立验证 `/dev/ttyCH9344USB0`、`/dev/ttyCH9344USB8` 上的按键上报与 LED 控制；当前尚未替换 `run_record.sh` 的旧 GPIO/PWM 主流程。
+
+# Changelog
+
+## v1.1.19 - 2026-03-11
+- 合并音频守护进程：耳机音量键监听已并入 `audio/audio_play.py` 的后台线程，不再额外依赖 `ugripper-usb-headset-keys.service`，减少一个 systemd service。
+- 安装/卸载链路同步简化：`postinst/prerm/build_deb.sh` 移除独立耳机音量键 service 的启停、禁用与打包逻辑。
+- 将仓库内默认 SoX `audio/noise.prof` 更新为当前现场在 `/tmp/ug_test_noise4.prof` 生成的新底噪 profile。
+
+## v1.1.18 - 2026-03-11
+- 修复 `py_script/usb_audio_mic_test.py` 的短录问题：放弃直接以 `16k/mono` 从 PulseAudio source 采集，改为按 source 原生参数录音后再用 SoX 转成目标格式，避免耳机麦克风链路被截断。
+- 新增 `py_script/usb_audio_noise_profile.py`：先采集当前环境底噪并生成 SoX `noise.prof`，再由 `usb_audio_mic_test.py --denoise` 显式使用，避免默认硬套旧 profile 把人声一起削掉。
+- `usb_audio_mic_test.py` 改为默认不启用去噪；只有显式传入 `--denoise` 且提供当前环境生成的 noise profile 时，才执行 `noisered + norm`。
+
+## Unreleased - 2026-03-11
+- 移除 Fays 相机相关运行链路：`run_record.sh` 不再检测、拉起或校验 Fays 录制进程与数据文件。
+- 构建/打包链路移除 `faysSense_vi_kit` 与 `fays_record_example`，主包仅保留 `camera_recorder` 与 `sensor_recorder` 相关产物。
+- U 盘标定导入改为仅处理主相机 `camchain`，不再依赖 `imucam` 或写入 Fays/IMU 标定字段。
+
+## v1.1.17 - 2026-03-11
+- 新增 USB 耳机音量键服务：通过 `audio/usb_headset_volume_keys.py` 监听这款耳机的 HID 按键事件，并用 `pactl` 调整 PulseAudio sink 音量，不再依赖桌面环境的媒体键守护进程。
+- `config/99-fixed-usb-map.rules` 新增 `/dev/input/ugripper_usb_audio_keys` 输入设备别名，支持耳机热插拔后稳定定位音量键输入节点。
+- `py_script/usb_audio_mic_test.py` 接入旧 SoX 去噪链路：录音后优先执行 `remix 1 -> noisered noise.prof 0.15 -> norm`，若系统未安装 `sox` 则降级为保留原始录音并打印告警。
+
+## v1.1.16 - 2026-03-11
+- 新增 `py_script/v2_serial_probe.py`：面向 v2 迁移场景，枚举 USB 串口拓扑并按现有协议自动探测 `IM648` 与 `encoder` 所在串口。
+- `v2_serial_probe.py` 默认按 `115200` 验证 encoder，并支持可选 `--set-encoder-1m` 下发切到 `1Mbps` 的配置命令；脚本会明确提示该变更需断电重上电后再验证。
+
+- `config/99-fixed-usb-map.rules` 新增 `ttyCH9344USB*` 权限规则：对 `1a86:55d9` 多串口桥统一放开 `0666` + `uaccess`，便于现场直接运行 IMU / encoder 探测脚本。
+- `config/99-fixed-usb-map.rules` 升级为基于 USB2 hub 路径 + 串口协议探测的动态 symlink 规则：为左右两侧自动生成 `right_imu` / `left_imu` / `right_encoder` / `left_encoder`，不再直接依赖漂移的 `ttyCH9344USBx` 命名。
+- `sensor_recorder` 改为单机双手采集：同时打开 `/dev/right_imu`、`/dev/right_encoder`、`/dev/left_imu`、`/dev/left_encoder`，并将左右 IMU / encoder 分别写入 `sensor_data.mcap` 的独立 channel；`zeroing` 改为显式参数选择 `left` / `right` / 设备路径，不再依赖 `DEVICE_SIDE` 或旧 `/dev/ttyS2`、`/dev/ttyS7`。
+## v1.1.15 - 2026-03-11
+- 音频播放/录音链路改为优先走 PulseAudio：`audio/audio_play.py` 与 USB 耳机测试脚本不再直接绑定 ALSA `hw/plughw`，而是强制选择型号为 `0020:0b21` 的 USB 耳机 sink/source。
+- USB 耳机匹配策略从“指定 serial”放宽为“同型号即命中”：udev 规则与运行时检测均仅校验 `VID:PID=0020:0b21`，支持同款耳机替换。
+- 修复 `py_script/usb_audio_mic_test.py`：改用 PulseAudio `parecord/paplay`，避免该耳机仅支持 48k 双声道 ALSA `hw` 采集时的参数不兼容问题。
+
+## v1.1.14 - 2026-03-11
+- v2 音频硬件切换为外接 USB 耳机/麦克风（`liyuany USB Audio`, `0020:0b21`）：新增 udev 稳定映射 `/dev/snd/ugripper_usb_audio_{control,playback,capture}`，不再依赖已不存在的 v1 `rockchipes8388`。
+- `audio/audio_play.py` 改为强制使用新 USB 音频设备；未识别到耳机时直接报错，不再回退默认声卡。
+- 新增 `py_script/usb_audio_play_test.py` 与 `py_script/usb_audio_mic_test.py`，便于现场分别验证耳机播放与麦克风录音/回放。
+
 ## v1.1.13 - 2026-03-09
 - 三路相机录制链路调整：主摄使用 `ffmpeg v4l2(NV12 1920x1080)->h26x_rkmpp`，左右触觉改为 `v4l2src(MJPEG)->mppjpegdec->appsink->ffmpeg h26x_rkmpp(CQP)`。
 - Fays 录制链路回退为 `ffmpeg rawvideo -> h26x_rkmpp`，并修复标定导入时 Fays 图像 `fps` 的来源：优先读取 `fays_vikit.yaml` 的 `stereo_fps`，缺失时写 `unknown`，不再默认写 `60`。
@@ -81,4 +166,3 @@
 - 新增自动判定 `build_deb.sh -q` 与标准模式的规则（基于改动类型与关键二进制是否存在）。
 - 三路相机录制调整为主摄 FFmpeg + 触觉 Hybrid（Gst/MPP 解 MJPEG + FFmpeg rkmpp CQP 编码），以兼顾触觉 CPU 占用与 FFmpeg CQP 体积表现。
 - `fays_record_example` 视频录制链路改回 FFmpeg `rawvideo -> h26x_rkmpp(CQP)`，不再使用 Gst `fixqp` 编码。
-

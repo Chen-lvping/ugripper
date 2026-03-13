@@ -23,6 +23,7 @@ htmlcov/
 .vscode/
 *.swp
 *.swo
+.worktrees
 # 环境变量文件（可选，若用 .env）
 .env
 # 文档构建产物

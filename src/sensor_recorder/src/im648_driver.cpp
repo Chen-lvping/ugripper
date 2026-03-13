@@ -4,6 +4,23 @@
 #include <iomanip>
 #include <cstring>
 #include <iostream>
+#include <filesystem>
+
+namespace fs = std::filesystem;
+
+static std::string resolveSerialPortPath(const std::string &configuredPort)
+{
+    std::error_code ec;
+    if (fs::exists(configuredPort, ec))
+    {
+        const fs::path resolved = fs::weakly_canonical(configuredPort, ec);
+        if (!ec && !resolved.empty())
+        {
+            return resolved.string();
+        }
+    }
+    return configuredPort;
+}
 
 using namespace dmbot_serial;
 
@@ -95,16 +112,20 @@ void Im648Driver::stop()
 
 void Im648Driver::initSerial()
 {
-    enum sp_return r = sp_get_port_by_name(port_name_.c_str(), &port_);
+    const std::string resolvedPort = resolveSerialPortPath(port_name_);
+
+    enum sp_return r = sp_get_port_by_name(resolvedPort.c_str(), &port_);
     if (r != SP_OK)
     {
-        std::cerr << "Cannot find serial port " << port_name_ << std::endl;
+        std::cerr << "Cannot find serial port " << port_name_
+                  << " (resolved=" << resolvedPort << ")" << std::endl;
         exit(1);
     }
 
     if (sp_open(port_, SP_MODE_READ_WRITE) != SP_OK)
     {
-        std::cerr << "Cannot open port " << port_name_ << std::endl;
+        std::cerr << "Cannot open port " << port_name_
+                  << " (resolved=" << resolvedPort << ")" << std::endl;
         exit(1);
     }
 

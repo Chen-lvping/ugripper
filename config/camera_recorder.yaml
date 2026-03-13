@@ -1,0 +1,70 @@
+cameras:
+  - name: left_cam_main
+    device: /dev/left_cam_main
+    mode: direct-copy-h265
+    width: 1920
+    height: 1080
+    fps: 60
+    output_files: [left_cam_main.mkv]
+
+  - name: right_cam_main
+    device: /dev/right_cam_main
+    mode: direct-copy-h265
+    width: 1920
+    height: 1080
+    fps: 60
+    output_files: [right_cam_main.mkv]
+
+  - name: left_stereo
+    device: /dev/left_stereo
+    mode: stereo-hybrid-decode-encode
+    width: 2560
+    height: 800
+    fps: 60
+    output_files: [left_stereo.mkv]
+    input_thread_queue_size: 128
+
+  - name: right_stereo
+    device: /dev/right_stereo
+    mode: stereo-hybrid-decode-encode
+    width: 2560
+    height: 800
+    fps: 60
+    output_files: [right_stereo.mkv]
+    input_thread_queue_size: 128
+
+  - name: left_tcam_l
+    device: /dev/left_tcam_l
+    mode: hybrid-decode-encode
+    width: 640
+    height: 480
+    fps: 120
+    output_files: [left_tcam_l.mkv]
+    input_thread_queue_size: 64
+
+  - name: left_tcam_r
+    device: /dev/left_tcam_r
+    mode: hybrid-decode-encode
+    width: 640
+    height: 480
+    fps: 120
+    output_files: [left_tcam_r.mkv]
+    input_thread_queue_size: 64
+
+  - name: right_tcam_l
+    device: /dev/right_tcam_l
+    mode: hybrid-decode-encode
+    width: 640
+    height: 480
+    fps: 120
+    output_files: [right_tcam_l.mkv]
+    input_thread_queue_size: 64
+
+  - name: right_tcam_r
+    device: /dev/right_tcam_r
+    mode: hybrid-decode-encode
+    width: 640
+    height: 480
+    fps: 120
+    output_files: [right_tcam_r.mkv]
+    input_thread_queue_size: 64

@@ -4,16 +4,27 @@
 #include <chrono>
 #include <csignal>
 #include <iostream>
+#include <string>
 #include <thread>
 
 std::atomic<bool> g_stopFlag(false);
+
+std::string resolveEncoderPort(const std::string &argument) {
+    if (argument == "left" || argument == "--left") {
+        return "/dev/left_encoder";
+    }
+    if (argument == "right" || argument == "--right") {
+        return "/dev/right_encoder";
+    }
+    return argument;
+}
 
 void signalHandler(int signum) {
     std::cout << "\nInterrupt signal (" << signum << ") received. Stopping..." << std::endl;
     g_stopFlag = true;
 }
 
-void encoderReadThreadFunc(EncoderDriver* encoder) {
+void encoderReadThreadFunc(EncoderDriver *encoder) {
     uint8_t readBuf[256];
     while (!g_stopFlag.load()) {
         if (!encoder->isConnected()) {
@@ -23,8 +34,8 @@ void encoderReadThreadFunc(EncoderDriver* encoder) {
 
         int bytesRead = encoder->readDataNonBlocking(readBuf, sizeof(readBuf));
         if (bytesRead > 0) {
-            auto frames_num = encoder->parseReceivedData(readBuf, bytesRead);
-            if (frames_num) {
+            const auto framesNum = encoder->parseReceivedData(readBuf, bytesRead);
+            if (framesNum) {
                 encoder->updateActiveStatus();
             }
         } else {
@@ -33,13 +44,21 @@ void encoderReadThreadFunc(EncoderDriver* encoder) {
     }
 }
 
-int main() {
+int main(int argc, char *argv[]) {
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
+    if (argc < 2) {
+        std::cerr << "Usage: zeroing <left|right|/dev/encoder_path>" << std::endl;
+        return 1;
+    }
+
     std::cout << "--- Encoder Zeroing Tool ---" << std::endl;
 
-    EncoderDriver encoder(1, "/dev/ttyS7", 1000000, "Joint1_Encoder");
+    const std::string encoderPort = resolveEncoderPort(argv[1]);
+    std::cout << "Using encoder port: " << encoderPort << std::endl;
+
+    EncoderDriver encoder(1, encoderPort, 1000000, "Joint1_Encoder");
 
     std::cout << "Connecting to encoder..." << std::endl;
     auto status = encoder.connect();
@@ -84,7 +103,7 @@ int main() {
     std::thread encoderReadThread(encoderReadThreadFunc, &encoder);
 
     std::cout << "Sending Zero Position Command..." << std::endl;
-    bool zeroSuccess = encoder.setCurrentAsZero();
+    const bool zeroSuccess = encoder.setCurrentAsZero();
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     if (zeroSuccess) {

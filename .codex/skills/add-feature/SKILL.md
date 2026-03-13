@@ -30,7 +30,7 @@ description: 为 ugripper 项目执行新增功能（add feature）类需求的�
 
 1. 每次 feature 修改后，必须同步创建或维护相关文档。
 2. 默认至少检查并更新 `docs/agent/overview.md` 中受影响的条目。
-3. 当流程、模块边界、运行时架构变化时，同时更新 `docs/agent/ARCHITECTURE.md`。
+3. 当流程、模块边界、运行时架构变化时，统一更新 `docs/agent/overview.md` 对应章节。
 4. 每次 feature 修改后，都要维护 `docs/CHANGELOG.md`，内容聚焦“软件功能改动”，避免写构建过程流水；条目尽量简洁。
 5. 仅在确有新增知识且无法放入现有文档时，新增文档；避免文档碎片化。
 

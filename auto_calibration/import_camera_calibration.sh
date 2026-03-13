@@ -57,10 +57,8 @@ if [ -z "$TARGET_SN_DIR" ] || [ ! -d "$TARGET_SN_DIR" ]; then
 fi
 
 CAMCHAIN_FILE="$(find "$TARGET_SN_DIR" -maxdepth 2 -type f \( -name '*camchain*.yaml' -o -name '*camchain*.yml' \) | sort | head -n1 || true)"
-IMUCAM_FILE="$(find "$TARGET_SN_DIR" -maxdepth 2 -type f -name '*imucam*.txt' | sort | head -n1 || true)"
-
-if [ -z "$CAMCHAIN_FILE" ] || [ -z "$IMUCAM_FILE" ]; then
-    log "Missing camchain/imucam file in $TARGET_SN_DIR"
+if [ -z "$CAMCHAIN_FILE" ]; then
+    log "Missing camchain file in $TARGET_SN_DIR"
     exit 1
 fi
 
@@ -75,31 +73,14 @@ fi
 
 mkdir -p "$PERSIST_CALIB_DIR"
 
-FAYS_CONFIG_FILE=""
-for candidate in     "$PROJECT_ROOT/build/faysSense_vi_kit/config/fays_vikit.yaml"     "$PROJECT_ROOT/faysSense_vi_kit/config/fays_vikit.yaml"; do
-    if [ -f "$candidate" ]; then
-        FAYS_CONFIG_FILE="$candidate"
-        break
-    fi
-done
-
-FAYS_STEREO_FPS="unknown"
-if [ -n "$FAYS_CONFIG_FILE" ]; then
-    fays_fps_raw="$(awk -F: '/^[[:space:]]*stereo_fps[[:space:]]*:/ {gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2); print $2; exit}' "$FAYS_CONFIG_FILE" || true)"
-    if [ -n "$fays_fps_raw" ]; then
-        FAYS_STEREO_FPS="$fays_fps_raw"
-    fi
-fi
-
-python3 - "$PERSIST_CALIB_FILE" "$FALLBACK_CAM_JSON" "$CAMCHAIN_FILE" "$IMUCAM_FILE" "$PERSIST_CALIB_FILE" "$DEVICE_SN" "$FAYS_STEREO_FPS" <<'PY'
+python3 - "$PERSIST_CALIB_FILE" "$FALLBACK_CAM_JSON" "$CAMCHAIN_FILE" "$PERSIST_CALIB_FILE" "$DEVICE_SN" <<'PY'
 import json
 import pathlib
 import re
 import sys
 from datetime import datetime, timezone
 
-base_json, fallback_json, camchain_file, imucam_file, output_json, device_sn, fays_stereo_fps = sys.argv[1:]
-num_re = r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?"
+base_json, fallback_json, camchain_file, output_json, device_sn = sys.argv[1:]
 
 
 def load_text(path):
@@ -141,172 +122,7 @@ def parse_camchain(path):
     }
 
 
-def parse_matrix_after(text, marker):
-    idx = text.find(marker)
-    if idx < 0:
-        return []
-
-    rows = []
-    for line in text[idx:].splitlines()[1:]:
-        nums = re.findall(num_re, line)
-        if nums:
-            rows.append([float(x) for x in nums])
-            if len(rows) == 4:
-                break
-        elif rows:
-            break
-    return rows
-
-
-def find_float_after(text, pattern):
-    m = re.search(pattern, text, re.S)
-    return float(m.group(1)) if m else None
-
-
-def extract_residuals(text):
-    lines = text.splitlines()
-    start_idx = None
-    for idx, line in enumerate(lines):
-        if line.strip() == "Residuals":
-            start_idx = idx
-            break
-
-    if start_idx is None:
-        return {}
-
-    residuals = {}
-    patterns = {
-        "reprojection_error_cam0_mean_px": rf"Reprojection error \(cam0\) \[px\]:\s*mean\s*({num_re})",
-        "reprojection_error_cam1_mean_px": rf"Reprojection error \(cam1\) \[px\]:\s*mean\s*({num_re})",
-        "gyro_error_mean_rad_s": rf"Gyroscope error \(imu0\) \[rad/s\]:\s*mean\s*({num_re})",
-        "acc_error_mean_m_s2": rf"Accelerometer error \(imu0\) \[m/s\^2\]:\s*mean\s*({num_re})",
-    }
-
-    for line in lines[start_idx + 1:]:
-        stripped = line.strip()
-        if not stripped:
-            continue
-        if stripped in {"Transformation (cam0):", "Transformation (cam1):", "IMU configuration", "cam0", "cam1"}:
-            break
-        for key, pattern in patterns.items():
-            if key in residuals:
-                continue
-            match = re.search(pattern, line)
-            if match:
-                residuals[key] = float(match.group(1))
-
-    return residuals
-
-
-def parse_cam_cfg(text, label):
-    m = re.search(
-        rf"^\s*{re.escape(label)}\s*$\n^\s*-+\s*$\n(.*?)(?=^\s*cam\d\s*$|^\s*IMU configuration\s*$|\Z)",
-        text,
-        re.M | re.S,
-    )
-    if not m:
-        raise ValueError(f"missing config block for {label}")
-
-    block = m.group(1)
-
-    def list_field(name):
-        mm = re.search(rf"{re.escape(name)}:\s*\[([^\]]+)\]", block)
-        if not mm:
-            return None
-        return parse_num_list(mm.group(1))
-
-    def scalar_field(name):
-        mm = re.search(rf"{re.escape(name)}:\s*(.+?)\s*$", block, re.M)
-        return mm.group(1).strip() if mm else None
-
-    fl = list_field("Focal length")
-    pp = list_field("Principal point")
-    dc = list_field("Distortion coefficients") or []
-    if not fl or len(fl) < 2 or not pp or len(pp) < 2:
-        raise ValueError(f"missing intrinsics in {label}")
-
-    return {
-        "camera_model": scalar_field("Camera model") or "pinhole",
-        "distortion_model": scalar_field("Distortion model") or "equidistant",
-        "intrinsics": [fl[0], fl[1], pp[0], pp[1]],
-        "distortion_coeffs": dc,
-    }
-
-
-def parse_imu_cfg(text):
-    m = re.search(r"^\s*IMU0:\s*$\n^\s*-+\s*$\n(.*?)(?=\Z)", text, re.M | re.S)
-    if not m:
-        return {}
-
-    block = m.group(1)
-
-    def pick(pattern):
-        mm = re.search(pattern, block, re.M | re.S)
-        return float(mm.group(1)) if mm else None
-
-    model_m = re.search(r"^\s*Model:\s*(.+?)\s*$", block, re.M)
-
-    return {
-        "model": model_m.group(1).strip() if model_m else None,
-        "update_rate_hz": pick(rf"Update rate:\s*({num_re})"),
-        "acc_noise_density": pick(rf"Accelerometer:\s*\n\s*Noise density:\s*({num_re})"),
-        "acc_noise_density_discrete": pick(rf"Accelerometer:.*?Noise density \(discrete\):\s*({num_re})"),
-        "acc_random_walk": pick(rf"Accelerometer:.*?Random walk:\s*({num_re})"),
-        "gyro_noise_density": pick(rf"Gyroscope:\s*\n\s*Noise density:\s*({num_re})"),
-        "gyro_noise_density_discrete": pick(rf"Gyroscope:.*?Noise density \(discrete\):\s*({num_re})"),
-        "gyro_random_walk": pick(rf"Gyroscope:.*?Random walk:\s*({num_re})"),
-    }
-
-
-def parse_imucam(path):
-    text = load_text(path)
-    residuals = extract_residuals(text)
-
-    cam0 = parse_cam_cfg(text, "cam0")
-    cam1 = parse_cam_cfg(text, "cam1")
-
-    return {
-        "cam0": cam0,
-        "cam1": cam1,
-        "extrinsics": {
-            "imu0_to_cam0_T_ci": parse_matrix_after(text, "T_ci:  (imu0 to cam0):"),
-            "cam0_to_imu0_T_ic": parse_matrix_after(text, "T_ic:  (cam0 to imu0):"),
-            "imu0_to_cam1_T_ci": parse_matrix_after(text, "T_ci:  (imu0 to cam1):"),
-            "cam1_to_imu0_T_ic": parse_matrix_after(text, "T_ic:  (cam1 to imu0):"),
-            "cam0_to_cam1_T_01": parse_matrix_after(text, "Baseline (cam0 to cam1):"),
-            "baseline_norm_m": find_float_after(text, rf"baseline norm:\s*({num_re})"),
-            "timeshift_cam0_to_imu0_sec": find_float_after(text, rf"timeshift cam0 to imu0:.*?\n\s*({num_re})"),
-            "timeshift_cam1_to_imu0_sec": find_float_after(text, rf"timeshift cam1 to imu0:.*?\n\s*({num_re})"),
-        },
-        "residuals": residuals,
-        "imu0": parse_imu_cfg(text),
-    }
-
-
-def resolve_shape(existing, default_h, default_w):
-    shape = existing.get("shape") if isinstance(existing, dict) else None
-    if isinstance(shape, list) and len(shape) >= 2 and all(isinstance(x, (int, float)) for x in shape[:2]):
-        return int(shape[0]), int(shape[1])
-    return default_h, default_w
-
-
-def normalize_fps_value(value):
-    if value in (None, ""):
-        return "unknown"
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return "unknown"
-        if re.fullmatch(r"[-+]?\d+", stripped):
-            return int(stripped)
-        return stripped
-    return value
-
-
-def ensure_image_entry(existing, width, height, fx, fy, cx, cy, camera_model, distortion_model, distortion_coeffs, fps_override=None):
-    base = existing if isinstance(existing, dict) else {}
-    fps = normalize_fps_value(fps_override if fps_override is not None else base.get("fps"))
-
+def ensure_image_entry(existing, width, height, fx, fy, cx, cy, camera_model, distortion_model, distortion_coeffs):
     return {
         "shape": [height, width, 3],
         "names": ["height", "width", "channels"],
@@ -323,7 +139,7 @@ def ensure_image_entry(existing, width, height, fx, fy, cx, cy, camera_model, di
         "distortion_model": distortion_model,
         "distortion_coeffs": distortion_coeffs,
         "dtype": "video",
-        "fps": fps,
+        "fps": (existing or {}).get("fps", "unknown") if isinstance(existing, dict) else "unknown",
     }
 
 
@@ -334,20 +150,18 @@ else:
     data = json.loads(pathlib.Path(fallback_json).read_text(encoding="utf-8"))
 
 camchain = parse_camchain(camchain_file)
-imucam = parse_imucam(imucam_file)
-
 main_key = "observation.images.{{CAM_MAIN}}"
 if main_key not in data:
     cam_keys = [k for k in data.keys() if k.startswith("observation.images.cam_")]
     if cam_keys:
         main_key = cam_keys[0]
 
-w_main, h_main = camchain["resolution"]
+width, height = camchain["resolution"]
 fx, fy, cx, cy = camchain["intrinsics"]
 data[main_key] = ensure_image_entry(
     data.get(main_key),
-    w_main,
-    h_main,
+    width,
+    height,
     fx,
     fy,
     cx,
@@ -359,39 +173,11 @@ data[main_key] = ensure_image_entry(
 if camchain.get("rostopic"):
     data[main_key]["rostopic"] = camchain["rostopic"]
 
-for idx in (0, 1):
-    key = f"observation.images.fays_cam{idx}"
-    cam_cfg = imucam[f"cam{idx}"]
-    fx_i, fy_i, cx_i, cy_i = cam_cfg["intrinsics"]
-    h, w = resolve_shape(data.get(key, {}), 480, 640)
-    data[key] = ensure_image_entry(
-        data.get(key),
-        w,
-        h,
-        fx_i,
-        fy_i,
-        cx_i,
-        cy_i,
-        cam_cfg["camera_model"],
-        cam_cfg["distortion_model"],
-        cam_cfg["distortion_coeffs"],
-        fps_override=fays_stereo_fps,
-    )
-
-imu_key = "observation.imu.fays_imu0"
-existing_imu = data.get(imu_key, {}) if isinstance(data.get(imu_key), dict) else {}
-imu_cfg = imucam.get("imu0", {})
-data[imu_key] = {
-    "dtype": "imu",
-    "model": imu_cfg.get("model") or existing_imu.get("model") or "calibrated",
-    "update_rate_hz": imu_cfg.get("update_rate_hz") or existing_imu.get("update_rate_hz"),
-    "acc_noise_density": imu_cfg.get("acc_noise_density") or existing_imu.get("acc_noise_density"),
-    "acc_noise_density_discrete": imu_cfg.get("acc_noise_density_discrete") or existing_imu.get("acc_noise_density_discrete"),
-    "acc_random_walk": imu_cfg.get("acc_random_walk") or existing_imu.get("acc_random_walk"),
-    "gyro_noise_density": imu_cfg.get("gyro_noise_density") or existing_imu.get("gyro_noise_density"),
-    "gyro_noise_density_discrete": imu_cfg.get("gyro_noise_density_discrete") or existing_imu.get("gyro_noise_density_discrete"),
-    "gyro_random_walk": imu_cfg.get("gyro_random_walk") or existing_imu.get("gyro_random_walk"),
-}
+for key in list(data.keys()):
+    if key == main_key:
+        continue
+    if key.startswith("observation.images.") or key.startswith("observation.imu."):
+        data.pop(key, None)
 
 metadata = data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {}
 metadata["format_version"] = metadata.get("format_version", "1.0")
@@ -410,11 +196,6 @@ calib_info["main_camera"] = {
     "distortion_model": camchain["distortion_model"],
     "resolution": camchain["resolution"],
 }
-calib_info["fays_imu_bundle"] = {
-    "source": pathlib.Path(imucam_file).name,
-    "extrinsics": imucam.get("extrinsics", {}),
-    "residuals": imucam.get("residuals", {}),
-}
 calib_info["notes"] = (
     "Auto-imported from USB by device SN. "
     "Runtime will still align {{CAM_MAIN}} and tactile serial values."
@@ -430,13 +211,11 @@ IMPORT_STAMP="$(date +%Y%m%d_%H%M%S)"
 IMPORT_SAVE_DIR="$PERSIST_CALIB_DIR/imported/${DEVICE_SN}/${IMPORT_STAMP}"
 mkdir -p "$IMPORT_SAVE_DIR"
 cp -f "$CAMCHAIN_FILE" "$IMPORT_SAVE_DIR/"
-cp -f "$IMUCAM_FILE" "$IMPORT_SAVE_DIR/"
 cat > "$IMPORT_SAVE_DIR/import_meta.txt" <<META
 import_time_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 device_sn=$DEVICE_SN
 usb_source_dir=$TARGET_SN_DIR
 camchain_file=$(basename "$CAMCHAIN_FILE")
-imucam_file=$(basename "$IMUCAM_FILE")
 output_calibration_json=$PERSIST_CALIB_FILE
 META
 

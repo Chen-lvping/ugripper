@@ -1,6 +1,6 @@
 ---
 name: debug-ugripper
-description: 为 ugripper 项目执行故障定位与只读调试验证。用于用户提出“debug / 排查问题 / 为什么失败 / 看日志 / 录制异常 / Fays 异常 / USB 升级失败 / 主从同步异常 / 校验失败”等请求时：先阅读 docs/agent/overview.md 理解项目链路，再立即执行非修改、低风险、只读的快速检查并输出初步发现；只有涉及代码修改、配置落盘、服务重启、构建打包、升级导入或其他有副作用操作时，才等待用户明确确认。
+description: 为 ugripper 项目执行故障定位与只读调试验证。用于用户提出“debug / 排查问题 / 为什么失败 / 看日志 / 录制异常 / USB 升级失败 / 网络/环境异常 / 校验失败”等请求时：先阅读 docs/agent/overview.md 理解项目链路，再立即执行非修改、低风险、只读的快速检查并输出初步发现；只有涉及代码修改、配置落盘、服务重启、构建打包、升级导入或其他有副作用操作时，才等待用户明确确认。
 ---
 
 # debug-ugripper
@@ -8,7 +8,7 @@ description: 为 ugripper 项目执行故障定位与只读调试验证。用于
 ## 固定执行顺序
 
 1. 先阅读 `docs/agent/overview.md`，用其中的主流程、模块边界、错误态和排障入口建立上下文。
-2. 将问题归类到最接近的链路：服务启动、录制流程、主从同步、Fays、三路相机、传感器、episode 校验、USB 升级/标定导入、打包/恢复。
+2. 将问题归类到最接近的链路：服务启动、录制流程、网络/环境、相机录制、传感器、episode 校验、USB 升级/标定导入、打包/恢复。
 3. 无需等待用户确认，立即执行非修改、低风险、只读的快速验证。
 4. 输出“当前症状判断 + 已验证证据 + 下一步排查计划 + 是否需要用户确认”的简要结论。
 5. 只有进入有副作用阶段时，才等待用户明确确认后继续。
@@ -42,14 +42,13 @@ description: 为 ugripper 项目执行故障定位与只读调试验证。用于
 
 - 失败现象是什么，首次出现在哪个步骤。
 - 是否只影响单臂、双臂、单次 episode 或所有录制。
-- 最近是否做过升级、导入配置/标定、改过编码器或主从角色。
+- 最近是否做过升级、导入配置/标定或改过编码器、网络配置。
 - 期望行为与实际行为的差异。
 - 是否已有具体 episode 目录、报错时间点或日志关键词。
 
 ## 项目专用排查入口
 
 - 服务主入口：`pack_script/ugripper.service` -> `run_record.sh`
-- Fays 控制：`faysSense_vi_kit/scripts/run_fays_record.sh`
 - USB 升级：`auto_update/usb_auto_update.sh`
 - 标定导入：`auto_calibration/import_camera_calibration.sh`
 - 打包：`build_deb.sh`、`usb_updater_build.sh`

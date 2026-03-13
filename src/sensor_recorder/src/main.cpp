@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <thread>
 
@@ -34,6 +35,39 @@ struct EncoderSample {
     float rad;
 };
 
+struct SensorSideConfig {
+    std::string label;
+    std::string imuPort;
+    std::string encoderPort;
+};
+
+struct SideWriter {
+    SensorSideConfig config;
+    fs::path outputFile;
+    mcap::McapWriter writer;
+    mcap::Schema imuSchema;
+    mcap::Schema encoderSchema;
+};
+
+struct ImuRuntime {
+    SensorSideConfig config;
+    std::unique_ptr<dmbot_serial::Im648Driver> driver;
+    mcap::Channel channel;
+    uint32_t sequence = 0;
+};
+
+struct EncoderRuntime {
+    SensorSideConfig config;
+    std::unique_ptr<EncoderDriver> driver;
+    mcap::Channel channel;
+    std::thread readThread;
+    std::thread requestThread;
+    uint32_t sequence = 0;
+    bool firstSampleLogged = false;
+    int warmupCounter = 0;
+    bool connected = false;
+};
+
 static_assert(sizeof(ImuSample) == 40, "ImuSample layout changed");
 static_assert(sizeof(EncoderSample) == 8, "EncoderSample layout changed");
 
@@ -43,28 +77,28 @@ void signalHandler(int signum) {
 }
 
 ImuSample create_imu_sample(const dmbot_serial::IM648_Data &d) {
-    ImuSample s{};
-    s.qx = d.quat_x;
-    s.qy = d.quat_y;
-    s.qz = d.quat_z;
-    s.qw = d.quat_w;
-    s.gx = d.gyrox;
-    s.gy = d.gyroy;
-    s.gz = d.gyroz;
-    s.ax = d.accx;
-    s.ay = d.accy;
-    s.az = d.accz;
-    return s;
+    ImuSample sample{};
+    sample.qx = d.quat_x;
+    sample.qy = d.quat_y;
+    sample.qz = d.quat_z;
+    sample.qw = d.quat_w;
+    sample.gx = d.gyrox;
+    sample.gy = d.gyroy;
+    sample.gz = d.gyroz;
+    sample.ax = d.accx;
+    sample.ay = d.accy;
+    sample.az = d.accz;
+    return sample;
 }
 
 EncoderSample create_encoder_sample(const EncoderData &d) {
-    EncoderSample s{};
-    s.raw = d.currentPosition;
-    s.rad = d.currentPositionRad;
-    return s;
+    EncoderSample sample{};
+    sample.raw = d.currentPosition;
+    sample.rad = d.currentPositionRad;
+    return sample;
 }
 
-void encoderReadThreadFunc(EncoderDriver *encoder) {
+void encoderReadThreadFunc(EncoderDriver *encoder, const std::string &label) {
     uint8_t readBuf[256];
     while (!g_stopFlag.load()) {
         if (!encoder->isConnected()) {
@@ -74,7 +108,7 @@ void encoderReadThreadFunc(EncoderDriver *encoder) {
 
         int bytesRead = encoder->readDataNonBlocking(readBuf, sizeof(readBuf));
         if (bytesRead > 0) {
-            auto frames = encoder->parseReceivedData(readBuf, bytesRead);
+            const auto frames = encoder->parseReceivedData(readBuf, bytesRead);
             if (frames > 0) {
                 encoder->updateActiveStatus();
             }
@@ -82,19 +116,19 @@ void encoderReadThreadFunc(EncoderDriver *encoder) {
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     }
-    std::cout << "Encoder read thread stopped" << std::endl;
+    std::cout << "Encoder read thread stopped for " << label << std::endl;
 }
 
-void encoderRequestThreadFunc(EncoderDriver *encoder) {
-    auto next_time = std::chrono::steady_clock::now();
-    const auto period = std::chrono::microseconds(1000); // 1 kHz
+void encoderRequestThreadFunc(EncoderDriver *encoder, const std::string &label) {
+    auto nextTime = std::chrono::steady_clock::now();
+    const auto period = std::chrono::microseconds(1000);
 
     while (!g_stopFlag.load()) {
-        next_time += period;
+        nextTime += period;
         encoder->requestState(false);
-        std::this_thread::sleep_until(next_time);
+        std::this_thread::sleep_until(nextTime);
     }
-    std::cout << "Encoder request thread stopped" << std::endl;
+    std::cout << "Encoder request thread stopped for " << label << std::endl;
 }
 
 mcap::Schema buildImuSchema() {
@@ -113,6 +147,76 @@ mcap::Schema buildEncoderSchema() {
     })");
 }
 
+bool openSideWriter(const fs::path &outputDir, const SensorSideConfig &config, SideWriter *sideWriter) {
+    if (sideWriter == nullptr) {
+        return false;
+    }
+
+    sideWriter->config = config;
+    sideWriter->outputFile = outputDir / ("sensor_data_" + config.label + ".mcap");
+    sideWriter->imuSchema = buildImuSchema();
+    sideWriter->encoderSchema = buildEncoderSchema();
+
+    mcap::McapWriterOptions options("sensor_recorder_" + config.label);
+    options.noChunking = false;
+    options.chunkSize = 256 * 1024;
+    options.compression = mcap::Compression::Lz4;
+    options.compressionLevel = mcap::CompressionLevel::Default;
+    options.forceCompression = false;
+    options.noRepeatedSchemas = true;
+    options.noRepeatedChannels = true;
+    options.noMessageIndex = true;
+
+    auto status = sideWriter->writer.open(sideWriter->outputFile.string(), options);
+    if (!status.ok()) {
+        std::cerr << "Failed to open MCAP file for " << config.label << ": " << status.message << std::endl;
+        return false;
+    }
+
+    sideWriter->writer.addSchema(sideWriter->imuSchema);
+    sideWriter->writer.addSchema(sideWriter->encoderSchema);
+    std::cout << "Recording " << config.label << " sensor data to " << sideWriter->outputFile << std::endl;
+    return true;
+}
+
+bool connectEncoderWithFallback(EncoderRuntime &encoderRuntime) {
+    auto connectStatus = encoderRuntime.driver->connect();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+
+    if (connectStatus == ConnectStatus::SERIAL_FAIL) {
+        std::cerr << "Failed to connect encoder serial port: " << encoderRuntime.config.encoderPort << std::endl;
+        return false;
+    }
+
+    if (connectStatus == ConnectStatus::NO_RESPONSE) {
+        std::cout << encoderRuntime.config.label
+                  << " encoder not responding at 1Mbps, falling back to 115200..." << std::endl;
+        encoderRuntime.driver->disconnect();
+        encoderRuntime.driver->resetBaudrate(115200);
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        connectStatus = encoderRuntime.driver->connect();
+        if (connectStatus == ConnectStatus::SUCCESS) {
+            std::cout << encoderRuntime.config.label
+                      << " encoder ready at 115200, switching back to 1Mbps." << std::endl;
+            encoderRuntime.driver->setBaudrate(1000000);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            encoderRuntime.driver->disconnect();
+            encoderRuntime.driver->resetBaudrate(1000000);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            connectStatus = encoderRuntime.driver->connect();
+        }
+        if (connectStatus != ConnectStatus::SUCCESS) {
+            std::cerr << encoderRuntime.config.label
+                      << " encoder failed to respond after baudrate adjustments." << std::endl;
+            return false;
+        }
+    } else {
+        std::cout << encoderRuntime.config.label << " encoder ready at 1Mbps." << std::endl;
+    }
+
+    return true;
+}
+
 int main(int argc, char *argv[]) {
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
@@ -127,156 +231,147 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    const fs::path outputFile = outputDir / "sensor_data.mcap";
-    std::cout << "Recording combined sensor data to " << outputFile << std::endl;
+    const SensorSideConfig rightConfig{"right", "/dev/right_imu", "/dev/right_encoder"};
+    const SensorSideConfig leftConfig{"left", "/dev/left_imu", "/dev/left_encoder"};
 
-    mcap::McapWriter writer;
-    mcap::McapWriterOptions options("sensor_recorder");
-    options.noChunking = false;
-    options.chunkSize = 256 * 1024; // 256 KiB
-    options.compression = mcap::Compression::Lz4;
-    options.compressionLevel = mcap::CompressionLevel::Default;
-    // Let writer skip compression when a tiny chunk would otherwise grow.
-    options.forceCompression = false;
-    options.noRepeatedSchemas = true;
-    options.noRepeatedChannels = true;
-    options.noMessageIndex = true;
-
-    auto status = writer.open(outputFile.string(), options);
-    if (!status.ok()) {
-        std::cerr << "Failed to open MCAP file: " << status.message << std::endl;
+    SideWriter rightWriter;
+    SideWriter leftWriter;
+    if (!openSideWriter(outputDir, rightConfig, &rightWriter) || !openSideWriter(outputDir, leftConfig, &leftWriter)) {
         return -1;
     }
 
-    auto imuSchema = buildImuSchema();
-    auto encoderSchema = buildEncoderSchema();
-    writer.addSchema(imuSchema);
-    writer.addSchema(encoderSchema);
+    ImuRuntime rightImu{rightConfig, nullptr, mcap::Channel("imu_right", "binary", rightWriter.imuSchema.id)};
+    ImuRuntime leftImu{leftConfig, nullptr, mcap::Channel("imu_left", "binary", leftWriter.imuSchema.id)};
+    EncoderRuntime rightEncoder{rightConfig, nullptr, mcap::Channel("encoder_right", "binary", rightWriter.encoderSchema.id)};
+    EncoderRuntime leftEncoder{leftConfig, nullptr, mcap::Channel("encoder_left", "binary", leftWriter.encoderSchema.id)};
 
-    mcap::Channel imuChannel("imu_raw", "binary", imuSchema.id);
-    mcap::Channel encoderChannel("encoder", "binary", encoderSchema.id);
-    writer.addChannel(imuChannel);
-    writer.addChannel(encoderChannel);
+    rightWriter.writer.addChannel(rightImu.channel);
+    rightWriter.writer.addChannel(rightEncoder.channel);
+    leftWriter.writer.addChannel(leftImu.channel);
+    leftWriter.writer.addChannel(leftEncoder.channel);
 
-    dmbot_serial::Im648Driver imu("/dev/ttyS2", 115200);
-    imu.start();
-    std::cout << "IM648 initialized." << std::endl;
+    std::cout << "Opening dual-arm sensors: "
+              << "right(imu=" << rightConfig.imuPort << ", encoder=" << rightConfig.encoderPort << ") "
+              << "left(imu=" << leftConfig.imuPort << ", encoder=" << leftConfig.encoderPort << ")"
+              << std::endl;
 
-    EncoderDriver encoder(1, "/dev/ttyS7", 1000000, "Joint1_Encoder");
-    auto connectStatus = encoder.connect();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    rightImu.driver = std::make_unique<dmbot_serial::Im648Driver>(rightConfig.imuPort, 115200);
+    leftImu.driver = std::make_unique<dmbot_serial::Im648Driver>(leftConfig.imuPort, 115200);
+    rightImu.driver->start();
+    leftImu.driver->start();
+    std::cout << "Both IM648 devices initialized." << std::endl;
 
-    if (connectStatus == ConnectStatus::SERIAL_FAIL) {
-        std::cerr << "Failed to connect encoder serial port." << std::endl;
+    rightEncoder.driver = std::make_unique<EncoderDriver>(1, rightConfig.encoderPort, 1000000, "Right_Encoder");
+    leftEncoder.driver = std::make_unique<EncoderDriver>(1, leftConfig.encoderPort, 1000000, "Left_Encoder");
+    rightEncoder.connected = connectEncoderWithFallback(rightEncoder);
+    leftEncoder.connected = connectEncoderWithFallback(leftEncoder);
+
+    if (!rightEncoder.connected && !leftEncoder.connected) {
+        std::cerr << "Both encoders failed to initialize." << std::endl;
         return -1;
     }
 
-    if (connectStatus == ConnectStatus::NO_RESPONSE) {
-        std::cout << "Encoder not responding at 1Mbps, falling back to 115200..." << std::endl;
-        encoder.disconnect();
-        encoder.resetBaudrate(115200);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        connectStatus = encoder.connect();
-        if (connectStatus == ConnectStatus::SUCCESS) {
-            std::cout << "Encoder ready at 115200, switching back to 1Mbps." << std::endl;
-            encoder.setBaudrate(1000000);
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            encoder.disconnect();
-            encoder.resetBaudrate(1000000);
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            connectStatus = encoder.connect();
-        }
-        if (connectStatus != ConnectStatus::SUCCESS) {
-            std::cerr << "Encoder failed to respond after baudrate adjustments." << std::endl;
-            return -1;
-        }
-    } else {
-        std::cout << "Encoder ready at 1Mbps." << std::endl;
+    if (rightEncoder.connected) {
+        rightEncoder.readThread = std::thread(encoderReadThreadFunc, rightEncoder.driver.get(), rightConfig.label);
+        rightEncoder.requestThread = std::thread(encoderRequestThreadFunc, rightEncoder.driver.get(), rightConfig.label);
     }
-
-    std::thread encoderReadThread(encoderReadThreadFunc, &encoder);
-    std::thread encoderRequestThread(encoderRequestThreadFunc, &encoder);
+    if (leftEncoder.connected) {
+        leftEncoder.readThread = std::thread(encoderReadThreadFunc, leftEncoder.driver.get(), leftConfig.label);
+        leftEncoder.requestThread = std::thread(encoderRequestThreadFunc, leftEncoder.driver.get(), leftConfig.label);
+    }
 
     auto nextEncoderWrite = std::chrono::steady_clock::now();
-    const auto encoderPeriod = std::chrono::microseconds(1000); // 1 kHz
+    const auto encoderPeriod = std::chrono::microseconds(1000);
 
-    uint32_t imuSequence = 0;
-    uint32_t encoderSequence = 0;
-    bool firstEncoderLogged = false;
-
-    int warmupCounter = 0;
     while (!g_stopFlag.load()) {
         bool wroteData = false;
 
-        const auto &imuData = imu.getData();
-        if (imuData.data_updated.load()) {
-            const auto timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                           std::chrono::system_clock::now().time_since_epoch())
-                                           .count();
+        const auto handleImu = [&](ImuRuntime &imuRuntime, mcap::McapWriter &writer) {
+            const auto &imuData = imuRuntime.driver->getData();
+            if (!imuData.data_updated.load()) {
+                return false;
+            }
+
+            const auto timestampNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                       std::chrono::system_clock::now().time_since_epoch())
+                                       .count();
             const auto sample = create_imu_sample(imuData);
 
             mcap::Message msg;
-            msg.channelId = imuChannel.id;
-            msg.sequence = imuSequence++;
-            msg.logTime = timestamp_ns;
-            msg.publishTime = timestamp_ns;
+            msg.channelId = imuRuntime.channel.id;
+            msg.sequence = imuRuntime.sequence++;
+            msg.logTime = timestampNs;
+            msg.publishTime = timestampNs;
             msg.data = reinterpret_cast<const std::byte *>(&sample);
             msg.dataSize = sizeof(sample);
 
-            auto writeStatus = writer.write(msg);
+            const auto writeStatus = writer.write(msg);
             if (!writeStatus.ok()) {
-                std::cerr << "Failed to write IMU frame: " << writeStatus.message << std::endl;
-                break;
+                std::cerr << "Failed to write " << imuRuntime.config.label
+                          << " IMU frame: " << writeStatus.message << std::endl;
+                g_stopFlag = true;
+                return false;
             }
 
-            wroteData = true;
+            imuRuntime.driver->clearDataUpdated();
+            return true;
+        };
 
-            imu.clearDataUpdated();
-        }
+        wroteData = handleImu(rightImu, rightWriter.writer) || wroteData;
+        wroteData = handleImu(leftImu, leftWriter.writer) || wroteData;
 
         auto nowSteady = std::chrono::steady_clock::now();
         if (nowSteady >= nextEncoderWrite) {
             nextEncoderWrite += encoderPeriod;
 
-            EncoderData state = encoder.getState();
-            if (state.currentPosition == 65535) {
-                if (warmupCounter++ < 100) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                    continue;
+            const auto handleEncoder = [&](EncoderRuntime &encoderRuntime, mcap::McapWriter &writer) {
+                if (!encoderRuntime.connected) {
+                    return false;
                 }
-            }
 
-            const auto timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                EncoderData state = encoderRuntime.driver->getState();
+                if (state.currentPosition == 65535) {
+                    if (encoderRuntime.warmupCounter++ < 100) {
+                        return false;
+                    }
+                }
+
+                const auto timestampNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
                                            std::chrono::system_clock::now().time_since_epoch())
                                            .count();
-            const auto sample = create_encoder_sample(state);
+                const auto sample = create_encoder_sample(state);
 
-            mcap::Message msg;
-            msg.channelId = encoderChannel.id;
-            msg.sequence = encoderSequence++;
-            msg.logTime = timestamp_ns;
-            msg.publishTime = timestamp_ns;
-            msg.data = reinterpret_cast<const std::byte *>(&sample);
-            msg.dataSize = sizeof(sample);
+                mcap::Message msg;
+                msg.channelId = encoderRuntime.channel.id;
+                msg.sequence = encoderRuntime.sequence++;
+                msg.logTime = timestampNs;
+                msg.publishTime = timestampNs;
+                msg.data = reinterpret_cast<const std::byte *>(&sample);
+                msg.dataSize = sizeof(sample);
 
-            auto writeStatus = writer.write(msg);
-            if (!writeStatus.ok()) {
-                std::cerr << "Failed to write encoder frame: " << writeStatus.message << std::endl;
-                break;
-            }
+                const auto writeStatus = writer.write(msg);
+                if (!writeStatus.ok()) {
+                    std::cerr << "Failed to write " << encoderRuntime.config.label
+                              << " encoder frame: " << writeStatus.message << std::endl;
+                    g_stopFlag = true;
+                    return false;
+                }
 
-            if (!firstEncoderLogged) {
-                std::cout << "[Encoder] First sample at recording start: "
-                          << "raw=" << state.currentPosition
-                          << ", rad=" << state.currentPositionRad
-                          << ", speed_raw=" << state.currentSpeed
-                          << ", speed_rad=" << state.currentSpeedRad
-                          << ", ts_ns=" << timestamp_ns
-                          << std::endl;
-                firstEncoderLogged = true;
-            }
+                if (!encoderRuntime.firstSampleLogged) {
+                    std::cout << "[Encoder-" << encoderRuntime.config.label << "] First sample: "
+                              << "raw=" << state.currentPosition
+                              << ", rad=" << state.currentPositionRad
+                              << ", speed_raw=" << state.currentSpeed
+                              << ", speed_rad=" << state.currentSpeedRad
+                              << ", ts_ns=" << timestampNs
+                              << std::endl;
+                    encoderRuntime.firstSampleLogged = true;
+                }
+                return true;
+            };
 
-            wroteData = true;
+            wroteData = handleEncoder(rightEncoder, rightWriter.writer) || wroteData;
+            wroteData = handleEncoder(leftEncoder, leftWriter.writer) || wroteData;
         }
 
         if (!wroteData) {
@@ -287,18 +382,31 @@ int main(int argc, char *argv[]) {
     g_stopFlag = true;
     std::cout << "Stopping sensors..." << std::endl;
 
-    imu.stop();
-    encoder.disconnect();
-
-    if (encoderReadThread.joinable()) {
-        encoderReadThread.join();
+    rightImu.driver->stop();
+    leftImu.driver->stop();
+    if (rightEncoder.driver) {
+        rightEncoder.driver->disconnect();
     }
-    if (encoderRequestThread.joinable()) {
-        encoderRequestThread.join();
+    if (leftEncoder.driver) {
+        leftEncoder.driver->disconnect();
     }
 
-    writer.close();
-    std::cout << "Combined MCAP log saved to " << outputFile << std::endl;
+    if (rightEncoder.readThread.joinable()) {
+        rightEncoder.readThread.join();
+    }
+    if (rightEncoder.requestThread.joinable()) {
+        rightEncoder.requestThread.join();
+    }
+    if (leftEncoder.readThread.joinable()) {
+        leftEncoder.readThread.join();
+    }
+    if (leftEncoder.requestThread.joinable()) {
+        leftEncoder.requestThread.join();
+    }
 
+    rightWriter.writer.close();
+    leftWriter.writer.close();
+    std::cout << "Right MCAP log saved to " << rightWriter.outputFile << std::endl;
+    std::cout << "Left MCAP log saved to " << leftWriter.outputFile << std::endl;
     return 0;
 }

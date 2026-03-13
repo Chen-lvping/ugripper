@@ -15,13 +15,14 @@ cd "$script_dir/../" || exit 1
 # ================= 配置部分 =================
 ENCODER_CALIB_BIN="./build/src/sensor_recorder/zeroing"
 
-# --- LED 控制配置 ---
-LED_SCRIPT="./led_manager.py"
-LED_PIPE="/tmp/umi_led_pipe"
+# --- HMI 灯效配置 ---
+HMI_HELPER_BIN="./build/src/gripper_hmi/gripper_hmi_test"
+HMI_PORT_ARGS=(--port /dev/right_gripper --port /dev/left_gripper)
 
 # --- 音频配置 ---
 AUDIO_PLAY_SCRIPT="./audio/audio_play.py"
 AUDIO_PIPE="/tmp/umi_audio_pipe"
+AUDIO_PYTHON=""
 
 # 全局变量存储 PID
 PID_LED_SHELL=""
@@ -68,11 +69,40 @@ run_as_user() {
     runuser -u "$TARGET_USER" -- bash -lc "$*"
 }
 
+resolve_audio_python() {
+    if [ -x "./.venv/bin/python3" ]; then
+        AUDIO_PYTHON="./.venv/bin/python3"
+    elif command -v uv >/dev/null 2>&1; then
+        AUDIO_PYTHON="uv run python3"
+    else
+        AUDIO_PYTHON="python3"
+    fi
+}
+
+stop_led_helper() {
+    if [ -n "$PID_LED_SHELL" ]; then
+        kill_tree "$PID_LED_SHELL"
+        PID_LED_SHELL=""
+    fi
+}
+
 set_state() {
     local state=$1
-    if [ -p "$LED_PIPE" ]; then
-        echo "$state" > "$LED_PIPE" &
+
+    stop_led_helper
+
+    if [ ! -x "$HMI_HELPER_BIN" ]; then
+        echo "HMI helper not found: $HMI_HELPER_BIN"
+        return 1
     fi
+
+    if id "$TARGET_USER" >/dev/null 2>&1; then
+        runuser -u "$TARGET_USER" -- "$HMI_HELPER_BIN" "${HMI_PORT_ARGS[@]}" --state "$state" --led-only --duration 0 >/dev/null 2>&1 &
+    else
+        "$HMI_HELPER_BIN" "${HMI_PORT_ARGS[@]}" --state "$state" --led-only --duration 0 >/dev/null 2>&1 &
+    fi
+    PID_LED_SHELL=$!
+    sleep 0.2
 }
 
 notify_audio() {
@@ -107,22 +137,18 @@ kill_tree() {
 start_helpers() {
     echo "Starting helper processes..."
     
-    rm -f "$LED_PIPE" "$AUDIO_PIPE"
-    mkfifo "$LED_PIPE"
+    rm -f "$AUDIO_PIPE"
     mkfifo "$AUDIO_PIPE"
-    chmod 666 "$LED_PIPE" "$AUDIO_PIPE"
+    chmod 666 "$AUDIO_PIPE"
 
-    if [ -f "$LED_SCRIPT" ]; then
-        run_as_user "uv run $LED_SCRIPT" &
-        PID_LED_SHELL=$! 
-        echo "LED Manager shell started (PID: $PID_LED_SHELL)"
+    if [ -x "$HMI_HELPER_BIN" ]; then
+        set_state "INIT"
+        echo "HMI LED helper started (PID: $PID_LED_SHELL)"
     fi
 
     if [ -f "$AUDIO_PLAY_SCRIPT" ]; then
-        amixer -c rockchipes8388 sset 'ALC Capture Function' Stereo >/dev/null 2>&1
-        amixer -c rockchipes8388 sset 'ALC Capture Max PGA' 7 >/dev/null 2>&1
-
-        run_as_user "uv run $AUDIO_PLAY_SCRIPT" &
+        resolve_audio_python
+        run_as_user "$AUDIO_PYTHON $AUDIO_PLAY_SCRIPT" &
         PID_AUDIO_SHELL=$!
         echo "Audio Manager shell started (PID: $PID_AUDIO_SHELL)"
     fi
@@ -136,7 +162,7 @@ stop_helpers() {
     # 使用 PID 递归清理进程
     if [ -n "$PID_LED_SHELL" ]; then
         echo "Stopping LED process tree..."
-        kill_tree "$PID_LED_SHELL"
+        stop_led_helper
     fi
     
     if [ -n "$PID_AUDIO_SHELL" ]; then

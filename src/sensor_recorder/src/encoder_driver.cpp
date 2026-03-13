@@ -1,6 +1,23 @@
 #include "encoder_driver.h"
 #include <thread>
 #include <chrono>
+#include <filesystem>
+
+namespace fs = std::filesystem;
+
+static std::string resolveSerialPortPath(const std::string &configuredPort)
+{
+    std::error_code ec;
+    if (fs::exists(configuredPort, ec))
+    {
+        const fs::path resolved = fs::weakly_canonical(configuredPort, ec);
+        if (!ec && !resolved.empty())
+        {
+            return resolved.string();
+        }
+    }
+    return configuredPort;
+}
 
 EncoderDriver::EncoderDriver(uint8_t serialNum, const std::string &port,
                              uint32_t baudrate, const std::string &name)
@@ -21,17 +38,21 @@ ConnectStatus EncoderDriver::connect()
     if (isConnected_)
         return ConnectStatus::SUCCESS;
 
-    sp_return result = sp_get_port_by_name(port_.c_str(), &serialPort_);
+    const std::string resolvedPort = resolveSerialPortPath(port_);
+
+    sp_return result = sp_get_port_by_name(resolvedPort.c_str(), &serialPort_);
     if (result != SP_OK)
     {
-        std::cerr << "EncoderDriver: Cannot find port " << port_ << std::endl;
+        std::cerr << "EncoderDriver: Cannot find port " << port_
+                  << " (resolved=" << resolvedPort << ")" << std::endl;
         return ConnectStatus::SERIAL_FAIL;
     }
 
     result = sp_open(serialPort_, SP_MODE_READ_WRITE);
     if (result != SP_OK)
     {
-        std::cerr << "EncoderDriver: Cannot open port " << port_ << std::endl;
+        std::cerr << "EncoderDriver: Cannot open port " << port_
+                  << " (resolved=" << resolvedPort << ")" << std::endl;
         sp_free_port(serialPort_);
         serialPort_ = nullptr;
         return ConnectStatus::SERIAL_FAIL;
