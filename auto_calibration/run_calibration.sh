@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # ================= 脚本初始化 =================
-TARGET_USER="radxa"
+TARGET_USER="ubuntu"
 
 # 检查是否以 root 运行
 if [ "$EUID" -ne 0 ]; then

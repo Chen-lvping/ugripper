@@ -25,7 +25,7 @@ ENFORCE_BY_PATH="0"   # 1=强制校验；0=不校验
 HMI_HELPER_BIN="/opt/ugripper/build/src/gripper_hmi/gripper_hmi_test"
 HMI_PORT_ARGS=(--port /dev/right_gripper --port /dev/left_gripper)
 CALIB_IMPORT_SCRIPT="/opt/ugripper/auto_calibration/import_camera_calibration.sh"
-LED_RUN_USER="radxa"
+LED_RUN_USER="ubuntu"
 PID_LED_SHELL=""
 
 mkdir -p "$(dirname "$LOG_FILE")"

@@ -1,14 +1,19 @@
 #include "camera_recorder/camera_recorder.h"
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <memory>
+#include <mutex>
 #include <optional>
+#include <cstdio>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -98,6 +103,112 @@ std::string ResolveCodec(const std::string& cli_codec) {
 bool Exists(const std::string& path) {
     std::error_code error;
     return fs::exists(path, error);
+}
+
+bool IsMainCamera(const CameraConfig& config) {
+    return config.name == "left_cam_main" || config.name == "right_cam_main";
+}
+
+int64_t CurrentSystemTimeUs() {
+    const auto now = std::chrono::system_clock::now();
+    return std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+}
+
+int64_t CurrentSteadyTimeUs() {
+    const auto now = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+}
+
+int64_t BootTimeOffsetUs() {
+    return CurrentSystemTimeUs() - CurrentSteadyTimeUs();
+}
+
+std::optional<int64_t> ParseFramePtsUsFromStatsLine(const std::string& line) {
+    const size_t separator = line.find(' ');
+    if (separator == std::string::npos) {
+        return std::nullopt;
+    }
+
+    const std::string pts_text = Trim(line.substr(0, separator));
+    const std::string tb_text = Trim(line.substr(separator + 1));
+    if (pts_text.empty() || tb_text.empty()) {
+        return std::nullopt;
+    }
+
+    const size_t slash = tb_text.find('/');
+    if (slash == std::string::npos) {
+        return std::nullopt;
+    }
+
+    try {
+        const int64_t pts = std::stoll(pts_text);
+        const int64_t num = std::stoll(tb_text.substr(0, slash));
+        const int64_t den = std::stoll(tb_text.substr(slash + 1));
+        if (den == 0) {
+            return std::nullopt;
+        }
+        const long double pts_us =
+            (static_cast<long double>(pts) * static_cast<long double>(num) * 1'000'000.0L) /
+            static_cast<long double>(den);
+        return static_cast<int64_t>(std::llround(pts_us));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<int64_t> ParseFramePtsUsFromDebugTsLine(const std::string& line) {
+    const std::string marker = "muxer <- type:video";
+    if (line.find(marker) == std::string::npos) {
+        return std::nullopt;
+    }
+
+    const std::string key = "pkt_pts_time:";
+    const size_t key_pos = line.find(key);
+    if (key_pos == std::string::npos) {
+        return std::nullopt;
+    }
+
+    size_t value_begin = key_pos + key.size();
+    size_t value_end = line.find(' ', value_begin);
+    const std::string value_text = Trim(line.substr(value_begin, value_end - value_begin));
+    if (value_text.empty() || value_text == "NOPTS") {
+        return std::nullopt;
+    }
+
+    try {
+        const long double pts_sec = std::stold(value_text);
+        return static_cast<int64_t>(std::llround(pts_sec * 1'000'000.0L));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+std::optional<int64_t> ParseFramePtsUsFromGstIdentityLine(const std::string& line) {
+    const std::string marker = "pts: ";
+    const size_t marker_pos = line.find(marker);
+    if (marker_pos == std::string::npos || line.find("identity") == std::string::npos) {
+        return std::nullopt;
+    }
+
+    size_t value_begin = marker_pos + marker.size();
+    size_t value_end = line.find(',', value_begin);
+    const std::string value_text = Trim(line.substr(value_begin, value_end - value_begin));
+    if (value_text.empty() || value_text == "none" || value_text == "N/A") {
+        return std::nullopt;
+    }
+
+    int hours = 0;
+    int minutes = 0;
+    long double seconds = 0.0;
+    if (std::sscanf(value_text.c_str(), "%d:%d:%Lf", &hours, &minutes, &seconds) != 3) {
+        return std::nullopt;
+    }
+
+    const long double total_seconds =
+        static_cast<long double>(hours) * 3600.0L +
+        static_cast<long double>(minutes) * 60.0L +
+        seconds;
+    return static_cast<int64_t>(std::llround(total_seconds * 1'000'000.0L));
 }
 
 std::string GetRkmppEncoder(const std::string& codec) {
@@ -221,6 +332,10 @@ public:
     ShellCameraRecorder(CameraConfig config, Options options)
         : config_(std::move(config)), options_(std::move(options)) {}
 
+    ~ShellCameraRecorder() override {
+        JoinOutputReaderThread();
+    }
+
     const CameraConfig& config() const override {
         return config_;
     }
@@ -238,9 +353,19 @@ public:
                   << " mode=" << ModeName(config_.mode) << std::endl;
         std::cout << "[camera_recorder] cmd: " << command_ << std::endl;
 
+        int output_pipe[2] = {-1, -1};
+        if (pipe(output_pipe) != 0) {
+            perror("pipe");
+            failure_ = true;
+            exit_code_ = -1;
+            return false;
+        }
+
         pid_t pid = fork();
         if (pid < 0) {
             perror("fork");
+            close(output_pipe[0]);
+            close(output_pipe[1]);
             failure_ = true;
             exit_code_ = -1;
             return false;
@@ -248,15 +373,20 @@ public:
 
         if (pid == 0) {
             setsid();
+            close(output_pipe[0]);
+            dup2(output_pipe[1], STDOUT_FILENO);
+            dup2(output_pipe[1], STDERR_FILENO);
+            close(output_pipe[1]);
             execl("/bin/bash", "bash", "-lc", command_.c_str(), static_cast<char*>(nullptr));
             _exit(127);
         }
 
+        close(output_pipe[1]);
         pid_ = pid;
         started_ = true;
         running_ = true;
+        StartOutputReaderThread(output_pipe[0]);
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
         Poll();
         return running_;
     }
@@ -287,6 +417,7 @@ public:
 
     void Stop() override {
         if (!running_ || pid_ <= 0) {
+            JoinOutputReaderThread();
             return;
         }
 
@@ -297,6 +428,7 @@ public:
         while (std::chrono::steady_clock::now() < soft_deadline) {
             Poll();
             if (!running_) {
+                JoinOutputReaderThread();
                 return;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -307,6 +439,7 @@ public:
         while (std::chrono::steady_clock::now() < hard_deadline) {
             Poll();
             if (!running_) {
+                JoinOutputReaderThread();
                 return;
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
@@ -315,6 +448,7 @@ public:
         kill(-pid_, SIGKILL);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         Poll();
+        JoinOutputReaderThread();
     }
 
     bool IsRunning() const override {
@@ -333,11 +467,83 @@ public:
         return exit_code_;
     }
 
+    std::optional<int64_t> RecordTimeOffsetUs() const override {
+        std::lock_guard<std::mutex> lock(first_frame_mutex_);
+        return record_time_offset_us_;
+    }
+
 protected:
     virtual std::string BuildCommand() const = 0;
 
     fs::path OutputPath(const std::string& file_name) const {
         return options_.output_dir / file_name;
+    }
+
+    void MaybeLockFirstFrame(int64_t frame_pts_us) {
+        std::lock_guard<std::mutex> lock(first_frame_mutex_);
+        if (record_time_offset_us_.has_value()) {
+            return;
+        }
+
+        const int64_t system_time_us = CurrentSystemTimeUs();
+        first_frame_pts_us_ = frame_pts_us;
+        first_frame_system_time_us_ = system_time_us;
+        record_time_offset_us_ = system_time_us - frame_pts_us;
+
+        std::cout << "[camera_recorder] first frame locked: " << config_.name
+                  << " frame_pts_us=" << frame_pts_us
+                  << " system_time_us=" << system_time_us
+                  << " record_time_offset_us=" << *record_time_offset_us_
+                  << std::endl;
+    }
+
+    void HandleOutputLine(const std::string& raw_line) {
+        const std::string line = Trim(raw_line);
+        if (line.empty()) {
+            return;
+        }
+
+        if (const auto pts_us = ParseFramePtsUsFromStatsLine(line); pts_us.has_value()) {
+            MaybeLockFirstFrame(*pts_us);
+            return;
+        }
+        if (const auto pts_us = ParseFramePtsUsFromDebugTsLine(line); pts_us.has_value()) {
+            MaybeLockFirstFrame(*pts_us);
+            return;
+        }
+        if (const auto pts_us = ParseFramePtsUsFromGstIdentityLine(line); pts_us.has_value()) {
+            MaybeLockFirstFrame(*pts_us);
+            return;
+        }
+
+        std::cout << "[" << config_.name << "] " << line << std::endl;
+    }
+
+    void StartOutputReaderThread(int read_fd) {
+        output_reader_thread_ = std::thread([this, read_fd]() {
+            std::unique_ptr<FILE, decltype(&fclose)> stream(fdopen(read_fd, "r"), fclose);
+            if (!stream) {
+                close(read_fd);
+                return;
+            }
+
+            char* line = nullptr;
+            size_t line_capacity = 0;
+            while (true) {
+                const ssize_t line_size = getline(&line, &line_capacity, stream.get());
+                if (line_size < 0) {
+                    break;
+                }
+                HandleOutputLine(std::string(line, static_cast<size_t>(line_size)));
+            }
+            free(line);
+        });
+    }
+
+    void JoinOutputReaderThread() {
+        if (output_reader_thread_.joinable()) {
+            output_reader_thread_.join();
+        }
     }
 
     static int DecodeExitCode(int status) {
@@ -359,6 +565,11 @@ protected:
     bool stop_requested_ = false;
     bool failure_ = false;
     std::optional<int> exit_code_;
+    std::thread output_reader_thread_;
+    mutable std::mutex first_frame_mutex_;
+    std::optional<int64_t> first_frame_pts_us_;
+    std::optional<int64_t> first_frame_system_time_us_;
+    std::optional<int64_t> record_time_offset_us_;
 };
 
 class MainCameraRecorder final : public ShellCameraRecorder {
@@ -372,19 +583,35 @@ private:
     std::string BuildCommand() const override {
         const std::string device = ShellQuote(config_.device);
         const std::string output = ShellQuote(OutputPath(config_.output_files.at(0)).string());
-        const std::string hevc_caps = ShellQuote(
-            "video/x-h265,width=" + std::to_string(config_.width) +
-            ",height=" + std::to_string(config_.height) +
-            ",framerate=" + std::to_string(config_.fps) + "/1");
+
+        if (options_.codec == "h264") {
+            std::ostringstream oss;
+            oss << options_.ffmpeg_bin
+                << " -hide_banner -loglevel info -nostats -debug_ts -y "
+                << "-f v4l2 -input_format h264 "
+                << "-framerate " << config_.fps << ' '
+                << "-video_size " << config_.width << 'x' << config_.height << ' '
+                << "-copyts "
+                << "-i " << device << ' '
+                << "-c:v copy "
+                << output;
+            return oss.str();
+        }
 
         std::ostringstream oss;
-        oss << options_.gst_bin << " -e -q "
+        oss << "GST_DEBUG=identity:7 " << options_.gst_bin << " -e "
             << "v4l2src device=" << device << " do-timestamp=true ! "
-            << hevc_caps << " ! "
+            << ShellQuote(
+                   "video/x-h265,width=" + std::to_string(config_.width) +
+                   ",height=" + std::to_string(config_.height) +
+                   ",framerate=" + std::to_string(config_.fps) + "/1")
+            << " ! "
+            << "identity silent=false ! "
             << "queue leaky=downstream max-size-buffers=4 ! "
             << "h265parse config-interval=-1 ! "
             << "matroskamux ! "
-            << "filesink location=" << output << " sync=false";
+            << "filesink location="
+            << output;
         return oss.str();
     }
 };
@@ -412,6 +639,8 @@ private:
             << "-video_size " << config_.width << 'x' << config_.height << ' '
             << "-i " << device << ' '
             << CommonEncodeArgs(options_.codec)
+            << "-stats_mux_pre pipe:1 "
+            << "-stats_mux_pre_fmt " << ShellQuote("{pts} {tb}") << ' '
             << output;
         return oss.str();
     }
@@ -440,6 +669,8 @@ private:
             << "-video_size " << config_.width << 'x' << config_.height << ' '
             << "-i " << device << ' '
             << CommonEncodeArgs(options_.codec)
+            << "-stats_mux_pre pipe:1 "
+            << "-stats_mux_pre_fmt " << ShellQuote("{pts} {tb}") << ' '
             << output;
         return oss.str();
     }
@@ -549,6 +780,43 @@ bool CameraRecorderManager::had_failure() const {
 
 const std::vector<std::unique_ptr<CameraRecorder>>& CameraRecorderManager::recorders() const {
     return recorders_;
+}
+
+bool CameraRecorderManager::WriteInfoJson() const {
+    const int64_t boot_time_offset_us = BootTimeOffsetUs();
+    const fs::path info_json_path = options_.output_dir / "info.json";
+    std::ofstream output(info_json_path, std::ios::trunc);
+    if (!output.is_open()) {
+        std::cerr << "[camera_recorder] failed to open info.json for write: "
+                  << info_json_path << std::endl;
+        return false;
+    }
+
+    output << "{\n";
+    output << "  \"boot_time_offset\": " << std::fixed << std::setprecision(6)
+           << (static_cast<double>(boot_time_offset_us) / 1'000'000.0) << ",\n";
+    output << "  \"boot_time_offset_us\": " << boot_time_offset_us;
+
+    bool missing_offset = false;
+    for (const auto& recorder : recorders_) {
+        auto offset_us = recorder->RecordTimeOffsetUs();
+        if (!offset_us.has_value() && options_.codec == "h265" && IsMainCamera(recorder->config())) {
+            offset_us = boot_time_offset_us;
+            std::cerr << "[camera_recorder] fallback to boot_time_offset_us for main camera "
+                      << recorder->config().name << " in h265 direct-stream mode" << std::endl;
+        }
+        if (!offset_us.has_value()) {
+            std::cerr << "[camera_recorder] missing record time offset for "
+                      << recorder->config().name << std::endl;
+            missing_offset = true;
+            continue;
+        }
+        output << ",\n"
+               << "  \"" << recorder->config().name << "_record_time_offset_us\": "
+               << *offset_us;
+    }
+    output << "\n}\n";
+    return !missing_offset;
 }
 
 Options ParseArgs(int argc, char** argv) {

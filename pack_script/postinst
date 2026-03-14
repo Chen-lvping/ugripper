@@ -16,6 +16,7 @@ SHUTDOWN_TRIGGER_PATH="umi-shutdown-trigger.path"
 NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 CALIB_PERSIST_DIR="/etc/ugripper/config/calibration"
 CALIB_PERSIST_FILE="${CALIB_PERSIST_DIR}/calibration.json"
+DATA_MOUNT_POINT="/mnt/data_disk"
 
 if [ -f "$NETWORK_HELPER_SCRIPT" ]; then
     . "$NETWORK_HELPER_SCRIPT"
@@ -186,6 +187,11 @@ mkdir -p "$CALIB_PERSIST_DIR"
 if [ ! -f "$CALIB_PERSIST_FILE" ] && [ -f "$APP_DIR/config/fakeCamCalib.json" ]; then
     cp -f "$APP_DIR/config/fakeCamCalib.json" "$CALIB_PERSIST_FILE"
 fi
+
+# 固定数据盘挂载点：默认存在但不可作为本地数据目录误用
+mkdir -p "$DATA_MOUNT_POINT"
+chown root:root "$DATA_MOUNT_POINT" >/dev/null 2>&1 || true
+chmod 0555 "$DATA_MOUNT_POINT" >/dev/null 2>&1 || true
 
 systemctl daemon-reload
 

@@ -154,9 +154,7 @@ class AudioPlayer:
         self.lang = self.resolve_language(lang_from_file or "zh")
         self.audio_dirs = self.resolve_audio_dirs(self.lang)
 
-        self.filename_aliases = {
-            "recording_start.wav": ["recording_started.wav"],
-        }
+        self.filename_aliases = {}
         self.sound_paths = {
             "ready": self.resolve_sound_path("ready.wav"),
             "audio_recording_stop": self.resolve_sound_path("audio_recording_stop.wav"),
@@ -165,7 +163,7 @@ class AudioPlayer:
             "no_reset_needed": self.resolve_sound_path("no_reset_needed.wav"),
             "writing": self.resolve_sound_path("writing.wav"),
             "shutdown": self.resolve_sound_path("shutdown.wav"),
-            "recording_start": self.resolve_sound_path("recording_start.wav"),
+            "recording_started": self.resolve_sound_path("recording_started.wav"),
             "reset_recording_start": self.resolve_sound_path("reset_recording_start.wav"),
             "recording_stop": self.resolve_sound_path("recording_stop.wav"),
             "error": self.resolve_sound_path("error.wav"),

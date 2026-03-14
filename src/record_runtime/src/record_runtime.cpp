@@ -11,7 +11,10 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
+#include <limits>
+#include <regex>
 #include <sstream>
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -27,6 +30,43 @@ constexpr uint64_t kActionDebounceMs = 250;
 constexpr uint64_t kLongPressThresholdMs = 800;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
 constexpr uint64_t kShutdownPromptThresholdMs = 2000;
+constexpr double kMinReasonableVideoSpanSec = 0.2;
+constexpr double kMaxVideoSpanGapSec = 5.0;
+constexpr int kVideoProbeTimeoutMs = 1500;
+
+struct EpisodeVideoArtifact
+{
+    const char *cameraName;
+    const char *fileName;
+};
+
+constexpr std::array<EpisodeVideoArtifact, 8> kEpisodeVideoArtifacts = {{
+    {"left_cam_main", "left_cam_main.mkv"},
+    {"right_cam_main", "right_cam_main.mkv"},
+    {"left_stereo", "left_stereo.mkv"},
+    {"right_stereo", "right_stereo.mkv"},
+    {"left_tcam_l", "left_tcam_l.mkv"},
+    {"left_tcam_r", "left_tcam_r.mkv"},
+    {"right_tcam_l", "right_tcam_l.mkv"},
+    {"right_tcam_r", "right_tcam_r.mkv"},
+}};
+
+struct VideoProbeResult
+{
+    std::string cameraName;
+    std::string fileName;
+    double startTimeSec = 0.0;
+    double durationSec = 0.0;
+    double spanSec = 0.0;
+};
+
+struct CommandCaptureResult
+{
+    bool success = false;
+    bool timedOut = false;
+    int exitCode = -1;
+    std::string output;
+};
 
 std::string joinArguments(const std::vector<std::string> &arguments)
 {
@@ -81,6 +121,266 @@ bool commandExists(const std::string &command)
         }
     }
     return false;
+}
+
+std::string trim(std::string text)
+{
+    const auto first = text.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos)
+    {
+        return {};
+    }
+    const auto last = text.find_last_not_of(" \t\r\n");
+    return text.substr(first, last - first + 1);
+}
+
+std::string formatSeconds(double value)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3) << value;
+    return stream.str();
+}
+
+bool parseDoubleStrict(const std::string &text, double *value)
+{
+    if (value == nullptr)
+    {
+        return false;
+    }
+
+    char *end = nullptr;
+    errno = 0;
+    const double parsed = std::strtod(text.c_str(), &end);
+    if (end == text.c_str() || *end != '\0' || errno != 0 || !std::isfinite(parsed))
+    {
+        return false;
+    }
+
+    *value = parsed;
+    return true;
+}
+
+bool extractJsonNumberField(const std::string &jsonText, const std::string &key, double *value)
+{
+    const std::regex pattern("\"" + key + "\"\\s*:\\s*(-?(?:\\d+(?:\\.\\d+)?|\\.\\d+)(?:[eE][+-]?\\d+)?)");
+    std::smatch match;
+    if (!std::regex_search(jsonText, match, pattern) || match.size() < 2)
+    {
+        return false;
+    }
+    return parseDoubleStrict(match[1].str(), value);
+}
+
+bool extractJsonIntegerField(const std::string &jsonText, const std::string &key, int64_t *value)
+{
+    if (value == nullptr)
+    {
+        return false;
+    }
+
+    const std::regex pattern("\"" + key + "\"\\s*:\\s*(-?\\d+)");
+    std::smatch match;
+    if (!std::regex_search(jsonText, match, pattern) || match.size() < 2)
+    {
+        return false;
+    }
+
+    const std::string matched = match[1].str();
+    char *end = nullptr;
+    errno = 0;
+    const long long parsed = std::strtoll(matched.c_str(), &end, 10);
+    if (end == matched.c_str() || *end != '\0' || errno != 0)
+    {
+        return false;
+    }
+
+    *value = static_cast<int64_t>(parsed);
+    return true;
+}
+
+CommandCaptureResult runCommandCapture(const std::vector<std::string> &arguments, int timeoutMs)
+{
+    CommandCaptureResult result;
+    if (arguments.empty())
+    {
+        return result;
+    }
+
+    int pipefd[2] = {-1, -1};
+    if (pipe(pipefd) != 0)
+    {
+        return result;
+    }
+
+    std::vector<char *> argv;
+    argv.reserve(arguments.size() + 1);
+    for (const auto &argument : arguments)
+    {
+        argv.push_back(const_cast<char *>(argument.c_str()));
+    }
+    argv.push_back(nullptr);
+
+    const pid_t pid = fork();
+    if (pid < 0)
+    {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return result;
+    }
+
+    if (pid == 0)
+    {
+        dup2(pipefd[1], STDOUT_FILENO);
+        dup2(pipefd[1], STDERR_FILENO);
+        close(pipefd[0]);
+        close(pipefd[1]);
+        execvp(argv[0], argv.data());
+        _exit(127);
+    }
+
+    close(pipefd[1]);
+
+    int status = 0;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (true)
+    {
+        const pid_t waitResult = waitpid(pid, &status, WNOHANG);
+        if (waitResult == pid)
+        {
+            break;
+        }
+        if (waitResult < 0)
+        {
+            close(pipefd[0]);
+            return result;
+        }
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            result.timedOut = true;
+            kill(pid, SIGKILL);
+            waitpid(pid, &status, 0);
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+
+    std::array<char, 512> buffer{};
+    ssize_t count = 0;
+    while ((count = read(pipefd[0], buffer.data(), buffer.size())) > 0)
+    {
+        result.output.append(buffer.data(), static_cast<size_t>(count));
+    }
+    close(pipefd[0]);
+
+    if (result.timedOut)
+    {
+        return result;
+    }
+
+    if (WIFEXITED(status))
+    {
+        result.exitCode = WEXITSTATUS(status);
+        result.success = (result.exitCode == 0);
+    }
+    return result;
+}
+
+bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::string *errorMessage)
+{
+    if (result == nullptr)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "internal error: missing probe output slot";
+        }
+        return false;
+    }
+
+    const CommandCaptureResult probe = runCommandCapture(
+        {
+            "ffprobe",
+            "-v",
+            "error",
+            "-select_streams",
+            "v:0",
+            "-show_entries",
+            "stream=codec_type:format=start_time,duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            filePath,
+        },
+        kVideoProbeTimeoutMs);
+
+    if (probe.timedOut)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ffprobe timeout after " + std::to_string(kVideoProbeTimeoutMs) + "ms";
+        }
+        return false;
+    }
+    if (!probe.success)
+    {
+        if (errorMessage != nullptr)
+        {
+            std::string detail = trim(probe.output);
+            if (detail.empty())
+            {
+                detail = "ffprobe exited with code " + std::to_string(probe.exitCode);
+            }
+            *errorMessage = detail;
+        }
+        return false;
+    }
+
+    std::vector<std::string> lines;
+    std::stringstream stream(probe.output);
+    std::string line;
+    while (std::getline(stream, line))
+    {
+        line = trim(line);
+        if (!line.empty())
+        {
+            lines.push_back(line);
+        }
+    }
+
+    if (lines.size() < 3 || lines[0] != "video")
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ffprobe did not report a readable video stream";
+        }
+        return false;
+    }
+
+    if (lines[1] == "N/A" || lines[2] == "N/A" ||
+        !parseDoubleStrict(lines[1], &result->startTimeSec) ||
+        !parseDoubleStrict(lines[2], &result->durationSec))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ffprobe returned invalid start_time/duration";
+        }
+        return false;
+    }
+
+    result->spanSec = result->durationSec;
+    if (result->startTimeSec > 0.0 && result->durationSec > result->startTimeSec)
+    {
+        result->spanSec = result->durationSec - result->startTimeSec;
+    }
+
+    if (!std::isfinite(result->spanSec) || result->spanSec <= 0.0)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ffprobe returned non-positive video span";
+        }
+        return false;
+    }
+
+    return true;
 }
 }
 
@@ -403,7 +703,7 @@ bool RecordRuntime::startRecording(bool resetRecording)
 
     isRecording_ = true;
     setLedState(LedState::Recording);
-    sendAudioCommand(resetRecording ? "reset_recording_start" : "recording_start");
+    sendAudioCommand(resetRecording ? "reset_recording_start" : "recording_started");
     std::cout << "[INFO] recording started: " << currentEpisodeDir_ << std::endl;
     return true;
 }
@@ -1309,19 +1609,25 @@ bool RecordRuntime::EpisodeManager::prepareEpisode(const std::string &episodeDir
 bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDir, std::string *errorMessage) const
 {
     const std::vector<std::string> requiredFiles = {
-        "left_cam_main.mkv",
-        "right_cam_main.mkv",
-        "left_stereo.mkv",
-        "right_stereo.mkv",
-        "left_tcam_l.mkv",
-        "left_tcam_r.mkv",
-        "right_tcam_l.mkv",
-        "right_tcam_r.mkv",
         "sensor_data_left.mcap",
         "sensor_data_right.mcap",
         "metadata.json",
         "calibration.json",
+        "info.json",
     };
+
+    for (const auto &artifact : kEpisodeVideoArtifacts)
+    {
+        const std::string path = episodeDir + "/" + artifact.fileName;
+        if (!RecordRuntime::fileExistsAndNotEmpty(path))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "missing or empty video file: " + path;
+            }
+            return false;
+        }
+    }
 
     for (const auto &file : requiredFiles)
     {
@@ -1331,6 +1637,120 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
             if (errorMessage != nullptr)
             {
                 *errorMessage = "missing or empty file: " + path;
+            }
+            return false;
+        }
+    }
+
+    if (!commandExists("ffprobe"))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ffprobe is required for episode validation but was not found in PATH";
+        }
+        return false;
+    }
+
+    const std::string infoPath = episodeDir + "/info.json";
+    std::ifstream infoInput(infoPath);
+    if (!infoInput.is_open())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "cannot open info.json for read";
+        }
+        return false;
+    }
+    std::ostringstream infoBuffer;
+    infoBuffer << infoInput.rdbuf();
+    const std::string infoJson = infoBuffer.str();
+
+    double bootTimeOffset = 0.0;
+    int64_t bootTimeOffsetUsFromFile = 0;
+    if (!extractJsonNumberField(infoJson, "boot_time_offset", &bootTimeOffset) || bootTimeOffset <= 0.0)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "info.json missing or invalid numeric field: boot_time_offset";
+        }
+        return false;
+    }
+    if (!extractJsonIntegerField(infoJson, "boot_time_offset_us", &bootTimeOffsetUsFromFile) || bootTimeOffsetUsFromFile <= 0)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "info.json missing or invalid integer field: boot_time_offset_us";
+        }
+        return false;
+    }
+    if (std::fabs((bootTimeOffset * 1000000.0) - static_cast<double>(bootTimeOffsetUsFromFile)) > 1.0)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "info.json boot_time_offset and boot_time_offset_us are inconsistent";
+        }
+        return false;
+    }
+
+    for (const auto &artifact : kEpisodeVideoArtifacts)
+    {
+        int64_t recordTimeOffsetUs = 0;
+        const std::string fieldName = std::string(artifact.cameraName) + "_record_time_offset_us";
+        if (!extractJsonIntegerField(infoJson, fieldName, &recordTimeOffsetUs) || recordTimeOffsetUs <= 0)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "info.json missing or invalid integer field: " + fieldName;
+            }
+            return false;
+        }
+    }
+
+    std::vector<VideoProbeResult> probes;
+    probes.reserve(kEpisodeVideoArtifacts.size());
+    double referenceSpanSec = 0.0;
+    for (const auto &artifact : kEpisodeVideoArtifacts)
+    {
+        VideoProbeResult probe;
+        probe.cameraName = artifact.cameraName;
+        probe.fileName = artifact.fileName;
+
+        std::string probeError;
+        if (!probeVideoFile(episodeDir + "/" + artifact.fileName, &probe, &probeError))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "video unreadable or missing timing metadata: " + std::string(artifact.fileName) + " (" + probeError + ")";
+            }
+            return false;
+        }
+
+        if (probe.spanSec < kMinReasonableVideoSpanSec)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = std::string("video span too short: ") + artifact.fileName +
+                                " span=" + formatSeconds(probe.spanSec) +
+                                "s, expected >=" + formatSeconds(kMinReasonableVideoSpanSec) + "s";
+            }
+            return false;
+        }
+
+        referenceSpanSec = std::max(referenceSpanSec, probe.spanSec);
+        probes.push_back(probe);
+    }
+
+    for (const auto &probe : probes)
+    {
+        const double gapSec = referenceSpanSec - probe.spanSec;
+        if (gapSec > kMaxVideoSpanGapSec)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "video span gap too large: " + probe.fileName +
+                                " span=" + formatSeconds(probe.spanSec) +
+                                "s, reference=" + formatSeconds(referenceSpanSec) +
+                                "s, gap=" + formatSeconds(gapSec) + "s";
             }
             return false;
         }
@@ -1394,23 +1814,7 @@ bool RecordRuntime::EpisodeManager::copyCalibration(const std::string &episodeDi
 
 bool RecordRuntime::EpisodeManager::prepareEpisodeOutputs(const std::string &episodeDir, std::string *errorMessage) const
 {
-    std::ofstream infoFile(episodeDir + "/info.json", std::ios::trunc);
-    if (!infoFile.is_open())
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "cannot open info.json for write";
-        }
-        return false;
-    }
-    infoFile << "{}\n";
-    infoFile.close();
-
-    std::error_code error;
-    fs::remove(episodeDir + "/cam.mkv", error);
-    error.clear();
-    fs::remove(episodeDir + "/tact_left.mkv", error);
-    error.clear();
-    fs::remove(episodeDir + "/tact_right.mkv", error);
+    (void)episodeDir;
+    (void)errorMessage;
     return true;
 }

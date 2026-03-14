@@ -4,7 +4,7 @@ After=network.target local-fs.target
 
 [Service]
 Type=simple
-User=radxa
+User=ubuntu
 WorkingDirectory=/opt/ugripper
 
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

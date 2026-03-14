@@ -23,7 +23,7 @@
 ## 3. 模块总览
 | 模块 | 入口 | 当前职责 | 关键输入/输出 |
 | --- | --- | --- | --- |
-| systemd 主服务 | `pack_script/ugripper.service` | 以 `radxa` 用户拉起录制服务 | `/opt/ugripper/run_record.sh` |
+| systemd 主服务 | `pack_script/ugripper.service` | 以 `ubuntu` 用户拉起录制服务 | `/opt/ugripper/run_record.sh` |
 | 薄壳启动脚本 | `run_record.sh` | 切到安装目录并直接 `exec record_runtime` | 无 |
 | 主运行时 | `build/src/record_runtime/record_runtime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
 | 相机录制 | `build/src/camera_recorder/camera_recorder` | 按 YAML 配置启动独立相机录制子进程 | 8 路 `mkv`（默认） |
@@ -37,7 +37,7 @@
 ## 4. 启动链路
 1. systemd 启动 `ugripper.service`。
 2. 服务进入 `/opt/ugripper/run_record.sh`。
-3. `run_record.sh` 检查 `./build/src/record_runtime/record_runtime` 是否存在，然后直接 `exec`。
+3. `run_record.sh` 检查 `./build/src/record_runtime/record_runtime` 是否存在，并等待 `/mnt/data_disk` 成为真实可写挂载点后再 `exec`。
 4. `record_runtime` 启动后读取 `/etc/environment`，至少关注：
    - `DEVICE_SN`：决定数据目录。
    - `CAMERA_CODEC`：非法值会回退到 `h264`。
@@ -77,7 +77,7 @@
    - `record_runtime=cpp`
    - `reset_recording=<true|false>`
 3. 将 `/etc/ugripper/config/calibration/calibration.json` 复制到 episode；若缺失则回退 `config/fakeCamCalib.json`。
-4. 生成 `info.json`，并清理旧兼容文件名 `cam.mkv`、`tact_left.mkv`、`tact_right.mkv`。
+4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 在每路首个 pre-mux packet 锁定 `PTS + 系统时间` 后统一生成。
 5. 若已准备 pre audio，则移动到本次 episode 的 `audio_pre.wav`。
 6. 启动：
    - `camera_recorder --codec <codec> --output-dir <episode> --only left_cam_main,right_cam_main,left_stereo,right_stereo,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
@@ -88,9 +88,14 @@
 - 配置入口：`config/camera_recorder.yaml`。
 - 当前 YAML 定义 8 路相机：左右主摄、左右 stereo、4 路触觉。
 - 当前运行时默认录制全部 8 路：左右主摄 + 左右 stereo + 4 路触觉。
-- 主相机模式是 `direct-copy-h265`：直接封装 H.265 码流。
+- 主相机模式是 `direct-copy-h265`：主摄始终走相机原生码流直封装，不做二次编码；实际拉流格式跟随 `CAMERA_CODEC` 选择 `h264` 或 `h265`。
 - 触觉 / 双目模式保留 `hybrid-decode-encode` / `stereo-hybrid-decode-encode`。
 - 每路相机由独立子进程承载；单路失败不会由 `camera_recorder` 主动连带停掉其他相机。
+- `info.json` 的时间字段由 `camera_recorder` 负责写出，而不是在停录校验阶段回填：
+  - `boot_time_offset`
+  - `boot_time_offset_us`
+  - 8 路 `<camera>_record_time_offset_us`
+- 当前实现参考 V1 语义，在每路相机首个 pre-mux packet 到达时原位锁定 `PTS/timebase + 系统时间`，用于保持 `frame_system_time_us = frame_pts_us + <camera>_record_time_offset_us` 的对齐方式。
 
 ### 6.3 传感器链路
 - `sensor_recorder` 固定录制：
@@ -105,7 +110,7 @@
 1. 停止 `sensor_recorder` 与 `camera_recorder`。
 2. 播放 `recording_stop`。
 3. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行 `sync`。
-4. 校验 episode 文件完整性。
+4. 执行稳定校验：强校验 `camera_recorder` 已写出的 `info.json` 时间字段，并用轻量 `ffprobe` 检查 8 路视频可读性与时长合理性。
 5. 成功则回到 `READY` 并播放 `ready`；完整性失败则进入 `ERROR_1`；运行时异常进入 `ERROR_5`。
 
 ## 7. Episode 产物与检查
@@ -129,15 +134,19 @@
   - `audio_pre.wav`
   - `audio_post.wav`
   - `info.json`
+    - `boot_time_offset`
+    - `boot_time_offset_us`
+    - 8 路 `<camera>_record_time_offset_us`
 
-### 7.2 最小检查项
-停录后优先检查：
-- 八路 `mkv` 是否存在且文件大小正常。
-- `sensor_data_left.mcap`、`sensor_data_right.mcap` 是否存在。
-- `metadata.json`、`calibration.json` 是否落盘。
-- 若执行了 pre/post 音频录制，对应 wav 是否存在。
+### 7.2 停录强校验
+停录后当前按以下层次校验：
+- 文件存在性：八路 `mkv`、`sensor_data_left.mcap`、`sensor_data_right.mcap`、`metadata.json`、`calibration.json`、`info.json` 必须存在且非空。
+- `info.json` 字段完整性：强制包含 `boot_time_offset`、`boot_time_offset_us` 与 8 路 `<camera>_record_time_offset_us`，且 `boot_time_offset` 与 `boot_time_offset_us` 必须数值一致。
+- 视频可读性：每路 `mkv` 都必须能被 `ffprobe` 读出首个视频流与 `start_time/duration`。
+- 时长合理性：每路视频跨度都必须大于最小阈值，且不能比本次 episode 的最长视频短超过 `5s`。
+- 条件产物：若执行了 pre/post 音频录制，对应 wav 仍需存在。
 
-说明：`info.json` 当前会生成，但**还不在强校验清单内**；它更适合作为辅助元信息，而不是当前最小验收的硬约束文件。
+说明：当前不会为视频做全量逐帧扫描；校验只读取容器元信息并消费已有 `info.json`，优先保证现场稳定性与停录耗时可控。
 
 ## 8. 灯效、音频与关键路径
 ### 8.1 当前状态灯语义
@@ -154,6 +163,7 @@
 - 音频临时目录：`/tmp/umi_audio`
 - 关机触发文件：`/tmp/umi_shutdown_request`
 - 数据目录：`/mnt/data_disk/<device_sn_lower>/data`
+- `/mnt/data_disk` 只作为固定挂载点使用：安装阶段会预创建为 `root:root 0555`，业务不会把本地空目录当成数据目录；只有真实数据盘挂载成功后才允许继续启动录制服务。
 
 ### 8.3 音频链路关键行为
 - `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音，并强制通过 PulseAudio 绑定型号为 `0020:0b21` 的 USB 音频设备。
@@ -222,6 +232,10 @@
 - 当前固定下发静态 IP：`192.168.1.110/24`。
 - 若安装前该网口已有激活的手工静态连接，且 IP 也是 `192.168.1.110/24`，安装接管过程通常不会改变现场可见 IP；卸载主包时会删除 `ugripper-static-*` 并恢复安装前备份的原连接。
 - 当前录制启动不依赖对端网络存在。
+
+数据盘挂载当前行为：
+- `auto_update/mount_data_disk.sh` 负责统一挂载 `/mnt/data_disk`。
+- 若 USB 数据盘拔插后 `/dev/sdX` 设备名漂移，helper 会把“挂载点仍指向已失效旧设备节点”的 stale mount 视为异常状态，并优先清理后再重新挂载当前真实分区。
 
 ### 9.6 网线监测行为
 `auto_calibration/monitor_network.sh` 当前行为：

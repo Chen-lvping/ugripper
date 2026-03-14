@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -56,6 +57,7 @@ public:
     virtual bool HasStarted() const = 0;
     virtual bool HasFailure() const = 0;
     virtual std::optional<int> ExitCode() const = 0;
+    virtual std::optional<int64_t> RecordTimeOffsetUs() const = 0;
 };
 
 class CameraRecorderManager {
@@ -70,6 +72,7 @@ public:
     bool empty() const;
     bool had_failure() const;
     const std::vector<std::unique_ptr<CameraRecorder>>& recorders() const;
+    bool WriteInfoJson() const;
 
 private:
     Options options_;

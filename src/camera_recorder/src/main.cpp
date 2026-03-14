@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
                   << " allow_missing=" << (options.allow_missing ? "true" : "false")
                   << " only_count=" << options.only_names.size()
                   << std::endl;
-        std::cout << "[camera_recorder] note: main cameras use direct H.265 copy and do not re-encode" << std::endl;
+        std::cout << "[camera_recorder] note: main cameras use direct stream copy selected by codec (h264/h265) and do not re-encode" << std::endl;
 
         if (options.dry_run) {
             for (const auto& recorder : manager.recorders()) {
@@ -58,7 +58,8 @@ int main(int argc, char** argv) {
 
         const bool monitor_ok = manager.MonitorUntilStop();
         manager.StopAll();
-        return (monitor_ok && !manager.had_failure()) ? 0 : 1;
+        const bool info_ok = manager.WriteInfoJson();
+        return (monitor_ok && !manager.had_failure() && info_ok) ? 0 : 1;
     } catch (const std::exception& ex) {
         std::cerr << "[camera_recorder] " << ex.what() << std::endl;
         return 1;

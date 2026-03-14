@@ -12,6 +12,7 @@ constexpr uint64_t kErrorLongOnMs = 700;
 constexpr uint64_t kErrorShortOnMs = 220;
 constexpr uint64_t kErrorPulseGapMs = 300;
 constexpr uint64_t kErrorSequenceGapMs = 1200;
+constexpr double kPi = 3.14159265358979323846;
 
 double clampProgress(double progress)
 {
@@ -148,12 +149,14 @@ GripperLedColor GripperLedEffectRenderer::render(const GripperLedEffect &effect,
         return GripperLedColor{0, 122, 255};
     case GripperLedEffectState::Ready:
     {
-        const uint64_t phaseMs = epochMs % kReadyBreathPeriodMs;
-        const uint64_t halfMs = kReadyBreathPeriodMs / 2;
-        const int level = (phaseMs < halfMs)
-                              ? static_cast<int>((phaseMs * 255) / halfMs)
-                              : static_cast<int>(((kReadyBreathPeriodMs - phaseMs) * 255) / halfMs);
-        return GripperLedColor{0, clampToU8(level), clampToU8((20 * level) / 255)};
+        const double phase = static_cast<double>(epochMs % kReadyBreathPeriodMs) /
+                             static_cast<double>(kReadyBreathPeriodMs);
+        // Keep the "deep breath" shape, but let it rise from full off and only
+        // cap the maximum brightness lower than before.
+        const double pulse = 0.5 - 0.5 * std::cos(2.0 * kPi * phase);
+        const double shaped = pulse * pulse * pulse;
+        const int level = static_cast<int>(std::lround(120.0 * shaped));
+        return GripperLedColor{0, clampToU8(level), clampToU8((12 * level) / 150)};
     }
     case GripperLedEffectState::Recording:
     {

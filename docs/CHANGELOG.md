@@ -4,7 +4,20 @@
 >
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
-## Unreleased - 2026-03-13
+## Unreleased - 2026-03-14
+- 修正主相机直录链路：`CAMERA_CODEC=h264` 时直接拉主摄 H.264 码流，`CAMERA_CODEC=h265` 时直接拉主摄 H.265 码流，避免环境里的 codec 误把主摄固定成错误的输入格式。
+- 修复 USB 数据盘拔插后 `/mnt/data_disk` 残留 stale mount 的问题：`mount_data_disk.sh` 现在会识别“当前挂载源设备节点已失效或 `/dev/sdX` 漂移”的场景，并在 add/remove 路径优先清理旧挂载，再挂上当前真实分区。
+- 为 V2 恢复 V1 风格 `info.json` 时间偏移字段：改为由 `camera_recorder` 在内部按每路首个 pre-mux packet 原位锁定 `PTS + 系统时间`，统一生成 `boot_time_offset` / `boot_time_offset_us` 和 8 路默认相机的 `<camera>_record_time_offset_us`。
+- V2 episode 停录校验升级为消费式稳定校验：`record_runtime` 不再在校验阶段回填时间字段，而是强校验 `camera_recorder` 已写出的 `info.json` 字段，并用轻量 `ffprobe` 检查 8 路视频可读性与基础时长合理性。
+
+## v1.2.0 - 2026-03-14
+- 收紧数据盘挂载保护：`mount_data_disk.sh` 为 add/remove 引入锁并只在当前移除的就是已挂载设备时才执行卸载，避免竞态把 `/mnt/data_disk` 删除；安装阶段会固定预创建只读挂载点，`run_record.sh` 的等待日志也改为限频输出，避免数据盘未上线时刷屏。
+- `run_record.sh` 启动时改为等待 `/mnt/data_disk` 真正成为可写挂载点后再拉起 `record_runtime`，避免数据盘缺失或尚未挂载时由 systemd 持续 crash loop 重启业务。
+- 修复 USB 数据盘自动挂载 exFAT 失败：`config/99-fixed-usb-map.rules` 改为通过 `systemd-run` 调用 `auto_update/mount_data_disk.sh`，由 helper 在 `ID_FS_TYPE=exfat` 时显式走 `mount.exfat-fuse`，其他文件系统回退到 `systemd-mount` 自动探测，避免 udev 直接承载 FUSE 挂载进程。
+- 数据盘 helper 补齐失败回收与拔盘清理：挂载失败时会清掉空的 `/mnt/data_disk`，并在 USB 分区 `remove` 事件触发时主动卸载并删除空挂载点，避免拔盘后残留 `root:root` 空目录。
+- 主包依赖补齐 `exfat-fuse` 与 `exfatprogs`，确保新装机或升级后具备 exFAT 挂载与校验工具。
+- 主服务与校准/USB 更新辅助流程的运行用户从 `radxa` 统一切到 `ubuntu`，与当前系统账号保持一致。
+- 修复 CH9344 `udev` 规则里的 shell 变量转义：对 `PROGRAM==...` 中的 `$$` 做显式转义，避免 `systemd-udevd` 先把 `$()` / `$node` / `$pick` 误解析成自身替换语法并报 `invalid substitution type`，确保 `right_gripper` / `left_gripper` / `*_encoder` / `*_imu` 节点稳定生成。
 - 主包安装/卸载的有线网托管改为“接管并可回退”：首次安装前会备份当前激活的手工以太网连接，卸载时删除 `ugripper-static-*` 后恢复原先手动 NetworkManager 配置，避免现场先手工设为 `192.168.1.110` 时被破坏。
 - 收敛 `auto_calibration/monitor_network.sh` 的网线边沿行为：插线时仅记录日志，不再触发 `udevadm trigger` 或重启 `ugripper.service`；拔线时仍只重启 `ugripper.service`。
 - `record_runtime` 默认录制集合从 6 路扩为 8 路：启动 `camera_recorder` 时纳入 `left_stereo` / `right_stereo`，episode 强校验也同步要求两路 stereo `mkv` 落盘。
@@ -13,7 +26,6 @@
 - `audio/audio_play.py` 移除常驻静音 keepalive，只保留启动短预热与每段提示音前导静音，避免长期占用 USB headset sink 扩大热状态行为面。
 - `audio/pulse_audio_utils.py` 在播放/录音初始化前收敛执行 `pactl unload-module module-suspend-on-idle`：仅在 USB 音频链路建链时关闭 idle suspend，降低长时间空闲或热插拔后的首段吞音。
 - 补充作用边界：`module-suspend-on-idle` 的卸载应作为 USB 音频初始化动作，而不是每次提示音/录音时都重复切换；现场仍可手工执行一次该命令做临时验证。
-## Unreleased - 2026-03-11
 - 删除旧 `led_manager.py`：夹爪灯效统一收口到 `src/gripper_hmi` 的状态渲染器，`record_runtime` 与校准/USB 导入流程都改为直接驱动 HMI RGB。
 - 新 HMI 灯效补齐旧语义：支持 `INIT`、`READY`、`RECORDING`、`CALIB_PRE`、`CALIB_RUN[:progress]`、`CALIB_DONE`、`ERROR_1~ERROR_5`、`EXIT`，并复现错误红灯长短码。
 - `record_runtime` 补回语音/落盘节奏：停录后先播 `recording_stop`，再播 `writing` 并显示 `INIT` 蓝灯；校验通过后重新播 `ready`。
