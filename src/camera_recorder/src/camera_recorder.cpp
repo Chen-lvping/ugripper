@@ -776,15 +776,34 @@ bool CameraRecorderManager::MonitorUntilStop() {
 }
 
 void CameraRecorderManager::StopAll() {
-    for (auto& recorder : recorders_) {
-        recorder->Stop();
+    std::cout << "[camera_recorder] stopping all recorders in parallel, count="
+              << recorders_.size() << std::endl;
+
+    std::vector<std::thread> stop_threads;
+    stop_threads.reserve(recorders_.size());
+    for (size_t index = 0; index < recorders_.size(); ++index) {
+        stop_threads.emplace_back([this, index]() {
+            recorders_[index]->Stop();
+        });
     }
+
+    for (auto& thread : stop_threads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
+    std::cout << "[camera_recorder] all recorder stop calls returned" << std::endl;
+
     for (auto& recorder : recorders_) {
         recorder->Poll();
         if (recorder->HasFailure()) {
             had_failure_ = true;
         }
     }
+
+    std::cout << "[camera_recorder] stop poll completed, had_failure="
+              << (had_failure_ ? "true" : "false") << std::endl;
 }
 
 bool CameraRecorderManager::empty() const {

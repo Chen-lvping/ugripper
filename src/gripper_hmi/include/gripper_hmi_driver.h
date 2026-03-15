@@ -6,10 +6,12 @@
 #include <libserialport.h>
 
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 struct GripperHmiSnapshot
@@ -47,8 +49,9 @@ public:
     uint32_t getBaudrate() const { return baudrate_; }
 
 private:
-    bool writeFrame(const uint8_t *data, size_t size);
-    bool readAndProcessAvailable();
+    void ioLoop();
+    bool writeFrameLocked(const uint8_t *data, size_t size);
+    bool readAndProcessAvailableLocked();
     void handleParsedFrame(const GripperParsedFrame &frame);
     static uint64_t currentSteadyMs();
 
@@ -59,11 +62,20 @@ private:
     std::vector<uint8_t> rxBuffer_;
 
     mutable std::mutex ioMutex_;
+    std::condition_variable ioCv_;
+    std::thread ioThread_;
+    bool ioRunning_ = false;
+    bool pendingStateRequest_ = false;
+    bool pendingLedUpdate_ = false;
+    GripperLedColor pendingLedColor_{};
+
     mutable std::mutex stateMutex_;
+    std::condition_variable stateCv_;
     std::array<bool, 6> keyPressed_{};
     GripperBeepState beepState_{};
     std::optional<GripperKeyReport> lastKeyReport_;
     uint64_t lastReceiveTimeMs_ = 0;
+    uint64_t stateGeneration_ = 0;
 };
 
 #endif

@@ -39,6 +39,7 @@ uint64_t GripperHmiDriver::currentSteadyMs()
 
 bool GripperHmiDriver::connect()
 {
+    std::lock_guard<std::mutex> ioLock(ioMutex_);
     if (serialPort_ != nullptr)
     {
         return true;
@@ -68,19 +69,41 @@ bool GripperHmiDriver::connect()
     sp_flush(serialPort_, SP_BUF_BOTH);
 
     rxBuffer_.clear();
+    pendingStateRequest_ = false;
+    pendingLedUpdate_ = false;
+    pendingLedColor_ = {};
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         keyPressed_.fill(false);
         beepState_ = {};
         lastKeyReport_.reset();
         lastReceiveTimeMs_ = 0;
+        stateGeneration_ = 0;
     }
 
+    ioRunning_ = true;
+    ioThread_ = std::thread(&GripperHmiDriver::ioLoop, this);
     return true;
 }
 
 void GripperHmiDriver::disconnect()
 {
+    {
+        std::lock_guard<std::mutex> ioLock(ioMutex_);
+        if (serialPort_ == nullptr)
+        {
+            return;
+        }
+        ioRunning_ = false;
+        pendingStateRequest_ = false;
+        pendingLedUpdate_ = false;
+    }
+    ioCv_.notify_all();
+    if (ioThread_.joinable())
+    {
+        ioThread_.join();
+    }
+
     std::lock_guard<std::mutex> ioLock(ioMutex_);
     if (serialPort_ == nullptr)
     {
@@ -88,11 +111,7 @@ void GripperHmiDriver::disconnect()
     }
 
     const auto offFrame = GripperHmiProtocol::buildSetRgbCommand(GripperLedColor{0, 0, 0});
-    const auto written = sp_blocking_write(serialPort_, offFrame.data(), offFrame.size(), 50);
-    if (written < 0 || static_cast<size_t>(written) != offFrame.size())
-    {
-        std::cerr << name_ << ": write failed on " << port_ << std::endl;
-    }
+    writeFrameLocked(offFrame.data(), offFrame.size());
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     sp_flush(serialPort_, SP_BUF_BOTH);
     sp_close(serialPort_);
@@ -102,17 +121,17 @@ void GripperHmiDriver::disconnect()
 
 bool GripperHmiDriver::isConnected() const
 {
+    std::lock_guard<std::mutex> ioLock(ioMutex_);
     return serialPort_ != nullptr;
 }
 
-bool GripperHmiDriver::writeFrame(const uint8_t *data, size_t size)
+bool GripperHmiDriver::writeFrameLocked(const uint8_t *data, size_t size)
 {
     if (data == nullptr || size == 0)
     {
         return false;
     }
 
-    std::lock_guard<std::mutex> ioLock(ioMutex_);
     if (serialPort_ == nullptr)
     {
         return false;
@@ -130,14 +149,27 @@ bool GripperHmiDriver::writeFrame(const uint8_t *data, size_t size)
 
 bool GripperHmiDriver::requestState()
 {
-    const auto frame = GripperHmiProtocol::buildBeepStateRequest();
-    return writeFrame(frame.data(), frame.size());
+    std::lock_guard<std::mutex> ioLock(ioMutex_);
+    if (serialPort_ == nullptr)
+    {
+        return false;
+    }
+    pendingStateRequest_ = true;
+    ioCv_.notify_one();
+    return true;
 }
 
 bool GripperHmiDriver::setLedColor(const GripperLedColor &color)
 {
-    const auto frame = GripperHmiProtocol::buildSetRgbCommand(color);
-    return writeFrame(frame.data(), frame.size());
+    std::lock_guard<std::mutex> ioLock(ioMutex_);
+    if (serialPort_ == nullptr)
+    {
+        return false;
+    }
+    pendingLedColor_ = color;
+    pendingLedUpdate_ = true;
+    ioCv_.notify_one();
+    return true;
 }
 
 bool GripperHmiDriver::setLedColor(uint8_t red, uint8_t green, uint8_t blue)
@@ -149,6 +181,7 @@ void GripperHmiDriver::handleParsedFrame(const GripperParsedFrame &frame)
 {
     std::lock_guard<std::mutex> lock(stateMutex_);
     lastReceiveTimeMs_ = currentSteadyMs();
+    ++stateGeneration_;
 
     if (frame.type == GripperFrameType::KeyReport)
     {
@@ -164,9 +197,11 @@ void GripperHmiDriver::handleParsedFrame(const GripperParsedFrame &frame)
     {
         beepState_ = frame.beepState;
     }
+
+    stateCv_.notify_all();
 }
 
-bool GripperHmiDriver::readAndProcessAvailable()
+bool GripperHmiDriver::readAndProcessAvailableLocked()
 {
     if (serialPort_ == nullptr)
     {
@@ -201,67 +236,70 @@ bool GripperHmiDriver::readAndProcessAvailable()
     return parsedAnyFrame;
 }
 
+void GripperHmiDriver::ioLoop()
+{
+    std::unique_lock<std::mutex> ioLock(ioMutex_);
+    while (ioRunning_ && serialPort_ != nullptr)
+    {
+        readAndProcessAvailableLocked();
+
+        if (pendingStateRequest_)
+        {
+            pendingStateRequest_ = false;
+            const auto frame = GripperHmiProtocol::buildBeepStateRequest();
+            writeFrameLocked(frame.data(), frame.size());
+            continue;
+        }
+
+        if (pendingLedUpdate_)
+        {
+            const auto frame = GripperHmiProtocol::buildSetRgbCommand(pendingLedColor_);
+            pendingLedUpdate_ = false;
+            writeFrameLocked(frame.data(), frame.size());
+            continue;
+        }
+
+        ioCv_.wait_for(ioLock, std::chrono::milliseconds(2), [this]() {
+            return !ioRunning_ || pendingStateRequest_ || pendingLedUpdate_;
+        });
+    }
+}
+
 bool GripperHmiDriver::pollOnce(int timeoutMs)
 {
-    if (serialPort_ == nullptr)
+    std::unique_lock<std::mutex> stateLock(stateMutex_);
+    const uint64_t beforeGeneration = stateGeneration_;
+    if (timeoutMs <= 0)
     {
         return false;
     }
 
-    const uint64_t startMs = currentSteadyMs();
-    bool parsedAnyFrame = false;
-
-    do
-    {
-        if (readAndProcessAvailable())
-        {
-            parsedAnyFrame = true;
-        }
-
-        if (parsedAnyFrame || timeoutMs <= 0)
-        {
-            break;
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    } while ((currentSteadyMs() - startMs) < static_cast<uint64_t>(timeoutMs));
-
-    return parsedAnyFrame;
+    return stateCv_.wait_for(stateLock, std::chrono::milliseconds(timeoutMs), [this, beforeGeneration]() {
+        return stateGeneration_ != beforeGeneration;
+    });
 }
 
 bool GripperHmiDriver::waitForKeyChange(int timeoutMs, GripperKeyReport *report)
 {
-    std::optional<GripperKeyReport> before;
+    std::unique_lock<std::mutex> stateLock(stateMutex_);
+    const std::optional<GripperKeyReport> before = lastKeyReport_;
+    const auto changed = [this, &before]() {
+        return lastKeyReport_.has_value() && (!before.has_value() ||
+            lastKeyReport_->rawCode != before->rawCode ||
+            lastKeyReport_->pressed != before->pressed ||
+            lastKeyReport_->keyIndex != before->keyIndex);
+    };
+
+    if (!stateCv_.wait_for(stateLock, std::chrono::milliseconds(timeoutMs), changed))
     {
-        std::lock_guard<std::mutex> lock(stateMutex_);
-        before = lastKeyReport_;
+        return false;
     }
 
-    const uint64_t startMs = currentSteadyMs();
-    do
+    if (report != nullptr)
     {
-        pollOnce(10);
-
-        std::optional<GripperKeyReport> current;
-        {
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            current = lastKeyReport_;
-        }
-
-        if (current.has_value() && (!before.has_value() ||
-            current->rawCode != before->rawCode ||
-            current->pressed != before->pressed ||
-            current->keyIndex != before->keyIndex))
-        {
-            if (report != nullptr)
-            {
-                *report = current.value();
-            }
-            return true;
-        }
-    } while ((currentSteadyMs() - startMs) < static_cast<uint64_t>(timeoutMs));
-
-    return false;
+        *report = *lastKeyReport_;
+    }
+    return true;
 }
 
 bool GripperHmiDriver::isKeyPressed(size_t keyIndex) const
