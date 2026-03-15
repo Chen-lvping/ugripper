@@ -28,7 +28,7 @@
 | 主运行时 | `build/src/record_runtime/record_runtime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
 | 相机录制 | `build/src/camera_recorder/camera_recorder` | 按 YAML 配置启动独立相机录制子进程 | 8 路 `mkv`（默认） |
 | 传感器录制 | `build/src/sensor_recorder/sensor_recorder` | 录制左右 IMU/encoder，分别输出 MCAP | `sensor_data_left.mcap`、`sensor_data_right.mcap` |
-| HMI 类库 | `src/gripper_hmi` | 读取夹爪按键、渲染 RGB 灯效，并在驱动内部以单线程 owner + 优先级队列串行调度状态查询与 RGB 指令发送 | 按键快照、RGB 指令 |
+| HMI 类库 | `src/gripper_hmi` | 读取夹爪按键，并在驱动内部以单线程 owner 线程完成状态查询、灯效生成与 RGB 指令发送；默认由状态机切灯效，必要时仍可直接下发 RGB | 按键快照、RGB 指令 |
 | 音频播放 | `audio/audio_play.py` | 绑定 USB 耳机 sink，播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 从 USB 耳机麦克风录制原始音频，供 pre/post 处理链路使用 | 临时 wav 文件 |
 | USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级、配置导入、主相机标定导入、encoder 校准触发 | `/etc/environment`、`calibration.json` |
@@ -43,7 +43,7 @@
    - `CAMERA_CODEC`：非法值会回退到 `h264`。
    - `UGRIPPER_LANG`：决定提示音语言。
 5. 运行时连接左右夹爪 HMI、启动 LED 渲染线程、尝试拉起音频守护进程。
-   - HMI 状态查询与 LED RGB 下发会在单个 gripper 串口内进入驱动内部队列，由单个 owner 线程串行调度；状态查询优先于 LED 刷新，避免按键轮询与录制闪灯互相打断。
+   - HMI 状态查询与 LED RGB 下发会在单个 gripper 串口内由驱动 owner 线程统一调度；`record_runtime` 只切换灯效模式，不再跨线程推送录制态的 500ms 亮灭边沿；若有专项诊断或直控需求，仍可走 direct RGB 通道覆盖当前效果。
 6. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
 
 ## 5. 状态机与按键行为
@@ -83,7 +83,7 @@
    - `data_format_version=1`
    - `record_runtime=cpp`
    - `reset_recording=<true|false>`
-3. 写入 `calibration.json`：当前按 V1 兼容口径只保留非 Fays、非主摄的校准项，默认写出 `["imu","encoder"]`。
+3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`，缺失时回退仓库根目录样例 `calibration.json`，再缺失时回退 `config/fakeCamCalib.json`。episode 内会保留主摄与触觉相机标定，并将旧 Fays 标定块替换为 `left_stereo` / `right_stereo` 占位标定。
 4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 在每路首个 pre-mux packet 锁定 `PTS + 系统时间` 后统一生成。
 5. 若已准备 pre audio，则移动到本次 episode 的 `audio_pre.wav`。
 6. 并行启动：

@@ -1,7 +1,7 @@
 #ifndef GRIPPER_HMI_LED_EFFECTS_H
 #define GRIPPER_HMI_LED_EFFECTS_H
 
-#include "gripper_hmi_driver.h"
+#include "gripper_hmi_protocol.h"
 
 #include <cstdint>
 #include <string>

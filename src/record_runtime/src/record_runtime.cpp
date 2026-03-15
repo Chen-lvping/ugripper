@@ -1,5 +1,7 @@
 #include "record_runtime.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cerrno>
 #include <cmath>
@@ -23,6 +25,7 @@
 #include <unistd.h>
 
 namespace fs = std::filesystem;
+using json = nlohmann::json;
 
 namespace {
 constexpr const char *kCameraStreamsCsv = "left_cam_main,right_cam_main,left_stereo,right_stereo,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r";
@@ -67,6 +70,122 @@ struct CommandCaptureResult
     int exitCode = -1;
     std::string output;
 };
+
+json makeStereoPlaceholderFromTemplate(const json *templateEntry)
+{
+    json placeholder = json::object();
+    if (templateEntry != nullptr && templateEntry->is_object())
+    {
+        placeholder = *templateEntry;
+    }
+
+    placeholder["shape"] = json::array({800, 2560, 3});
+    placeholder["names"] = json::array({"height", "width", "channels"});
+    placeholder["info"] = nullptr;
+    placeholder["dtype"] = "video";
+    placeholder["fps"] = 60;
+
+    if (!placeholder.contains("camera_model"))
+    {
+        placeholder["camera_model"] = "pinhole";
+    }
+    if (!placeholder.contains("distortion_model"))
+    {
+        placeholder["distortion_model"] = "equidistant";
+    }
+    if (!placeholder.contains("distortion_coeffs"))
+    {
+        placeholder["distortion_coeffs"] = json::array({0.0, 0.0, 0.0, 0.0});
+    }
+
+    if (placeholder.contains("intrinsics") && placeholder["intrinsics"].is_object() && !placeholder["intrinsics"].empty())
+    {
+        const auto firstIntrinsics = placeholder["intrinsics"].begin().value();
+        if (firstIntrinsics.is_object())
+        {
+            json scaled = firstIntrinsics;
+            const double fx = scaled.value("fx", 320.0) * 4.0;
+            const double fy = scaled.value("fy", 240.0) * (800.0 / 480.0);
+            const double ppx = scaled.value("ppx", 320.0) * 4.0;
+            const double ppy = scaled.value("ppy", 240.0) * (800.0 / 480.0);
+            scaled["fx"] = fx;
+            scaled["fy"] = fy;
+            scaled["ppx"] = ppx;
+            scaled["ppy"] = ppy;
+            placeholder["intrinsics"] = json::object({{"2560x800", scaled}});
+        }
+    }
+    else
+    {
+        placeholder["intrinsics"] = json::object({
+            {"2560x800", {
+                {"fx", 1280.0},
+                {"fy", 400.0},
+                {"ppx", 1280.0},
+                {"ppy", 400.0},
+            }},
+        });
+    }
+
+    return placeholder;
+}
+
+void appendCalibrationNote(json *calibrationInfo, const std::string &message)
+{
+    if (calibrationInfo == nullptr || !calibrationInfo->is_object())
+    {
+        return;
+    }
+
+    const std::string existing = calibrationInfo->value("notes", std::string());
+    if (existing.empty())
+    {
+        (*calibrationInfo)["notes"] = message;
+        return;
+    }
+
+    if (existing.find(message) != std::string::npos)
+    {
+        return;
+    }
+
+    (*calibrationInfo)["notes"] = existing + " " + message;
+}
+
+void removeIfPresent(json *root, const std::string &key)
+{
+    if (root != nullptr && root->is_object())
+    {
+        root->erase(key);
+    }
+}
+
+bool loadJsonFile(const std::string &path, json *output, std::string *errorMessage)
+{
+    std::ifstream input(path);
+    if (!input.is_open())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "cannot open calibration source: " + path;
+        }
+        return false;
+    }
+
+    try
+    {
+        input >> *output;
+        return true;
+    }
+    catch (const std::exception &error)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "invalid calibration json in " + path + ": " + error.what();
+        }
+        return false;
+    }
+}
 
 std::string joinArguments(const std::vector<std::string> &arguments)
 {
@@ -476,8 +595,9 @@ bool RecordRuntime::initialize()
         deviceSn_,
         language_,
         options_.cameraCodec,
-        options_.fallbackImuCalibrationFile,
-        options_.fallbackEncoderCalibrationFile,
+        options_.persistCalibrationFile,
+        options_.exampleCalibrationFile,
+        options_.fallbackCalibrationFile,
         packageVersion_,
         updaterVersion_);
 
@@ -1437,7 +1557,6 @@ bool RecordRuntime::GripperPanelManager::poll(int timeoutMs, ButtonSnapshot *sna
     for (size_t index = 0; index < drivers_.size(); ++index)
     {
         auto &driver = drivers_[index];
-        driver->requestState();
         received = driver->pollOnce(timeoutMs) || received;
         if (index != inputDriverIndex_)
         {
@@ -1470,6 +1589,14 @@ void RecordRuntime::GripperPanelManager::setLedColor(uint8_t red, uint8_t green,
     }
 }
 
+void RecordRuntime::GripperPanelManager::setLedEffect(const GripperLedEffect &effect)
+{
+    for (auto &driver : drivers_)
+    {
+        driver->setLedEffect(effect);
+    }
+}
+
 void RecordRuntime::GripperPanelManager::turnOff()
 {
     setLedColor(0, 0, 0);
@@ -1487,23 +1614,14 @@ RecordRuntime::HmiLedController::~HmiLedController()
 
 void RecordRuntime::HmiLedController::start()
 {
-    if (running_.exchange(true))
+    if (panelManager_ == nullptr)
     {
         return;
     }
-    worker_ = std::thread(&HmiLedController::workerLoop, this);
 }
 
 void RecordRuntime::HmiLedController::stop()
 {
-    if (!running_.exchange(false))
-    {
-        return;
-    }
-    if (worker_.joinable())
-    {
-        worker_.join();
-    }
     if (panelManager_ != nullptr)
     {
         panelManager_->turnOff();
@@ -1512,39 +1630,20 @@ void RecordRuntime::HmiLedController::stop()
 
 void RecordRuntime::HmiLedController::setState(LedState state, double progress)
 {
-    std::lock_guard<std::mutex> lock(stateMutex_);
-    effect_ = makeLedEffect(state, progress);
-}
-
-void RecordRuntime::HmiLedController::workerLoop()
-{
-    while (running_.load())
+    if (panelManager_ == nullptr)
     {
-        GripperLedEffect effect;
-        {
-            std::lock_guard<std::mutex> lock(stateMutex_);
-            effect = effect_;
-        }
-
-        const auto rendered = renderer_.render(effect, RecordRuntime::currentSteadyMs(), RecordRuntime::currentEpochMs());
-        const std::array<uint8_t, 3> color{rendered.red, rendered.green, rendered.blue};
-        if (color != lastColor_ && panelManager_ != nullptr)
-        {
-            panelManager_->setLedColor(color[0], color[1], color[2]);
-            lastColor_ = color;
-        }
-
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(GripperLedEffectRenderer::recommendedRenderIntervalMs()));
+        return;
     }
+    panelManager_->setLedEffect(makeLedEffect(state, progress));
 }
 
 RecordRuntime::EpisodeManager::EpisodeManager(std::string diskRoot,
                                               std::string deviceSn,
                                               std::string language,
                                               std::string cameraCodec,
-                                              std::string fallbackImuCalibrationFile,
-                                              std::string fallbackEncoderCalibrationFile,
+                                              std::string persistCalibrationFile,
+                                              std::string exampleCalibrationFile,
+                                              std::string fallbackCalibrationFile,
                                               std::string packageVersion,
                                               std::string updaterVersion)
     : diskRoot_(std::move(diskRoot)),
@@ -1552,8 +1651,9 @@ RecordRuntime::EpisodeManager::EpisodeManager(std::string diskRoot,
       deviceSnLower_(RecordRuntime::toLower(deviceSn_)),
       language_(std::move(language)),
       cameraCodec_(std::move(cameraCodec)),
-      fallbackImuCalibrationFile_(std::move(fallbackImuCalibrationFile)),
-      fallbackEncoderCalibrationFile_(std::move(fallbackEncoderCalibrationFile)),
+      persistCalibrationFile_(std::move(persistCalibrationFile)),
+      exampleCalibrationFile_(std::move(exampleCalibrationFile)),
+      fallbackCalibrationFile_(std::move(fallbackCalibrationFile)),
       packageVersion_(std::move(packageVersion)),
       updaterVersion_(std::move(updaterVersion))
 {
@@ -1626,7 +1726,7 @@ bool RecordRuntime::EpisodeManager::prepareEpisode(const std::string &episodeDir
     {
         return false;
     }
-    if (!writeCalibrationManifest(episodeDir, errorMessage))
+    if (!writeFilteredCalibration(episodeDir, errorMessage))
     {
         return false;
     }
@@ -1829,8 +1929,79 @@ bool RecordRuntime::EpisodeManager::writeMetadata(const std::string &episodeDir,
     return true;
 }
 
-bool RecordRuntime::EpisodeManager::writeCalibrationManifest(const std::string &episodeDir, std::string *errorMessage) const
+bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &episodeDir, std::string *errorMessage) const
 {
+    std::string sourceFile;
+    if (fs::exists(persistCalibrationFile_))
+    {
+        sourceFile = persistCalibrationFile_;
+    }
+    else if (fs::exists(exampleCalibrationFile_))
+    {
+        sourceFile = exampleCalibrationFile_;
+    }
+    else
+    {
+        sourceFile = fallbackCalibrationFile_;
+    }
+
+    json calibrationJson;
+    if (!loadJsonFile(sourceFile, &calibrationJson, errorMessage))
+    {
+        return false;
+    }
+
+    json leftStereoTemplate;
+    json rightStereoTemplate;
+    const json *leftStereoTemplatePtr = nullptr;
+    const json *rightStereoTemplatePtr = nullptr;
+    if (calibrationJson.contains("observation.images.left_stereo") && calibrationJson["observation.images.left_stereo"].is_object())
+    {
+        leftStereoTemplate = calibrationJson["observation.images.left_stereo"];
+        leftStereoTemplatePtr = &leftStereoTemplate;
+    }
+    else if (calibrationJson.contains("observation.images.fays_cam0") && calibrationJson["observation.images.fays_cam0"].is_object())
+    {
+        leftStereoTemplate = calibrationJson["observation.images.fays_cam0"];
+        leftStereoTemplatePtr = &leftStereoTemplate;
+    }
+
+    if (calibrationJson.contains("observation.images.right_stereo") && calibrationJson["observation.images.right_stereo"].is_object())
+    {
+        rightStereoTemplate = calibrationJson["observation.images.right_stereo"];
+        rightStereoTemplatePtr = &rightStereoTemplate;
+    }
+    else if (calibrationJson.contains("observation.images.fays_cam1") && calibrationJson["observation.images.fays_cam1"].is_object())
+    {
+        rightStereoTemplate = calibrationJson["observation.images.fays_cam1"];
+        rightStereoTemplatePtr = &rightStereoTemplate;
+    }
+
+    removeIfPresent(&calibrationJson, "observation.images.fays_cam0");
+    removeIfPresent(&calibrationJson, "observation.images.fays_cam1");
+    removeIfPresent(&calibrationJson, "observation.imu.fays_imu0");
+
+    calibrationJson["observation.images.left_stereo"] = makeStereoPlaceholderFromTemplate(leftStereoTemplatePtr);
+    calibrationJson["observation.images.right_stereo"] = makeStereoPlaceholderFromTemplate(rightStereoTemplatePtr);
+
+    if (!calibrationJson.contains("metadata") || !calibrationJson["metadata"].is_object())
+    {
+        calibrationJson["metadata"] = json::object();
+    }
+    calibrationJson["metadata"]["format_version"] = calibrationJson["metadata"].value("format_version", "1.0");
+    calibrationJson["metadata"]["description"] = calibrationJson["metadata"].value("description", "Camera calibration parameters");
+
+    if (!calibrationJson.contains("calibration_info") || !calibrationJson["calibration_info"].is_object())
+    {
+        calibrationJson["calibration_info"] = json::object();
+    }
+
+    json &calibrationInfo = calibrationJson["calibration_info"];
+    calibrationInfo.erase("fays_imu_bundle");
+    appendCalibrationNote(
+        &calibrationInfo,
+        "Stereo calibration entries are placeholder values migrated from the legacy Fays template until dedicated stereo calibration is available.");
+
     std::ofstream output(episodeDir + "/calibration.json");
     if (!output.is_open())
     {
@@ -1841,26 +2012,7 @@ bool RecordRuntime::EpisodeManager::writeCalibrationManifest(const std::string &
         return false;
     }
 
-    std::vector<std::string> calibrationItems;
-    if (fs::exists(fallbackImuCalibrationFile_))
-    {
-        calibrationItems.emplace_back("\"imu\"");
-    }
-    if (fs::exists(fallbackEncoderCalibrationFile_))
-    {
-        calibrationItems.emplace_back("\"encoder\"");
-    }
-
-    output << "[";
-    for (size_t index = 0; index < calibrationItems.size(); ++index)
-    {
-        if (index != 0)
-        {
-            output << ",";
-        }
-        output << calibrationItems[index];
-    }
-    output << "]\n";
+    output << calibrationJson.dump(4) << "\n";
     return true;
 }
 

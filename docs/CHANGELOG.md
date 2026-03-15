@@ -4,16 +4,18 @@
 >
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
-## v1.2.3 - 2026-03-16
+## Unreleased - 2026-03-16
 - `camera_recorder` 的停录改为并发 stop 全部 recorder，并补充停录阶段日志，避免多路相机顺序收尾时被外层 stop 窗口截断，导致 `info.json` 缺失和非主相机 `mkv` 只落半成品。
 
 ## v1.2.2 - 2026-03-16
 - `camera_recorder` 内部改为并发拉起全部选中的相机子进程；`sensor_recorder` 改为并发初始化左右 IMU / encoder，并收紧 IMU 配置阶段固定等待，减少首样本启动散布。
 - 修复 HMI 录制灯效切换偶发失效：`gripper_hmi` 现在会串行化同一串口上的状态查询与 RGB 指令发送，避免 `RECORDING` 1Hz 闪烁在左右手出现亮灭切换失败。
 - 继续收口 HMI 控制模型：单个 gripper 串口的状态查询与 LED 下发改为进入驱动内部单线程 owner 队列，按“状态查询优先、LED 刷新次之”调度，降低录制过程中的可感知控制干扰。
+- 录制灯效边沿生成进一步收口到 HMI 驱动 owner 线程：`record_runtime` 只切换 `READY/RECORDING/...` 状态，不再跨线程下发 500ms 亮灭边沿，降低边沿在软件侧被覆盖或错过的概率。
+- 参考 V1 口径进一步收束灯效职责：HMI 驱动接管全部常规灯效生成，主进程只负责状态切换；同时保留 direct RGB 通道，便于专项调试或临时直控覆盖当前效果。
 
 ## v1.2.1 - 2026-03-14
-- episode 补回 V1 风格的 `metadata.json` / `calibration.json`：`metadata.json` 恢复 `collector`、`data_path` 等兼容字段，并补写 `UGRIPPER_LANG`；`calibration.json` 改回 V1 兼容 manifest，只保留非 Fays、非主摄的 `imu` / `encoder` 项。
+- episode 补回 V1 风格的 `metadata.json` / `calibration.json`：`metadata.json` 恢复 `collector`、`data_path` 等兼容字段，并补写 `UGRIPPER_LANG`；`calibration.json` 改为在保留主摄/触觉结构的同时，把旧 Fays 标定块替换成 `left_stereo` / `right_stereo` 占位标定。
 - 清理旧录制角色残留：`record_runtime` 不再写角色字段，`usb_auto_update.sh` 也不再从 `config.txt` 导入角色配置。
 - 调整 HMI `READY` 呼吸灯手感：完整呼吸周期从 `3.0s` 放慢到约 `4.5s`，LED 渲染/发送节拍从 `50ms` 提升到 `20ms`，减少肉眼可见的亮度阶梯抖动。
 - 放宽 `udev` 口位映射：左右 stereo 与 CH9344 串口桥允许同侧 hub 的内部端口 `.1/.2` 互换；同时按当前现场布线对调左右 tactile 的 `tcam_l/tcam_r` 内部端口映射。

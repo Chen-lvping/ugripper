@@ -31,9 +31,8 @@ struct RecordRuntimeOptions
     std::string diskRoot = "/mnt/data_disk";
     std::string envFile = "/etc/environment";
     std::string persistCalibrationFile = "/etc/ugripper/config/calibration/calibration.json";
+    std::string exampleCalibrationFile = "./calibration.json";
     std::string fallbackCalibrationFile = "./config/fakeCamCalib.json";
-    std::string fallbackImuCalibrationFile = "./config/fakeIMUCalib.json";
-    std::string fallbackEncoderCalibrationFile = "./config/fakeEncoderCalib.json";
     std::string cameraCodec = "h264";
     int pollMs = 20;
 };
@@ -101,6 +100,7 @@ private:
         void disconnect();
         bool hasConnectedDevice() const;
         bool poll(int timeoutMs, ButtonSnapshot *snapshot);
+        void setLedEffect(const GripperLedEffect &effect);
         void setLedColor(uint8_t red, uint8_t green, uint8_t blue);
         void turnOff();
 
@@ -124,15 +124,7 @@ private:
         void setState(LedState state, double progress = 0.0);
 
     private:
-        void workerLoop();
-
         GripperPanelManager *panelManager_ = nullptr;
-        std::atomic<bool> running_{false};
-        std::thread worker_;
-        mutable std::mutex stateMutex_;
-        GripperLedEffect effect_{};
-        GripperLedEffectRenderer renderer_{};
-        std::array<uint8_t, 3> lastColor_{0, 0, 0};
     };
 
     class EpisodeManager
@@ -142,8 +134,9 @@ private:
                        std::string deviceSn,
                        std::string language,
                        std::string cameraCodec,
-                       std::string fallbackImuCalibrationFile,
-                       std::string fallbackEncoderCalibrationFile,
+                       std::string persistCalibrationFile,
+                       std::string exampleCalibrationFile,
+                       std::string fallbackCalibrationFile,
                        std::string packageVersion,
                        std::string updaterVersion);
 
@@ -161,7 +154,7 @@ private:
                            bool resetRecording,
                            const std::string &resetSourceDir,
                            std::string *errorMessage) const;
-        bool writeCalibrationManifest(const std::string &episodeDir, std::string *errorMessage) const;
+        bool writeFilteredCalibration(const std::string &episodeDir, std::string *errorMessage) const;
         bool prepareEpisodeOutputs(const std::string &episodeDir, std::string *errorMessage) const;
 
         std::string diskRoot_;
@@ -169,8 +162,9 @@ private:
         std::string deviceSnLower_;
         std::string language_;
         std::string cameraCodec_;
-        std::string fallbackImuCalibrationFile_;
-        std::string fallbackEncoderCalibrationFile_;
+        std::string persistCalibrationFile_;
+        std::string exampleCalibrationFile_;
+        std::string fallbackCalibrationFile_;
         std::string packageVersion_;
         std::string updaterVersion_;
         std::string dataRoot_;

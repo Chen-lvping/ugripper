@@ -7,6 +7,12 @@
 
 namespace fs = std::filesystem;
 
+namespace
+{
+constexpr uint64_t kStateRequestIntervalMs = 20;
+constexpr uint64_t kLedRenderIntervalMs = GripperLedEffectRenderer::recommendedRenderIntervalMs();
+}
+
 static std::string resolveSerialPortPath(const std::string &configuredPort)
 {
     std::error_code ec;
@@ -72,6 +78,13 @@ bool GripperHmiDriver::connect()
     pendingStateRequest_ = false;
     pendingLedUpdate_ = false;
     pendingLedColor_ = {};
+    ledEffectEnabled_ = false;
+    ledEffectDirty_ = false;
+    ledEffect_ = {};
+    pendingLedColor_ = GripperLedColor{0, 0, 0};
+    lastRenderedColor_ = {255, 255, 255};
+    lastStateRequestAtMs_ = 0;
+    lastLedWriteAtMs_ = 0;
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         keyPressed_.fill(false);
@@ -166,6 +179,7 @@ bool GripperHmiDriver::setLedColor(const GripperLedColor &color)
     {
         return false;
     }
+    ledEffectEnabled_ = false;
     pendingLedColor_ = color;
     pendingLedUpdate_ = true;
     ioCv_.notify_one();
@@ -175,6 +189,21 @@ bool GripperHmiDriver::setLedColor(const GripperLedColor &color)
 bool GripperHmiDriver::setLedColor(uint8_t red, uint8_t green, uint8_t blue)
 {
     return setLedColor(GripperLedColor{red, green, blue});
+}
+
+bool GripperHmiDriver::setLedEffect(const GripperLedEffect &effect)
+{
+    std::lock_guard<std::mutex> ioLock(ioMutex_);
+    if (serialPort_ == nullptr)
+    {
+        return false;
+    }
+
+    ledEffect_ = effect;
+    ledEffectEnabled_ = true;
+    ledEffectDirty_ = true;
+    ioCv_.notify_one();
+    return true;
 }
 
 void GripperHmiDriver::handleParsedFrame(const GripperParsedFrame &frame)
@@ -190,6 +219,7 @@ void GripperHmiDriver::handleParsedFrame(const GripperParsedFrame &frame)
         {
             keyPressed_[static_cast<size_t>(frame.keyReport.keyIndex)] = frame.keyReport.pressed;
         }
+        stateCv_.notify_all();
         return;
     }
 
@@ -243,20 +273,49 @@ void GripperHmiDriver::ioLoop()
     {
         readAndProcessAvailableLocked();
 
-        if (pendingStateRequest_)
+        const uint64_t nowMs = currentSteadyMs();
+        const uint64_t epochMs = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
+        const bool stateDue = pendingStateRequest_ ||
+                              lastStateRequestAtMs_ == 0 ||
+                              (nowMs - lastStateRequestAtMs_) >= kStateRequestIntervalMs;
+        const bool ledDue = lastLedWriteAtMs_ == 0 ||
+                            (nowMs - lastLedWriteAtMs_) >= kLedRenderIntervalMs;
+
+        GripperLedColor desiredColor = pendingLedColor_;
+        if (ledEffectEnabled_)
         {
-            pendingStateRequest_ = false;
-            const auto frame = GripperHmiProtocol::buildBeepStateRequest();
-            writeFrameLocked(frame.data(), frame.size());
-            continue;
+            desiredColor = ledRenderer_.render(ledEffect_, nowMs, epochMs);
         }
 
-        if (pendingLedUpdate_)
+        const std::array<uint8_t, 3> desiredColorArray{desiredColor.red, desiredColor.green, desiredColor.blue};
+        const bool ledShouldSend = pendingLedUpdate_ ||
+                                   ledEffectDirty_ ||
+                                   desiredColorArray != lastRenderedColor_ ||
+                                   ledDue;
+
+        if (stateDue)
         {
-            const auto frame = GripperHmiProtocol::buildSetRgbCommand(pendingLedColor_);
+            const auto frame = GripperHmiProtocol::buildBeepStateRequest();
+            pendingStateRequest_ = false;
+            if (writeFrameLocked(frame.data(), frame.size()))
+            {
+                lastStateRequestAtMs_ = nowMs;
+            }
+        }
+
+        if (ledShouldSend)
+        {
+            const auto frame = GripperHmiProtocol::buildSetRgbCommand(desiredColor);
+            if (writeFrameLocked(frame.data(), frame.size()))
+            {
+                lastLedWriteAtMs_ = nowMs;
+                lastRenderedColor_ = desiredColorArray;
+            }
             pendingLedUpdate_ = false;
-            writeFrameLocked(frame.data(), frame.size());
-            continue;
+            ledEffectDirty_ = false;
         }
 
         ioCv_.wait_for(ioLock, std::chrono::milliseconds(2), [this]() {

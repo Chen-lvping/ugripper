@@ -34,6 +34,11 @@ namespace {
 
 std::atomic<bool> g_stop_requested{false};
 
+constexpr auto kRecorderStopSigintTimeout = std::chrono::milliseconds(3000);
+constexpr auto kRecorderStopSigtermTimeout = std::chrono::milliseconds(1000);
+constexpr auto kRecorderStopReapTimeout = std::chrono::milliseconds(500);
+constexpr auto kRecorderStopPollInterval = std::chrono::milliseconds(50);
+
 void SignalHandler(int) {
     g_stop_requested.store(true, std::memory_order_relaxed);
 }
@@ -424,30 +429,40 @@ public:
         stop_requested_ = true;
         kill(-pid_, SIGINT);
 
-        const auto soft_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        const auto soft_deadline = std::chrono::steady_clock::now() + kRecorderStopSigintTimeout;
         while (std::chrono::steady_clock::now() < soft_deadline) {
             Poll();
             if (!running_) {
                 JoinOutputReaderThread();
                 return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(kRecorderStopPollInterval);
         }
 
+        std::cerr << "[camera_recorder] stop timeout after SIGINT, escalating to SIGTERM: "
+                  << config_.name << std::endl;
         kill(-pid_, SIGTERM);
-        const auto hard_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        const auto hard_deadline = std::chrono::steady_clock::now() + kRecorderStopSigtermTimeout;
         while (std::chrono::steady_clock::now() < hard_deadline) {
             Poll();
             if (!running_) {
                 JoinOutputReaderThread();
                 return;
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            std::this_thread::sleep_for(kRecorderStopPollInterval);
         }
 
+        std::cerr << "[camera_recorder] stop timeout after SIGTERM, escalating to SIGKILL: "
+                  << config_.name << std::endl;
         kill(-pid_, SIGKILL);
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        Poll();
+        const auto reap_deadline = std::chrono::steady_clock::now() + kRecorderStopReapTimeout;
+        while (std::chrono::steady_clock::now() < reap_deadline) {
+            Poll();
+            if (!running_) {
+                break;
+            }
+            std::this_thread::sleep_for(kRecorderStopPollInterval);
+        }
         JoinOutputReaderThread();
     }
 

@@ -1,6 +1,7 @@
 #ifndef GRIPPER_HMI_DRIVER_H
 #define GRIPPER_HMI_DRIVER_H
 
+#include "gripper_hmi_led_effects.h"
 #include "gripper_hmi_protocol.h"
 
 #include <libserialport.h>
@@ -36,6 +37,7 @@ public:
     bool requestState();
     bool setLedColor(const GripperLedColor &color);
     bool setLedColor(uint8_t red, uint8_t green, uint8_t blue);
+    bool setLedEffect(const GripperLedEffect &effect);
 
     bool pollOnce(int timeoutMs = 20);
     bool waitForKeyChange(int timeoutMs, GripperKeyReport *report);
@@ -68,6 +70,13 @@ private:
     bool pendingStateRequest_ = false;
     bool pendingLedUpdate_ = false;
     GripperLedColor pendingLedColor_{};
+    bool ledEffectEnabled_ = false;
+    bool ledEffectDirty_ = false;
+    GripperLedEffect ledEffect_{};
+    GripperLedEffectRenderer ledRenderer_{};
+    std::array<uint8_t, 3> lastRenderedColor_{255, 255, 255};
+    uint64_t lastStateRequestAtMs_ = 0;
+    uint64_t lastLedWriteAtMs_ = 0;
 
     mutable std::mutex stateMutex_;
     std::condition_variable stateCv_;
