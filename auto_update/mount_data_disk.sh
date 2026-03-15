@@ -29,6 +29,11 @@ run_unmount_with_timeout() {
     timeout -k 1s "${UNMOUNT_TIMEOUT_SEC}s" "$@" >/dev/null 2>&1 || true
 }
 
+run_mount_command() {
+    # Do not leak the lock fd into long-lived mount helpers.
+    "$@" 9>&-
+}
+
 ensure_mountpoint_dir() {
     mkdir -p "$MOUNT_POINT"
     chown root:root "$MOUNT_POINT" >/dev/null 2>&1 || true
@@ -104,11 +109,11 @@ fi
 ensure_mountpoint_dir
 
 if [ "$FS_TYPE" = "exfat" ]; then
-    if /sbin/mount.exfat-fuse -o "$MOUNT_OPTS" "$DEVNODE" "$MOUNT_POINT"; then
+    if run_mount_command /sbin/mount.exfat-fuse -o "$MOUNT_OPTS" "$DEVNODE" "$MOUNT_POINT"; then
         exit 0
     fi
 else
-    if /usr/bin/systemd-mount --collect -o "$MOUNT_OPTS" "$DEVNODE" "$MOUNT_POINT"; then
+    if run_mount_command /usr/bin/systemd-mount --collect -o "$MOUNT_OPTS" "$DEVNODE" "$MOUNT_POINT"; then
         exit 0
     fi
 fi
