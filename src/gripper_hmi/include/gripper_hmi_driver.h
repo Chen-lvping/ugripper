@@ -58,6 +58,7 @@ private:
     struct sp_port *serialPort_;
     std::vector<uint8_t> rxBuffer_;
 
+    mutable std::mutex ioMutex_;
     mutable std::mutex stateMutex_;
     std::array<bool, 6> keyPressed_{};
     GripperBeepState beepState_{};

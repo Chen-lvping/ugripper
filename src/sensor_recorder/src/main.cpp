@@ -256,16 +256,28 @@ int main(int argc, char *argv[]) {
               << "left(imu=" << leftConfig.imuPort << ", encoder=" << leftConfig.encoderPort << ")"
               << std::endl;
 
-    rightImu.driver = std::make_unique<dmbot_serial::Im648Driver>(rightConfig.imuPort, 115200);
-    leftImu.driver = std::make_unique<dmbot_serial::Im648Driver>(leftConfig.imuPort, 115200);
-    rightImu.driver->start();
-    leftImu.driver->start();
+    std::thread rightImuInitThread([&rightImu, &rightConfig]() {
+        rightImu.driver = std::make_unique<dmbot_serial::Im648Driver>(rightConfig.imuPort, 115200);
+        rightImu.driver->start();
+    });
+    std::thread leftImuInitThread([&leftImu, &leftConfig]() {
+        leftImu.driver = std::make_unique<dmbot_serial::Im648Driver>(leftConfig.imuPort, 115200);
+        leftImu.driver->start();
+    });
+    rightImuInitThread.join();
+    leftImuInitThread.join();
     std::cout << "Both IM648 devices initialized." << std::endl;
 
-    rightEncoder.driver = std::make_unique<EncoderDriver>(1, rightConfig.encoderPort, 1000000, "Right_Encoder");
-    leftEncoder.driver = std::make_unique<EncoderDriver>(1, leftConfig.encoderPort, 1000000, "Left_Encoder");
-    rightEncoder.connected = connectEncoderWithFallback(rightEncoder);
-    leftEncoder.connected = connectEncoderWithFallback(leftEncoder);
+    std::thread rightEncoderInitThread([&rightEncoder, &rightConfig]() {
+        rightEncoder.driver = std::make_unique<EncoderDriver>(1, rightConfig.encoderPort, 1000000, "Right_Encoder");
+        rightEncoder.connected = connectEncoderWithFallback(rightEncoder);
+    });
+    std::thread leftEncoderInitThread([&leftEncoder, &leftConfig]() {
+        leftEncoder.driver = std::make_unique<EncoderDriver>(1, leftConfig.encoderPort, 1000000, "Left_Encoder");
+        leftEncoder.connected = connectEncoderWithFallback(leftEncoder);
+    });
+    rightEncoderInitThread.join();
+    leftEncoderInitThread.join();
 
     if (!rightEncoder.connected && !leftEncoder.connected) {
         std::cerr << "Both encoders failed to initialize." << std::endl;

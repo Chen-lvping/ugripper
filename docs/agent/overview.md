@@ -28,7 +28,7 @@
 | 主运行时 | `build/src/record_runtime/record_runtime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
 | 相机录制 | `build/src/camera_recorder/camera_recorder` | 按 YAML 配置启动独立相机录制子进程 | 8 路 `mkv`（默认） |
 | 传感器录制 | `build/src/sensor_recorder/sensor_recorder` | 录制左右 IMU/encoder，分别输出 MCAP | `sensor_data_left.mcap`、`sensor_data_right.mcap` |
-| HMI 类库 | `src/gripper_hmi` | 读取夹爪按键、渲染 RGB 灯效 | 按键快照、RGB 指令 |
+| HMI 类库 | `src/gripper_hmi` | 读取夹爪按键、渲染 RGB 灯效，并串行化同一串口上的状态查询与 RGB 指令发送 | 按键快照、RGB 指令 |
 | 音频播放 | `audio/audio_play.py` | 绑定 USB 耳机 sink，播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 从 USB 耳机麦克风录制原始音频，供 pre/post 处理链路使用 | 临时 wav 文件 |
 | USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级、配置导入、主相机标定导入、encoder 校准触发 | `/etc/environment`、`calibration.json` |
@@ -43,6 +43,7 @@
    - `CAMERA_CODEC`：非法值会回退到 `h264`。
    - `UGRIPPER_LANG`：决定提示音语言。
 5. 运行时连接左右夹爪 HMI、启动 LED 渲染线程、尝试拉起音频守护进程。
+   - HMI 状态查询与 LED RGB 下发会在单个 gripper 串口内串行执行，避免按键轮询与录制闪灯同时写串口时打乱帧边界。
 6. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
 
 ## 5. 状态机与按键行为
@@ -98,6 +99,7 @@
   - tactile `l/r` 的内部端口映射已按当前现场布线对调；
   - tactile 仍按左右侧固定 kernel 路径命名，不做跨侧互换。
 - 当前运行时默认录制全部 8 路：左右主摄 + 左右 stereo + 4 路触觉。
+- `camera_recorder` 当前会并发拉起全部已选中的相机子进程，不再在管理层按 YAML 顺序逐路等待启动返回。
 - 主相机模式是 `direct-copy-h265`：主摄始终走相机原生码流直封装，不做二次编码；实际拉流格式跟随 `CAMERA_CODEC` 选择 `h264` 或 `h265`。
 - 触觉 / 双目模式保留 `hybrid-decode-encode` / `stereo-hybrid-decode-encode`。
 - 每路相机由独立子进程承载；单路失败不会由 `camera_recorder` 主动连带停掉其他相机。
@@ -111,6 +113,8 @@
 - `sensor_recorder` 固定录制：
   - 右手：`/dev/right_imu`、`/dev/right_encoder`
   - 左手：`/dev/left_imu`、`/dev/left_encoder`
+- 启动阶段会并发初始化左右 IMU 和左右 encoder，减少首样本被串行初始化链路拉长。
+- IMU 配置阶段保留固定 settle wait，但已从旧的长等待收敛到更短窗口，优先压缩起录前空转时间。
 - 输出拆成两份 MCAP：
   - `sensor_data_right.mcap`
   - `sensor_data_left.mcap`

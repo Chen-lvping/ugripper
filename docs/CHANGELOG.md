@@ -4,8 +4,9 @@
 >
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
-## Unreleased - 2026-03-16
+## v1.2.2 - 2026-03-16
 - `camera_recorder` 内部改为并发拉起全部选中的相机子进程；`sensor_recorder` 改为并发初始化左右 IMU / encoder，并收紧 IMU 配置阶段固定等待，减少首样本启动散布。
+- 修复 HMI 录制灯效切换偶发失效：`gripper_hmi` 现在会串行化同一串口上的状态查询与 RGB 指令发送，避免 `RECORDING` 1Hz 闪烁在左右手出现亮灭切换失败。
 
 ## v1.2.1 - 2026-03-14
 - episode 补回 V1 风格的 `metadata.json` / `calibration.json`：`metadata.json` 恢复 `collector`、`data_path` 等兼容字段，并补写 `UGRIPPER_LANG`；`calibration.json` 改回 V1 兼容 manifest，只保留非 Fays、非主摄的 `imu` / `encoder` 项。

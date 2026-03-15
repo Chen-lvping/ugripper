@@ -9,8 +9,8 @@ namespace fs = std::filesystem;
 
 namespace {
 
-constexpr int kConfigCommandSettleMs = 100;
-constexpr int kFinalFlushSettleMs = 200;
+constexpr int kConfigCommandSettleMs = 40;
+constexpr int kFinalFlushSettleMs = 60;
 
 std::string resolveSerialPortPath(const std::string &configured_port) {
     std::error_code ec;

@@ -81,13 +81,18 @@ bool GripperHmiDriver::connect()
 
 void GripperHmiDriver::disconnect()
 {
+    std::lock_guard<std::mutex> ioLock(ioMutex_);
     if (serialPort_ == nullptr)
     {
         return;
     }
 
     const auto offFrame = GripperHmiProtocol::buildSetRgbCommand(GripperLedColor{0, 0, 0});
-    writeFrame(offFrame.data(), offFrame.size());
+    const auto written = sp_blocking_write(serialPort_, offFrame.data(), offFrame.size(), 50);
+    if (written < 0 || static_cast<size_t>(written) != offFrame.size())
+    {
+        std::cerr << name_ << ": write failed on " << port_ << std::endl;
+    }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
     sp_flush(serialPort_, SP_BUF_BOTH);
     sp_close(serialPort_);
@@ -102,7 +107,13 @@ bool GripperHmiDriver::isConnected() const
 
 bool GripperHmiDriver::writeFrame(const uint8_t *data, size_t size)
 {
-    if (serialPort_ == nullptr || data == nullptr || size == 0)
+    if (data == nullptr || size == 0)
+    {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> ioLock(ioMutex_);
+    if (serialPort_ == nullptr)
     {
         return false;
     }

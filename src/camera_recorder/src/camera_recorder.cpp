@@ -717,14 +717,31 @@ bool CameraRecorderManager::Prepare(const std::vector<CameraConfig>& configs, st
 }
 
 bool CameraRecorderManager::StartAll() {
+    std::vector<int> started(recorders_.size(), 0);
+    std::vector<std::thread> start_threads;
+    start_threads.reserve(recorders_.size());
+
+    for (size_t index = 0; index < recorders_.size(); ++index) {
+        start_threads.emplace_back([this, &started, index]() {
+            started[index] = recorders_[index]->Start() ? 1 : 0;
+        });
+    }
+
+    for (auto& thread : start_threads) {
+        if (thread.joinable()) {
+            thread.join();
+        }
+    }
+
     size_t started_count = 0;
-    for (auto& recorder : recorders_) {
-        if (recorder->Start()) {
+    for (size_t index = 0; index < recorders_.size(); ++index) {
+        if (started[index]) {
             started_count++;
         } else {
             had_failure_ = true;
         }
     }
+
     return started_count > 0;
 }
 
