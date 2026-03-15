@@ -4,11 +4,22 @@
 >
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
-## Unreleased - 2026-03-14
+## Unreleased - 2026-03-16
+- `camera_recorder` 内部改为并发拉起全部选中的相机子进程；`sensor_recorder` 改为并发初始化左右 IMU / encoder，并收紧 IMU 配置阶段固定等待，减少首样本启动散布。
+
+## v1.2.1 - 2026-03-14
+- episode 补回 V1 风格的 `metadata.json` / `calibration.json`：`metadata.json` 恢复 `collector`、`data_path` 等兼容字段，并补写 `UGRIPPER_LANG`；`calibration.json` 改回 V1 兼容 manifest，只保留非 Fays、非主摄的 `imu` / `encoder` 项。
+- 清理旧录制角色残留：`record_runtime` 不再写角色字段，`usb_auto_update.sh` 也不再从 `config.txt` 导入角色配置。
+- 调整 HMI `READY` 呼吸灯手感：完整呼吸周期从 `3.0s` 放慢到约 `4.5s`，LED 渲染/发送节拍从 `50ms` 提升到 `20ms`，减少肉眼可见的亮度阶梯抖动。
+- 放宽 `udev` 口位映射：左右 stereo 与 CH9344 串口桥允许同侧 hub 的内部端口 `.1/.2` 互换；同时按当前现场布线对调左右 tactile 的 `tcam_l/tcam_r` 内部端口映射。
+- 录制启动改为并行拉起 `camera_recorder` 与 `sensor_recorder`，消除 `record_runtime` 在业务层面对相机与传感器的串行启动偏差；不引入统一 `start_time` 或额外起录同步协议。
+- 主包安装/卸载不再托管有线静态 IP：`postinst/prerm` 去掉 `ugripper-static-*` 的创建、删除与回退逻辑，安装升级默认沿用系统现有 NetworkManager 配置，避免覆盖现场自带的 `192.168.2.240` 等板卡网络策略。
 - 修正主相机直录链路：`CAMERA_CODEC=h264` 时直接拉主摄 H.264 码流，`CAMERA_CODEC=h265` 时直接拉主摄 H.265 码流，避免环境里的 codec 误把主摄固定成错误的输入格式。
 - 修复 USB 数据盘拔插后 `/mnt/data_disk` 残留 stale mount 的问题：`mount_data_disk.sh` 现在会识别“当前挂载源设备节点已失效或 `/dev/sdX` 漂移”的场景，并在 add/remove 路径优先清理旧挂载，再挂上当前真实分区。
 - 为 V2 恢复 V1 风格 `info.json` 时间偏移字段：改为由 `camera_recorder` 在内部按每路首个 pre-mux packet 原位锁定 `PTS + 系统时间`，统一生成 `boot_time_offset` / `boot_time_offset_us` 和 8 路默认相机的 `<camera>_record_time_offset_us`。
 - V2 episode 停录校验升级为消费式稳定校验：`record_runtime` 不再在校验阶段回填时间字段，而是强校验 `camera_recorder` 已写出的 `info.json` 字段，并用轻量 `ffprobe` 检查 8 路视频可读性与基础时长合理性。
+- 标定导入升级为双夹爪口径：`ugripper_calib/<DEVICE_SN>/` 目录下支持同次存在 `_left` / `_right` 后缀的 `camchain` 文件，分别导入左右主相机参数，单侧缺失不覆盖另一侧。
+- 编码器校准升级为左右并行 zeroing：`calibration.txt` 触发后会同时启动左右 zeroing，并在 `zeroing` 成功后读取 0.5 秒状态，输出最后一个位置值供现场判断是否校准成功。
 
 ## v1.2.0 - 2026-03-14
 - 收紧数据盘挂载保护：`mount_data_disk.sh` 为 add/remove 引入锁并只在当前移除的就是已挂载设备时才执行卸载，避免竞态把 `/mnt/data_disk` 删除；安装阶段会固定预创建只读挂载点，`run_record.sh` 的等待日志也改为限频输出，避免数据盘未上线时刷屏。
@@ -54,7 +65,7 @@
 - `auto_calibration/run_calibration.sh` 移除 `rockchipes8388` 的 `amixer` 初始化残留，校准流程与 V2 USB 音频方案保持一致。
 - 修复 `auto_calibration/monitor_network.sh` 的网线“伪上升沿”：改为等当前物理网卡与 `carrier` 首次可读后再建立基线，并在网卡切换时重新建基线，不再把服务重启后的已插线状态误判成新插入事件。
 - 主包安装链路恢复网络配置：`pack_script/postinst` 会自动识别当前物理网卡，并通过 NetworkManager 配置静态 IP `192.168.1.110/24`；`prerm` 对应清理 `ugripper-static-*` 连接。
-- `run_record.sh` 的 V2 默认行为改为本地控制模式：未配置或非法 `DEVICE_ROLE` 时默认按 `master` 启动，不再隐式假设旧 Right/Left 对端 IP；旧双机 `SYNC_TARGET_IP`/`MASTER_IP` 仅作兼容保留。
+- `run_record.sh` 的 V2 默认行为改为本地控制模式：未配置或非法旧角色配置时默认按 `master` 启动，不再隐式假设旧 Right/Left 对端 IP；旧双机 `SYNC_TARGET_IP`/`MASTER_IP` 仅作兼容保留。
 - 新增 `src/gripper_hmi` 模块：参考 `ref_src` 的夹爪串口协议，在项目源码内用 `libserialport` 重写按键读取与 RGB LED 控制类，不再引入 `RingBuffer` / `SerialPort` / `SerialDevice` 抽象。
 - 新增 `gripper_hmi_test` 测试程序，可独立验证 `/dev/ttyCH9344USB0`、`/dev/ttyCH9344USB8` 上的按键上报与 LED 控制；当前尚未替换 `run_record.sh` 的旧 GPIO/PWM 主流程。
 
@@ -101,7 +112,7 @@
 - 三路相机录制链路调整：主摄使用 `ffmpeg v4l2(NV12 1920x1080)->h26x_rkmpp`，左右触觉改为 `v4l2src(MJPEG)->mppjpegdec->appsink->ffmpeg h26x_rkmpp(CQP)`。
 - Fays 录制链路回退为 `ffmpeg rawvideo -> h26x_rkmpp`，并修复标定导入时 Fays 图像 `fps` 的来源：优先读取 `fays_vikit.yaml` 的 `stereo_fps`，缺失时写 `unknown`，不再默认写 `60`。
 - 修复 `import_camera_calibration.sh` 的 `Residuals` 提取逻辑：按行解析带单位结果，避免导入后 `residuals` 变成 `null`。
-- `metadata.json` 新增 `device_role`、`camera_codec`、`ugripper_version`、`ugripper_usb_updater_version` 与 `data_format_version`，便于后处理识别数据来源、编码配置与版本信息。
+- `metadata.json` 新增角色字段、`camera_codec`、`ugripper_version`、`ugripper_usb_updater_version` 与 `data_format_version`，便于后处理识别数据来源、编码配置与版本信息。
 - 开机自恢复增强：`boot_check_install.sh` 会像 `ugripper-usb-updater` 一样比较 `/opt/backup` 中的 `ugripper` 版本，备份包更高时自动升级；主包缺失或状态异常时继续执行恢复安装。
 - 录制附加信息与停录日志增强：`info.json` 新增各路视频 `*_record_time_offset_us`，`stop_recording` 新增分阶段耗时日志，便于定位写盘与校验耗时。
 
@@ -119,8 +130,8 @@
 - `run_record.sh` 扩展主从启动指令为 `START|episode_xxxx|master_sn`，Master 触发录制时会附带本机 `DEVICE_SN`。
 - Left 侧录制流程不限制 Master SN，接收到任意 `master_sn` 均作为本次配对来源。
 - Left 停录后会向当前 episode 的 `info.json` 写入 `paired_master_sn`，用于后处理追溯主从配对关系。
-- 新增 `DEVICE_ROLE` 配置：`run_record.sh` 支持按 `master/slave` 角色分流控制逻辑，解耦物理侧 `DEVICE_SIDE` 与主从角色，允许 Left 设备作为 Master。
-- `usb_auto_update.sh` 新增 `config.txt` 键 `DEVICE_ROLE/ROLE`（值 `master|slave`），识别后写入 `/etc/environment` 的 `DEVICE_ROLE`。
+- 新增旧角色配置：`run_record.sh` 一度支持按 `master/slave` 角色分流控制逻辑，解耦物理侧 `DEVICE_SIDE` 与主从角色，允许 Left 设备作为 Master。
+- `usb_auto_update.sh` 一度支持从 `config.txt` 读取角色键（值 `master|slave`）并写入旧角色环境变量。
 - USB 导入流程兼容增强：`config.txt` 与 `ugripper_calib` 允许在同一次触发中统一导入，全部导入完成后仅亮一次完成灯并重启一次 `ugripper.service`。
 - 导入失败反馈增强：统一导入阶段任一项失败时切换 `ERROR_1` 红灯错误态提示，再执行服务重启。
 - `run_record.sh` 的 episode 结束校验改为强制检查 Fays 文件存在性：`fays_stereo_output.mkv` 与 `fays_data.mcap` 不再按“本轮是否期望 Fays”跳过。

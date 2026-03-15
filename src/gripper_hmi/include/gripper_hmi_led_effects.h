@@ -31,6 +31,8 @@ struct GripperLedEffect
 class GripperLedEffectRenderer
 {
 public:
+    static constexpr uint64_t recommendedRenderIntervalMs() { return 20; }
+
     static bool parseStateText(const std::string &text, GripperLedEffect *effect);
     static std::string stateText(const GripperLedEffect &effect);
 

@@ -1,52 +1,61 @@
 #pragma once
-#include <string>
-#include <thread>
+
+#include "im648_CMD.h"
+
 #include <atomic>
+#include <chrono>
 #include <iostream>
 #include <libserialport.h>
-#include <chrono>
+#include <mutex>
+#include <string>
+#include <thread>
 
-namespace dmbot_serial
-{
+namespace dmbot_serial {
 
-    // ---------------- IM648 数据 ----------------
-    struct IM648_Data
-    {
-        // 加速度 (m/s²)
-        float accx = 0, accy = 0, accz = 0;
-        // 角速度 (rad/s)
-        float gyrox = 0, gyroy = 0, gyroz = 0;
-        // 欧拉角 (度)
-        float roll = 0, pitch = 0, yaw = 0;
-        // 四元数
-        float quat_x = 0.0, quat_y = 0.0, quat_z = 0.0, quat_w = 1.0;
-        // 时间戳
-        uint64_t timestamp = 0;
-        // 数据更新标志（线程安全）
-        std::atomic<bool> data_updated{false};
-    };
+struct IM648_Data {
+    float accx = 0.0f;
+    float accy = 0.0f;
+    float accz = 0.0f;
+    float gyrox = 0.0f;
+    float gyroy = 0.0f;
+    float gyroz = 0.0f;
+    float roll = 0.0f;
+    float pitch = 0.0f;
+    float yaw = 0.0f;
+    float quat_x = 0.0f;
+    float quat_y = 0.0f;
+    float quat_z = 0.0f;
+    float quat_w = 1.0f;
+    uint64_t timestamp = 0;
+};
 
-    class Im648Driver
-    {
-    public:
-        Im648Driver(const std::string &port_name, int baudrate = 115200);
-        ~Im648Driver();
+class Im648Driver {
+public:
+    Im648Driver(const std::string &port_name, int baudrate = 115200);
+    ~Im648Driver();
 
-        void start();  // 启动读取线程
-        void stop();   // 停止读取线程
-        const IM648_Data& getData() const; // 获取最新数据（返回引用，避免复制atomic成员）
-        void clearDataUpdated(); // 清除数据更新标志
+    void start();
+    void stop();
+    bool tryConsumeData(IM648_Data *out);
 
-    private:
-        void initSerial();      // 初始化串口
-        void readThread();      // 后台读取线程（类似DmImu::readThread）
+private:
+    static int writeThunk(const U8 *buf, int len, void *user_data);
 
-        std::string port_name_;
-        int baudrate_;
-        std::thread th_;
-        std::atomic<bool> stop_flag_{false};
-        struct sp_port *port_ = nullptr;
-        IM648_Data data_;
-    };
+    void initSerial();
+    void configureDevice();
+    void readThread();
+    int write(const U8 *buf, int len);
 
-} // namespace dmbot_serial
+    std::string port_name_;
+    int baudrate_;
+    std::thread th_;
+    std::atomic<bool> stop_flag_{false};
+    struct sp_port *port_ = nullptr;
+
+    std::mutex data_mutex_;
+    IM648_Data data_;
+    bool data_updated_ = false;
+    Im648ProtocolContext protocol_ctx_{};
+};
+
+}  // namespace dmbot_serial

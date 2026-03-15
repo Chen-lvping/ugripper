@@ -32,7 +32,7 @@
 | 音频播放 | `audio/audio_play.py` | 绑定 USB 耳机 sink，播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 从 USB 耳机麦克风录制原始音频，供 pre/post 处理链路使用 | 临时 wav 文件 |
 | USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级、配置导入、主相机标定导入、encoder 校准触发 | `/etc/environment`、`calibration.json` |
-| 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、执行 encoder zeroing、恢复服务 | `build/src/sensor_recorder/zeroing` |
+| 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、复用 `/mnt/data_disk` 触发左右编码器并行 zeroing、恢复服务 | `build/src/sensor_recorder/zeroing` |
 
 ## 4. 启动链路
 1. systemd 启动 `ugripper.service`。
@@ -48,6 +48,7 @@
 ## 5. 状态机与按键行为
 ### 5.1 空闲态与阈值
 - `READY`：绿色呼吸灯，提示系统可开始录制。
+- 当前 `READY` 呼吸灯周期约 `4.5s`，LED 渲染线程约每 `20ms` 刷新一次，降低肉眼可见亮度抖动。
 - 主循环轮询周期约 `20ms`。
 - 长按判定阈值 `800ms`，双键关机提示阈值 `2000ms`，双键执行阈值 `4000ms`。
 
@@ -72,14 +73,19 @@
    - `device_type=UMI`
    - `device_model=ugripper`
    - `device_id=<DEVICE_SN>`
-   - `device_role=local`
+   - `collector=default_user`
+   - `data_path=data/episode_{date:08d}_{episode_index:04d}`
    - `camera_codec=<h264|h265>`
+   - `ugripper_lang=<zh|en>`
+   - `ugripper_version=<deb version>`
+   - `ugripper_usb_updater_version=<deb version>`
+   - `data_format_version=1`
    - `record_runtime=cpp`
    - `reset_recording=<true|false>`
-3. 将 `/etc/ugripper/config/calibration/calibration.json` 复制到 episode；若缺失则回退 `config/fakeCamCalib.json`。
+3. 写入 `calibration.json`：当前按 V1 兼容口径只保留非 Fays、非主摄的校准项，默认写出 `["imu","encoder"]`。
 4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 在每路首个 pre-mux packet 锁定 `PTS + 系统时间` 后统一生成。
 5. 若已准备 pre audio，则移动到本次 episode 的 `audio_pre.wav`。
-6. 启动：
+6. 并行启动：
    - `camera_recorder --codec <codec> --output-dir <episode> --only left_cam_main,right_cam_main,left_stereo,right_stereo,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
    - `sensor_recorder <episode_dir>`
 7. 切换到 `RECORDING` 状态并播放开始提示音。
@@ -87,6 +93,10 @@
 ### 6.2 相机链路
 - 配置入口：`config/camera_recorder.yaml`。
 - 当前 YAML 定义 8 路相机：左右主摄、左右 stereo、4 路触觉。
+- `udev` 口位策略当前口径：
+  - stereo 与 CH9344 串口桥允许同侧 hub 的内部端口 `.1/.2` 互换；
+  - tactile `l/r` 的内部端口映射已按当前现场布线对调；
+  - tactile 仍按左右侧固定 kernel 路径命名，不做跨侧互换。
 - 当前运行时默认录制全部 8 路：左右主摄 + 左右 stereo + 4 路触觉。
 - 主相机模式是 `direct-copy-h265`：主摄始终走相机原生码流直封装，不做二次编码；实际拉流格式跟随 `CAMERA_CODEC` 选择 `h264` 或 `h265`。
 - 触觉 / 双目模式保留 `hybrid-decode-encode` / `stereo-hybrid-decode-encode`。
@@ -189,37 +199,34 @@
 | `DEVICE_SN` | 决定数据路径与标定导入匹配目录 | 建议视为必填 |
 | `UGRIPPER_LANG` | 提示音语言 | 由 `config.txt` 导入 |
 | `CAMERA_CODEC` | `camera_recorder` 启动参数 | 仅支持 `h264` / `h265` |
-| `DEVICE_ROLE` | 导入配置键 | 当前录制主流程不依赖该字段 |
 
-说明：`DEVICE_ROLE` 可能仍由 USB 导入脚本写入，但 `record_runtime` 当前写出的 `metadata.json` 固定为 `device_role=local`，录制主流程按本地模式运行。
+说明：当前录制与 U 盘导入流程都不再使用角色环境变量；episode `metadata.json` 也不再写角色字段。
 
 ### 9.2 当前默认项
 | 项目 | 当前默认口径 |
 | --- | --- |
 | 部署形态 | 单机双手、本地录制 |
 | 录制相机集合 | 左右主摄 + 左右 stereo + 4 路触觉 |
-| 设备角色 | episode 元数据固定写 `device_role=local` |
 | 网络 | 业务可在无对端设备时启动 |
-| 静态 IP | 安装脚本仍会配置 `192.168.1.110/24` |
+| 静态 IP | 主包不托管，沿用系统现有有线配置 |
 
 ### 9.3 U 盘支持内容
 - 主包升级：根目录放置 `ugripper_*_arm64*.deb`。
 - updater 自升级：根目录放置 `ugripper-usb-updater*.deb`。
 - 配置导入：根目录 `config.txt`。
-- 主相机标定导入：`ugripper_calib/<DEVICE_SN>/`。
+- 主相机标定导入：`ugripper_calib/<DEVICE_SN>/`，通过文件名后缀 `_left` / `_right` 区分左右夹爪参数文件。
 - encoder 零位校准触发：根目录 `calibration.txt`。
 
 ### 9.4 U 盘同次插入顺序
 当同一次 U 盘插入同时包含 `config.txt`、`ugripper_calib/` 和 `calibration.txt` 时，当前顺序是：
 1. 导入 `config.txt`
-2. 导入主相机标定
-3. 若存在 `calibration.txt`，则跳过中间重启，直接进入 encoder 校准流程
+2. 导入左右主相机标定（按 `_left` / `_right` 文件后缀区分；缺失的一侧保持原值）
+3. 若存在 `calibration.txt`，则跳过中间重启，直接进入左右编码器并行校准流程
 4. 校准完成后恢复 `ugripper.service`
 
 ### 9.5 安装脚本与网络行为
 `pack_script/postinst` 当前会：
 - 停掉旧的录制相关进程。
-- 若当前有线网口正使用手工配置的非 `ugripper-static-*` 以太网连接，首次安装会先备份该连接，供卸载回退。
 - 初始化持久化标定目录。
 - 重新加载 udev 规则。
 - 启用 `umi-shutdown-trigger.path`。
@@ -227,10 +234,8 @@
 - 启用并重启 `ugripper-network-monitor.service`。
 
 网络相关当前行为：
-- 安装脚本会自动识别当前物理以太网口。
-- 通过 NetworkManager 创建/更新 `ugripper-static-<iface>` 连接。
-- 当前固定下发静态 IP：`192.168.1.110/24`。
-- 若安装前该网口已有激活的手工静态连接，且 IP 也是 `192.168.1.110/24`，安装接管过程通常不会改变现场可见 IP；卸载主包时会删除 `ugripper-static-*` 并恢复安装前备份的原连接。
+- 主包不再创建、更新或删除有线 NetworkManager 连接。
+- 主包安装/卸载默认沿用系统原有的有线 IP 配置，不对现场网络拓扑做接管。
 - 当前录制启动不依赖对端网络存在。
 
 数据盘挂载当前行为：
@@ -289,5 +294,5 @@ sudo tail -n 200 /var/log/ugripper/boot_install.log
 - `config/camera_recorder.yaml` 当前 8 路配置全部默认启用；若现场需要裁剪录制集合，应明确同步调整 `record_runtime` 的 `--only` 参数与 episode 校验清单。
 - 仓库内仍有部分后处理脚本依赖旧输出命名或旧假设，不能默认视为当前主链路的一部分。
 - `info.json` 会生成，但当前不属于最小强校验集合。
-- 安装脚本仍会配置静态 IP；这更偏向交付/运维约束，而不是录制主链路前置条件。
+- 现场调试若需要同时访问不同子网设备，应由系统侧或人工维护额外地址/路由；主包不负责托管这些网络策略。
 - 校准、导入与恢复动作仍分散在多个 shell 脚本和 service 中；当前功能可用，但维护时需要注意入口分散。

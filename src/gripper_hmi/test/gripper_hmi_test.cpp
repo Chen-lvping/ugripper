@@ -355,7 +355,9 @@ int main(int argc, char **argv)
             }
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(options.stateMode ? 50 : std::max(1, options.pollMs)));
+        std::this_thread::sleep_for(std::chrono::milliseconds(
+            options.stateMode ? static_cast<int>(GripperLedEffectRenderer::recommendedRenderIntervalMs())
+                              : std::max(1, options.pollMs)));
     }
 
     return 0;

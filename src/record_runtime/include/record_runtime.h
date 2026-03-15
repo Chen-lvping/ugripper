@@ -32,6 +32,8 @@ struct RecordRuntimeOptions
     std::string envFile = "/etc/environment";
     std::string persistCalibrationFile = "/etc/ugripper/config/calibration/calibration.json";
     std::string fallbackCalibrationFile = "./config/fakeCamCalib.json";
+    std::string fallbackImuCalibrationFile = "./config/fakeIMUCalib.json";
+    std::string fallbackEncoderCalibrationFile = "./config/fakeEncoderCalib.json";
     std::string cameraCodec = "h264";
     int pollMs = 20;
 };
@@ -138,9 +140,10 @@ private:
     public:
         EpisodeManager(std::string diskRoot,
                        std::string deviceSn,
+                       std::string language,
                        std::string cameraCodec,
-                       std::string persistCalibrationFile,
-                       std::string fallbackCalibrationFile,
+                       std::string fallbackImuCalibrationFile,
+                       std::string fallbackEncoderCalibrationFile,
                        std::string packageVersion,
                        std::string updaterVersion);
 
@@ -158,15 +161,16 @@ private:
                            bool resetRecording,
                            const std::string &resetSourceDir,
                            std::string *errorMessage) const;
-        bool copyCalibration(const std::string &episodeDir, std::string *errorMessage) const;
+        bool writeCalibrationManifest(const std::string &episodeDir, std::string *errorMessage) const;
         bool prepareEpisodeOutputs(const std::string &episodeDir, std::string *errorMessage) const;
 
         std::string diskRoot_;
         std::string deviceSn_;
         std::string deviceSnLower_;
+        std::string language_;
         std::string cameraCodec_;
-        std::string persistCalibrationFile_;
-        std::string fallbackCalibrationFile_;
+        std::string fallbackImuCalibrationFile_;
+        std::string fallbackEncoderCalibrationFile_;
         std::string packageVersion_;
         std::string updaterVersion_;
         std::string dataRoot_;
@@ -219,6 +223,7 @@ private:
     ButtonStateTracker buttonTracker_{};
     uint64_t lastButtonActionMs_ = 0;
     std::string deviceSn_;
+    std::string language_;
     std::string packageVersion_;
     std::string updaterVersion_;
     std::string currentEpisodeDir_;

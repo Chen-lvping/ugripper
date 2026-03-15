@@ -5,7 +5,7 @@
 
 namespace
 {
-constexpr uint64_t kReadyBreathPeriodMs = 3000;
+constexpr uint64_t kReadyBreathPeriodMs = 4500;
 constexpr uint64_t kRecordingBlinkPeriodMs = 1000;
 constexpr uint64_t kCalibBlinkPeriodMs = 1000;
 constexpr uint64_t kErrorLongOnMs = 700;

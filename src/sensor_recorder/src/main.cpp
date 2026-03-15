@@ -54,6 +54,7 @@ struct ImuRuntime {
     std::unique_ptr<dmbot_serial::Im648Driver> driver;
     mcap::Channel channel;
     uint32_t sequence = 0;
+    bool firstSampleLogged = false;
 };
 
 struct EncoderRuntime {
@@ -287,8 +288,8 @@ int main(int argc, char *argv[]) {
         bool wroteData = false;
 
         const auto handleImu = [&](ImuRuntime &imuRuntime, mcap::McapWriter &writer) {
-            const auto &imuData = imuRuntime.driver->getData();
-            if (!imuData.data_updated.load()) {
+            dmbot_serial::IM648_Data imuData;
+            if (!imuRuntime.driver->tryConsumeData(&imuData)) {
                 return false;
             }
 
@@ -313,7 +314,15 @@ int main(int argc, char *argv[]) {
                 return false;
             }
 
-            imuRuntime.driver->clearDataUpdated();
+            if (!imuRuntime.firstSampleLogged) {
+                std::cout << "[IMU-" << imuRuntime.config.label << "] First sample: "
+                          << "q=(" << sample.qx << "," << sample.qy << "," << sample.qz << "," << sample.qw << ") "
+                          << "g=(" << sample.gx << "," << sample.gy << "," << sample.gz << ") "
+                          << "a=(" << sample.ax << "," << sample.ay << "," << sample.az << ") "
+                          << "ts_ns=" << timestampNs
+                          << std::endl;
+                imuRuntime.firstSampleLogged = true;
+            }
             return true;
         };
 

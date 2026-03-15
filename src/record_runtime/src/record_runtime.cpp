@@ -442,6 +442,12 @@ bool RecordRuntime::initialize()
         deviceSn_ = "noname_device";
     }
 
+    language_ = toLower(readEnvValue(options_.envFile, "UGRIPPER_LANG"));
+    if (language_.empty())
+    {
+        language_ = "zh";
+    }
+
     options_.cameraCodec = toLower(readEnvValue(options_.envFile, "CAMERA_CODEC"));
     if (options_.cameraCodec.empty())
     {
@@ -468,9 +474,10 @@ bool RecordRuntime::initialize()
     episodeManager_ = std::make_unique<EpisodeManager>(
         options_.diskRoot,
         deviceSn_,
+        language_,
         options_.cameraCodec,
-        options_.persistCalibrationFile,
-        options_.fallbackCalibrationFile,
+        options_.fallbackImuCalibrationFile,
+        options_.fallbackEncoderCalibrationFile,
         packageVersion_,
         updaterVersion_);
 
@@ -684,18 +691,39 @@ bool RecordRuntime::startRecording(bool resetRecording)
         currentEpisodeDir_,
     };
 
-    if (!cameraRecorder_.start(cameraArgs))
-    {
-        std::cerr << "[ERROR] failed to launch camera recorder" << std::endl;
-        setLedState(LedState::Error5);
-        sendAudioCommand("error");
-        return false;
-    }
+    bool cameraStarted = false;
+    bool sensorStarted = false;
 
-    if (!sensorRecorder_.start(sensorArgs))
+    std::thread cameraThread([&]() {
+        cameraStarted = cameraRecorder_.start(cameraArgs);
+    });
+    std::thread sensorThread([&]() {
+        sensorStarted = sensorRecorder_.start(sensorArgs);
+    });
+
+    cameraThread.join();
+    sensorThread.join();
+
+    if (!cameraStarted || !sensorStarted)
     {
-        std::cerr << "[ERROR] failed to launch sensor recorder" << std::endl;
-        cameraRecorder_.stop(2000);
+        if (!cameraStarted)
+        {
+            std::cerr << "[ERROR] failed to launch camera recorder" << std::endl;
+        }
+        if (!sensorStarted)
+        {
+            std::cerr << "[ERROR] failed to launch sensor recorder" << std::endl;
+        }
+
+        if (cameraStarted)
+        {
+            cameraRecorder_.stop(2000);
+        }
+        if (sensorStarted)
+        {
+            sensorRecorder_.stop(2000);
+        }
+
         setLedState(LedState::Error5);
         sendAudioCommand("error");
         return false;
@@ -1506,23 +1534,26 @@ void RecordRuntime::HmiLedController::workerLoop()
             lastColor_ = color;
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(GripperLedEffectRenderer::recommendedRenderIntervalMs()));
     }
 }
 
 RecordRuntime::EpisodeManager::EpisodeManager(std::string diskRoot,
                                               std::string deviceSn,
+                                              std::string language,
                                               std::string cameraCodec,
-                                              std::string persistCalibrationFile,
-                                              std::string fallbackCalibrationFile,
+                                              std::string fallbackImuCalibrationFile,
+                                              std::string fallbackEncoderCalibrationFile,
                                               std::string packageVersion,
                                               std::string updaterVersion)
     : diskRoot_(std::move(diskRoot)),
       deviceSn_(std::move(deviceSn)),
       deviceSnLower_(RecordRuntime::toLower(deviceSn_)),
+      language_(std::move(language)),
       cameraCodec_(std::move(cameraCodec)),
-      persistCalibrationFile_(std::move(persistCalibrationFile)),
-      fallbackCalibrationFile_(std::move(fallbackCalibrationFile)),
+      fallbackImuCalibrationFile_(std::move(fallbackImuCalibrationFile)),
+      fallbackEncoderCalibrationFile_(std::move(fallbackEncoderCalibrationFile)),
       packageVersion_(std::move(packageVersion)),
       updaterVersion_(std::move(updaterVersion))
 {
@@ -1595,7 +1626,7 @@ bool RecordRuntime::EpisodeManager::prepareEpisode(const std::string &episodeDir
     {
         return false;
     }
-    if (!copyCalibration(episodeDir, errorMessage))
+    if (!writeCalibrationManifest(episodeDir, errorMessage))
     {
         return false;
     }
@@ -1784,8 +1815,10 @@ bool RecordRuntime::EpisodeManager::writeMetadata(const std::string &episodeDir,
         << "  \"device_type\": \"UMI\",\n"
         << "  \"device_model\": \"ugripper\",\n"
         << "  \"device_id\": \"" << RecordRuntime::jsonEscape(deviceSn_) << "\",\n"
-        << "  \"device_role\": \"local\",\n"
+        << "  \"collector\": \"default_user\",\n"
+        << "  \"data_path\": \"data/episode_{date:08d}_{episode_index:04d}\",\n"
         << "  \"camera_codec\": \"" << RecordRuntime::jsonEscape(cameraCodec_) << "\",\n"
+        << "  \"ugripper_lang\": \"" << RecordRuntime::jsonEscape(language_) << "\",\n"
         << "  \"ugripper_version\": \"" << RecordRuntime::jsonEscape(packageVersion_) << "\",\n"
         << "  \"ugripper_usb_updater_version\": \"" << RecordRuntime::jsonEscape(updaterVersion_) << "\",\n"
         << "  \"data_format_version\": \"1\",\n"
@@ -1796,19 +1829,38 @@ bool RecordRuntime::EpisodeManager::writeMetadata(const std::string &episodeDir,
     return true;
 }
 
-bool RecordRuntime::EpisodeManager::copyCalibration(const std::string &episodeDir, std::string *errorMessage) const
+bool RecordRuntime::EpisodeManager::writeCalibrationManifest(const std::string &episodeDir, std::string *errorMessage) const
 {
-    const std::string sourceFile = fs::exists(persistCalibrationFile_) ? persistCalibrationFile_ : fallbackCalibrationFile_;
-    std::error_code error;
-    fs::copy_file(sourceFile, episodeDir + "/calibration.json", fs::copy_options::overwrite_existing, error);
-    if (error)
+    std::ofstream output(episodeDir + "/calibration.json");
+    if (!output.is_open())
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = "failed to copy calibration from " + sourceFile + ": " + error.message();
+            *errorMessage = "cannot open calibration.json for write";
         }
         return false;
     }
+
+    std::vector<std::string> calibrationItems;
+    if (fs::exists(fallbackImuCalibrationFile_))
+    {
+        calibrationItems.emplace_back("\"imu\"");
+    }
+    if (fs::exists(fallbackEncoderCalibrationFile_))
+    {
+        calibrationItems.emplace_back("\"encoder\"");
+    }
+
+    output << "[";
+    for (size_t index = 0; index < calibrationItems.size(); ++index)
+    {
+        if (index != 0)
+        {
+            output << ",";
+        }
+        output << calibrationItems[index];
+    }
+    output << "]\n";
     return true;
 }
 
