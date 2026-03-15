@@ -28,6 +28,8 @@ htmlcov/
 .env
 # 文档构建产物
 docs/_site/
+docs/todo_dashboard.md
+.codex/todo-hub/runtime.json
 checks.json
 .python-version
 
@@ -37,4 +39,3 @@ ASR/audio/
 
 py_script/set_baud_1m.py
 py_script/README_set_baud_1m_windows.md
-

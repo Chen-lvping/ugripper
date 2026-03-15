@@ -9,12 +9,15 @@ description: 管理 `docs/todo_list.md`、按任务创建 `git worktree` 与 `fe
 
 1. 先执行 `python3 .codex/skills/todo-hub/scripts/ensure_todo_template.py docs/todo_list.md --owner zhouwu`；若 `docs/todo_list.md` 不存在，立即生成空模板供用户手改。
 2. 默认进入“计划 / 状态”模式，不要自动启动全部任务。
-3. 只有在以下条件之一成立时，才创建 worktree 并拉起子会话：
+3. 当用户要求“同时推进 / 并行启动”多个任务，但没有明确说“直接开始实现/直接改代码”时，默认子 agent 只进入**规划阶段**：先给任务规划、影响文件和文档/测试计划，不做代码修改。
+4. 主控 agent 需要等所有已启动任务都返回规划后，统一向用户汇总，再等待用户修改意见或明确确认执行。
+5. 只有用户明确确认后，主控 agent 才通过续接子会话下达“开始执行”指令。
+6. 只有在以下条件之一成立时，才创建 worktree 并拉起子会话：
    - 用户明确点名任务 ID；
    - 用户要求启动 `focus = true` 的任务；
    - 用户给出明确筛选条件（例如 `type = feature`、`status = todo`）。
-4. 若任务选择条件不充分且执行会造成明显副作用，只问一个简短澄清问题，不要连续追问。
-5. 每次任务状态变化后，都同步刷新 `docs/todo_dashboard.md`。
+7. 若任务选择条件不充分且执行会造成明显副作用，只问一个简短澄清问题，不要连续追问。
+8. 每次任务状态变化后，都同步刷新 `docs/todo_dashboard.md`。
 
 ## 固定工作流
 
@@ -46,6 +49,8 @@ description: 管理 `docs/todo_list.md`、按任务创建 `git worktree` 与 `fe
 7. dashboard 的阶段性刷新应由子 agent 自行完成：每完成一段落就调用进度上报脚本刷新，不依赖主控轮询。
 8. 子任务退出时仍需立即回写最终状态。
 9. 默认重拉任务时应复用该 task 已登记的 `session_id` 继续同一 agent 对话；只有用户明确要求“新 agent/重置上下文”时，才使用新的子 session。
+10. 默认启动后的第一轮子会话只做规划并退出；主控 agent 需等待所有任务都进入“已返回规划”的状态后，再统一给用户看。
+11. 当用户确认某个或全部规划后，主控 agent 通过 `relay_command.sh` 或重新 `launch_agent_session.sh` 续接会话，明确下达“开始执行”指令。
 
 ### 4. 查看进度
 
@@ -63,6 +68,10 @@ description: 管理 `docs/todo_list.md`、按任务创建 `git worktree` 与 `fe
 1. 当用户说“让 TASK-001 先补测试”“通知某个子 agent 暂停”时，执行：
    - `bash .codex/skills/todo-hub/scripts/relay_command.sh --task-id TASK-001 --message '...'`
 2. 指令发送后，刷新 `docs/todo_dashboard.md` 并回报目标任务的最新摘要。
+3. 当用户说“确认方案，开始执行”时，消息里必须明确包含执行授权语义，例如：
+   - `方案已确认，开始执行`
+   - `按当前计划实现`
+   - `先做代码，不用再等`
 
 ## TODO 选择规则
 
