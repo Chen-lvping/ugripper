@@ -13,7 +13,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$script_dir/../" || exit 1
 
 # ================= 配置部分 =================
-ENCODER_CALIB_BIN="./build/src/sensor_recorder/zeroing"
+ENCODER_CALIB_BIN="${ENCODER_CALIB_BIN_OVERRIDE:-./build/src/sensor_recorder/zeroing}"
 
 # --- HMI 灯效配置 ---
 HMI_HELPER_BIN="./build/src/gripper_hmi/gripper_hmi_test"
@@ -29,8 +29,8 @@ PID_LED_SHELL=""
 PID_AUDIO_SHELL=""
 
 # --- 硬盘检测配置 ---
-USB_LINK="/dev/usb_update_stick"
-MOUNT_POINT="/mnt/usb_calib"
+MOUNT_POINT="${MOUNT_POINT_OVERRIDE:-/mnt/data_disk}"
+ZEROING_TIMEOUT_SEC="${ZEROING_TIMEOUT_SEC_OVERRIDE:-120}"
 
 # 停止业务服务，防止占用
 echo "Stopping ugripper.service..."
@@ -39,34 +39,62 @@ sleep 3
 
 
 # ================= 升级硬盘及文件检测 =================
-echo "Checking USB trigger conditions..."
+echo "Checking calibration trigger conditions..."
 
-if [ ! -b "$USB_LINK" ]; then
-    echo "Error: USB update stick ($USB_LINK) not found. Exiting."
-    systemctl start ugripper.service
-    exit 1
-fi
-
-mkdir -p "$MOUNT_POINT"
-if ! mount -o ro "$USB_LINK" "$MOUNT_POINT" 2>/dev/null; then
-    echo "Error: Failed to mount USB stick."
+if [ ! -d "$MOUNT_POINT" ]; then
+    echo "Error: calibration mount point not found: $MOUNT_POINT"
     systemctl start ugripper.service
     exit 1
 fi
 
 if [ ! -f "$MOUNT_POINT/calibration.txt" ]; then
-    echo "Error: calibration.txt not found in USB root. Exiting."
-    umount "$MOUNT_POINT" 2>/dev/null
-    systemctl start ugripper.service    
+    echo "Error: calibration.txt not found in $MOUNT_POINT. Exiting."
+    systemctl start ugripper.service
     exit 1
 fi
 
-echo "USB Check Passed: calibration.txt detected."
+echo "Calibration trigger check passed: calibration.txt detected in $MOUNT_POINT."
 
 # ================= 辅助函数 =================
 
 run_as_user() {
     runuser -u "$TARGET_USER" -- bash -lc "$*"
+}
+
+run_encoder_zeroing() {
+    local side="$1"
+
+    echo "Running encoder zeroing for side=$side..."
+    if id "$TARGET_USER" >/dev/null 2>&1; then
+        timeout --foreground "${ZEROING_TIMEOUT_SEC}s" runuser -u "$TARGET_USER" -- "$ENCODER_CALIB_BIN" "$side"
+    else
+        timeout --foreground "${ZEROING_TIMEOUT_SEC}s" "$ENCODER_CALIB_BIN" "$side"
+    fi
+}
+
+stream_side_log() {
+    local side="$1"
+    local log_file="$2"
+
+    [ -f "$log_file" ] || return 0
+
+    while IFS= read -r line || [ -n "$line" ]; do
+        printf '[zeroing-%s] %s\n' "$side" "$line"
+    done < "$log_file"
+}
+
+describe_zeroing_failure() {
+    local side="$1"
+    local rc="$2"
+
+    case "$rc" in
+        124)
+            printf 'Encoder zeroing timed out for side=%s after %ss.' "$side" "$ZEROING_TIMEOUT_SEC"
+            ;;
+        *)
+            printf 'Encoder zeroing failed for side=%s (exit=%s).' "$side" "$rc"
+            ;;
+    esac
 }
 
 resolve_audio_python() {
@@ -178,11 +206,6 @@ on_exit_cleanup() {
     echo ""
     echo ">>> Trapped signal or exit. Cleaning up..."
     
-    if mountpoint -q "$MOUNT_POINT"; then
-        umount "$MOUNT_POINT" 2>/dev/null
-        echo "USB unmounted."
-    fi
-
     stop_helpers
     
     if ! systemctl is-active --quiet ugripper.service; then
@@ -226,19 +249,56 @@ notify_audio "calibrating"
 # fi
 
 # 2.2 Encoder
-if [ -f "$ENCODER_CALIB_BIN" ]; then
-    echo "Running Encoder Zeroing..."
-    run_as_user "$ENCODER_CALIB_BIN"
-else
+if [ ! -x "$ENCODER_CALIB_BIN" ]; then
     echo "Error: Encoder binary not found at $ENCODER_CALIB_BIN"
+    set_state "ERROR_1"
+    exit 1
 fi
 
-sleep 2 
-# --- 阶段 3: 完成 ---
-echo "Phase 3: Done (Green Flash)"
-set_state "CALIB_DONE"
-notify_audio "calib_done"   
-sleep 3                     
+declare -a FAILED_SIDES=()
+ZEROING_TMP_DIR="$(mktemp -d /tmp/ugripper-zeroing.XXXXXX)"
+declare -A ZEROING_PIDS=()
+declare -A ZEROING_LOGS=()
+trap 'rm -rf "$ZEROING_TMP_DIR" 2>/dev/null || true; on_exit_cleanup' EXIT SIGINT SIGTERM
+
+for side in left right; do
+    ZEROING_LOGS["$side"]="$ZEROING_TMP_DIR/${side}.log"
+    (
+        run_encoder_zeroing "$side"
+    ) >"${ZEROING_LOGS[$side]}" 2>&1 &
+    ZEROING_PIDS["$side"]=$!
+    echo "Started encoder zeroing for side=$side (pid=${ZEROING_PIDS[$side]})."
+done
+
+for side in left right; do
+    if wait "${ZEROING_PIDS[$side]}"; then
+        side_rc=0
+    else
+        side_rc=$?
+    fi
+    stream_side_log "$side" "${ZEROING_LOGS[$side]}"
+    if [ "$side_rc" -ne 0 ]; then
+        describe_zeroing_failure "$side" "$side_rc"
+        echo
+        FAILED_SIDES+=("${side}:${side_rc}")
+    else
+        echo "Encoder zeroing succeeded for side=$side."
+    fi
+done
+
+sleep 2
+
+if [ "${#FAILED_SIDES[@]}" -eq 0 ]; then
+    echo "Phase 3: Done (Green Flash)"
+    set_state "CALIB_DONE"
+    notify_audio "calib_done"
+    sleep 3
+else
+    echo "Encoder zeroing completed with failures: ${FAILED_SIDES[*]}"
+    set_state "ERROR_1"
+    sleep 3
+    exit 1
+fi
 
 echo ">>> Calibration Sequence Finished."
 echo "Restoring ugripper.service..."

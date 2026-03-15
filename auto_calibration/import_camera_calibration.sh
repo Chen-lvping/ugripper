@@ -9,6 +9,28 @@ log() {
     echo "[calib-import][$(date '+%Y-%m-%d %H:%M:%S')] $*"
 }
 
+detect_camera_side() {
+    local path="$1"
+    local filename stem
+
+    filename="$(basename "$path")"
+    stem="${filename%.*}"
+    stem="${stem,,}"
+
+    case "$stem" in
+        *_left)
+            printf 'left'
+            return 0
+            ;;
+        *_right)
+            printf 'right'
+            return 0
+            ;;
+    esac
+
+    return 1
+}
+
 read_env_value() {
     local key="$1"
     if [ ! -f /etc/environment ]; then
@@ -56,11 +78,32 @@ if [ -z "$TARGET_SN_DIR" ] || [ ! -d "$TARGET_SN_DIR" ]; then
     exit 10
 fi
 
-CAMCHAIN_FILE="$(find "$TARGET_SN_DIR" -maxdepth 2 -type f \( -name '*camchain*.yaml' -o -name '*camchain*.yml' \) | sort | head -n1 || true)"
-if [ -z "$CAMCHAIN_FILE" ]; then
-    log "Missing camchain file in $TARGET_SN_DIR"
+declare -A SIDE_CAMCHAIN_FILES=()
+while IFS= read -r file; do
+    side="$(detect_camera_side "$file" || true)"
+    if [ -z "$side" ]; then
+        log "Ignoring camchain without _left/_right suffix: $(basename "$file")"
+        continue
+    fi
+
+    if [ -n "${SIDE_CAMCHAIN_FILES[$side]:-}" ]; then
+        log "Multiple camchain files found for side=$side: $(basename "${SIDE_CAMCHAIN_FILES[$side]}"), $(basename "$file")"
+        exit 1
+    fi
+
+    SIDE_CAMCHAIN_FILES[$side]="$file"
+done < <(find "$TARGET_SN_DIR" -maxdepth 2 -type f \( -name '*camchain*.yaml' -o -name '*camchain*.yml' \) | sort)
+
+if [ "${#SIDE_CAMCHAIN_FILES[@]}" -eq 0 ]; then
+    log "Missing side-specific camchain file in $TARGET_SN_DIR (expected *_left.yaml or *_right.yaml)"
     exit 1
 fi
+
+for side in left right; do
+    if [ -n "${SIDE_CAMCHAIN_FILES[$side]:-}" ]; then
+        log "Detected ${side} camchain: $(basename "${SIDE_CAMCHAIN_FILES[$side]}")"
+    fi
+done
 
 PERSIST_CALIB_DIR="${CALIB_PERSIST_DIR_OVERRIDE:-/etc/ugripper/config/calibration}"
 PERSIST_CALIB_FILE="$PERSIST_CALIB_DIR/calibration.json"
@@ -73,14 +116,41 @@ fi
 
 mkdir -p "$PERSIST_CALIB_DIR"
 
-python3 - "$PERSIST_CALIB_FILE" "$FALLBACK_CAM_JSON" "$CAMCHAIN_FILE" "$PERSIST_CALIB_FILE" "$DEVICE_SN" <<'PY'
+IMPORT_SIDE_ARGS=()
+for side in left right; do
+    if [ -n "${SIDE_CAMCHAIN_FILES[$side]:-}" ]; then
+        IMPORT_SIDE_ARGS+=("${side}=${SIDE_CAMCHAIN_FILES[$side]}")
+    fi
+done
+
+python3 - "$PERSIST_CALIB_FILE" "$FALLBACK_CAM_JSON" "$PERSIST_CALIB_FILE" "$DEVICE_SN" "${IMPORT_SIDE_ARGS[@]}" <<'PY'
 import json
 import pathlib
 import re
 import sys
 from datetime import datetime, timezone
 
-base_json, fallback_json, camchain_file, output_json, device_sn = sys.argv[1:]
+base_json, fallback_json, output_json, device_sn, *side_args = sys.argv[1:]
+
+TARGET_KEYS = {
+    "left": "observation.images.left_cam_main",
+    "right": "observation.images.right_cam_main",
+}
+
+LEGACY_KEYS = {
+    "left": [
+        "observation.images.left_cam_main",
+        "observation.images.cam_left",
+        "observation.images.left_main",
+        "observation.images.{{CAM_MAIN}}",
+    ],
+    "right": [
+        "observation.images.right_cam_main",
+        "observation.images.cam_right",
+        "observation.images.right_main",
+        "observation.images.{{CAM_MAIN}}",
+    ],
+}
 
 
 def load_text(path):
@@ -143,40 +213,78 @@ def ensure_image_entry(existing, width, height, fx, fy, cx, cy, camera_model, di
     }
 
 
+def parse_side_args(arguments):
+    parsed = {}
+    for item in arguments:
+        if "=" not in item:
+            raise ValueError(f"invalid side argument: {item}")
+        side, path = item.split("=", 1)
+        if side not in TARGET_KEYS:
+            raise ValueError(f"unsupported side: {side}")
+        parsed[side] = path
+    if not parsed:
+        raise ValueError("no side-specific camchain files provided")
+    return parsed
+
+
+def pop_existing_image_entry(data, side):
+    for key in LEGACY_KEYS[side]:
+        value = data.get(key)
+        if isinstance(value, dict):
+            if key != TARGET_KEYS[side]:
+                data.pop(key, None)
+            return value
+    return None
+
+
 src_json_path = pathlib.Path(base_json)
 if src_json_path.exists():
     data = json.loads(src_json_path.read_text(encoding="utf-8"))
 else:
     data = json.loads(pathlib.Path(fallback_json).read_text(encoding="utf-8"))
 
-camchain = parse_camchain(camchain_file)
-main_key = "observation.images.{{CAM_MAIN}}"
-if main_key not in data:
-    cam_keys = [k for k in data.keys() if k.startswith("observation.images.cam_")]
-    if cam_keys:
-        main_key = cam_keys[0]
+side_to_file = parse_side_args(side_args)
+main_cameras = {}
+existing_calibration_info = data.get("calibration_info")
+if not isinstance(existing_calibration_info, dict):
+    existing_calibration_info = {}
 
-width, height = camchain["resolution"]
-fx, fy, cx, cy = camchain["intrinsics"]
-data[main_key] = ensure_image_entry(
-    data.get(main_key),
-    width,
-    height,
-    fx,
-    fy,
-    cx,
-    cy,
-    camchain["camera_model"],
-    camchain["distortion_model"],
-    camchain["distortion_coeffs"],
-)
-if camchain.get("rostopic"):
-    data[main_key]["rostopic"] = camchain["rostopic"]
+existing_main_cameras = existing_calibration_info.get("main_cameras")
+if isinstance(existing_main_cameras, dict):
+    main_cameras.update(existing_main_cameras)
 
+for side, camchain_file in sorted(side_to_file.items()):
+    camchain = parse_camchain(camchain_file)
+    width, height = camchain["resolution"]
+    fx, fy, cx, cy = camchain["intrinsics"]
+    target_key = TARGET_KEYS[side]
+    existing_entry = pop_existing_image_entry(data, side)
+    data[target_key] = ensure_image_entry(
+        existing_entry,
+        width,
+        height,
+        fx,
+        fy,
+        cx,
+        cy,
+        camchain["camera_model"],
+        camchain["distortion_model"],
+        camchain["distortion_coeffs"],
+    )
+    data[target_key].pop("rostopic", None)
+    if camchain.get("rostopic"):
+        data[target_key]["rostopic"] = camchain["rostopic"]
+
+    main_cameras[side] = {
+        "source": pathlib.Path(camchain_file).name,
+        "camera_model": camchain["camera_model"],
+        "distortion_model": camchain["distortion_model"],
+        "resolution": camchain["resolution"],
+    }
+
+data.pop("observation.images.{{CAM_MAIN}}", None)
 for key in list(data.keys()):
-    if key == main_key:
-        continue
-    if key.startswith("observation.images.") or key.startswith("observation.imu."):
+    if key.startswith("observation.imu."):
         data.pop(key, None)
 
 metadata = data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {}
@@ -190,15 +298,12 @@ calib_info = data.get("calibration_info", {}) if isinstance(data.get("calibratio
 calib_info["calibration_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 calib_info["calibration_status"] = "calibrated"
 calib_info["device_sn"] = device_sn
-calib_info["main_camera"] = {
-    "source": pathlib.Path(camchain_file).name,
-    "camera_model": camchain["camera_model"],
-    "distortion_model": camchain["distortion_model"],
-    "resolution": camchain["resolution"],
-}
+calib_info.pop("main_camera", None)
+calib_info["main_cameras"] = main_cameras
+calib_info["imported_sides"] = sorted(side_to_file.keys())
 calib_info["notes"] = (
     "Auto-imported from USB by device SN. "
-    "Runtime will still align {{CAM_MAIN}} and tactile serial values."
+    "Main camera files must use *_left/*_right suffixes; missing sides are left unchanged."
 )
 data["calibration_info"] = calib_info
 
@@ -210,15 +315,21 @@ PY
 IMPORT_STAMP="$(date +%Y%m%d_%H%M%S)"
 IMPORT_SAVE_DIR="$PERSIST_CALIB_DIR/imported/${DEVICE_SN}/${IMPORT_STAMP}"
 mkdir -p "$IMPORT_SAVE_DIR"
-cp -f "$CAMCHAIN_FILE" "$IMPORT_SAVE_DIR/"
 cat > "$IMPORT_SAVE_DIR/import_meta.txt" <<META
 import_time_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 device_sn=$DEVICE_SN
 usb_source_dir=$TARGET_SN_DIR
-camchain_file=$(basename "$CAMCHAIN_FILE")
+imported_sides=$(printf '%s\n' "${!SIDE_CAMCHAIN_FILES[@]}" | sort | paste -sd, -)
 output_calibration_json=$PERSIST_CALIB_FILE
 META
 
-log "Calibration import completed for DEVICE_SN=$DEVICE_SN"
+for side in left right; do
+    if [ -n "${SIDE_CAMCHAIN_FILES[$side]:-}" ]; then
+        cp -f "${SIDE_CAMCHAIN_FILES[$side]}" "$IMPORT_SAVE_DIR/"
+        printf 'camchain_%s_file=%s\n' "$side" "$(basename "${SIDE_CAMCHAIN_FILES[$side]}")" >> "$IMPORT_SAVE_DIR/import_meta.txt"
+    fi
+done
+
+log "Calibration import completed for DEVICE_SN=$DEVICE_SN, sides=$(printf '%s\n' "${!SIDE_CAMCHAIN_FILES[@]}" | sort | paste -sd, -)"
 log "Updated: $PERSIST_CALIB_FILE"
 exit 0

@@ -92,7 +92,7 @@ if [ -z "$DEVNODE" ]; then
     exit 1
 fi
 
-CURRENT_SOURCE="$(findmnt -rn -o SOURCE --target "$MOUNT_POINT" 2>/dev/null || true)"
+CURRENT_SOURCE="$(current_source)"
 if [ "$CURRENT_SOURCE" = "$DEVNODE" ] && source_exists "$CURRENT_SOURCE"; then
     exit 0
 fi

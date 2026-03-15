@@ -4,12 +4,6 @@ set -e
 APP_DIR="{{INSTALL_DIR}}"
 SERVICE_NAME="{{APP_NAME}}.service"
 
-NETWORK_HELPER_SCRIPT="${APP_DIR}/auto_calibration/network_iface_lib.sh"
-STATIC_IP_CIDR="192.168.1.110/24"
-NM_CONN_PREFIX="ugripper-static-"
-NETWORK_BACKUP_DIR="/var/lib/ugripper"
-NETWORK_BACKUP_FILE="${NETWORK_BACKUP_DIR}/network_manager_backup.env"
-
 SHUTDOWN_TRIGGER_SCRIPT="${APP_DIR}/auto_update/trigger_shutdown.sh"
 SHUTDOWN_TRIGGER_SERVICE="umi-shutdown-trigger.service"
 SHUTDOWN_TRIGGER_PATH="umi-shutdown-trigger.path"
@@ -17,10 +11,6 @@ NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 CALIB_PERSIST_DIR="/etc/ugripper/config/calibration"
 CALIB_PERSIST_FILE="${CALIB_PERSIST_DIR}/calibration.json"
 DATA_MOUNT_POINT="/mnt/data_disk"
-
-if [ -f "$NETWORK_HELPER_SCRIPT" ]; then
-    . "$NETWORK_HELPER_SCRIPT"
-fi
 
 stop_service_fast() {
     local service_name="$1"
@@ -48,117 +38,6 @@ force_cleanup_recording_processes() {
     rm -f /tmp/umi_audio_pipe /tmp/umi_recording.lock || true
 }
 
-delete_managed_nm_connections() {
-    if ! command -v nmcli >/dev/null 2>&1; then
-        return 0
-    fi
-
-    nmcli -t -f NAME connection show 2>/dev/null | while IFS= read -r conn_name; do
-        case "$conn_name" in
-            ${NM_CONN_PREFIX}*)
-                nmcli connection delete "$conn_name" >/dev/null 2>&1 || true
-                ;;
-        esac
-    done
-}
-
-backup_existing_network_connection() {
-    local iface="$1"
-    local current_name=""
-    local current_device=""
-    local current_type=""
-    local ipv4_method=""
-    local ipv4_addresses=""
-    local ipv4_gateway=""
-    local ipv4_never_default=""
-    local ipv6_method=""
-    local autoconnect=""
-
-    if ! command -v nmcli >/dev/null 2>&1; then
-        return 0
-    fi
-
-    if [ -z "$iface" ] || [ -f "$NETWORK_BACKUP_FILE" ]; then
-        return 0
-    fi
-
-    while IFS=: read -r current_name current_device current_type; do
-        [ "$current_device" = "$iface" ] || continue
-        [ "$current_type" = "802-3-ethernet" ] || [ "$current_type" = "ethernet" ] || continue
-        case "$current_name" in
-            ${NM_CONN_PREFIX}*)
-                continue
-                ;;
-        esac
-
-        ipv4_method="$(nmcli -g ipv4.method connection show "$current_name" 2>/dev/null || true)"
-        [ "$ipv4_method" = "manual" ] || continue
-        break
-    done < <(nmcli -t -f NAME,DEVICE,TYPE connection show --active 2>/dev/null || true)
-
-    if [ -z "$current_name" ] || [ "$ipv4_method" != "manual" ]; then
-        return 0
-    fi
-
-    ipv4_addresses="$(nmcli -g ipv4.addresses connection show "$current_name" 2>/dev/null || true)"
-    ipv4_gateway="$(nmcli -g ipv4.gateway connection show "$current_name" 2>/dev/null || true)"
-    ipv4_never_default="$(nmcli -g ipv4.never-default connection show "$current_name" 2>/dev/null || true)"
-    ipv6_method="$(nmcli -g ipv6.method connection show "$current_name" 2>/dev/null || true)"
-    autoconnect="$(nmcli -g connection.autoconnect connection show "$current_name" 2>/dev/null || true)"
-
-    mkdir -p "$NETWORK_BACKUP_DIR"
-    cat > "$NETWORK_BACKUP_FILE" <<EOF
-BACKUP_CONN_NAME=$(printf '%q' "$current_name")
-BACKUP_IFACE=$(printf '%q' "$iface")
-BACKUP_IPV4_METHOD=$(printf '%q' "$ipv4_method")
-BACKUP_IPV4_ADDRESSES=$(printf '%q' "$ipv4_addresses")
-BACKUP_IPV4_GATEWAY=$(printf '%q' "$ipv4_gateway")
-BACKUP_IPV4_NEVER_DEFAULT=$(printf '%q' "$ipv4_never_default")
-BACKUP_IPV6_METHOD=$(printf '%q' "$ipv6_method")
-BACKUP_AUTOCONNECT=$(printf '%q' "$autoconnect")
-EOF
-
-    echo "Backed up existing manual NetworkManager connection $current_name for $iface"
-}
-
-configure_static_network() {
-    local iface="$1"
-    local conn_name="${NM_CONN_PREFIX}${iface}"
-
-    if ! command -v nmcli >/dev/null 2>&1; then
-        echo "Warning: nmcli not found, skip static network configuration."
-        return 0
-    fi
-
-    if [ -z "$iface" ]; then
-        echo "Warning: no ethernet interface detected, skip static network configuration."
-        return 0
-    fi
-
-    delete_managed_nm_connections
-
-    if nmcli -t -f NAME connection show 2>/dev/null | grep -Fx "$conn_name" >/dev/null; then
-        nmcli connection mod "$conn_name" \
-            connection.interface-name "$iface" \
-            ipv4.method manual \
-            ipv4.addresses "$STATIC_IP_CIDR" \
-            ipv4.gateway "" \
-            ipv4.never-default yes \
-            ipv6.method ignore \
-            connection.autoconnect yes
-    else
-        nmcli connection add type ethernet ifname "$iface" con-name "$conn_name" \
-            ipv4.method manual \
-            ipv4.addresses "$STATIC_IP_CIDR" \
-            ipv4.never-default yes \
-            ipv6.method ignore \
-            connection.autoconnect yes
-    fi
-
-    nmcli connection up "$conn_name" >/dev/null 2>&1 || true
-    echo "Configured static IP ${STATIC_IP_CIDR%/*} on $iface via NetworkManager connection $conn_name"
-}
-
 # 安装窗口先清理旧业务进程，避免升级后残留占用音频/GPIO/FIFO
 stop_service_fast "$SERVICE_NAME" 6
 stop_service_fast "$NETWORK_MONITOR_SERVICE" 4
@@ -168,12 +47,7 @@ force_cleanup_recording_processes
 # 0) 单机双手模式：停用旧双机 DEVICE_SIDE/PTP 配置
 # --------------------------------------------------
 
-# --------------------------------------------------
-# 1) NetworkManager 静态 IP 配置
-# --------------------------------------------------
-CURRENT_ETH_IFACE="$(detect_preferred_ethernet_interface 2>/dev/null || true)"
-backup_existing_network_connection "$CURRENT_ETH_IFACE"
-configure_static_network "$CURRENT_ETH_IFACE"
+# 主包不再托管有线静态 IP，沿用系统现有 NetworkManager 配置。
 
 # --------------------------------------------------
 # 3) 配置应用服务权限及启动

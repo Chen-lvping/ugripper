@@ -1,4 +1,6 @@
-ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", \
-  KERNELS=="3-1.3", \
-  SYMLINK+="usb_update_stick", \
-  TAG+="systemd", ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
+# USB 内容检查入口已统一到主包的 `config/99-fixed-usb-map.rules` +
+# `auto_update/mount_data_disk.sh`：
+# 1. 允许的 4 个物理 USB 口统一挂载到 `/mnt/data_disk`
+# 2. 挂载成功后再触发 `usb_auto_update.sh` 检查 deb/config/calibration 文件
+#
+# updater 包保留该文件仅用于兼容安装布局，避免继续通过旧固定口规则重复触发。

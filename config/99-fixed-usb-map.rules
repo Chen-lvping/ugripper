@@ -5,42 +5,42 @@
 # - 右侧 hub 可插右上 / 右下物理口：USB2=5-1|1-1，USB3=6-1|8-1
 # - 左侧 hub 可插左上 / 左下物理口：USB2=9-1|11-1，USB3=10-1|12-1
 # - hub 内部端口约定：
-#   * .4.1 -> tcam_l
-#   * .4.2 -> tcam_r
+#   * .4.1 -> tcam_r
+#   * .4.2 -> tcam_l
 #   * .4.4 -> cam_main (YuZhuo, 27c2:0530)
-#   * .2   -> stereo (USB3 路径；节点命名不绑定厂家)
+#   * .1/.2 -> stereo (USB3 路径；允许两个内部端口互换，节点命名不绑定厂家)
 # 摄像头通常会生成两个节点 (videoN, videoN+1)，这里只取 index=0 的主节点。
 
 # ========================
 # 1. USB cameras
 # ========================
 # ---- Right tactile cameras ----
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.1", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.2", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="right_tcam_l"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.1", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.2", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="right_tcam_l"
 
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.2", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="right_tcam_r"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.2", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="right_tcam_r"
 
 # ---- Left tactile cameras ----
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.1", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.2", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="left_tcam_l"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.1", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="left_tcam_l"
 
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.2", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="left_tcam_r"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="left_tcam_r"
 
@@ -61,14 +61,22 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", \
   SYMLINK+="left_cam_main"
 
 # ---- Right stereo camera ----
-# 这里仅按右侧 USB3 hub 的固定内部端口 .2 匹配，不把厂家名写进节点命名。
+# 允许 USB3 hub 内部端口 .1/.2 互换，不把厂家名写进节点命名。
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.1", ATTR{index}=="0", \
+  SYMLINK+="right_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.2", ATTR{index}=="0", \
+  SYMLINK+="right_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.1", ATTR{index}=="0", \
   SYMLINK+="right_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.2", ATTR{index}=="0", \
   SYMLINK+="right_stereo"
 
 # ---- Left stereo camera ----
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.1", ATTR{index}=="0", \
+  SYMLINK+="left_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.2", ATTR{index}=="0", \
+  SYMLINK+="left_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.1", ATTR{index}=="0", \
   SYMLINK+="left_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.2", ATTR{index}=="0", \
   SYMLINK+="left_stereo"
@@ -82,20 +90,33 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.2", ATTR{index}=="0",
 SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9",   MODE:="0666", TAG+="uaccess"
 
 # CH9344 gripper HMI 固定口映射：只依赖左右 USB2 hub 路径 + 同组 tty 的内核顺序，不依赖全局 ttyCH9344USB<num> 号。
+# 允许同侧 USB2 hub 的内部端口 .1/.2 互换。
 # 规则含义：在同一个 CH9344 设备组下，组内排序第 1 路 = gripper HMI，第 2 路 = encoder，第 3 路 = IMU。
 # 通过 PROGRAM 的退出码判断“当前 tty 是否为组内第 N 路”，不依赖额外 role probe。
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="left_gripper"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="left_gripper"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="left_gripper"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="left_gripper"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 3p); [ %k = $$pick ]'", SYMLINK+="right_imu"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 3p); [ %k = $$pick ]'", SYMLINK+="right_imu"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 3p); [ %k = $$pick ]'", SYMLINK+="right_imu"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 3p); [ %k = $$pick ]'", SYMLINK+="right_imu"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 3p); [ %k = $$pick ]'", SYMLINK+="left_imu"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 3p); [ %k = $$pick ]'", SYMLINK+="left_imu"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 3p); [ %k = $$pick ]'", SYMLINK+="left_imu"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 3p); [ %k = $$pick ]'", SYMLINK+="left_imu"
 
 # ========================
 # 3. USB audio headset
@@ -118,41 +139,41 @@ SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="0020", ATTRS{idProduct}=
 # - 其他文件系统回退到 systemd-mount 自动探测
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="1-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="1-1", \
   RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="5-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="5-1", \
   RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="9-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="9-1", \
   RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="11-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="11-1", \
   RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="6-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="6-1", \
   RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="8-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="8-1", \
   RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="10-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="10-1", \
   RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="12-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="12-1", \
   RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"

@@ -2,24 +2,22 @@
 set -euo pipefail
 
 # ================= 配置区域 =================
-# 如果你想只允许固定 USB 口触发（强校验），填你的 by-path（推荐）
-USB_DEV_PATH="/dev/disk/by-path/platform-xhci-hcd.1.auto-usb-0:1.3:1.0-scsi-0:0:0:0-part1"
-
 # 业务主程序包前缀
 DEB_PREFIX="ugripper_*_arm64"
 # Updater 自身更新包前缀
 UPDATER_PREFIX="ugripper-usb-updater*"
 
-MOUNT_POINT="/mnt/usb_updater_tmp"
+DATA_MOUNT_POINT="/mnt/data_disk"
+MOUNT_POINT="$DATA_MOUNT_POINT"
 LOG_FILE="/var/log/ugripper/usb_auto_update.log"
 LOCK_FILE="/run/usb_auto_update.lock"
+DATA_MOUNT_WAIT_RETRIES=15
+DATA_MOUNT_WAIT_INTERVAL_SEC="0.2"
 
 # 升级保护锁：安装期间用于抑制 network monitor 的重启/二次触发
 UPGRADE_GUARD_FILE="/run/ugripper_installing_from_usb.lock"
 NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 
-# 是否强制要求 “触发设备 == 固定口 by-path”
-ENFORCE_BY_PATH="0"   # 1=强制校验；0=不校验
 # ===========================================
 
 HMI_HELPER_BIN="/opt/ugripper/build/src/gripper_hmi/gripper_hmi_test"
@@ -35,6 +33,60 @@ NEED_UGRIPPER_RESTART=0
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+}
+
+realpath_or_empty() {
+  local path="${1:-}"
+
+  [ -n "$path" ] || return 0
+  readlink -f "$path" 2>/dev/null || true
+}
+
+mount_source() {
+  local mountpoint="$1"
+
+  findmnt -rn -o SOURCE --mountpoint "$mountpoint" 2>/dev/null || true
+}
+
+mount_source_matches_device() {
+  local mountpoint="$1"
+  local devnode="$2"
+  local mounted_source real_mounted_source real_devnode
+
+  mounted_source="$(mount_source "$mountpoint")"
+  [ -n "$mounted_source" ] || return 1
+
+  real_mounted_source="$(realpath_or_empty "$mounted_source")"
+  real_devnode="$(realpath_or_empty "$devnode")"
+
+  [ -n "$real_mounted_source" ] || return 1
+  [ -n "$real_devnode" ] || return 1
+  [ "$real_mounted_source" = "$real_devnode" ]
+}
+
+prepare_scan_mountpoint() {
+  local current_source retry_count
+
+  retry_count=0
+  while [ "$retry_count" -lt "$DATA_MOUNT_WAIT_RETRIES" ]; do
+    if mount_source_matches_device "$DATA_MOUNT_POINT" "$DEV_NODE"; then
+      MOUNT_POINT="$DATA_MOUNT_POINT"
+      log "检测到 ${DATA_MOUNT_POINT} 已挂载当前设备，复用统一入口检查内容。"
+      return 0
+    fi
+
+    current_source="$(mount_source "$DATA_MOUNT_POINT")"
+    if [ -n "$current_source" ] && [ -n "$(realpath_or_empty "$current_source")" ]; then
+      log "${DATA_MOUNT_POINT} 当前挂载的是其他设备（source=$current_source），跳过本次内容检查。"
+      return 2
+    fi
+
+    retry_count=$((retry_count + 1))
+    sleep "$DATA_MOUNT_WAIT_INTERVAL_SEC"
+  done
+
+  log "等待 ${DATA_MOUNT_POINT} 挂载当前设备超时，跳过本次内容检查。"
+  return 1
 }
 
 trim_text() {
@@ -85,32 +137,6 @@ normalize_camera_codec() {
   case "$normalized" in
     h264|h265)
       printf '%s' "$normalized"
-      return 0
-      ;;
-  esac
-
-  return 1
-}
-
-normalize_device_role() {
-  local raw="$1"
-  local normalized
-
-  normalized="$(trim_text "$raw")"
-  normalized="${normalized#\"}"
-  normalized="${normalized%\"}"
-  normalized="${normalized#\'}"
-  normalized="${normalized%\'}"
-  normalized="$(trim_text "$normalized")"
-  normalized="${normalized,,}"
-
-  case "$normalized" in
-    master|m)
-      printf 'master'
-      return 0
-      ;;
-    slave|s)
-      printf 'slave'
       return 0
       ;;
   esac
@@ -192,43 +218,6 @@ parse_camera_codec_from_config() {
   return 1
 }
 
-parse_device_role_from_config() {
-  local config_file="$1"
-  local line key value role
-
-  [ -f "$config_file" ] || return 1
-
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="$(trim_text "$line")"
-    [ -z "$line" ] && continue
-
-    case "$line" in
-      \#*|\;*)
-        continue
-        ;;
-    esac
-
-    if [ "${line#*=}" = "$line" ]; then
-      continue
-    fi
-
-    key="$(trim_text "${line%%=*}")"
-    value="$(trim_text "${line#*=}")"
-    key="${key,,}"
-
-    case "$key" in
-      device_role|role)
-        if role="$(normalize_device_role "$value")"; then
-          printf '%s' "$role"
-          return 0
-        fi
-        ;;
-    esac
-  done < "$config_file"
-
-  return 1
-}
-
 set_ugripper_language() {
   local lang="$1"
   local env_file="/etc/environment"
@@ -294,40 +283,6 @@ set_camera_codec() {
   fi
 
   export CAMERA_CODEC="$codec"
-  return 0
-}
-
-set_device_role() {
-  local role="$1"
-  local env_file="/etc/environment"
-  local env_key="DEVICE_ROLE"
-  local env_line="${env_key}=${role}"
-
-  if [ ! -e "$env_file" ]; then
-    if ! printf '%s\n' "$env_line" > "$env_file"; then
-      log "写入 $env_file 失败，设备角色设置未生效。"
-      return 1
-    fi
-    export DEVICE_ROLE="$role"
-    log "已创建 $env_file 并写入 $env_line"
-    return 0
-  fi
-
-  if grep -qE "^${env_key}=" "$env_file"; then
-    if ! sed -i -E "s|^${env_key}=.*$|${env_line}|" "$env_file"; then
-      log "更新 $env_file 中 ${env_key} 失败。"
-      return 1
-    fi
-    log "已更新 $env_file 中 ${env_key}=${role}"
-  else
-    if ! printf '\n%s\n' "$env_line" >> "$env_file"; then
-      log "追加 ${env_key} 到 $env_file 失败。"
-      return 1
-    fi
-    log "已追加 $env_line 到 $env_file"
-  fi
-
-  export DEVICE_ROLE="$role"
   return 0
 }
 
@@ -452,9 +407,8 @@ restart_ugripper_if_needed() {
 apply_imports_with_led_feedback() {
   local cfg_lang="$1"
   local cfg_codec="$2"
-  local cfg_role="$3"
-  local do_calib_import="$4"
-  local defer_restart_for_calibration="$5"
+  local do_calib_import="$3"
+  local defer_restart_for_calibration="$4"
   local yellow_start_ts=0
   local yellow_elapsed=0
   local has_failure=0
@@ -488,16 +442,6 @@ apply_imports_with_led_feedback() {
       any_imported=1
     else
       log "编码器配置写入失败。"
-      has_failure=1
-    fi
-  fi
-
-  if [ -n "$cfg_role" ]; then
-    if set_device_role "$cfg_role"; then
-      log "已应用设备角色配置：DEVICE_ROLE=$cfg_role"
-      any_imported=1
-    else
-      log "设备角色配置写入失败。"
       has_failure=1
     fi
   fi
@@ -560,9 +504,6 @@ apply_imports_with_led_feedback() {
 }
 
 cleanup() {
-  if mountpoint -q "$MOUNT_POINT"; then
-    umount "$MOUNT_POINT" || true
-  fi
   stop_led_helper
   leave_upgrade_window
 }
@@ -590,41 +531,20 @@ fi
 
 log "Triggered by device: $DEV_NODE"
 
-# （可选）强校验：只允许固定口 by-path
-if [ "$ENFORCE_BY_PATH" = "1" ]; then
-  if [ ! -e "$USB_DEV_PATH" ]; then
-    log "固定口 by-path 不存在：$USB_DEV_PATH（可能还没生成），退出。"
-    exit 0
-  fi
-
-  REAL_BY_PATH="$(readlink -f "$USB_DEV_PATH" || true)"
-  REAL_DEV_NODE="$(readlink -f "$DEV_NODE" || true)"
-
-  if [ -z "$REAL_BY_PATH" ] || [ -z "$REAL_DEV_NODE" ]; then
-    log "无法解析设备真实路径，退出。"
-    exit 0
-  fi
-
-  if [ "$REAL_BY_PATH" != "$REAL_DEV_NODE" ]; then
-    log "触发设备不匹配固定口：by-path=$REAL_BY_PATH, trigger=$REAL_DEV_NODE，忽略。"
-    exit 0
-  fi
-fi
-
-mkdir -p "$MOUNT_POINT"
-
-# 挂载（建议 ro，避免写U盘）
-if mount "$DEV_NODE" "$MOUNT_POINT" -o ro; then
-  log "Mounted $DEV_NODE to $MOUNT_POINT (ro)"
+if prepare_scan_mountpoint; then
+  :
 else
-  log "挂载失败：$DEV_NODE"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    exit 0
+  fi
   exit 1
 fi
 
 CONFIG_FILE="$MOUNT_POINT/config.txt"
 HAS_CALIB_IMPORT=0
 if [ -f "$CONFIG_FILE" ]; then
-  log "检测到 config.txt，检查语言/编码器/设备角色配置。"
+  log "检测到 config.txt，检查语言与编码器配置。"
   CONFIG_LANG="$(parse_language_from_config "$CONFIG_FILE" || true)"
   if [ -n "$CONFIG_LANG" ]; then
     log "解析到语言配置：UGRIPPER_LANG=$CONFIG_LANG"
@@ -638,15 +558,8 @@ if [ -f "$CONFIG_FILE" ]; then
   else
     log "config.txt 未找到有效编码器设置（支持 CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC，值为 h264/h265），跳过。"
   fi
-
-  CONFIG_DEVICE_ROLE="$(parse_device_role_from_config "$CONFIG_FILE" || true)"
-  if [ -n "$CONFIG_DEVICE_ROLE" ]; then
-    log "解析到设备角色配置：DEVICE_ROLE=$CONFIG_DEVICE_ROLE"
-  else
-    log "config.txt 未找到有效设备角色设置（支持 DEVICE_ROLE/ROLE，值为 master/slave），跳过。"
-  fi
 else
-  log "未检测到 config.txt，跳过语言/编码器/设备角色配置。"
+  log "未检测到 config.txt，跳过语言与编码器配置。"
 fi
 
 if [ -d "$MOUNT_POINT/ugripper_calib" ]; then
@@ -659,8 +572,8 @@ if [ -f "$MOUNT_POINT/calibration.txt" ]; then
   log "检测到 calibration.txt：本次 U 盘流程会在导入阶段后追加 encoder 零位校准。"
 fi
 
-if [ -n "${CONFIG_LANG:-}" ] || [ -n "${CONFIG_CAMERA_CODEC:-}" ] || [ -n "${CONFIG_DEVICE_ROLE:-}" ] || [ "$HAS_CALIB_IMPORT" -eq 1 ]; then
-  if ! apply_imports_with_led_feedback "${CONFIG_LANG:-}" "${CONFIG_CAMERA_CODEC:-}" "${CONFIG_DEVICE_ROLE:-}" "$HAS_CALIB_IMPORT" "$HAS_CALIBRATION_TRIGGER"; then
+if [ -n "${CONFIG_LANG:-}" ] || [ -n "${CONFIG_CAMERA_CODEC:-}" ] || [ "$HAS_CALIB_IMPORT" -eq 1 ]; then
+  if ! apply_imports_with_led_feedback "${CONFIG_LANG:-}" "${CONFIG_CAMERA_CODEC:-}" "$HAS_CALIB_IMPORT" "$HAS_CALIBRATION_TRIGGER"; then
     log "导入流程存在失败项（已执行失败红灯），继续后续流程。"
   else
     log "导入流程成功完成。"

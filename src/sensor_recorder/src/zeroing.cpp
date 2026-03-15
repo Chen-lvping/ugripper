@@ -19,6 +19,16 @@ std::string resolveEncoderPort(const std::string &argument) {
     return argument;
 }
 
+std::string resolveEncoderLabel(const std::string &argument) {
+    if (argument == "left" || argument == "--left" || argument == "/dev/left_encoder") {
+        return "left";
+    }
+    if (argument == "right" || argument == "--right" || argument == "/dev/right_encoder") {
+        return "right";
+    }
+    return argument;
+}
+
 void signalHandler(int signum) {
     std::cout << "\nInterrupt signal (" << signum << ") received. Stopping..." << std::endl;
     g_stopFlag = true;
@@ -44,6 +54,25 @@ void encoderReadThreadFunc(EncoderDriver *encoder) {
     }
 }
 
+EncoderData sampleFinalState(EncoderDriver *encoder, std::chrono::milliseconds duration, bool *sampled) {
+    EncoderData lastState = encoder->getState();
+    const auto deadline = std::chrono::steady_clock::now() + duration;
+    bool gotSample = false;
+
+    while (!g_stopFlag.load() && std::chrono::steady_clock::now() < deadline) {
+        encoder->requestState(false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        lastState = encoder->getState();
+        gotSample = true;
+    }
+
+    if (sampled != nullptr) {
+        *sampled = gotSample;
+    }
+
+    return lastState;
+}
+
 int main(int argc, char *argv[]) {
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
@@ -55,7 +84,9 @@ int main(int argc, char *argv[]) {
 
     std::cout << "--- Encoder Zeroing Tool ---" << std::endl;
 
+    const std::string encoderLabel = resolveEncoderLabel(argv[1]);
     const std::string encoderPort = resolveEncoderPort(argv[1]);
+    std::cout << "Encoder side: " << encoderLabel << std::endl;
     std::cout << "Using encoder port: " << encoderPort << std::endl;
 
     EncoderDriver encoder(1, encoderPort, 1000000, "Joint1_Encoder");
@@ -104,17 +135,24 @@ int main(int argc, char *argv[]) {
 
     std::cout << "Sending Zero Position Command..." << std::endl;
     const bool zeroSuccess = encoder.setCurrentAsZero();
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
     if (zeroSuccess) {
-        EncoderData state = encoder.getState();
+        bool sampled = false;
+        EncoderData state = sampleFinalState(&encoder, std::chrono::milliseconds(500), &sampled);
         std::cout << "--------------------------------" << std::endl;
         std::cout << " [SUCCESS] Encoder Zeroed." << std::endl;
-        std::cout << " Current Pos (Raw): " << state.currentPosition << std::endl;
-        std::cout << " Current Pos (Rad): " << state.currentPositionRad << std::endl;
+        std::cout << " Encoder Side: " << encoderLabel << std::endl;
+        std::cout << " Sample Window: 0.5s" << std::endl;
+        if (sampled) {
+            std::cout << " Last Pos (Raw): " << state.currentPosition << std::endl;
+            std::cout << " Last Pos (Rad): " << state.currentPositionRad << std::endl;
+        } else {
+            std::cout << " Last Pos: unavailable" << std::endl;
+        }
         std::cout << "--------------------------------" << std::endl;
     } else {
-        std::cerr << " [FAILED] Failed to set zero position! (Or verify failed)" << std::endl;
+        std::cerr << " [FAILED] Failed to set zero position for encoder side " << encoderLabel
+                  << "! (Or verify failed)" << std::endl;
     }
 
     g_stopFlag = true;
@@ -123,5 +161,5 @@ int main(int argc, char *argv[]) {
     }
 
     encoder.disconnect();
-    return 0;
+    return zeroSuccess ? 0 : 2;
 }
