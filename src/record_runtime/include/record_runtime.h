@@ -107,10 +107,17 @@ private:
     private:
         static constexpr size_t kBtnUpKeyIndex = 0;
         static constexpr size_t kBtnDownKeyIndex = 1;
+        static constexpr uint64_t kReconnectIntervalMs = 1000;
 
+        void maybeReconnectDriver(size_t index);
         std::vector<std::unique_ptr<GripperHmiDriver>> drivers_;
+        std::vector<uint64_t> reconnectAttemptMs_;
         size_t inputDriverIndex_ = 0;
         bool hasDedicatedRightInput_ = false;
+        bool hasLedEffect_ = false;
+        bool hasDirectLedColor_ = false;
+        GripperLedEffect currentLedEffect_{};
+        GripperLedColor currentLedColor_{};
     };
 
     class HmiLedController

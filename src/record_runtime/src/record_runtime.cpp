@@ -187,6 +187,25 @@ bool loadJsonFile(const std::string &path, json *output, std::string *errorMessa
     }
 }
 
+bool loadCalibrationJsonFile(const std::string &path, json *output, std::string *errorMessage)
+{
+    if (!loadJsonFile(path, output, errorMessage))
+    {
+        return false;
+    }
+
+    if (!output->is_object())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "invalid calibration json in " + path + ": top-level JSON must be an object";
+        }
+        return false;
+    }
+
+    return true;
+}
+
 std::string joinArguments(const std::vector<std::string> &arguments)
 {
     std::ostringstream stream;
@@ -240,6 +259,19 @@ bool commandExists(const std::string &command)
         }
     }
     return false;
+}
+
+std::vector<std::string> resolvePythonCommand()
+{
+    if (commandExists("./.venv/bin/python3"))
+    {
+        return {"./.venv/bin/python3"};
+    }
+    if (commandExists("uv"))
+    {
+        return {"uv", "run", "python3"};
+    }
+    return {"python3"};
 }
 
 std::string trim(std::string text)
@@ -674,19 +706,8 @@ bool RecordRuntime::startAudioPlayer()
     std::error_code error;
     fs::remove(options_.audioReadyFile, error);
 
-    std::vector<std::string> audioArguments;
-    if (fs::exists("./.venv/bin/python3"))
-    {
-        audioArguments = {"./.venv/bin/python3", options_.audioPlayScript};
-    }
-    else if (commandExists("uv"))
-    {
-        audioArguments = {"uv", "run", "python3", options_.audioPlayScript};
-    }
-    else
-    {
-        audioArguments = {"python3", options_.audioPlayScript};
-    }
+    std::vector<std::string> audioArguments = resolvePythonCommand();
+    audioArguments.push_back(options_.audioPlayScript);
 
     if (!audioPlayer_.start(audioArguments))
     {
@@ -1003,7 +1024,11 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
     sendAudioCommand(audioType == "pre" ? "pre_audio_recording" : "post_audio_recording");
 
     ProcessRunner audioRecorder("audio_recorder");
-    if (!audioRecorder.start({"python3", options_.audioRecordScript, "--output", captureFile.string()}))
+    std::vector<std::string> audioRecorderArgs = resolvePythonCommand();
+    audioRecorderArgs.push_back(options_.audioRecordScript);
+    audioRecorderArgs.push_back("--output");
+    audioRecorderArgs.push_back(captureFile.string());
+    if (!audioRecorder.start(audioRecorderArgs))
     {
         std::cerr << "[ERROR] failed to start audio recorder" << std::endl;
         sendAudioCommand("audio_recording_stop");
@@ -1517,37 +1542,89 @@ bool RecordRuntime::ProcessRunner::pollExit(bool blocking)
 
 bool RecordRuntime::GripperPanelManager::connect(const std::vector<std::string> &ports)
 {
+    disconnect();
     drivers_.clear();
+    reconnectAttemptMs_.clear();
     inputDriverIndex_ = 0;
     hasDedicatedRightInput_ = false;
+    hasLedEffect_ = false;
+    hasDirectLedColor_ = false;
 
     for (size_t index = 0; index < ports.size(); ++index)
     {
         auto driver = std::make_unique<GripperHmiDriver>(ports[index], 115200, "RecordRuntimeHmi" + std::to_string(index));
+        if (!hasDedicatedRightInput_ && ports[index].find("right_gripper") != std::string::npos)
+        {
+            inputDriverIndex_ = index;
+            hasDedicatedRightInput_ = true;
+        }
         if (!driver->connect())
         {
             std::cerr << "[WARN] failed to connect HMI port: " << ports[index] << std::endl;
-            continue;
-        }
-        if (!hasDedicatedRightInput_ && ports[index].find("right_gripper") != std::string::npos)
-        {
-            inputDriverIndex_ = drivers_.size();
-            hasDedicatedRightInput_ = true;
         }
         drivers_.push_back(std::move(driver));
+        reconnectAttemptMs_.push_back(0);
     }
 
-    return !drivers_.empty();
+    return hasConnectedDevice();
 }
 
 void RecordRuntime::GripperPanelManager::disconnect()
 {
     drivers_.clear();
+    reconnectAttemptMs_.clear();
 }
 
 bool RecordRuntime::GripperPanelManager::hasConnectedDevice() const
 {
-    return !drivers_.empty();
+    for (const auto &driver : drivers_)
+    {
+        if (driver != nullptr && driver->isConnected())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+void RecordRuntime::GripperPanelManager::maybeReconnectDriver(size_t index)
+{
+    if (index >= drivers_.size() || drivers_[index] == nullptr)
+    {
+        return;
+    }
+    if (drivers_[index]->isConnected())
+    {
+        return;
+    }
+
+    const uint64_t nowMs = RecordRuntime::currentSteadyMs();
+    if (index < reconnectAttemptMs_.size() &&
+        reconnectAttemptMs_[index] != 0 &&
+        (nowMs - reconnectAttemptMs_[index]) < kReconnectIntervalMs)
+    {
+        return;
+    }
+
+    if (index < reconnectAttemptMs_.size())
+    {
+        reconnectAttemptMs_[index] = nowMs;
+    }
+
+    if (!drivers_[index]->connect())
+    {
+        return;
+    }
+
+    std::cout << "[INFO] reconnected HMI port: " << drivers_[index]->getPort() << std::endl;
+    if (hasDirectLedColor_)
+    {
+        drivers_[index]->setLedColor(currentLedColor_);
+    }
+    else if (hasLedEffect_)
+    {
+        drivers_[index]->setLedEffect(currentLedEffect_);
+    }
 }
 
 bool RecordRuntime::GripperPanelManager::poll(int timeoutMs, ButtonSnapshot *snapshot)
@@ -1557,6 +1634,11 @@ bool RecordRuntime::GripperPanelManager::poll(int timeoutMs, ButtonSnapshot *sna
     for (size_t index = 0; index < drivers_.size(); ++index)
     {
         auto &driver = drivers_[index];
+        maybeReconnectDriver(index);
+        if (!driver->isConnected())
+        {
+            continue;
+        }
         received = driver->pollOnce(timeoutMs) || received;
         if (index != inputDriverIndex_)
         {
@@ -1583,17 +1665,29 @@ bool RecordRuntime::GripperPanelManager::poll(int timeoutMs, ButtonSnapshot *sna
 
 void RecordRuntime::GripperPanelManager::setLedColor(uint8_t red, uint8_t green, uint8_t blue)
 {
+    currentLedColor_ = GripperLedColor{red, green, blue};
+    hasDirectLedColor_ = true;
+    hasLedEffect_ = false;
     for (auto &driver : drivers_)
     {
-        driver->setLedColor(red, green, blue);
+        if (driver != nullptr)
+        {
+            driver->setLedColor(red, green, blue);
+        }
     }
 }
 
 void RecordRuntime::GripperPanelManager::setLedEffect(const GripperLedEffect &effect)
 {
+    currentLedEffect_ = effect;
+    hasLedEffect_ = true;
+    hasDirectLedColor_ = false;
     for (auto &driver : drivers_)
     {
-        driver->setLedEffect(effect);
+        if (driver != nullptr)
+        {
+            driver->setLedEffect(effect);
+        }
     }
 }
 
@@ -1931,24 +2025,55 @@ bool RecordRuntime::EpisodeManager::writeMetadata(const std::string &episodeDir,
 
 bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &episodeDir, std::string *errorMessage) const
 {
-    std::string sourceFile;
+    json calibrationJson;
+    std::vector<std::string> candidateFiles;
     if (fs::exists(persistCalibrationFile_))
     {
-        sourceFile = persistCalibrationFile_;
+        candidateFiles.push_back(persistCalibrationFile_);
     }
-    else if (fs::exists(exampleCalibrationFile_))
+    if (fs::exists(exampleCalibrationFile_) && exampleCalibrationFile_ != persistCalibrationFile_)
     {
-        sourceFile = exampleCalibrationFile_;
+        candidateFiles.push_back(exampleCalibrationFile_);
     }
-    else
+    if (fs::exists(fallbackCalibrationFile_) &&
+        fallbackCalibrationFile_ != persistCalibrationFile_ &&
+        fallbackCalibrationFile_ != exampleCalibrationFile_)
     {
-        sourceFile = fallbackCalibrationFile_;
+        candidateFiles.push_back(fallbackCalibrationFile_);
     }
 
-    json calibrationJson;
-    if (!loadJsonFile(sourceFile, &calibrationJson, errorMessage))
+    std::string sourceFile;
+    std::string lastError;
+    bool loaded = false;
+    for (const std::string &candidate : candidateFiles)
     {
+        if (loadCalibrationJsonFile(candidate, &calibrationJson, &lastError))
+        {
+            sourceFile = candidate;
+            loaded = true;
+            break;
+        }
+    }
+
+    if (!loaded)
+    {
+        if (errorMessage != nullptr)
+        {
+            if (!lastError.empty())
+            {
+                *errorMessage = lastError;
+            }
+            else
+            {
+                *errorMessage = "no usable calibration source found";
+            }
+        }
         return false;
+    }
+
+    if (sourceFile != persistCalibrationFile_ && fs::exists(persistCalibrationFile_))
+    {
+        std::cerr << "[WARN] invalid persist calibration, fallback to " << sourceFile << std::endl;
     }
 
     json leftStereoTemplate;

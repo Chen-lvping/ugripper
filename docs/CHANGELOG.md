@@ -5,7 +5,11 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased - 2026-03-16
+- 双目默认录制参数调整为 `1280x400@60`，并新增每路 YAML 可配的 `qp_init/qp_min/qp_max/qp_min_i/qp_max_i`；当前 stereo 改为 `qp_init=34`、`qp_min=28`、`qp_max=42`、`qp_min_i=24`、`qp_max_i=42`，用于将同源 `1280x400@60` MJPEG 样本的单路 HEVC 码率压到 `1Mbps` 以下。
 - `camera_recorder` 的停录改为并发 stop 全部 recorder，并补充停录阶段日志，避免多路相机顺序收尾时被外层 stop 窗口截断，导致 `info.json` 缺失和非主相机 `mkv` 只落半成品。
+- `pack_script/postinst` 现在会在安装阶段自动修复空文件、`[]` 或其他非法的持久化 `calibration.json`；`record_runtime` 写 episode 标定时也会在持久化标定不可用时回退到内置默认 calibration，避免因坏文件直接卡死开录。
+- 交付侧新增 `../firmwareburner/repair_v2_env.sh`，用于修复错误部署环境并重装 `ugripper`，不会覆盖现有 SN；`v2_deploy.sh` 的 exFAT 部署口径同步固定为 `/home/user/lib/exfat.ko + insmod + /home/usr/user_start.sh`。
+- 修复 U 盘升级触发回归：`auto_update/mount_data_disk.sh` 在成功挂载 `/mnt/data_disk` 后会异步拉起 `usb-auto-update@<dev>.service`，确保插入升级 U 盘后真正执行 `usb_auto_update.sh` 扫描与安装流程。
 
 ## v1.2.2 - 2026-03-16
 - `camera_recorder` 内部改为并发拉起全部选中的相机子进程；`sensor_recorder` 改为并发初始化左右 IMU / encoder，并收紧 IMU 配置阶段固定等待，减少首样本启动散布。

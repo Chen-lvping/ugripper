@@ -42,6 +42,11 @@ struct CameraConfig {
     int eye_height = 0;
     std::vector<std::string> output_files;
     int input_thread_queue_size = 0;
+    int qp_init = 30;
+    int qp_max = 38;
+    int qp_min = 24;
+    int qp_max_i = 38;
+    int qp_min_i = 20;
 };
 
 class CameraRecorder {

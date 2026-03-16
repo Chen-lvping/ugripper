@@ -50,6 +50,10 @@ bool GripperHmiDriver::connect()
     {
         return true;
     }
+    if (ioThread_.joinable())
+    {
+        ioThread_.join();
+    }
 
     const std::string resolvedPort = resolveSerialPortPath(port_);
     if (sp_get_port_by_name(resolvedPort.c_str(), &serialPort_) != SP_OK)
@@ -103,10 +107,6 @@ void GripperHmiDriver::disconnect()
 {
     {
         std::lock_guard<std::mutex> ioLock(ioMutex_);
-        if (serialPort_ == nullptr)
-        {
-            return;
-        }
         ioRunning_ = false;
         pendingStateRequest_ = false;
         pendingLedUpdate_ = false;
@@ -153,11 +153,26 @@ bool GripperHmiDriver::writeFrameLocked(const uint8_t *data, size_t size)
     const auto written = sp_blocking_write(serialPort_, data, size, 50);
     if (written < 0 || static_cast<size_t>(written) != size)
     {
-        std::cerr << name_ << ": write failed on " << port_ << std::endl;
+        handleIoFailureLocked("write");
         return false;
     }
 
     return true;
+}
+
+void GripperHmiDriver::handleIoFailureLocked(const char *operation)
+{
+    std::cerr << name_ << ": " << operation << " failed on " << port_ << std::endl;
+    pendingStateRequest_ = false;
+    pendingLedUpdate_ = false;
+    ioRunning_ = false;
+    if (serialPort_ != nullptr)
+    {
+        sp_flush(serialPort_, SP_BUF_BOTH);
+        sp_close(serialPort_);
+        sp_free_port(serialPort_);
+        serialPort_ = nullptr;
+    }
 }
 
 bool GripperHmiDriver::requestState()
@@ -244,7 +259,12 @@ bool GripperHmiDriver::readAndProcessAvailableLocked()
     while (true)
     {
         const int bytesRead = sp_nonblocking_read(serialPort_, buffer, sizeof(buffer));
-        if (bytesRead <= 0)
+        if (bytesRead < 0)
+        {
+            handleIoFailureLocked("read");
+            break;
+        }
+        if (bytesRead == 0)
         {
             break;
         }

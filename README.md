@@ -22,3 +22,35 @@ sudo systemctl status ugripper.service
 sudo systemctl restart ugripper.service
 sudo journalctl -u ugripper.service -f
 ```
+
+## Python 环境初始化
+首次部署时，手动用 `uv` 按依赖表重建项目内可打包的 `.venv`。
+目标结构是把 CPython 运行时收进 `.venv/.python-runtime/`，避免 `.venv/bin/python3` 链到机器外部路径。
+
+```bash
+cd /path/to/ugripper_v2
+
+PY_VER="$(sed -n 's/^requires-python = "==\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)"
+PY_MM="$(printf '%s' "$PY_VER" | cut -d. -f1,2)"
+TMP_PY_DIR="$(mktemp -d)"
+
+rm -rf .venv
+uv python install --install-dir "$TMP_PY_DIR" "$PY_VER"
+
+PY_BIN="$(find "$TMP_PY_DIR" -path "*/bin/python${PY_MM}" -type f | head -n 1)"
+UV_LINK_MODE=copy uv venv --relocatable --python "$PY_BIN" .venv
+VIRTUAL_ENV="$PWD/.venv" UV_LINK_MODE=copy uv sync --active --frozen --no-editable --no-install-project --python "$PY_BIN"
+
+mkdir -p .venv/.python-runtime
+mv "$(dirname "$(dirname "$PY_BIN")")" .venv/.python-runtime/
+
+REL_PY="$(realpath --relative-to="$PWD/.venv/bin" "$PWD/.venv/.python-runtime/$(basename "$(dirname "$(dirname "$PY_BIN")")")/bin/python${PY_MM}")"
+ln -snf "$REL_PY" .venv/bin/python
+ln -snf python .venv/bin/python3
+ln -snf python .venv/bin/python${PY_MM}
+
+rm -rf "$TMP_PY_DIR"
+./.venv/bin/python3 -c "import sys, pygame; print(sys.executable); print(sys.base_prefix)"
+```
+
+验证通过后，再执行 `./build_deb.sh` 或 `./build_deb.sh -q` 打包；包内会直接携带这套 `.venv`。

@@ -4,7 +4,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ================= 变量定义区域 =================
 APP_NAME="ugripper"
-VERSION="1.2.2"       # 每次发布前修改这里
+VERSION="1.2.3"       # 每次发布前修改这里
 ARCH="arm64"
 INSTALL_DIR="/opt/${APP_NAME}"
 BUILD_ROOT="temp_build_deb"
@@ -29,7 +29,7 @@ if [ "$QUICK_MODE" = true ]; then
     echo "⚡ 已启用快速构建模式 (Quick Mode)"
     echo "   - 保留临时构建目录 (不执行 rm -rf)"
     echo "   - 跳过 C++ 编译"
-    echo "   - 智能排除 .env 和已存在的 .venv"
+    echo "   - 排除 .env，复制已维护好的 .venv"
 else
     echo "🐢 标准构建模式 (Standard Mode)"
     echo "   - 清理并重建构建目录"
@@ -103,19 +103,11 @@ if [ "$QUICK_MODE" = true ]; then
     # 1. 排除 .env (防止覆盖配置)
     echo "--> [Exclude] Skipping .env (preserve config)"
     EXCLUDE_LIST+=( --exclude='.env' )
-
-    # 2. 检查临时目录里是否已经有 .venv
-    #    路径是: build_deb_temp/opt/ugripper/.venv
-    if [ -d "$BUILD_ROOT/$INSTALL_DIR/.venv" ]; then
-        echo "--> [Exclude] Found existing .venv in temp dir, skipping copy to save time..."
-        EXCLUDE_LIST+=( --exclude='.venv' )
-    else
-        echo "--> [Info] No .venv found in temp dir, will copy from source..."
-    fi
 fi
 
 # 1. 拷贝项目主体文件
 echo "--> Copying project files..."
+rm -rf "$BUILD_ROOT/$INSTALL_DIR/.venv" "$BUILD_ROOT/$INSTALL_DIR/.uv"
 rsync -av "${EXCLUDE_LIST[@]}" . "$BUILD_ROOT/$INSTALL_DIR/"
 
 # 2. 手动补回编译好的二进制文件 (from unified build/ directory)
@@ -188,5 +180,5 @@ fi
 
 echo "Build Success: ${APP_NAME}_${VERSION}_${ARCH}.deb"
 if [ "$QUICK_MODE" = true ]; then
-    echo "Note: Quick Mode used. .env excluded. .venv reused if present."
+    echo "Note: Quick Mode used. .env excluded. Maintained .venv copied into package."
 fi

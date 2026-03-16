@@ -38,6 +38,38 @@ force_cleanup_recording_processes() {
     rm -f /tmp/umi_audio_pipe /tmp/umi_recording.lock || true
 }
 
+calibration_file_is_valid() {
+    local path="$1"
+
+    [ -s "$path" ] || return 1
+
+    if ! command -v python3 >/dev/null 2>&1; then
+        return 0
+    fi
+
+    python3 - "$path" <<'PY' >/dev/null 2>&1
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+data = json.loads(path.read_text(encoding="utf-8"))
+sys.exit(0 if isinstance(data, dict) else 1)
+PY
+}
+
+ensure_persist_calibration() {
+    local fallback_file="$APP_DIR/config/fakeCamCalib.json"
+
+    [ -f "$fallback_file" ] || return 0
+
+    if calibration_file_is_valid "$CALIB_PERSIST_FILE"; then
+        return 0
+    fi
+
+    cp -f "$fallback_file" "$CALIB_PERSIST_FILE"
+}
+
 # 安装窗口先清理旧业务进程，避免升级后残留占用音频/GPIO/FIFO
 stop_service_fast "$SERVICE_NAME" 6
 stop_service_fast "$NETWORK_MONITOR_SERVICE" 4
@@ -56,11 +88,9 @@ chmod +x "$APP_DIR/run_record.sh"
 chmod +x "$SHUTDOWN_TRIGGER_SCRIPT"
 chmod -R 777 "$APP_DIR"
 
-# 初始化持久化标定目录：仅首次缺失时写入默认 fake calibration
+# 初始化持久化标定目录：缺失、空文件或非法 JSON 时写入默认 fake calibration
 mkdir -p "$CALIB_PERSIST_DIR"
-if [ ! -f "$CALIB_PERSIST_FILE" ] && [ -f "$APP_DIR/config/fakeCamCalib.json" ]; then
-    cp -f "$APP_DIR/config/fakeCamCalib.json" "$CALIB_PERSIST_FILE"
-fi
+ensure_persist_calibration
 
 # 固定数据盘挂载点：默认存在但不可作为本地数据目录误用
 mkdir -p "$DATA_MOUNT_POINT"

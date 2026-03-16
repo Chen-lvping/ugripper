@@ -238,6 +238,24 @@ std::string CommonEncodeArgs(const std::string& codec) {
     return oss.str();
 }
 
+std::string CommonEncodeArgs(const std::string& codec, const CameraConfig& config) {
+    std::ostringstream oss;
+    oss << "-c:v " << GetRkmppEncoder(codec) << ' '
+        << "-rc_mode CQP "
+        << "-qp_init " << config.qp_init << ' '
+        << "-qp_max " << config.qp_max << ' '
+        << "-qp_min " << config.qp_min << ' '
+        << "-qp_max_i " << config.qp_max_i << ' '
+        << "-qp_min_i " << config.qp_min_i << ' ';
+
+    if (codec == "h264") {
+        oss << "-profile:v main -level 5.1 ";
+    } else {
+        oss << "-profile:v main ";
+    }
+    return oss.str();
+}
+
 CameraRecordMode ParseMode(const std::string& mode_text) {
     if (mode_text == "direct-copy-h265") {
         return CameraRecordMode::DirectCopyH265;
@@ -328,6 +346,15 @@ CameraConfig ParseCameraConfig(const YAML::Node& camera_node, size_t index) {
     config.input_thread_queue_size = OptionalInt(camera_node, "input_thread_queue_size", 0, context);
     if (config.input_thread_queue_size < 0) {
         throw std::runtime_error("field 'input_thread_queue_size' must be >= 0 in " + context);
+    }
+    config.qp_init = OptionalInt(camera_node, "qp_init", config.qp_init, context);
+    config.qp_max = OptionalInt(camera_node, "qp_max", config.qp_max, context);
+    config.qp_min = OptionalInt(camera_node, "qp_min", config.qp_min, context);
+    config.qp_max_i = OptionalInt(camera_node, "qp_max_i", config.qp_max_i, context);
+    config.qp_min_i = OptionalInt(camera_node, "qp_min_i", config.qp_min_i, context);
+    if (config.qp_init < 0 || config.qp_max < 0 || config.qp_min < 0 ||
+        config.qp_max_i < 0 || config.qp_min_i < 0) {
+        throw std::runtime_error("qp fields must be >= 0 in " + context);
     }
     return config;
 }
@@ -653,7 +680,7 @@ private:
             << "-framerate " << config_.fps << ' '
             << "-video_size " << config_.width << 'x' << config_.height << ' '
             << "-i " << device << ' '
-            << CommonEncodeArgs(options_.codec)
+            << CommonEncodeArgs(options_.codec, config_)
             << "-stats_mux_pre pipe:1 "
             << "-stats_mux_pre_fmt " << ShellQuote("{pts} {tb}") << ' '
             << output;
@@ -683,7 +710,7 @@ private:
             << "-framerate " << config_.fps << ' '
             << "-video_size " << config_.width << 'x' << config_.height << ' '
             << "-i " << device << ' '
-            << CommonEncodeArgs(options_.codec)
+            << CommonEncodeArgs(options_.codec, config_)
             << "-stats_mux_pre pipe:1 "
             << "-stats_mux_pre_fmt " << ShellQuote("{pts} {tb}") << ' '
             << output;

@@ -54,6 +54,7 @@ private:
     void ioLoop();
     bool writeFrameLocked(const uint8_t *data, size_t size);
     bool readAndProcessAvailableLocked();
+    void handleIoFailureLocked(const char *operation);
     void handleParsedFrame(const GripperParsedFrame &frame);
     static uint64_t currentSteadyMs();
 

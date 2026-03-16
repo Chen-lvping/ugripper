@@ -18,20 +18,30 @@ cameras:
   - name: left_stereo
     device: /dev/left_stereo
     mode: stereo-hybrid-decode-encode
-    width: 2560
-    height: 800
+    width: 1280
+    height: 400
     fps: 60
     output_files: [left_stereo.mkv]
     input_thread_queue_size: 128
+    qp_init: 34
+    qp_max: 42
+    qp_min: 28
+    qp_max_i: 42
+    qp_min_i: 24
 
   - name: right_stereo
     device: /dev/right_stereo
     mode: stereo-hybrid-decode-encode
-    width: 2560
-    height: 800
+    width: 1280
+    height: 400
     fps: 60
     output_files: [right_stereo.mkv]
     input_thread_queue_size: 128
+    qp_init: 34
+    qp_max: 42
+    qp_min: 28
+    qp_max_i: 42
+    qp_min_i: 24
 
   - name: left_tcam_l
     device: /dev/left_tcam_l

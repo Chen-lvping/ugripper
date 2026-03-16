@@ -83,7 +83,7 @@
    - `data_format_version=1`
    - `record_runtime=cpp`
    - `reset_recording=<true|false>`
-3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`，缺失时回退仓库根目录样例 `calibration.json`，再缺失时回退 `config/fakeCamCalib.json`。episode 内会保留主摄与触觉相机标定，并将旧 Fays 标定块替换为 `left_stereo` / `right_stereo` 占位标定。
+3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `config/fakeCamCalib.json`。episode 内会保留主摄与触觉相机标定，并将旧 Fays 标定块替换为 `left_stereo` / `right_stereo` 占位标定。
 4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 在每路首个 pre-mux packet 锁定 `PTS + 系统时间` 后统一生成。
 5. 若已准备 pre audio，则移动到本次 episode 的 `audio_pre.wav`。
 6. 并行启动：
@@ -103,6 +103,7 @@
 - 停录阶段也会并发向各路相机子进程发 stop，并在全部 stop 返回后统一 poll 状态，降低多路顺序收尾导致 `info.json` 缺失或容器未 finalize 的风险。
 - 主相机模式是 `direct-copy-h265`：主摄始终走相机原生码流直封装，不做二次编码；实际拉流格式跟随 `CAMERA_CODEC` 选择 `h264` 或 `h265`。
 - 触觉 / 双目模式保留 `hybrid-decode-encode` / `stereo-hybrid-decode-encode`。
+- stereo 当前默认按 `1280x400@60` 录制，并在 YAML 内使用更激进的 HEVC CQP（`qp_init=34`、`qp_min=28`、`qp_max=42`、`qp_min_i=24`、`qp_max_i=42`）；该组参数基于同一段 `1280x400@60` 原始 MJPEG 样本压测，可将单路码率压到 `1Mbps` 以下。
 - 每路相机由独立子进程承载；单路失败不会由 `camera_recorder` 主动连带停掉其他相机。
 - `info.json` 的时间字段由 `camera_recorder` 负责写出，而不是在停录校验阶段回填：
   - `boot_time_offset`
@@ -232,7 +233,7 @@
 ### 9.5 安装脚本与网络行为
 `pack_script/postinst` 当前会：
 - 停掉旧的录制相关进程。
-- 初始化持久化标定目录。
+- 初始化持久化标定目录；若 `calibration.json` 缺失、空文件或非法 JSON，则自动用 `config/fakeCamCalib.json` 修复。
 - 重新加载 udev 规则。
 - 启用 `umi-shutdown-trigger.path`。
 - 启用并重启 `ugripper.service`。
@@ -244,7 +245,7 @@
 - 当前录制启动不依赖对端网络存在。
 
 数据盘挂载当前行为：
-- `auto_update/mount_data_disk.sh` 负责统一挂载 `/mnt/data_disk`。
+- `auto_update/mount_data_disk.sh` 负责统一挂载 `/mnt/data_disk`，并在挂载成功或检测到当前设备已挂上 `/mnt/data_disk` 时，异步启动 `usb-auto-update@<dev>.service` 扫描 U 盘根目录中的升级包与导入文件。
 - 若 USB 数据盘拔插后 `/dev/sdX` 设备名漂移，helper 会把“挂载点仍指向已失效旧设备节点”的 stale mount 视为异常状态，并优先清理后再重新挂载当前真实分区。
 
 ### 9.6 网线监测行为
@@ -301,3 +302,4 @@ sudo tail -n 200 /var/log/ugripper/boot_install.log
 - `info.json` 会生成，但当前不属于最小强校验集合。
 - 现场调试若需要同时访问不同子网设备，应由系统侧或人工维护额外地址/路由；主包不负责托管这些网络策略。
 - 校准、导入与恢复动作仍分散在多个 shell 脚本和 service 中；当前功能可用，但维护时需要注意入口分散。
+- 若设备已被错误部署且不希望覆盖当前 SN，可在交付侧仓库执行 `../firmwareburner/repair_v2_env.sh`，该脚本会重装环境与 `ugripper` 并修复持久化 `calibration.json`。
