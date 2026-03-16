@@ -1,5 +1,5 @@
 [Unit]
-Description=Monitor end0 cable insertion
+Description=Monitor end0 cable state changes
 After=systemd-udev-settle.service
 Wants=systemd-udev-settle.service
 

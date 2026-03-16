@@ -257,9 +257,38 @@ set_error_state() {
     set_state "$state"
 }
 
+start_audio_play_manager() {
+    if [ ! -f "$AUDIO_PLAY_SCRIPT" ]; then
+        echo "[Warning]:Audio play script not found at $AUDIO_PLAY_SCRIPT"
+        PID_AUDIO_PLAY=""
+        return 1
+    fi
+
+    if [ ! -p "$AUDIO_PIPE" ]; then
+        rm -f "$AUDIO_PIPE"
+        mkfifo "$AUDIO_PIPE"
+    fi
+
+    echo "[INFO]:Starting Audio Play Manager..."
+    uv run "$AUDIO_PLAY_SCRIPT" \
+        1>/dev/null &
+    PID_AUDIO_PLAY=$!
+    sleep 0.2
+
+    if ! kill -0 "$PID_AUDIO_PLAY" 2>/dev/null; then
+        wait "$PID_AUDIO_PLAY" 2>/dev/null || true
+        echo "[WARNING]:Audio Play Manager exited immediately after start."
+        PID_AUDIO_PLAY=""
+        return 1
+    fi
+
+    return 0
+}
+
 # 音频状态通知函数
 notify_audio() {
     local action=$1
+    ensure_audio_play_manager_running "notify:${action}" || true
     write_pipe_message "$AUDIO_PIPE" "$action" 0.10 || true
 }
 
@@ -289,7 +318,7 @@ fi
 if [ -f "$AUDIO_PLAY_SCRIPT" ]; then
     echo "[INFO]:Starting Audio Play Manager..."
     uv run "$AUDIO_PLAY_SCRIPT" \
-        > /dev/null 2>&1 &
+        1>/dev/null &
     PID_AUDIO_PLAY=$!
     sleep 0.2
 else
@@ -1050,6 +1079,9 @@ record_audio() {
     
     # 等待录音进程完全结束
     wait $arecord_pid 2>/dev/null
+
+    # 录音结束后主动重建播放进程，避免同卡录放切换后提示音长期失效。
+    restart_audio_play_manager "after_audio_recording" || true
     
     # 降噪处理：固定提取 ch1，单声道降噪后输出。
     if [ -s "$capture_file" ]; then
@@ -1162,6 +1194,32 @@ force_stop_pid() {
     fi
 
     wait "$pid" 2>/dev/null || true
+}
+
+restart_audio_play_manager() {
+    local reason="${1:-unknown}"
+
+    if [ -n "$PID_AUDIO_PLAY" ]; then
+        force_stop_pid "$PID_AUDIO_PLAY" "Audio player"
+    fi
+
+    echo "[INFO]:Restarting Audio Play Manager (reason=${reason})..."
+    start_audio_play_manager || {
+        echo "[WARNING]:Audio Play Manager restart failed (reason=${reason})."
+        return 1
+    }
+    return 0
+}
+
+ensure_audio_play_manager_running() {
+    local reason="${1:-health_check}"
+
+    if is_pid_alive "$PID_AUDIO_PLAY"; then
+        return 0
+    fi
+
+    echo "[WARNING]:Audio Play Manager is not running (reason=${reason})."
+    restart_audio_play_manager "$reason"
 }
 
 detect_fays_ftdi_present_raw() {

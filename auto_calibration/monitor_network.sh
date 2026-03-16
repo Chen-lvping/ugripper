@@ -1,5 +1,4 @@
 #!/bin/bash
-# TODO service重启时如果有插入状态记录 可能产生“伪上升沿”
 INTERFACE="end0"
 CARRIER_PATH="/sys/class/net/$INTERFACE/carrier"
 UPGRADE_GUARD_FILE="/run/ugripper_installing_from_usb.lock"
@@ -65,6 +64,7 @@ while true; do
         fi
 
         # ================= 下降沿：插着 → 拔掉 =================
+        # 仅在拔线时重启 ugripper，避免插线现场难以抓取问题。
         if [ "$LAST_STATE" -eq 1 ] && [ "$CURRENT_STATE" -eq 0 ]; then
             echo "[$(date)] Cable Removal Detected!"
             restart_ugripper
@@ -76,8 +76,6 @@ while true; do
 
             echo "Triggering udev block rules..."
             udevadm trigger --subsystem-match=block --action=add || true
-
-            restart_ugripper
         fi
 
         LAST_STATE="$CURRENT_STATE"

@@ -46,8 +46,8 @@
 
 ### 2.4 反馈与状态通道
 - `led_manager.py`：监听 `/tmp/umi_led_pipe`，呈现 `INIT/READY/RECORDING/ERROR/EXIT` 与 `CALIB_PRE/CALIB_RUN/CALIB_DONE`。
-- `audio/audio_play.py`：监听 `/tmp/umi_audio_pipe`，播放提示音。
-- `run_record.sh` 与校准流程均通过 FIFO 向 LED/AUDIO 发状态，形成跨进程低耦合通信。
+- `audio/audio_play.py`：监听 `/tmp/umi_audio_pipe`，播放提示音；播放失败时尝试重建 `pygame` mixer。
+- `run_record.sh` 与校准流程均通过 FIFO 向 LED/AUDIO 发状态，形成跨进程低耦合通信；其中 `run_record.sh` 会在发音频通知前检查播放子进程是否存活，并在语音录制结束后主动重拉音频播放子进程。
 
 ## 3. 支撑服务与运维流程
 
@@ -58,7 +58,7 @@
   - 停止主服务。
   - 启动 LED/音频提示。
   - 执行 `build/src/sensor_recorder/zeroing`。
-- `auto_calibration/monitor_network.sh` 仍常驻监听 `end0` 网线插拔，但仅负责 `ugripper.service` 重启，不再触发校准。
+- `auto_calibration/monitor_network.sh` 仍常驻监听 `end0` 网线插拔：插线仅补触发一次 `block add` udev 规则，拔线时才重启 `ugripper.service`，不再触发校准。
 - 升级期间若检测到 `/run/ugripper_installing_from_usb.lock`，network monitor 跳过插拔动作，避免升级中的伪上升沿与二次触发。
 
 ### 3.2 时间同步

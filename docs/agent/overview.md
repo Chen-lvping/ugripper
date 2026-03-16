@@ -14,7 +14,7 @@
 - 同步端口：`12345`（`nc`）。
 
 ## 3. 主流程（`run_record.sh`）
-1. 启动时初始化目录、LED/Audio FIFO、GPIO、Fays 可用性。
+1. 启动时初始化目录、LED/Audio FIFO、GPIO、Fays 可用性；音频播放子进程异常退出时会在下一次提示音请求时自动拉起。
  - 加载持久化标定文件：`/etc/ugripper/config/calibration/calibration.json`（缺失时回退 fake 模板）。
 2. 后台 `monitor_loop` 运行健康检查（约 50ms 一次）并维护错误灯效状态。
 3. `start_recording`：
@@ -114,4 +114,4 @@
 - 若导入阶段存在失败，会改为红灯错误态（`ERROR_1`）闪烁提示，再重启 `ugripper.service`。
 - `run_record.sh` 使用 `CAMERA_CODEC` 驱动三路相机编码参数。
 - `fays_record_example` 直接读取 `/etc/environment` 的 `CAMERA_CODEC`，不依赖进程继承环境变量。
-- `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音：`en` 优先 `audio_en/`，文件缺失时回退 `audio/`。
+- `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音：`en` 优先 `audio_en/`，文件缺失时回退 `audio/`；播放异常时会尝试重建 `pygame` mixer，语音录制结束后 `run_record.sh` 也会主动重启音频播放子进程。

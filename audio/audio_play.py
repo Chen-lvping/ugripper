@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 import os
 import re
-import subprocess
-import time
-import pygame
 import signal
+import subprocess
 import sys
+import time
+
+import pygame
+
+
+def log_stderr(level: str, message: str):
+    print(f"[AUDIO][{level}] {message}", file=sys.stderr, flush=True)
 
 
 def find_alsa_card_by_name(target: str):
@@ -15,10 +20,9 @@ def find_alsa_card_by_name(target: str):
     try:
         out = subprocess.check_output(["aplay", "-l"], stderr=subprocess.STDOUT, text=True)
     except Exception as e:
-        print(f"ERROR: failed to run aplay -l: {e}")
+        log_stderr("ERROR", f"failed to run aplay -l: {e}")
         return None
 
-    # match "card <n>: <name> ["
     for line in out.splitlines():
         m = re.search(r"^card\s+(\d+):\s*([^\[]+)\[", line.strip())
         if m:
@@ -27,7 +31,6 @@ def find_alsa_card_by_name(target: str):
             if target.lower() in card_name.lower():
                 return card_num
 
-    # fallback: also try matching whole output
     m2 = re.search(rf"^card\s+(\d+):.*{re.escape(target)}", out, re.IGNORECASE | re.MULTILINE)
     if m2:
         return int(m2.group(1))
@@ -36,23 +39,18 @@ def find_alsa_card_by_name(target: str):
 
 
 def setup_audio_device():
-    # 强制 SDL 走 ALSA（避免默认走 pulse/pipewire 导致 Host is down）
     os.environ["SDL_AUDIODRIVER"] = "alsa"
 
-    # 按声卡名找 card 编号
     target = "rockchipes8388"
     card = find_alsa_card_by_name(target)
 
     if card is None:
-        # 找不到就退回 default
-        print(f"WARNING: ALSA card '{target}' not found, fallback to default")
+        log_stderr("WARN", f"ALSA card '{target}' not found, fallback to default")
         return
 
-    # 选设备 0
     dev = f"plughw:{card},0"
     os.environ["AUDIODEV"] = dev
-    print(f"Using ALSA device: {dev} (matched card name: {target})")
-    # 最小兜底：升级后可能出现播放开关被关，启动时恢复一次
+
     for cmd in (
         ["amixer", "-c", str(card), "set", "PCM", "85%", "unmute"],
         ["amixer", "-c", str(card), "sset", "Speaker", "on"],
@@ -76,69 +74,73 @@ def read_env_file_value(key: str, env_file: str = "/etc/environment"):
                 k, v = line.split("=", 1)
                 if k.strip() != key:
                     continue
-                return v.strip().strip("\"").strip("'")
+                return v.strip().strip('"').strip("'")
     except Exception as e:
-        print(f"WARNING: failed to read {env_file}: {e}")
+        log_stderr("WARN", f"failed to read {env_file}: {e}")
     return None
 
 
 class AudioPlayer:
     def __init__(self):
-        # 注册信号处理，捕获 SIGINT 和 SIGTERM 以便正常退出
         signal.signal(signal.SIGINT, self.shutdown)
         signal.signal(signal.SIGTERM, self.shutdown)
 
-        setup_audio_device()
-
-        pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-        # Reserve a background channel for long/looping prompts (e.g. "writing")
-        self.bg_channel = pygame.mixer.Channel(0)
-        self.fx_channel = pygame.mixer.Channel(1)
-
         self.pipe_path = "/tmp/umi_audio_pipe"
         self.base_audio_dir = os.path.dirname(os.path.abspath(__file__))
+        self.last_log_ts = {}
         lang_from_file = read_env_file_value("UGRIPPER_LANG")
         self.lang = self.resolve_language(lang_from_file or "zh")
         self.audio_dirs = self.resolve_audio_dirs(self.lang)
         self.volume = 1.0
+        self.bg_channel = None
+        self.fx_channel = None
 
-        # 兼容现有英文包中命名差异
         self.filename_aliases = {
             "recording_start.wav": ["recording_started.wav"],
         }
-
-        self.sounds = {
-            "ready": self.load_sound("ready.wav"),
-            "audio_recording_start": self.load_sound("audio_recording_start.wav"),
-            "audio_recording_stop": self.load_sound("audio_recording_stop.wav"),
-            "pre_audio_recording": self.load_sound("pre_audio_recording.wav"),
-            "post_audio_recording": self.load_sound("post_audio_recording.wav"),
-            "no_reset_needed": self.load_sound("no_reset_needed.wav"),
-            "writing": self.load_sound("writing.wav"),
-            "shutdown": self.load_sound("shutdown.wav"),
-            "recording_start": self.load_sound("recording_start.wav"),
-            "reset_recording_start": self.load_sound("reset_recording_start.wav"),
-            "recording_stop": self.load_sound("recording_stop.wav"),
-            "error": self.load_sound("error.wav"),
-            "validation_failed": self.load_sound("validation_failed.wav"),
-            "calib_start": self.load_sound("calib_start.wav"),  # "准备进入校准"
-            "calibrating": self.load_sound("calibrating.wav"),  # "正在校准中"
-            "calib_done": self.load_sound("calib_done.wav"),    # "校准完成"
+        self.sound_files = {
+            "ready": "ready.wav",
+            "audio_recording_start": "audio_recording_start.wav",
+            "audio_recording_stop": "audio_recording_stop.wav",
+            "pre_audio_recording": "pre_audio_recording.wav",
+            "post_audio_recording": "post_audio_recording.wav",
+            "no_reset_needed": "no_reset_needed.wav",
+            "writing": "writing.wav",
+            "shutdown": "shutdown.wav",
+            "recording_start": "recording_start.wav",
+            "reset_recording_start": "reset_recording_start.wav",
+            "recording_stop": "recording_stop.wav",
+            "error": "error.wav",
+            "validation_failed": "validation_failed.wav",
+            "calib_start": "calib_start.wav",
+            "calibrating": "calibrating.wav",
+            "calib_done": "calib_done.wav",
         }
+        self.sounds = {}
 
         if not os.path.exists(self.pipe_path):
             os.mkfifo(self.pipe_path)
 
+        self.initialize_audio_engine(initial=True)
+
         print(f"Audio language: {self.lang}; search dirs: {self.audio_dirs}")
         print("Audio Player Ready. Waiting for commands...")
 
+    def log_throttled(self, level: str, key: str, message: str, interval_sec: float = 15.0):
+        now = time.monotonic()
+        last_ts = self.last_log_ts.get(key, 0.0)
+        if now - last_ts < interval_sec:
+            return
+        self.last_log_ts[key] = now
+        log_stderr(level, message)
+
     def resolve_language(self, raw_lang: str) -> str:
-        normalized = raw_lang.strip().strip("\"").strip("'").lower()
+        normalized = raw_lang.strip().strip('"').strip("'").lower()
         if normalized in ("en", "english", "en_us", "en_gb"):
             return "en"
         if normalized in ("zh", "cn", "zh_cn", "chinese", "zh_hans", "zh-hans", "中文"):
             return "zh"
-        print(f"WARNING: unsupported UGRIPPER_LANG='{raw_lang}', fallback to zh")
+        self.log_throttled("WARN", "lang_fallback", f"unsupported UGRIPPER_LANG='{raw_lang}', fallback to zh", 60.0)
         return "zh"
 
     def resolve_audio_dirs(self, lang: str):
@@ -163,7 +165,6 @@ class AudioPlayer:
                 yield path
 
     def shutdown(self, signum, frame):
-        """处理退出信号，避免子进程卡死"""
         print(f"Received signal {signum}, audio player exiting...")
         sys.exit(0)
 
@@ -176,27 +177,96 @@ class AudioPlayer:
                 sound.set_volume(self.volume)
                 return sound
             except Exception as e:
-                print(f"Warning: Could not load {filepath}: {e}")
-
-        print(f"Warning: Audio file not found for {filename}")
+                self.log_throttled(
+                    "ERROR",
+                    f"load:{filepath}:{type(e).__name__}",
+                    f"failed to load sound '{filepath}': {e}",
+                    30.0,
+                )
         return None
 
-    def play_sound(self, sound_name):
-        if sound_name in self.sounds and self.sounds[sound_name]:
-            try:
-                if sound_name == "writing":
-                    # Loop "writing" until a later cue (e.g. "ready") interrupts it.
-                    self.bg_channel.play(self.sounds[sound_name], loops=-1)
-                else:
-                    # Any non-writing cue interrupts "writing".
-                    if self.bg_channel.get_busy():
-                        self.bg_channel.stop()
-                    self.fx_channel.play(self.sounds[sound_name])
-                print(f"Playing: {sound_name}")
-            except Exception as e:
-                print(f"Error playing {sound_name}: {e}")
+    def reload_sounds(self):
+        self.sounds = {
+            sound_name: self.load_sound(filename)
+            for sound_name, filename in self.sound_files.items()
+        }
+
+    def initialize_audio_engine(self, initial: bool = False):
+        try:
+            setup_audio_device()
+            if pygame.mixer.get_init():
+                pygame.mixer.quit()
+            pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+            self.bg_channel = pygame.mixer.Channel(0)
+            self.fx_channel = pygame.mixer.Channel(1)
+            self.reload_sounds()
+            if not initial:
+                self.log_throttled("WARN", "mixer_recovered", "audio mixer recovered", 5.0)
+            return True
+        except Exception as e:
+            self.bg_channel = None
+            self.fx_channel = None
+            self.sounds = {}
+            self.log_throttled(
+                "ERROR",
+                f"mixer_init:{type(e).__name__}",
+                f"failed to initialize pygame mixer: {e}",
+                10.0,
+            )
+            return False
+
+    def recover_audio_engine(self, reason: str):
+        self.log_throttled("WARN", f"recover:{reason}", f"attempting audio mixer recovery ({reason})", 10.0)
+        return self.initialize_audio_engine(initial=False)
+
+    def play_with_channels(self, sound_name: str):
+        sound = self.sounds.get(sound_name)
+        if sound is None:
+            self.log_throttled(
+                "WARN",
+                f"sound_unavailable:{sound_name}",
+                f"sound '{sound_name}' is unavailable",
+                30.0,
+            )
+            return False
+
+        if sound_name == "writing":
+            self.bg_channel.play(sound, loops=-1)
         else:
-            print(f"Sound not available: {sound_name}")
+            if self.bg_channel and self.bg_channel.get_busy():
+                self.bg_channel.stop()
+            self.fx_channel.play(sound)
+        return True
+
+    def play_sound(self, sound_name):
+        if not pygame.mixer.get_init() or self.bg_channel is None or self.fx_channel is None:
+            if not self.recover_audio_engine("mixer_uninitialized"):
+                return
+
+        try:
+            if self.play_with_channels(sound_name):
+                print(f"Playing: {sound_name}")
+                return
+        except Exception as e:
+            self.log_throttled(
+                "ERROR",
+                f"play:{sound_name}:{type(e).__name__}",
+                f"failed to play '{sound_name}': {e}",
+                15.0,
+            )
+
+        if not self.recover_audio_engine(f"play_failed:{sound_name}"):
+            return
+
+        try:
+            self.play_with_channels(sound_name)
+        except Exception as e:
+            self.log_throttled(
+                "ERROR",
+                f"play_retry:{sound_name}:{type(e).__name__}",
+                f"failed to replay '{sound_name}' after recovery: {e}",
+                20.0,
+            )
 
     def run(self):
         while True:
@@ -205,7 +275,7 @@ class AudioPlayer:
                     while True:
                         raw_line = pipe.readline()
                         if raw_line == "":
-                            break  # EOF reached, reopen pipe
+                            break
 
                         line = raw_line.strip()
                         if line == "exit":
@@ -213,7 +283,12 @@ class AudioPlayer:
                             return
                         self.play_sound(line)
             except Exception as e:
-                print(f"Pipe error: {e}, reopening in 1 second...")
+                self.log_throttled(
+                    "ERROR",
+                    f"pipe:{type(e).__name__}",
+                    f"pipe error, reopening in 1 second: {e}",
+                    15.0,
+                )
                 time.sleep(1)
 
 

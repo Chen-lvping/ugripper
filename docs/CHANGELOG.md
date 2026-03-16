@@ -1,5 +1,10 @@
 # Changelog
 
+## v1.1.14 - 2026-03-13
+- 音频提示自恢复增强：`run_record.sh` 在发送提示音前会检查 `audio_play.py` 是否仍存活，异常退出时自动拉起。
+- 语音录制结束后会主动重启音频播放子进程，降低同卡录放切换后提示音长期失效的概率。
+- `audio/audio_play.py` 新增低噪声异常日志与 `pygame` mixer 重建逻辑，便于现场抓取“有报错后无声音”的问题。
+
 ## v1.1.13 - 2026-03-09
 - 三路相机录制链路调整：主摄使用 `ffmpeg v4l2(NV12 1920x1080)->h26x_rkmpp`，左右触觉改为 `v4l2src(MJPEG)->mppjpegdec->appsink->ffmpeg h26x_rkmpp(CQP)`。
 - Fays 录制链路回退为 `ffmpeg rawvideo -> h26x_rkmpp`，并修复标定导入时 Fays 图像 `fps` 的来源：优先读取 `fays_vikit.yaml` 的 `stereo_fps`，缺失时写 `unknown`，不再默认写 `60`。
