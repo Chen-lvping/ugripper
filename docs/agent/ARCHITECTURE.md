@@ -4,7 +4,7 @@
 
 ## 1. 系统概览
 - **目标**：在 Radxa 嵌入式平台上可靠同步录制视觉、触觉、FaysSense 双目、IMU、编码器等多模态数据，并提供现场 LED/音频反馈。
-- **运行角色**：双臂协同，物理侧与控制角色解耦。`DEVICE_SIDE` 表示物理 `left/right`，`DEVICE_ROLE` 表示控制角色 `master/slave`（未配置时兼容旧逻辑：Right=Master、Left=Slave）。
+- **运行角色**：双臂协同，物理侧与控制角色解耦。`DEVICE_SIDE` 表示物理 `left/right`；运行时角色由 `run_record.sh` 决定：Right 固定为 `master`，Left 在 `end0` 已插线且 `192.168.1.100` 可达时切为 `slave`，否则回到 `master`。`DEVICE_ROLE` 仍可由配置流程写入 `/etc/environment` 以保留兼容字段，但 Left 侧最终以自动判定为准。
 - **部署形态**：脚本、C++ 二进制和资源打包到 `/opt/ugripper`，通过 systemd 与 udev 触发器驱动；数据写入 `/mnt/data_disk/<device_id>/`。
 
 ## 2. 核心运行组件
@@ -12,6 +12,7 @@
 ### 2.1 主业务服务（`ugripper.service` -> `run_record.sh`）
 - 由 `pack_script/ugripper.service` 安装并常驻运行，工作目录 `/opt/ugripper`，用户 `radxa`。
 - 负责：
+  - 启动时基于 `DEVICE_SIDE`、`end0` carrier 与 `192.168.1.100` 可达性解析本次实际运行角色。
   - 磁盘/目录准备（`metadata`、`calibration`、`data`）。
   - 元数据与校准文件初始化（`config/fake*Calib.json` -> `/mnt/data_disk/.../calibration/`）。
   - 触觉相机序列号校验，替换 JSON 中 `{{TACTILE_*_SERIAL}}` 占位符。
@@ -58,7 +59,7 @@
   - 停止主服务。
   - 启动 LED/音频提示。
   - 执行 `build/src/sensor_recorder/zeroing`。
-- `auto_calibration/monitor_network.sh` 仍常驻监听 `end0` 网线插拔：插线仅补触发一次 `block add` udev 规则，拔线时才重启 `ugripper.service`，不再触发校准。
+- `auto_calibration/monitor_network.sh` 常驻监听 `end0`：插线时补触发一次 `block add` udev 规则；Left 侧会持续判定目标角色（`master/slave`），在“检测到 `192.168.1.100` 可达”或“拔线/对端不可达”导致目标角色变化时，确认两次后重启 `ugripper.service`，让 `run_record.sh` 按新角色重启；Right 侧仍只在拔线时重启服务。
 - 升级期间若检测到 `/run/ugripper_installing_from_usb.lock`，network monitor 跳过插拔动作，避免升级中的伪上升沿与二次触发。
 
 ### 3.2 时间同步
@@ -70,7 +71,7 @@
 ### 3.3 自动更新与自愈
 - `auto_update/99-usb-auto-update.rules` + `usb-auto-update@.service`：U 盘插入自动触发统一入口脚本（先判定 `calibration.txt` 是否触发校准，再进入升级逻辑）。
 - 升级窗口内 `usb_auto_update.sh` 会创建 `/run/ugripper_installing_from_usb.lock`，暂停 network monitor，并在结束后恢复。
-- `usb_auto_update.sh` 挂载后会读取升级盘根目录 `config.txt`：`LANGUAGE/VOICE_LANG` 写入 `UGRIPPER_LANG`（`zh|en`）；`CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC` 写入 `CAMERA_CODEC`（`h264|h265`）；`DEVICE_ROLE/ROLE` 写入 `DEVICE_ROLE`（`master|slave`）。
+- `usb_auto_update.sh` 挂载后会读取升级盘根目录 `config.txt`：`LANGUAGE/VOICE_LANG` 写入 `UGRIPPER_LANG`（`zh|en`）；`CAMERA_CODEC/VIDEO_CODEC/TRIPLE_CAMERA_CODEC/CODEC` 写入 `CAMERA_CODEC`（`h264|h265`）；`DEVICE_ROLE/ROLE` 写入 `DEVICE_ROLE`（`master|slave`，保留兼容字段，Left 运行时仍以自动角色判定为准）。
 - 统一导入时序（配置 + 标定）：先停止 `ugripper.service`，启动独立 LED helper，进入 `CALIB_RUN` 黄灯快闪并至少持续 2 秒；全部导入成功时亮一次 `CALIB_DONE` 绿灯完成态 1 秒，随后仅重启一次 `ugripper.service`。
 - 若导入阶段任一项失败，切换 `ERROR_1` 红灯错误态提示后再重启 `ugripper.service`，避免服务停滞。
 - `auto_update/boot_check_install.sh` + `ugripper-boot-install.service`：开机先比较 `/opt/backup` 中 `ugripper-usb-updater` 版本并在更高时先升级 updater，再检查 `ugripper` 是否缺失/异常并执行自恢复。

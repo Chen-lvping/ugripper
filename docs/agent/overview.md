@@ -8,13 +8,15 @@
 
 ## 2. 角色分工（双臂）
 - `DEVICE_SIDE`：物理侧（`left|right`）。
-- `DEVICE_ROLE`：控制角色（`master|slave`，未配置时兼容旧逻辑：Right=Master、Left=Slave）。
+- `DEVICE_ROLE`：控制角色配置项（`master|slave`）；Right 侧固定按 `master` 运行，Left 侧在运行时按网络状态自动决策角色。
 - Master：按键控制、音频提示、发网络命令给对端。
 - Slave：监听 `START|episode_xxx|master_sn` / `STOP|0`，按命令同步录制。
+- Left 自动角色规则：`end0` 已插线且 `192.168.1.100` 可达时切为 `slave`；未插线、对端不可达或链路异常时回到 `master`。
 - 同步端口：`12345`（`nc`）。
 
 ## 3. 主流程（`run_record.sh`）
 1. 启动时初始化目录、LED/Audio FIFO、GPIO、Fays 可用性；音频播放子进程异常退出时会在下一次提示音请求时自动拉起。
+ - 启动时先解析运行角色：Right 固定为 `master`；Left 根据 `end0` carrier + `192.168.1.100` 可达性自动选择 `master/slave`。
  - 加载持久化标定文件：`/etc/ugripper/config/calibration/calibration.json`（缺失时回退 fake 模板）。
 2. 后台 `monitor_loop` 运行健康检查（约 50ms 一次）并维护错误灯效状态。
 3. `start_recording`：
@@ -110,6 +112,7 @@
 - 编码器识别成功后写入 `/etc/environment`：`CAMERA_CODEC=<h264|h265>`。
 - 支持角色配置键：`DEVICE_ROLE`/`ROLE`（大小写不敏感），支持值：`master|slave`。
 - 角色识别成功后写入 `/etc/environment`：`DEVICE_ROLE=<master|slave>`。
+- 运行时角色以 `run_record.sh` 自动判定为准：Right 始终 `master`；Left 在检测到 `192.168.1.100` 为在线 master 时转为 `slave`，否则回到 `master`。
 - 导入时序（配置 + 标定兼容）：先停止 `ugripper.service`，复用校准黄灯快闪态（`CALIB_RUN`）并至少保持 2 秒，全部导入成功后复用校准完成绿灯态（`CALIB_DONE`）1 秒，仅重启一次 `ugripper.service`。
 - 若导入阶段存在失败，会改为红灯错误态（`ERROR_1`）闪烁提示，再重启 `ugripper.service`。
 - `run_record.sh` 使用 `CAMERA_CODEC` 驱动三路相机编码参数。

@@ -46,6 +46,11 @@ UGRIPPER_USB_UPDATER_PKG_VERSION="$(get_installed_pkg_version "ugripper-usb-upda
 
 # --- 网络配置 (双臂协同) ---
 # DEVICE_SIDE：物理左右；DEVICE_ROLE：控制角色（master/slave）
+IP_RIGHT="192.168.1.100"
+IP_LEFT="192.168.1.101"
+SYNC_PORT=12345
+NETWORK_INTERFACE="end0"
+
 DEVICE_SIDE="$(get_env_value "DEVICE_SIDE" || true)"
 CURRENT_SIDE="${DEVICE_SIDE:-Right}"
 CURRENT_SIDE_LOWER="${CURRENT_SIDE,,}"
@@ -55,6 +60,60 @@ if [ "$CURRENT_SIDE_LOWER" != "left" ] && [ "$CURRENT_SIDE_LOWER" != "right" ]; 
     CURRENT_SIDE="Right"
     CURRENT_SIDE_LOWER="right"
 fi
+
+read_network_carrier_state() {
+    local carrier_path="/sys/class/net/${NETWORK_INTERFACE}/carrier"
+    local state=""
+
+    if [ ! -r "$carrier_path" ]; then
+        return 1
+    fi
+
+    state=$(cat "$carrier_path" 2>/dev/null || true)
+    if [ "$state" != "0" ] && [ "$state" != "1" ]; then
+        return 1
+    fi
+
+    printf '%s' "$state"
+}
+
+is_network_master_reachable() {
+    ping -c 1 -W 1 "$IP_RIGHT" >/dev/null 2>&1
+}
+
+resolve_runtime_role() {
+    local configured_role_lower="$1"
+    local carrier_state=""
+
+    if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
+        echo "[INFO]:Role resolve: RIGHT side always runs as master." >&2
+        printf 'master'
+        return 0
+    fi
+
+    carrier_state="$(read_network_carrier_state || true)"
+    if [ "$carrier_state" == "1" ] && is_network_master_reachable; then
+        echo "[INFO]:Role resolve: LEFT side detected cable + reachable master ($IP_RIGHT), run as slave." >&2
+        printf 'slave'
+        return 0
+    fi
+
+    if [ "$carrier_state" == "1" ]; then
+        echo "[INFO]:Role resolve: LEFT side detected cable but master ($IP_RIGHT) is unreachable, run as master." >&2
+    elif [ "$carrier_state" == "0" ]; then
+        echo "[INFO]:Role resolve: LEFT side cable unplugged, run as master." >&2
+    else
+        echo "[INFO]:Role resolve: LEFT side carrier unreadable on ${NETWORK_INTERFACE}, fallback to master." >&2
+    fi
+
+    if [ -n "$configured_role_lower" ] && [ "$configured_role_lower" != "master" ] && [ "$configured_role_lower" != "slave" ]; then
+        echo "[WARNING]:Configured DEVICE_ROLE='$DEVICE_ROLE' ignored for LEFT auto-role because it is invalid." >&2
+    elif [ -n "$configured_role_lower" ]; then
+        echo "[INFO]:Configured DEVICE_ROLE='$configured_role_lower' is overridden by LEFT auto-role policy." >&2
+    fi
+
+    printf 'master'
+}
 
 DEVICE_ROLE="$(get_env_value "DEVICE_ROLE" || true)"
 CURRENT_ROLE_LOWER="${DEVICE_ROLE,,}"
@@ -77,14 +136,12 @@ if [ "$CURRENT_ROLE_LOWER" != "master" ] && [ "$CURRENT_ROLE_LOWER" != "slave" ]
     fi
 fi
 
+CURRENT_ROLE_LOWER="$(resolve_runtime_role "$CURRENT_ROLE_LOWER")"
+
 IS_MASTER=false
 if [ "$CURRENT_ROLE_LOWER" == "master" ]; then
     IS_MASTER=true
 fi
-
-IP_RIGHT="192.168.1.100"
-IP_LEFT="192.168.1.101"
-SYNC_PORT=12345
 
 if [ "$CURRENT_SIDE_LOWER" == "right" ]; then
     LOCAL_IP="$IP_RIGHT"
@@ -989,7 +1046,7 @@ mark_reset_tag_to_info() {
 
 # 函数：在 Slave 侧当前 episode 的 info.json 写入配对 Master SN
 mark_paired_master_sn_to_info() {
-    if [ "$CURRENT_SIDE_LOWER" != "left" ]; then
+    if [ "$CURRENT_SIDE_LOWER" != "left" ] || [ "$IS_MASTER" = true ]; then
         return 0
     fi
 
@@ -1689,7 +1746,7 @@ start_recording() {
     NEXT_RESET_SOURCE_EPISODE_DIR=""
     CURRENT_RECORDING_PAIRED_MASTER_SN=""
 
-    if [ "$CURRENT_SIDE_LOWER" == "left" ]; then
+    if [ "$CURRENT_SIDE_LOWER" == "left" ] && [ "$IS_MASTER" != true ]; then
         # Slave 不校验 SN 白名单：接收到任意 Master SN 都记录为当前 episode 配对来源。
         if [ -n "$paired_master_sn" ]; then
             CURRENT_RECORDING_PAIRED_MASTER_SN="$paired_master_sn"

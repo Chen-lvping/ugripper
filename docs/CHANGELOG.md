@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased - 2026-03-16
+- Left 夹爪新增自动主从切换：`end0` 已插线且 `192.168.1.100` 可达时自动作为 `slave` 运行并受右臂 master 控制；拔线或对端不可达时自动回到 `master`。
+- `auto_calibration/monitor_network.sh` 增强为 Left 侧自动角色监控：插线仍会补触发一次 `block add` udev 规则，目标角色变化连续确认两次后自动重启 `ugripper.service`，让业务按新角色重新启动。
+- `run_record.sh` 的 Left 侧 `paired_master_sn` 记录逻辑收敛到“仅 Slave 运行态”生效，避免 Left 独立 `master` 模式下输出误导性日志。
+
 ## v1.1.14 - 2026-03-13
 - 音频提示自恢复增强：`run_record.sh` 在发送提示音前会检查 `audio_play.py` 是否仍存活，异常退出时自动拉起。
 - 语音录制结束后会主动重启音频播放子进程，降低同卡录放切换后提示音长期失效的概率。
@@ -86,4 +91,3 @@
 - 新增自动判定 `build_deb.sh -q` 与标准模式的规则（基于改动类型与关键二进制是否存在）。
 - 三路相机录制调整为主摄 FFmpeg + 触觉 Hybrid（Gst/MPP 解 MJPEG + FFmpeg rkmpp CQP 编码），以兼顾触觉 CPU 占用与 FFmpeg CQP 体积表现。
 - `fays_record_example` 视频录制链路改回 FFmpeg `rawvideo -> h26x_rkmpp(CQP)`，不再使用 Gst `fixqp` 编码。
-
