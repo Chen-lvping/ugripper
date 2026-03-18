@@ -210,6 +210,35 @@ def get_forced_usb_audio_target(require_source: bool = False) -> PulseAudioTarge
     return PulseAudioTarget(sink=sink, source=source, server=server)
 
 
+def probe_forced_usb_audio_target(require_source: bool = False) -> Optional[PulseAudioTarget]:
+    try:
+        return get_forced_usb_audio_target(require_source=require_source)
+    except (PulseAudioTargetNotFoundError, PulseAudioProbeError):
+        return None
+
+
+def wait_for_forced_usb_audio_target(
+    timeout_sec: float,
+    *,
+    poll_interval_sec: float = 0.5,
+    require_source: bool = False,
+) -> PulseAudioTarget:
+    deadline = time.monotonic() + max(0.0, timeout_sec)
+    last_error: RuntimeError | None = None
+
+    while True:
+        try:
+            return get_forced_usb_audio_target(require_source=require_source)
+        except (PulseAudioTargetNotFoundError, PulseAudioProbeError) as exc:
+            last_error = exc
+            if time.monotonic() >= deadline:
+                raise exc
+            time.sleep(max(0.05, poll_interval_sec))
+
+    if last_error is not None:
+        raise last_error
+
+
 def configure_pulse_audio_env(require_source: bool = False, disable_suspend_on_idle: bool = True) -> PulseAudioTarget:
     unloaded_modules = ()
     if disable_suspend_on_idle:

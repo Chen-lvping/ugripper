@@ -11,6 +11,9 @@ NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 CALIB_PERSIST_DIR="/etc/ugripper/config/calibration"
 CALIB_PERSIST_FILE="${CALIB_PERSIST_DIR}/calibration.json"
 DATA_MOUNT_POINT="/mnt/data_disk"
+EXFAT_SOURCE_MODULE="/home/user/lib/exfat.ko"
+EXFAT_MODULE_NAME="exfat"
+EXFAT_MODULES_LOAD_FILE="/etc/modules-load.d/ugripper-exfat.conf"
 
 stop_service_fast() {
     local service_name="$1"
@@ -70,6 +73,59 @@ ensure_persist_calibration() {
     cp -f "$fallback_file" "$CALIB_PERSIST_FILE"
 }
 
+ensure_exfat_autoload() {
+    local kernel_release
+    local module_dest_dir
+    local module_dest_path
+    local module_available=0
+
+    kernel_release="$(uname -r)"
+    module_dest_dir="/lib/modules/${kernel_release}/extra"
+    module_dest_path="${module_dest_dir}/${EXFAT_MODULE_NAME}.ko"
+
+    if grep -qw "$EXFAT_MODULE_NAME" /proc/filesystems 2>/dev/null || lsmod | grep -q "^${EXFAT_MODULE_NAME}\\b"; then
+        module_available=1
+    elif command -v modprobe >/dev/null 2>&1 && modprobe -n -q "$EXFAT_MODULE_NAME" >/dev/null 2>&1; then
+        module_available=1
+    elif [ -f "$EXFAT_SOURCE_MODULE" ]; then
+        module_available=1
+    fi
+
+    if [ "$module_available" -ne 1 ]; then
+        echo "Warning: ${EXFAT_MODULE_NAME} module is unavailable; skip boot-time autoload configuration."
+        return 1
+    fi
+
+    if [ -f "$EXFAT_SOURCE_MODULE" ]; then
+        mkdir -p "$module_dest_dir"
+        if [ ! -f "$module_dest_path" ] || ! cmp -s "$EXFAT_SOURCE_MODULE" "$module_dest_path"; then
+            cp -f "$EXFAT_SOURCE_MODULE" "$module_dest_path"
+        fi
+
+        if command -v depmod >/dev/null 2>&1; then
+            depmod "$kernel_release" >/dev/null 2>&1 || true
+        fi
+    fi
+
+    mkdir -p "$(dirname "$EXFAT_MODULES_LOAD_FILE")"
+    printf '%s\n' "$EXFAT_MODULE_NAME" > "$EXFAT_MODULES_LOAD_FILE"
+
+    if grep -qw "$EXFAT_MODULE_NAME" /proc/filesystems 2>/dev/null || lsmod | grep -q "^${EXFAT_MODULE_NAME}\\b"; then
+        return 0
+    fi
+
+    if command -v modprobe >/dev/null 2>&1 && modprobe "$EXFAT_MODULE_NAME" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if [ -f "$EXFAT_SOURCE_MODULE" ] && insmod "$EXFAT_SOURCE_MODULE" >/dev/null 2>&1; then
+        return 0
+    fi
+
+    echo "Warning: failed to load ${EXFAT_MODULE_NAME}; boot-time auto-mount may still depend on later fallback paths."
+    return 1
+}
+
 # 安装窗口先清理旧业务进程，避免升级后残留占用音频/GPIO/FIFO
 stop_service_fast "$SERVICE_NAME" 6
 stop_service_fast "$NETWORK_MONITOR_SERVICE" 4
@@ -91,6 +147,9 @@ chmod -R 777 "$APP_DIR"
 # 初始化持久化标定目录：缺失、空文件或非法 JSON 时写入默认 fake calibration
 mkdir -p "$CALIB_PERSIST_DIR"
 ensure_persist_calibration
+
+# 安装时自动配置 exfat 提前加载，兼容已生产设备通过 deb 升级修复开机挂载竞态
+ensure_exfat_autoload || true
 
 # 固定数据盘挂载点：默认存在但不可作为本地数据目录误用
 mkdir -p "$DATA_MOUNT_POINT"

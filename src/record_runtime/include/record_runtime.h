@@ -213,6 +213,8 @@ private:
     bool checkRecorderProcesses();
     bool startAudioPlayer();
     void stopAudioPlayer();
+    void maintainAudioPlayer();
+    void setAudioRecoveryCommand(std::string command);
     void sendAudioCommand(const std::string &command) const;
     void setLedState(LedState state, double progress = 0.0);
 
@@ -230,7 +232,9 @@ private:
     std::string currentEpisodeDir_;
     std::string lastEpisodeDir_;
     std::string pendingPreAudioFile_;
+    std::string audioRecoveryCommand_;
     bool audioPlayerStarted_ = false;
+    uint64_t lastAudioPlayerStartAttemptMs_ = 0;
     std::unique_ptr<EpisodeManager> episodeManager_;
     GripperPanelManager panelManager_;
     std::unique_ptr<HmiLedController> ledController_;

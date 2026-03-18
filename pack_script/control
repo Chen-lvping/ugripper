@@ -3,7 +3,7 @@ Version: {{VERSION}}
 Section: utils
 Priority: optional
 Architecture: {{ARCH}}
-Depends: bash, systemd, udev, pulseaudio-utils, sox, alsa-utils
+Depends: bash, systemd, udev, kmod, pulseaudio-utils, sox, alsa-utils
 Maintainer: Your Name <your@email.com>
 Description: Ugripper Control System
  Automated recording and gripper control system.

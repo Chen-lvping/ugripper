@@ -5,6 +5,10 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased - 2026-03-16
+- 数据盘启动链路进一步收敛：`pack_script/postinst` 现在会在安装/升级 `ugripper` 时自动把现场 `/home/user/lib/exfat.ko` 复制进 `/lib/modules/<kernel>/extra/` 并写入 `/etc/modules-load.d/ugripper-exfat.conf`，让已生产设备仅靠升级主包也能在后续开机更早加载 `exfat`；同时 `config/99-fixed-usb-map.rules` 改为直接使用 `systemd-mount` 固定挂载 `/mnt/data_disk`，并在 USB 分区 `remove` 事件里显式卸载清理，再通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@<dev>.service`，不再把 `mount_data_disk.sh` 作为主路径挂载协调器。
+- `usb-auto-update@.service` 现在显式排在 `mnt-data_disk.mount` 后启动，`usb_auto_update.sh` 等待 `/mnt/data_disk` 挂上当前设备的重试窗口也从 `3s` 提升到 `6s`，降低开机或热插拔时 mount/updater 并发启动导致的扫描超时。
+- 修复提示音重叠播放：`audio/audio_play.py` 改为“后触发抢占前触发”的提示音语义，新的 one-shot 或 loop 命令到达后会立即打断当前播放，`writing` / `calibrating` 等 loop 提示不再与 `recording_stop`、`ready`、`validation_failed` 等关键语音叠播；`record_runtime` 也会在守护进程恢复后按当前阶段补发对应提示，避免 `writing` 阶段误播 `ready`。
+- 继续修复 USB 耳机后插/热插拔导致业务提示音恢复不稳定的问题：`audio/audio_play.py` 现在只在真实绑定 USB sink 后写 `umi_audio_ready`，耳机拔掉时会撤销 ready 标记；`record_runtime` 则把“守护进程存活”和“提示音可播放”拆开处理，避免假 ready 导致后插后长期不补发 `ready`。
 - 双目默认录制参数调整为 `1280x400@60`，并新增每路 YAML 可配的 `qp_init/qp_min/qp_max/qp_min_i/qp_max_i`；当前 stereo 改为 `qp_init=34`、`qp_min=28`、`qp_max=42`、`qp_min_i=24`、`qp_max_i=42`，用于将同源 `1280x400@60` MJPEG 样本的单路 HEVC 码率压到 `1Mbps` 以下。
 - `camera_recorder` 的停录改为并发 stop 全部 recorder，并补充停录阶段日志，避免多路相机顺序收尾时被外层 stop 窗口截断，导致 `info.json` 缺失和非主相机 `mkv` 只落半成品。
 - `pack_script/postinst` 现在会在安装阶段自动修复空文件、`[]` 或其他非法的持久化 `calibration.json`；`record_runtime` 写 episode 标定时也会在持久化标定不可用时回退到内置默认 calibration，避免因坏文件直接卡死开录。

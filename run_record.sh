@@ -16,9 +16,25 @@ if [ ! -x "$RUNTIME_BIN" ]; then
 fi
 
 is_storage_ready() {
+    local mount_source mount_opts
+
     if ! findmnt -rn --target "$DISK_ROOT" >/dev/null 2>&1; then
         return 1
     fi
+
+    mount_source="$(findmnt -rn -o SOURCE --target "$DISK_ROOT" 2>/dev/null || true)"
+    mount_opts="$(findmnt -rn -o OPTIONS --target "$DISK_ROOT" 2>/dev/null || true)"
+
+    [ -n "$mount_source" ] || return 1
+    [ -e "$mount_source" ] || return 1
+
+    case ",$mount_opts," in
+        *,rw,*)
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 
     [ -w "$DISK_ROOT" ]
 }

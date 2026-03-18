@@ -11,7 +11,14 @@ import time
 import wave
 from pathlib import Path
 
-from pulse_audio_utils import configure_pulse_audio_env, pulse_audio_env, get_forced_usb_audio_target
+from pulse_audio_utils import (
+    PulseAudioProbeError,
+    PulseAudioTargetNotFoundError,
+    configure_pulse_audio_env,
+    get_forced_usb_audio_target,
+    probe_forced_usb_audio_target,
+    pulse_audio_env,
+)
 
 INPUT_EVENT_FORMAT = "llHHI"
 INPUT_EVENT_SIZE = struct.calcsize(INPUT_EVENT_FORMAT)
@@ -30,21 +37,11 @@ MIXER_CHANNELS = 2
 MIXER_BUFFER = 512
 WARMUP_MSEC = 120
 LEADING_SILENCE_MSEC = 300
+LOOPING_SOUNDS = {"writing", "calibrating"}
 
 
 def setup_audio_device():
     target = configure_pulse_audio_env(require_source=False, disable_suspend_on_idle=True)
-    if target.unloaded_modules:
-        print(
-            "[INFO] disabled PulseAudio suspend modules before playback init: "
-            + ", ".join(target.unloaded_modules),
-            flush=True,
-        )
-    print(
-        f"Using PulseAudio USB headset sink: {target.sink.name} "
-        f"({target.sink.description})",
-        flush=True,
-    )
     return target
 
 
@@ -127,28 +124,19 @@ class AudioPlayer:
         self.stop_event = threading.Event()
         self.playback_lock = threading.Lock()
         self.key_thread = threading.Thread(target=self.volume_key_loop, name="usb-headset-keys", daemon=True)
+        self.backend_thread = threading.Thread(target=self.backend_loop, name="usb-headset-backend", daemon=True)
         self.pygame = None
         self.fx_channel = None
         self.bg_channel = None
         self.silence_sound = None
+        self.target = None
+        self.audio_env = os.environ.copy()
+        self.backend_wait_logged = False
+        self.active_sound_name = None
+        self.active_sound_looping = False
 
         self._remove_ready_marker()
         self._ensure_pipe()
-
-        self.target = setup_audio_device()
-        self.audio_env = os.environ.copy()
-        boot_env = pulse_audio_env()
-        if "XDG_RUNTIME_DIR" in boot_env:
-            self.audio_env["XDG_RUNTIME_DIR"] = boot_env["XDG_RUNTIME_DIR"]
-            os.environ["XDG_RUNTIME_DIR"] = boot_env["XDG_RUNTIME_DIR"]
-        if "PULSE_SERVER" in boot_env:
-            self.audio_env["PULSE_SERVER"] = boot_env["PULSE_SERVER"]
-            os.environ["PULSE_SERVER"] = boot_env["PULSE_SERVER"]
-        self.audio_env["PULSE_SINK"] = self.target.sink.name
-        os.environ["PULSE_SINK"] = self.target.sink.name
-        os.environ["SDL_AUDIODRIVER"] = "pulseaudio"
-
-        self.init_mixer()
 
         lang_from_file = read_env_file_value("UGRIPPER_LANG")
         self.lang = self.resolve_language(lang_from_file or "zh")
@@ -173,14 +161,13 @@ class AudioPlayer:
             "calib_done": self.resolve_sound_path("calib_done.wav"),
         }
         self.sounds = {
-            sound_name: self.load_sound(sound_name, sound_path)
-            for sound_name, sound_path in self.sound_paths.items()
+            sound_name: None for sound_name in self.sound_paths
         }
 
         self.key_thread.start()
-        self.ready_path.write_text("ready\n", encoding="utf-8")
+        self.backend_thread.start()
         print(f"Audio language: {self.lang}; search dirs: {self.audio_dirs}", flush=True)
-        print("Audio daemon ready. Waiting for commands...", flush=True)
+        print("Audio daemon started. Waiting for USB headset and commands...", flush=True)
 
     def _ensure_pipe(self):
         try:
@@ -197,6 +184,9 @@ class AudioPlayer:
                 self.ready_path.unlink()
         except OSError:
             pass
+
+    def _write_ready_marker(self):
+        self.ready_path.write_text("ready\n", encoding="utf-8")
 
     def init_mixer(self):
         try:
@@ -229,6 +219,113 @@ class AudioPlayer:
         while self.fx_channel.get_busy() and not self.stop_event.is_set():
             pygame.time.wait(10)
         pygame.time.wait(20)
+
+    def _apply_audio_target(self, target):
+        self.audio_env = os.environ.copy()
+        boot_env = pulse_audio_env()
+        if "XDG_RUNTIME_DIR" in boot_env:
+            self.audio_env["XDG_RUNTIME_DIR"] = boot_env["XDG_RUNTIME_DIR"]
+            os.environ["XDG_RUNTIME_DIR"] = boot_env["XDG_RUNTIME_DIR"]
+        if "PULSE_SERVER" in boot_env:
+            self.audio_env["PULSE_SERVER"] = boot_env["PULSE_SERVER"]
+            os.environ["PULSE_SERVER"] = boot_env["PULSE_SERVER"]
+        self.audio_env["PULSE_SINK"] = target.sink.name
+        os.environ["PULSE_SINK"] = target.sink.name
+        if target.source is not None:
+            self.audio_env["PULSE_SOURCE"] = target.source.name
+            os.environ["PULSE_SOURCE"] = target.source.name
+        os.environ["SDL_AUDIODRIVER"] = "pulseaudio"
+
+        self.init_mixer()
+        self.sounds = {
+            sound_name: self.load_sound(sound_name, sound_path)
+            for sound_name, sound_path in self.sound_paths.items()
+        }
+        self.target = target
+        self._write_ready_marker()
+
+    def _stop_playback_locked(self):
+        if self.bg_channel is not None:
+            self.bg_channel.stop()
+        if self.fx_channel is not None:
+            self.fx_channel.stop()
+        self.active_sound_name = None
+        self.active_sound_looping = False
+
+    def _teardown_audio_backend_locked(self):
+        self._remove_ready_marker()
+        self._stop_playback_locked()
+        if self.pygame is not None:
+            try:
+                self.pygame.mixer.stop()
+                self.pygame.mixer.quit()
+            except Exception:
+                pass
+            try:
+                self.pygame.quit()
+            except Exception:
+                pass
+
+        self.pygame = None
+        self.fx_channel = None
+        self.bg_channel = None
+        self.silence_sound = None
+        self.target = None
+        self.sounds = {
+            sound_name: None for sound_name in self.sound_paths
+        }
+
+    def refresh_audio_backend(self, *, log_missing: bool) -> bool:
+        current_target = self.target
+        probed_target = probe_forced_usb_audio_target(require_source=False)
+        current_sink = current_target.sink.name if current_target is not None else None
+
+        if probed_target is None:
+            with self.playback_lock:
+                had_backend = self.target is not None or self.pygame is not None
+                self._teardown_audio_backend_locked()
+            if had_backend:
+                print("[WARN] USB headset disappeared from PulseAudio, audio playback paused", flush=True)
+            elif log_missing and not self.backend_wait_logged:
+                print("[WARN] audio backend waiting for USB headset sink", flush=True)
+            self.backend_wait_logged = True
+            return False
+
+        if current_sink == probed_target.sink.name and self.pygame is not None:
+            self.backend_wait_logged = False
+            return True
+
+        try:
+            target = setup_audio_device()
+        except (PulseAudioTargetNotFoundError, PulseAudioProbeError) as exc:
+            if log_missing and not self.backend_wait_logged:
+                print(f"[WARN] audio backend waiting for USB headset sink: {exc}", flush=True)
+            self.backend_wait_logged = True
+            return False
+
+        with self.playback_lock:
+            previous_sink = self.target.sink.name if self.target is not None else None
+            self._teardown_audio_backend_locked()
+            self._apply_audio_target(target)
+
+        if target.unloaded_modules:
+            print(
+                "[INFO] disabled PulseAudio suspend modules before playback init: "
+                + ", ".join(target.unloaded_modules),
+                flush=True,
+            )
+        if previous_sink and previous_sink != target.sink.name:
+            print(
+                f"[INFO] USB headset sink changed: {previous_sink} -> {target.sink.name}",
+                flush=True,
+            )
+        print(
+            f"[INFO] audio backend bound to USB headset sink: {target.sink.name} "
+            f"({target.sink.description})",
+            flush=True,
+        )
+        self.backend_wait_logged = False
+        return True
 
     def resolve_language(self, raw_lang: str) -> str:
         normalized = raw_lang.strip().strip('"').strip("'").lower()
@@ -296,24 +393,46 @@ class AudioPlayer:
             return None
 
     def play_sound(self, sound_name: str):
-        sound = self.sounds.get(sound_name)
-        if sound is None:
-            print(f"Sound not available: {sound_name}", flush=True)
+        if not self.refresh_audio_backend(log_missing=True):
+            print(f"[WARN] skip sound because USB headset is not ready: {sound_name}", flush=True)
             return
 
+        looping = sound_name in LOOPING_SOUNDS
+        sound = self.sounds.get(sound_name)
+
         with self.playback_lock:
-            if sound_name == "writing":
-                if self.bg_channel is not None and self.bg_channel.get_busy():
+            if (
+                looping
+                and self.active_sound_looping
+                and self.active_sound_name == sound_name
+                and self.bg_channel is not None
+                and self.bg_channel.get_busy()
+            ):
+                print(f"Playing(loop): {sound_name} (unchanged)", flush=True)
+                return
+
+            self._stop_playback_locked()
+
+            if sound is None:
+                print(f"Sound not available: {sound_name}", flush=True)
+                return
+
+            if looping:
+                if self.bg_channel is None:
+                    print(f"[WARN] loop channel unavailable, skip sound: {sound_name}", flush=True)
                     return
                 self.bg_channel.play(sound, loops=-1)
+                self.active_sound_name = sound_name
+                self.active_sound_looping = True
                 print(f"Playing(loop): {sound_name}", flush=True)
                 return
 
-            if self.bg_channel is not None and self.bg_channel.get_busy():
-                self.bg_channel.stop()
-            if self.fx_channel is not None:
-                self.fx_channel.stop()
-                self.fx_channel.play(sound)
+            if self.fx_channel is None:
+                print(f"[WARN] fx channel unavailable, skip sound: {sound_name}", flush=True)
+                return
+            self.fx_channel.play(sound)
+            self.active_sound_name = sound_name
+            self.active_sound_looping = False
             print(f"Playing: {sound_name}", flush=True)
 
     def shutdown(self, signum=None, frame=None):
@@ -321,21 +440,16 @@ class AudioPlayer:
         self.stop_event.set()
         self._remove_ready_marker()
         with self.playback_lock:
-            if self.bg_channel is not None:
-                self.bg_channel.stop()
-            if self.fx_channel is not None:
-                self.fx_channel.stop()
-            if self.pygame is not None:
-                try:
-                    self.pygame.mixer.stop()
-                    self.pygame.mixer.quit()
-                except Exception:
-                    pass
-                try:
-                    self.pygame.quit()
-                except Exception:
-                    pass
+            self._teardown_audio_backend_locked()
         sys.exit(0)
+
+    def backend_loop(self):
+        while not self.stop_event.is_set():
+            try:
+                self.refresh_audio_backend(log_missing=False)
+            except Exception as exc:
+                print(f"[WARN] audio backend refresh failed: {exc}", flush=True)
+            self.stop_event.wait(RETRY_SEC)
 
     def volume_key_loop(self):
         fd = None

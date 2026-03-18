@@ -11,7 +11,7 @@ DATA_MOUNT_POINT="/mnt/data_disk"
 MOUNT_POINT="$DATA_MOUNT_POINT"
 LOG_FILE="/var/log/ugripper/usb_auto_update.log"
 LOCK_FILE="/run/usb_auto_update.lock"
-DATA_MOUNT_WAIT_RETRIES=15
+DATA_MOUNT_WAIT_RETRIES=30
 DATA_MOUNT_WAIT_INTERVAL_SEC="0.2"
 
 # 升级保护锁：安装期间用于抑制 network monitor 的重启/二次触发

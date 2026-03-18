@@ -22,6 +22,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <thread>
+#include <utility>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
@@ -33,6 +34,8 @@ constexpr uint64_t kActionDebounceMs = 250;
 constexpr uint64_t kLongPressThresholdMs = 800;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
 constexpr uint64_t kShutdownPromptThresholdMs = 2000;
+constexpr uint64_t kAudioPlayerRestartIntervalMs = 2000;
+constexpr uint64_t kAudioPlayerReadyGraceMs = 3000;
 constexpr double kMinReasonableVideoSpanSec = 0.2;
 constexpr double kMaxVideoSpanGapSec = 5.0;
 constexpr int kVideoProbeTimeoutMs = 1500;
@@ -218,6 +221,141 @@ std::string joinArguments(const std::vector<std::string> &arguments)
         stream << arguments[index];
     }
     return stream.str();
+}
+
+bool moveFileWithCrossDeviceFallback(const fs::path &source,
+                                     const fs::path &target,
+                                     std::error_code *error)
+{
+    std::error_code localError;
+    fs::rename(source, target, localError);
+    if (!localError)
+    {
+        if (error != nullptr)
+        {
+            error->clear();
+        }
+        return true;
+    }
+
+    if (localError != std::make_error_code(std::errc::cross_device_link))
+    {
+        if (error != nullptr)
+        {
+            *error = localError;
+        }
+        return false;
+    }
+
+    localError.clear();
+    fs::copy_file(source, target, fs::copy_options::overwrite_existing, localError);
+    if (localError)
+    {
+        if (error != nullptr)
+        {
+            *error = localError;
+        }
+        return false;
+    }
+
+    fs::remove(source, localError);
+    if (localError)
+    {
+        std::error_code cleanupError;
+        fs::remove(target, cleanupError);
+        if (error != nullptr)
+        {
+            *error = localError;
+        }
+        return false;
+    }
+
+    if (error != nullptr)
+    {
+        error->clear();
+    }
+    return true;
+}
+
+bool flushFileToDisk(const fs::path &path, std::error_code *error)
+{
+    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+    {
+        if (error != nullptr)
+        {
+            *error = std::error_code(errno, std::generic_category());
+        }
+        return false;
+    }
+
+    if (::fsync(fd) != 0)
+    {
+        const std::error_code syncError(errno, std::generic_category());
+        close(fd);
+        if (error != nullptr)
+        {
+            *error = syncError;
+        }
+        return false;
+    }
+
+    close(fd);
+
+    if (error != nullptr)
+    {
+        error->clear();
+    }
+    return true;
+}
+
+void flushEpisodeArtifactsToDisk(const fs::path &episodeDir)
+{
+    if (episodeDir.empty())
+    {
+        return;
+    }
+
+    std::vector<fs::path> paths;
+    paths.reserve(kEpisodeVideoArtifacts.size() + 6);
+
+    for (const auto &artifact : kEpisodeVideoArtifacts)
+    {
+        paths.push_back(episodeDir / artifact.fileName);
+    }
+
+    paths.push_back(episodeDir / "sensor_data_left.mcap");
+    paths.push_back(episodeDir / "sensor_data_right.mcap");
+    paths.push_back(episodeDir / "metadata.json");
+    paths.push_back(episodeDir / "calibration.json");
+    paths.push_back(episodeDir / "info.json");
+
+    const fs::path audioPre = episodeDir / "audio_pre.wav";
+    if (fs::exists(audioPre))
+    {
+        paths.push_back(audioPre);
+    }
+
+    const fs::path audioPost = episodeDir / "audio_post.wav";
+    if (fs::exists(audioPost))
+    {
+        paths.push_back(audioPost);
+    }
+
+    for (const auto &path : paths)
+    {
+        if (!fs::exists(path))
+        {
+            continue;
+        }
+
+        std::error_code error;
+        if (!flushFileToDisk(path, &error))
+        {
+            std::cerr << "[WARN] failed to flush episode artifact: "
+                      << path << " error=" << error.message() << std::endl;
+        }
+    }
 }
 
 std::string makeTimestampString()
@@ -654,6 +792,7 @@ bool RecordRuntime::initialize()
 
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     setLedState(LedState::Ready);
+    setAudioRecoveryCommand("ready");
     sendAudioCommand("ready");
 
     initialized_ = true;
@@ -673,6 +812,8 @@ int RecordRuntime::run()
 
     while (!stopRequested_.load())
     {
+        maintainAudioPlayer();
+
         ButtonSnapshot buttons;
         panelManager_.poll(options_.pollMs, &buttons);
         handleButtons(buttons);
@@ -705,6 +846,7 @@ bool RecordRuntime::startAudioPlayer()
 
     std::error_code error;
     fs::remove(options_.audioReadyFile, error);
+    lastAudioPlayerStartAttemptMs_ = currentSteadyMs();
 
     std::vector<std::string> audioArguments = resolvePythonCommand();
     audioArguments.push_back(options_.audioPlayScript);
@@ -724,15 +866,20 @@ bool RecordRuntime::startAudioPlayer()
             audioPlayerStarted_ = false;
             return false;
         }
-        if (fs::exists(options_.audioPipe) && fs::exists(options_.audioReadyFile))
+        if (fs::exists(options_.audioPipe))
         {
-            audioPlayerStarted_ = true;
+            const bool playbackReady = fs::exists(options_.audioReadyFile);
+            audioPlayerStarted_ = playbackReady;
+            if (!playbackReady)
+            {
+                std::cout << "[INFO] audio player launched; waiting for USB headset sink" << std::endl;
+            }
             return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
-    std::cerr << "[WARN] audio player ready timeout, pipe or ready marker missing" << std::endl;
+    std::cerr << "[WARN] audio player pipe timeout, audio daemon did not finish bootstrap" << std::endl;
     audioPlayer_.stop(1000);
     audioPlayerStarted_ = false;
     return false;
@@ -747,6 +894,67 @@ void RecordRuntime::stopAudioPlayer()
     }
     audioPlayer_.stop(1000);
     audioPlayerStarted_ = false;
+}
+
+void RecordRuntime::setAudioRecoveryCommand(std::string command)
+{
+    audioRecoveryCommand_ = std::move(command);
+}
+
+void RecordRuntime::maintainAudioPlayer()
+{
+    const uint64_t nowMs = currentSteadyMs();
+    const bool pipeReady = fs::exists(options_.audioPipe);
+    const bool readyMarker = fs::exists(options_.audioReadyFile);
+
+    if (audioPlayer_.isRunning())
+    {
+        if (!pipeReady)
+        {
+            if ((nowMs - lastAudioPlayerStartAttemptMs_) < kAudioPlayerReadyGraceMs)
+            {
+                return;
+            }
+
+            std::cerr << "[WARN] audio player running without pipe, restarting" << std::endl;
+            audioPlayer_.stop(1000);
+        }
+
+        if (readyMarker)
+        {
+            const bool recovered = !audioPlayerStarted_;
+            audioPlayerStarted_ = true;
+            if (recovered)
+            {
+                std::cout << "[INFO] audio player recovered and is ready" << std::endl;
+                if (initialized_ && !audioRecoveryCommand_.empty())
+                {
+                    sendAudioCommand(audioRecoveryCommand_);
+                }
+            }
+            return;
+        }
+
+        if (audioPlayerStarted_)
+        {
+            std::cerr << "[WARN] audio player lost ready marker, waiting for USB headset recovery" << std::endl;
+        }
+        audioPlayerStarted_ = false;
+        return;
+    }
+
+    if (audioPlayerStarted_)
+    {
+        std::cerr << "[WARN] audio player exited, will retry" << std::endl;
+        audioPlayerStarted_ = false;
+    }
+
+    if ((nowMs - lastAudioPlayerStartAttemptMs_) < kAudioPlayerRestartIntervalMs)
+    {
+        return;
+    }
+
+    startAudioPlayer();
 }
 
 void RecordRuntime::sendAudioCommand(const std::string &command) const
@@ -784,11 +992,15 @@ bool RecordRuntime::attachPendingPreAudio(const std::string &episodeDir)
 
     std::error_code error;
     const fs::path target = fs::path(episodeDir) / "audio_pre.wav";
-    fs::rename(pendingPreAudioFile_, target, error);
-    if (error)
+    if (!moveFileWithCrossDeviceFallback(pendingPreAudioFile_, target, &error))
     {
         std::cerr << "[WARN] failed to move pre audio into episode: " << error.message() << std::endl;
         return false;
+    }
+
+    if (!flushFileToDisk(target, &error))
+    {
+        std::cerr << "[WARN] failed to flush pre audio into episode: " << error.message() << std::endl;
     }
 
     pendingPreAudioFile_.clear();
@@ -802,6 +1014,7 @@ bool RecordRuntime::startRecording(bool resetRecording)
     {
         std::cerr << "[ERROR] failed to create episode directory" << std::endl;
         setLedState(LedState::Error5);
+        setAudioRecoveryCommand("error");
         sendAudioCommand("error");
         return false;
     }
@@ -812,6 +1025,7 @@ bool RecordRuntime::startRecording(bool resetRecording)
     {
         std::cerr << "[ERROR] prepare episode failed: " << errorMessage << std::endl;
         setLedState(LedState::Error5);
+        setAudioRecoveryCommand("error");
         sendAudioCommand("error");
         return false;
     }
@@ -866,12 +1080,14 @@ bool RecordRuntime::startRecording(bool resetRecording)
         }
 
         setLedState(LedState::Error5);
+        setAudioRecoveryCommand("error");
         sendAudioCommand("error");
         return false;
     }
 
     isRecording_ = true;
     setLedState(LedState::Recording);
+    setAudioRecoveryCommand("");
     sendAudioCommand(resetRecording ? "reset_recording_start" : "recording_started");
     std::cout << "[INFO] recording started: " << currentEpisodeDir_ << std::endl;
     return true;
@@ -884,6 +1100,7 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
         if (dueToError)
         {
             setLedState(LedState::Error5);
+            setAudioRecoveryCommand("error");
             sendAudioCommand("error");
         }
         return true;
@@ -902,9 +1119,10 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
         lastEpisodeDir_ = currentEpisodeDir_;
     }
 
+    setAudioRecoveryCommand("writing");
     sendAudioCommand("writing");
     setLedState(LedState::Init);
-    ::sync();
+    flushEpisodeArtifactsToDisk(fs::path(currentEpisodeDir_));
 
     std::string errorMessage;
     const bool valid = episodeManager_->validateEpisode(currentEpisodeDir_, &errorMessage);
@@ -918,6 +1136,7 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
     if (dueToError)
     {
         setLedState(LedState::Error5);
+        setAudioRecoveryCommand("error");
         sendAudioCommand("error");
         return false;
     }
@@ -925,11 +1144,13 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
     if (!valid)
     {
         setLedState(LedState::Error1);
+        setAudioRecoveryCommand("validation_failed");
         sendAudioCommand("validation_failed");
         return false;
     }
 
     setLedState(LedState::Ready);
+    setAudioRecoveryCommand("ready");
     sendAudioCommand("ready");
     return true;
 }
@@ -952,6 +1173,7 @@ bool RecordRuntime::handleShortDownAction()
         if (lastEpisodeDir_.empty() || !fs::exists(lastEpisodeDir_))
         {
             std::cout << "[INFO] no previous episode, BTN_DOWN reset ignored" << std::endl;
+            setAudioRecoveryCommand("ready");
             sendAudioCommand("no_reset_needed");
             setLedState(LedState::Ready);
             return false;
@@ -991,6 +1213,7 @@ void RecordRuntime::handleDualShutdownAction()
         stopRecording(false, "dual-button shutdown");
     }
     setLedState(LedState::Exit);
+    setAudioRecoveryCommand("writing");
     sendAudioCommand("writing");
 
     std::ofstream requestFile(options_.shutdownRequestFile, std::ios::trunc);
@@ -1010,6 +1233,7 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
     if (!fs::exists(options_.audioRecordScript))
     {
         std::cerr << "[ERROR] audio record script not found: " << options_.audioRecordScript << std::endl;
+        setAudioRecoveryCommand("error");
         sendAudioCommand("error");
         return false;
     }
@@ -1098,11 +1322,14 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
         if (!lastEpisodeDir_.empty() && fs::exists(lastEpisodeDir_))
         {
             std::error_code error;
-            fs::rename(outputFile, fs::path(lastEpisodeDir_) / "audio_post.wav", error);
-            if (error)
+            if (!moveFileWithCrossDeviceFallback(outputFile, fs::path(lastEpisodeDir_) / "audio_post.wav", &error))
             {
                 std::cerr << "[ERROR] failed to move post-audio into last episode: " << error.message() << std::endl;
                 fs::remove(outputFile);
+            }
+            else if (!flushFileToDisk(fs::path(lastEpisodeDir_) / "audio_post.wav", &error))
+            {
+                std::cerr << "[WARN] failed to flush post-audio into last episode: " << error.message() << std::endl;
             }
         }
         else

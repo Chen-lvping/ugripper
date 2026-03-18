@@ -2,7 +2,7 @@
 Description=USB Auto Update for /dev/%I
 # 等设备节点就绪
 BindsTo=dev-%i.device
-After=dev-%i.device
+After=dev-%i.device mnt-data_disk.mount
 
 [Service]
 Type=oneshot

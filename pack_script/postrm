@@ -2,11 +2,13 @@
 set -e
 
 APP_DIR="{{INSTALL_DIR}}"
+EXFAT_MODULES_LOAD_FILE="/etc/modules-load.d/ugripper-exfat.conf"
 
 systemctl daemon-reload
 
 # 如果是彻底清除 (purge)，则删除程序目录
 if [ "$1" = "purge" ]; then
+    rm -f "$EXFAT_MODULES_LOAD_FILE"
     rm -rf "$APP_DIR"
 fi
 

@@ -113,11 +113,11 @@ id = "TASK-004"
 title = "优化提示音重叠播放问题"
 type = "fix"
 slug = "avoid-overlapped-audio-prompts"
-status = "todo"
-enabled = true
+status = "done"
+enabled = false
 focus = false
 depends_on = []
-summary = "记录语音提示会重叠播放的问题，例如录制结束和数据写入中提示音会同时播放，后续需要做串行化或抢占策略优化。"
+summary = "已合并回主目录，完成提示音抢占式播放修复，待后续按主线流程继续实机回归。"
 acceptance = [
   "明确当前提示音重叠的触发链路与复现场景",
   "设计并实现提示音队列、抢占或去重策略",
@@ -127,6 +127,30 @@ acceptance = [
 notes = """
 用户反馈当前语音提示存在重叠播放，例如录制结束与数据写入中的提示会叠在一起。
 后续执行时需要梳理 audio daemon 的命令队列、loop 播放与一次性提示音之间的关系，避免关键语音互相覆盖。
-本次仅登记 TODO，不立即执行。
+2026-03-18：task worktree 已合并回主目录，独立 task 分支与运行态可清理。
+"""
+```
+
+<!-- TODO_HUB_TASK -->
+```toml
+id = "TASK-005"
+title = "继续修复 USB 耳机热插拔与后插恢复异常"
+type = "fix"
+slug = "fix-usb-audio-hotplug-followup"
+status = "done"
+enabled = false
+focus = false
+depends_on = []
+summary = "已合并回主目录，补齐 USB 耳机后插与热插拔恢复收敛修复，待主线继续现场回归。"
+acceptance = [
+  "复现并归类当前仍存在的 USB 耳机后插或热插拔异常场景",
+  "确认问题落在 audio daemon、record_runtime、PulseAudio 时序还是设备事件链路",
+  "修复后在服务先起、耳机后插和运行中拔插恢复场景下提示音稳定恢复",
+  "完成后通过现场流程验证 ready、recording_started、recording_stop 等关键提示音行为",
+]
+notes = """
+背景：当前主线已经补过一轮 audio daemon 与 record_runtime 的恢复逻辑，但用户反馈“还是不太对”。
+后续执行时需要继续围绕真实硬件现场、PulseAudio sink/source 出现时序、audio daemon ready 语义、record_runtime 重试节流和热插拔后的命令投递链路做专项排查与修复。
+2026-03-18：task worktree 已合并回主目录，独立 task 分支与运行态可清理。
 """
 ```

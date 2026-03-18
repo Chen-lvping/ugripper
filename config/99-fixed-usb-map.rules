@@ -134,46 +134,53 @@ SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="0020", ATTRS{idProduct}=
 # 2. Storage devices
 # ========================
 # 数据盘允许插在四个物理 USB 口中的任意一个；按物理口祖先 KERNELS 匹配，避免依赖漂移的 /dev/sdX。
-# 所有文件系统统一走 helper：
-# - exfat 显式用 mount.exfat-fuse
-# - 其他文件系统回退到 systemd-mount 自动探测
+# exfat 由主包安装时自动配置为开机提前加载。
+# 数据盘挂载直接走 systemd-mount；USB 分区 remove 事件会显式卸载 `/mnt/data_disk`，避免残留 stale mount。
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="1-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --no-block --collect --owner=ubuntu --options=noatime \"$devnode\" /mnt/data_disk'", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="1-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --umount \"$devnode\" /mnt/data_disk >/dev/null 2>&1 || /usr/bin/systemd-mount --umount /mnt/data_disk >/dev/null 2>&1 || true'"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="5-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --no-block --collect --owner=ubuntu --options=noatime \"$devnode\" /mnt/data_disk'", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="5-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --umount \"$devnode\" /mnt/data_disk >/dev/null 2>&1 || /usr/bin/systemd-mount --umount /mnt/data_disk >/dev/null 2>&1 || true'"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="9-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --no-block --collect --owner=ubuntu --options=noatime \"$devnode\" /mnt/data_disk'", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="9-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --umount \"$devnode\" /mnt/data_disk >/dev/null 2>&1 || /usr/bin/systemd-mount --umount /mnt/data_disk >/dev/null 2>&1 || true'"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="11-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --no-block --collect --owner=ubuntu --options=noatime \"$devnode\" /mnt/data_disk'", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="11-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --umount \"$devnode\" /mnt/data_disk >/dev/null 2>&1 || /usr/bin/systemd-mount --umount /mnt/data_disk >/dev/null 2>&1 || true'"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="6-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --no-block --collect --owner=ubuntu --options=noatime \"$devnode\" /mnt/data_disk'", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="6-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --umount \"$devnode\" /mnt/data_disk >/dev/null 2>&1 || /usr/bin/systemd-mount --umount /mnt/data_disk >/dev/null 2>&1 || true'"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="8-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --no-block --collect --owner=ubuntu --options=noatime \"$devnode\" /mnt/data_disk'", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="8-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --umount \"$devnode\" /mnt/data_disk >/dev/null 2>&1 || /usr/bin/systemd-mount --umount /mnt/data_disk >/dev/null 2>&1 || true'"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="10-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --no-block --collect --owner=ubuntu --options=noatime \"$devnode\" /mnt/data_disk'", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="10-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --umount \"$devnode\" /mnt/data_disk >/dev/null 2>&1 || /usr/bin/systemd-mount --umount /mnt/data_disk >/dev/null 2>&1 || true'"
 ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="12-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --property=KillMode=none --unit=ugripper-mount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh add $devnode $env{ID_FS_TYPE}"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --no-block --collect --owner=ubuntu --options=noatime \"$devnode\" /mnt/data_disk'", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
 ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", KERNELS=="12-1", \
-  RUN+="/usr/bin/systemd-run --no-block --collect --unit=ugripper-unmount-data-disk-%k /opt/ugripper/auto_update/mount_data_disk.sh remove $devnode"
+  RUN+="/bin/sh -c '/usr/bin/systemd-mount --umount \"$devnode\" /mnt/data_disk >/dev/null 2>&1 || /usr/bin/systemd-mount --umount /mnt/data_disk >/dev/null 2>&1 || true'"

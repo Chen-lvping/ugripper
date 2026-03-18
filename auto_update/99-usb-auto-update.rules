@@ -1,6 +1,5 @@
-# USB 内容检查入口已统一到主包的 `config/99-fixed-usb-map.rules` +
-# `auto_update/mount_data_disk.sh`：
-# 1. 允许的 4 个物理 USB 口统一挂载到 `/mnt/data_disk`
-# 2. 挂载成功后再触发 `usb_auto_update.sh` 检查 deb/config/calibration 文件
+# USB 内容检查入口已统一到主包的 `config/99-fixed-usb-map.rules`：
+# 1. 允许的物理 USB 口会直接触发 `systemd-mount` 挂载到 `/mnt/data_disk`
+# 2. 同一条 udev 规则通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@<dev>.service`
 #
 # updater 包保留该文件仅用于兼容安装布局，避免继续通过旧固定口规则重复触发。
