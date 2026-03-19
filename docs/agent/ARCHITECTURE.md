@@ -59,7 +59,7 @@
   - 停止主服务。
   - 启动 LED/音频提示。
   - 执行 `build/src/sensor_recorder/zeroing`。
-- `auto_calibration/monitor_network.sh` 常驻监听 `end0`：插线时补触发一次 `block add` udev 规则；Left 侧会持续判定目标角色（`master/slave`），在“检测到 `192.168.1.100` 可达”或“拔线/对端不可达”导致目标角色变化时，确认两次后重启 `ugripper.service`，让 `run_record.sh` 按新角色重启；Right 侧仍只在拔线时重启服务。
+- `auto_calibration/monitor_network.sh` 常驻监听 `end0`：仅记录插拔状态，不再因网线事件补触发 `block add` udev 规则，也不再让 Right 侧因插拔网线重启服务；Left 侧仍会持续判定目标角色（`master/slave`），在“检测到 `192.168.1.100` 可达”或“拔线/对端不可达”导致目标角色变化时，确认两次后重启 `ugripper.service`，让 `run_record.sh` 按新角色重启。
 - 升级期间若检测到 `/run/ugripper_installing_from_usb.lock`，network monitor 跳过插拔动作，避免升级中的伪上升沿与二次触发。
 
 ### 3.2 时间同步

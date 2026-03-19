@@ -12,6 +12,8 @@ PACK_SCRIPT_DIR="pack_script"
 
 # 默认行为变量
 QUICK_MODE=false
+DEB_COMPRESS_TYPE="xz"
+DEB_COMPRESS_LEVEL="1"
 
 # ================= 参数解析 =================
 for arg in "$@"; do
@@ -176,7 +178,8 @@ for file in "${FILES_TO_PATCH[@]}"; do
 done
 
 echo "=== [5/5] 生成 DEB 包 ==="
-dpkg-deb --build "$BUILD_ROOT" "${APP_NAME}_${VERSION}_${ARCH}.deb"
+echo "--> 使用 dpkg-deb 压缩参数: -Z${DEB_COMPRESS_TYPE} -z${DEB_COMPRESS_LEVEL}"
+dpkg-deb -Z"${DEB_COMPRESS_TYPE}" -z"${DEB_COMPRESS_LEVEL}" --build "$BUILD_ROOT" "${APP_NAME}_${VERSION}_${ARCH}.deb"
 
 # Refresh source baseline manifest for auto-release-deb diff detection.
 MANIFEST_WRITER=".codex/skills/auto-release-deb/scripts/write_source_manifest.sh"

@@ -54,6 +54,7 @@ SYNC_SEND_TIMEOUT_SEC="${SYNC_SEND_TIMEOUT_SEC:-3}"
 SYNC_PING_TIMEOUT_SEC="${SYNC_PING_TIMEOUT_SEC:-2}"
 SYNC_PING_ATTEMPTS="${SYNC_PING_ATTEMPTS:-3}"
 SYNC_PING_INTERVAL_SEC="${SYNC_PING_INTERVAL_SEC:-0.2}"
+SYNC_QUICK_CHECK_TIMEOUT_SEC="${SYNC_QUICK_CHECK_TIMEOUT_SEC:-1}"
 
 DEVICE_SIDE="$(get_env_value "DEVICE_SIDE" || true)"
 CURRENT_SIDE="${DEVICE_SIDE:-Right}"
@@ -944,20 +945,39 @@ send_network_command() {
     local send_rc=0
 
     if [ "$cmd" = "START" ] && [ "$CURRENT_SIDE_LOWER" = "right" ]; then
-        if ! prime_sync_connection; then
-            echo "[WARNING]:Sync preflight failed before START; still attempt single START send."
+        if is_sync_peer_ready_for_start; then
+            if printf "%s\n" "$payload" | nc -N -w "$SYNC_SEND_TIMEOUT_SEC" "$SYNC_TARGET_IP" "$SYNC_PORT" >/dev/null 2>&1; then
+                echo "[INFO]:Sent to peer (${PEER_SIDE_LOWER}) (sync): ${payload}"
+                log_sync_neighbor_state "after_start_send_ok"
+                return 0
+            fi
+
+            send_rc=$?
+            echo "[ERROR]:Failed to send START to peer (${PEER_SIDE_LOWER}) rc=${send_rc} timeout=${SYNC_SEND_TIMEOUT_SEC}s payload=${payload}"
+            log_sync_neighbor_state "after_start_send_fail"
+            return "$send_rc"
         fi
 
-        if printf "%s\n" "$payload" | nc -N -w "$SYNC_SEND_TIMEOUT_SEC" "$SYNC_TARGET_IP" "$SYNC_PORT" >/dev/null 2>&1; then
-            echo "[INFO]:Sent to peer (${PEER_SIDE_LOWER}) (sync): ${payload}"
-            log_sync_neighbor_state "after_start_send_ok"
-            return 0
-        fi
+        echo "[WARNING]:Peer not ready for synchronous START; continue local recording and retry in background."
+        (
+            bg_send_rc=0
 
-        send_rc=$?
-        echo "[ERROR]:Failed to send START to peer (${PEER_SIDE_LOWER}) rc=${send_rc} timeout=${SYNC_SEND_TIMEOUT_SEC}s payload=${payload}"
-        log_sync_neighbor_state "after_start_send_fail"
-        return "$send_rc"
+            if ! prime_sync_connection; then
+                echo "[INFO]:Background START retry skipped: peer (${PEER_SIDE_LOWER}) still unreachable."
+                exit 0
+            fi
+
+            if printf "%s\n" "$payload" | nc -N -w "$SYNC_SEND_TIMEOUT_SEC" "$SYNC_TARGET_IP" "$SYNC_PORT" >/dev/null 2>&1; then
+                echo "[INFO]:Sent to peer (${PEER_SIDE_LOWER}) (background START): ${payload}"
+                log_sync_neighbor_state "after_bg_start_send_ok"
+                exit 0
+            fi
+
+            bg_send_rc=$?
+            echo "[WARNING]:Background START send failed to peer (${PEER_SIDE_LOWER}) rc=${bg_send_rc} timeout=${SYNC_SEND_TIMEOUT_SEC}s payload=${payload}"
+            log_sync_neighbor_state "after_bg_start_send_fail"
+        ) &
+        return 0
     fi
 
     # 非 START 命令保持异步，不阻塞主流程。
@@ -965,6 +985,34 @@ send_network_command() {
         printf "%s\n" "$payload" | nc -N -w 1 "$SYNC_TARGET_IP" "$SYNC_PORT" >/dev/null 2>&1 || true
     ) &
     echo "Sent to peer (${PEER_SIDE_LOWER}) (async): ${payload}"
+}
+
+is_sync_peer_ready_for_start() {
+    local carrier_state=""
+    local ping_rc=0
+
+    if [ "$IS_MASTER" != true ] || [ "$CURRENT_SIDE_LOWER" != "right" ]; then
+        return 1
+    fi
+
+    carrier_state="$(read_network_carrier_state || true)"
+    if [ "$carrier_state" != "1" ]; then
+        echo "[INFO]:Skip synchronous START because ${NETWORK_INTERFACE} carrier=${carrier_state:-unknown}."
+        return 1
+    fi
+
+    log_sync_neighbor_state "before_start"
+
+    if ping -I "$NETWORK_INTERFACE" -c 1 -W "$SYNC_QUICK_CHECK_TIMEOUT_SEC" "$SYNC_TARGET_IP" >/dev/null 2>&1; then
+        echo "[INFO]:Sync quick ping succeeded before START."
+        log_sync_neighbor_state "after_quick_ping_ok"
+        return 0
+    fi
+
+    ping_rc=$?
+    echo "[WARNING]:Sync quick ping failed before START (rc=${ping_rc}, timeout=${SYNC_QUICK_CHECK_TIMEOUT_SEC}s)."
+    log_sync_neighbor_state "after_quick_ping_fail"
+    return 1
 }
 
 log_sync_neighbor_state() {

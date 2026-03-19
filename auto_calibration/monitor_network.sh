@@ -116,20 +116,12 @@ while true; do
             continue
         fi
 
-        # ================= 上升沿：拔掉 → 插入 =================
         if [ "$LAST_STATE" -eq 0 ] && [ "$CURRENT_STATE" -eq 1 ]; then
             echo "[$(date)] Cable Insertion Detected!"
-
-            echo "Triggering udev block rules..."
-            udevadm trigger --subsystem-match=block --action=add || true
         fi
 
-        # ================= 下降沿：插着 → 拔掉 =================
         if [ "$LAST_STATE" -eq 1 ] && [ "$CURRENT_STATE" -eq 0 ]; then
             echo "[$(date)] Cable Removal Detected!"
-            if ! is_left_side; then
-                restart_ugripper
-            fi
         fi
 
         LAST_STATE="$CURRENT_STATE"

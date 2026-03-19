@@ -1,8 +1,13 @@
 # Changelog
 
+## v1.1.15 - 2026-03-19
+- 修复 Right 侧网线插拔副作用：`auto_calibration/monitor_network.sh` 不再因 `end0` 插线补触发 `block add` udev 规则，避免误触发 `usb-auto-update`、U 盘卸载/导入等与网口无关的流程。
+- 修复 Right 侧拔网线时的异常重启：network monitor 不再因 Right 侧网线拔插直接重启 `ugripper.service`，避免把主服务带进磁盘未就绪、录制中断等异常状态。
+- 修复 Right 侧“有网线但没有 slave”时的开录卡顿：`run_record.sh` 仅在对端快速可达时走同步 `START` 发送；对端不可达时本地立即开录，并在后台重试一次同步发送，不再阻塞主流程。
+
 ## v1.1.14 - 2026-03-16
 - Left 夹爪新增自动主从切换：`end0` 已插线且 `192.168.1.100` 可达时自动作为 `slave` 运行并受右臂 master 控制；拔线或对端不可达时自动回到 `master`。
-- `auto_calibration/monitor_network.sh` 增强为 Left 侧自动角色监控：插线仍会补触发一次 `block add` udev 规则，目标角色变化连续确认两次后自动重启 `ugripper.service`，让业务按新角色重新启动。
+- `auto_calibration/monitor_network.sh` 增强为 Left 侧自动角色监控：目标角色变化连续确认两次后自动重启 `ugripper.service`，让业务按新角色重新启动。
 - `run_record.sh` 的 Left 侧 `paired_master_sn` 记录逻辑收敛到“仅 Slave 运行态”生效，避免 Left 独立 `master` 模式下输出误导性日志。
 - 修复主从同步监听时差：Slave 侧改为常驻 `nc -lk` 逐行监听并立即处理 `START/STOP`，消除单次 `nc -w 1` 监听带来的约 1 秒固定时延。
 - 修复 slave 夹爪拔线重插后的首条录制命令发送失败：Right master 在发送 `START` 前会先基于 `end0` 做 `ping` 预探测并记录 `ip neigh` 状态，随后使用更长超时的同步 `nc` 单次发送 `START`；若发送失败会打印退出码与邻居表状态，便于继续定位链路恢复阶段的首发失败问题。
