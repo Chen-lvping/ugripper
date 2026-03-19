@@ -812,6 +812,7 @@ int RecordRuntime::run()
 
     while (!stopRequested_.load())
     {
+        const uint64_t loopStartMs = currentSteadyMs();
         maintainAudioPlayer();
 
         ButtonSnapshot buttons;
@@ -823,7 +824,11 @@ int RecordRuntime::run()
             stopRecording(true, "camera or sensor recorder exited unexpectedly");
         }
 
-        std::this_thread::sleep_for(std::chrono::milliseconds(options_.pollMs));
+        const uint64_t loopElapsedMs = currentSteadyMs() - loopStartMs;
+        if (loopElapsedMs < static_cast<uint64_t>(options_.pollMs))
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(options_.pollMs) - std::chrono::milliseconds(loopElapsedMs));
+        }
     }
 
     stopRecording(false, "shutdown");
@@ -1866,7 +1871,11 @@ bool RecordRuntime::GripperPanelManager::poll(int timeoutMs, ButtonSnapshot *sna
         {
             continue;
         }
-        received = driver->pollOnce(timeoutMs) || received;
+        if (index == inputDriverIndex_)
+        {
+            // Only the designated input side is allowed to consume the poll budget.
+            received = driver->pollOnce(timeoutMs) || received;
+        }
         if (index != inputDriverIndex_)
         {
             continue;

@@ -50,13 +50,13 @@
    - `CAMERA_CODEC`：非法值会回退到 `h264`。
    - `UGRIPPER_LANG`：决定提示音语言。
 10. 运行时连接左右夹爪 HMI、启动 LED 渲染线程、尝试拉起音频守护进程。
-   - HMI 状态查询与 LED RGB 下发会在单个 gripper 串口内由驱动 owner 线程统一调度；`record_runtime` 只切换灯效模式，不再跨线程推送录制态的 500ms 亮灭边沿；若有专项诊断或直控需求，仍可走 direct RGB 通道覆盖当前效果。
+   - HMI 状态查询与 LED RGB 下发会在单个 gripper 串口内由驱动 owner 线程统一调度；`record_runtime` 只切换灯效模式，不再跨线程推送录制态的 500ms 亮灭边沿。当前驱动参考旧版 `driver_origin/led_manager` 的职责分离思路做了收敛：按键输入仍以 HMI 主动上报 `KeyReport` 为主，串口主动查询已降为约 `1s` 一次的低频探活/状态刷新；LED 仅在颜色变化、状态切换或低频补发时下发，避免高频状态查询与 RGB 指令互相抢占；若有专项诊断或直控需求，仍可走 direct RGB 通道覆盖当前效果。
 11. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
 
 ## 5. 状态机与按键行为
 ### 5.1 空闲态与阈值
 - `READY`：绿色呼吸灯，提示系统可开始录制。
-- 当前 `READY` 呼吸灯周期约 `4.5s`，LED 渲染线程约每 `20ms` 刷新一次，降低肉眼可见亮度抖动。
+- 当前 `READY` 呼吸灯周期约 `4.5s`，LED 渲染线程约每 `20ms` 按单调时钟刷新一次；驱动只在亮度实际变化时发送 RGB，并以约 `250ms` 的低频做灯效补发、约 `1s` 的低频做串口探活，降低肉眼可见抖动和录制态丢闪。
 - 主循环轮询周期约 `20ms`。
 - 长按判定阈值 `800ms`，双键关机提示阈值 `2000ms`，双键执行阈值 `4000ms`。
 
@@ -174,8 +174,8 @@
 ## 8. 灯效、音频与关键路径
 ### 8.1 当前状态灯语义
 - `INIT`：初始化或落盘阶段，蓝灯。
-- `READY`：可录制，绿色呼吸灯。
-- `RECORDING`：录制中，绿色闪烁。
+- `READY`：可录制，绿色呼吸灯；当前基于单调时钟渲染，避免系统校时导致相位突变。
+- `RECORDING`：录制中，绿色闪烁；当前只在亮灭边沿和低频补发时下发 RGB，避免高频重复写串口造成丢闪。
 - `CALIB_PRE` / `CALIB_RUN` / `CALIB_DONE`：供 USB 导入与校准脚本复用。
 - `ERROR_1` ~ `ERROR_5`：红灯长短码，分别用于完整性失败到运行时错误。
 - `EXIT`：关机退出阶段。
@@ -269,6 +269,12 @@
 - 网线拔出：仅重启 `ugripper.service`
 - 网线插入：不重启 `ugripper.service`，也不执行其他额外动作
 - 若存在 `/run/ugripper_installing_from_usb.lock`，则跳过升级窗口内的边沿动作
+
+### 9.7 主包打包约束
+- 主包当前仍直接携带项目内 `.venv` 与 `.venv/.python-runtime`，部署后继续以 `/opt/ugripper/.venv/bin/python3` 作为首选解释器入口。
+- `build_deb.sh` 的 staging 目录默认按增量方式复用：项目主体与 `.venv` 分开同步，避免每次打包都先删除再完整重拷 `.venv`。
+- `build_deb.sh -q` 默认仍跳过 C++ 编译，并把 `dpkg-deb` 压缩级别降到更快的口径；如需在速度与包体积之间切换，可通过 `DPKG_DEB_COMPRESSOR`、`DPKG_DEB_LEVEL`、`DPKG_DEB_STRATEGY`、`DPKG_DEB_UNIFORM_COMPRESSION` 覆盖默认参数。
+- 若当前 worktree 未自带 `.venv` 或 `build`，打包脚本可通过 `PACKAGED_VENV_SOURCE`、`PACKAGED_BUILD_DIR` 复用外部已有产物；若最终 `.venv` 来源不存在，脚本会同步移除 staging 中旧的 `.venv`，此时包仍可生成，但不再满足部署后直接运行的交付约束。
 
 ## 10. 常用检查与排障入口
 ### 10.1 服务管理

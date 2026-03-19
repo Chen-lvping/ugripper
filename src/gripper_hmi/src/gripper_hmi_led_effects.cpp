@@ -149,7 +149,7 @@ GripperLedColor GripperLedEffectRenderer::render(const GripperLedEffect &effect,
         return GripperLedColor{0, 122, 255};
     case GripperLedEffectState::Ready:
     {
-        const double phase = static_cast<double>(epochMs % kReadyBreathPeriodMs) /
+        const double phase = static_cast<double>(steadyMs % kReadyBreathPeriodMs) /
                              static_cast<double>(kReadyBreathPeriodMs);
         // Keep the "deep breath" shape, but let it rise from full off and only
         // cap the maximum brightness lower than before.
@@ -160,7 +160,7 @@ GripperLedColor GripperLedEffectRenderer::render(const GripperLedEffect &effect,
     }
     case GripperLedEffectState::Recording:
     {
-        const bool on = (epochMs % kRecordingBlinkPeriodMs) < (kRecordingBlinkPeriodMs / 2);
+        const bool on = (steadyMs % kRecordingBlinkPeriodMs) < (kRecordingBlinkPeriodMs / 2);
         return on ? GripperLedColor{0, 255, 0} : GripperLedColor{0, 0, 0};
     }
     case GripperLedEffectState::CalibDone:

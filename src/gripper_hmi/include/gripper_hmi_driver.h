@@ -43,8 +43,8 @@ public:
     bool waitForKeyChange(int timeoutMs, GripperKeyReport *report);
 
     bool isKeyPressed(size_t keyIndex) const;
-    bool isActive(uint64_t timeoutMs = 500) const;
-    GripperHmiSnapshot getSnapshot(uint64_t activeTimeoutMs = 500) const;
+    bool isActive(uint64_t timeoutMs = 2000) const;
+    GripperHmiSnapshot getSnapshot(uint64_t activeTimeoutMs = 2000) const;
 
     const std::string &getName() const { return name_; }
     const std::string &getPort() const { return port_; }
@@ -76,6 +76,7 @@ private:
     GripperLedEffect ledEffect_{};
     GripperLedEffectRenderer ledRenderer_{};
     std::array<uint8_t, 3> lastRenderedColor_{255, 255, 255};
+    uint64_t lastLedRenderAtMs_ = 0;
     uint64_t lastStateRequestAtMs_ = 0;
     uint64_t lastLedWriteAtMs_ = 0;
 

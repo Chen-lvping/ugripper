@@ -9,8 +9,9 @@ namespace fs = std::filesystem;
 
 namespace
 {
-constexpr uint64_t kStateRequestIntervalMs = 20;
+constexpr uint64_t kStateRequestIntervalMs = 1000;
 constexpr uint64_t kLedRenderIntervalMs = GripperLedEffectRenderer::recommendedRenderIntervalMs();
+constexpr uint64_t kLedResendIntervalMs = 250;
 }
 
 static std::string resolveSerialPortPath(const std::string &configuredPort)
@@ -87,7 +88,8 @@ bool GripperHmiDriver::connect()
     ledEffect_ = {};
     pendingLedColor_ = GripperLedColor{0, 0, 0};
     lastRenderedColor_ = {255, 255, 255};
-    lastStateRequestAtMs_ = 0;
+    lastLedRenderAtMs_ = 0;
+    lastStateRequestAtMs_ = currentSteadyMs();
     lastLedWriteAtMs_ = 0;
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
@@ -299,34 +301,39 @@ void GripperHmiDriver::ioLoop()
                 std::chrono::system_clock::now().time_since_epoch())
                 .count());
         const bool stateDue = pendingStateRequest_ ||
-                              lastStateRequestAtMs_ == 0 ||
                               (nowMs - lastStateRequestAtMs_) >= kStateRequestIntervalMs;
-        const bool ledDue = lastLedWriteAtMs_ == 0 ||
-                            (nowMs - lastLedWriteAtMs_) >= kLedRenderIntervalMs;
+        const bool renderDue = !ledEffectEnabled_ ||
+                               lastLedRenderAtMs_ == 0 ||
+                               (nowMs - lastLedRenderAtMs_) >= kLedRenderIntervalMs;
 
         GripperLedColor desiredColor = pendingLedColor_;
         if (ledEffectEnabled_)
         {
-            desiredColor = ledRenderer_.render(ledEffect_, nowMs, epochMs);
-        }
-
-        const std::array<uint8_t, 3> desiredColorArray{desiredColor.red, desiredColor.green, desiredColor.blue};
-        const bool ledShouldSend = pendingLedUpdate_ ||
-                                   ledEffectDirty_ ||
-                                   desiredColorArray != lastRenderedColor_ ||
-                                   ledDue;
-
-        if (stateDue)
-        {
-            const auto frame = GripperHmiProtocol::buildBeepStateRequest();
-            pendingStateRequest_ = false;
-            if (writeFrameLocked(frame.data(), frame.size()))
+            if (renderDue || ledEffectDirty_)
             {
-                lastStateRequestAtMs_ = nowMs;
+                desiredColor = ledRenderer_.render(ledEffect_, nowMs, epochMs);
+                lastLedRenderAtMs_ = nowMs;
+            }
+            else
+            {
+                desiredColor = GripperLedColor{
+                    lastRenderedColor_[0],
+                    lastRenderedColor_[1],
+                    lastRenderedColor_[2],
+                };
             }
         }
 
-        if (ledShouldSend)
+        const std::array<uint8_t, 3> desiredColorArray{desiredColor.red, desiredColor.green, desiredColor.blue};
+        const bool colorChanged = desiredColorArray != lastRenderedColor_;
+        const bool ledResendDue = lastLedWriteAtMs_ == 0 ||
+                                  (nowMs - lastLedWriteAtMs_) >= kLedResendIntervalMs;
+        const bool ledPrioritySend = pendingLedUpdate_ || ledEffectDirty_ || colorChanged;
+        const bool ledShouldSend = ledPrioritySend || ledResendDue;
+
+        // Mirror the old driver_origin split: preserve LED edges first, then use
+        // low-frequency keepalive traffic so serial writes do not mask blink transitions.
+        if (ledPrioritySend)
         {
             const auto frame = GripperHmiProtocol::buildSetRgbCommand(desiredColor);
             if (writeFrameLocked(frame.data(), frame.size()))
@@ -338,7 +345,48 @@ void GripperHmiDriver::ioLoop()
             ledEffectDirty_ = false;
         }
 
-        ioCv_.wait_for(ioLock, std::chrono::milliseconds(2), [this]() {
+        if (stateDue)
+        {
+            const auto frame = GripperHmiProtocol::buildBeepStateRequest();
+            pendingStateRequest_ = false;
+            if (writeFrameLocked(frame.data(), frame.size()))
+            {
+                lastStateRequestAtMs_ = nowMs;
+            }
+        }
+
+        if (!ledPrioritySend && ledShouldSend)
+        {
+            const auto frame = GripperHmiProtocol::buildSetRgbCommand(desiredColor);
+            if (writeFrameLocked(frame.data(), frame.size()))
+            {
+                lastLedWriteAtMs_ = nowMs;
+                lastRenderedColor_ = desiredColorArray;
+            }
+            pendingLedUpdate_ = false;
+            ledEffectDirty_ = false;
+        }
+
+        uint64_t waitMs = kStateRequestIntervalMs;
+        if (ledEffectEnabled_)
+        {
+            const uint64_t renderWaitMs =
+                (lastLedRenderAtMs_ == 0 || (nowMs - lastLedRenderAtMs_) >= kLedRenderIntervalMs)
+                    ? 1
+                    : (kLedRenderIntervalMs - (nowMs - lastLedRenderAtMs_));
+            waitMs = std::min(waitMs, renderWaitMs);
+        }
+        if (lastStateRequestAtMs_ == 0 || (nowMs - lastStateRequestAtMs_) >= kStateRequestIntervalMs)
+        {
+            waitMs = 1;
+        }
+        else
+        {
+            waitMs = std::min(waitMs, kStateRequestIntervalMs - (nowMs - lastStateRequestAtMs_));
+        }
+        waitMs = std::max<uint64_t>(1, waitMs);
+
+        ioCv_.wait_for(ioLock, std::chrono::milliseconds(waitMs), [this]() {
             return !ioRunning_ || pendingStateRequest_ || pendingLedUpdate_;
         });
     }
