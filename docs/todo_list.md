@@ -66,11 +66,11 @@ id = "TASK-002"
 title = "在 U 盘中维护日志并参考 v1 实现方式"
 type = "feature"
 slug = "maintain-usb-logs-like-v1"
-status = "todo"
-enabled = true
+status = "done"
+enabled = false
 focus = false
 depends_on = []
-summary = "记录 U 盘日志维护需求，后续实现时参考 v1 的处理方式，当前暂不执行。"
+summary = "已合并回主目录，补回 v1 风格运行日志维护，待主线按真实 U 盘流程继续实机回归。"
 acceptance = [
   "明确 v1 中 U 盘日志维护的触发时机与保留策略",
   "在当前版本中补齐 U 盘日志维护能力",
@@ -80,6 +80,7 @@ acceptance = [
 notes = """
 用户要求先登记 TODO，不立即执行。
 后续实现时需要先对照 v1 的日志维护方案，确认目录结构、写入时机和清理策略。
+2026-03-19：task worktree 中的 `run_record.sh` / 文档变更已合并回主目录，独立 task 运行态可清理。
 """
 ```
 
