@@ -94,7 +94,10 @@ prepare_generated_dirs() {
 resolve_dpkg_deb_args() {
     DPKG_DEB_BUILD_ARGS=(--root-owner-group)
 
-    if [ "$QUICK_MODE" = true ] && [ -z "$DPKG_DEB_LEVEL" ]; then
+    if [ -z "$DPKG_DEB_COMPRESSOR" ]; then
+        DPKG_DEB_COMPRESSOR="xz"
+    fi
+    if [ -z "$DPKG_DEB_LEVEL" ]; then
         DPKG_DEB_LEVEL="1"
     fi
 
@@ -141,6 +144,7 @@ else
     echo "🐢 标准构建模式 (Standard Mode)"
     echo "   - 执行全量编译"
     echo "   - 打包 staging 改为增量复用，仅覆盖变化内容"
+    echo "   - 默认使用 dpkg-deb xz -1 压缩口径"
 fi
 
 # ===============================================

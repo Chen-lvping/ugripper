@@ -36,6 +36,8 @@ constexpr uint64_t kDualLongPressThresholdMs = 4000;
 constexpr uint64_t kShutdownPromptThresholdMs = 2000;
 constexpr uint64_t kAudioPlayerRestartIntervalMs = 2000;
 constexpr uint64_t kAudioPlayerReadyGraceMs = 3000;
+constexpr uint64_t kHealthCheckIntervalMs = 1000;
+constexpr uint64_t kHmiActiveTimeoutMs = 2500;
 constexpr double kMinReasonableVideoSpanSec = 0.2;
 constexpr double kMaxVideoSpanGapSec = 5.0;
 constexpr int kVideoProbeTimeoutMs = 1500;
@@ -55,6 +57,21 @@ constexpr std::array<EpisodeVideoArtifact, 8> kEpisodeVideoArtifacts = {{
     {"left_tcam_r", "left_tcam_r.mkv"},
     {"right_tcam_l", "right_tcam_l.mkv"},
     {"right_tcam_r", "right_tcam_r.mkv"},
+}};
+
+constexpr std::array<const char *, 12> kCriticalDevicePaths = {{
+    "/dev/right_cam_main",
+    "/dev/left_cam_main",
+    "/dev/right_stereo",
+    "/dev/left_stereo",
+    "/dev/right_tcam_l",
+    "/dev/right_tcam_r",
+    "/dev/left_tcam_l",
+    "/dev/left_tcam_r",
+    "/dev/right_encoder",
+    "/dev/left_encoder",
+    "/dev/right_imu",
+    "/dev/left_imu",
 }};
 
 struct VideoProbeResult
@@ -219,6 +236,20 @@ std::string joinArguments(const std::vector<std::string> &arguments)
             stream << ' ';
         }
         stream << arguments[index];
+    }
+    return stream.str();
+}
+
+std::string joinStrings(const std::vector<std::string> &items, const char *separator)
+{
+    std::ostringstream stream;
+    for (size_t index = 0; index < items.size(); ++index)
+    {
+        if (index > 0)
+        {
+            stream << separator;
+        }
+        stream << items[index];
     }
     return stream.str();
 }
@@ -814,6 +845,7 @@ int RecordRuntime::run()
     {
         const uint64_t loopStartMs = currentSteadyMs();
         maintainAudioPlayer();
+        monitorHardwareHealth();
 
         ButtonSnapshot buttons;
         panelManager_.poll(options_.pollMs, &buttons);
@@ -1165,6 +1197,12 @@ bool RecordRuntime::handleShortUpAction()
     std::cout << "[INFO] BTN_UP short press" << std::endl;
     if (!isRecording_)
     {
+        if (healthStatus_ == HealthStatus::Error)
+        {
+            std::cout << "[WARN] ignore start recording while hardware health is in error state" << std::endl;
+            sendAudioCommand("error");
+            return false;
+        }
         return startRecording(false);
     }
     return stopRecording(false, "BTN_UP short stop");
@@ -1175,6 +1213,12 @@ bool RecordRuntime::handleShortDownAction()
     std::cout << "[INFO] BTN_DOWN short press" << std::endl;
     if (!isRecording_)
     {
+        if (healthStatus_ == HealthStatus::Error)
+        {
+            std::cout << "[WARN] ignore reset recording while hardware health is in error state" << std::endl;
+            sendAudioCommand("error");
+            return false;
+        }
         if (lastEpisodeDir_.empty() || !fs::exists(lastEpisodeDir_))
         {
             std::cout << "[INFO] no previous episode, BTN_DOWN reset ignored" << std::endl;
@@ -1469,6 +1513,126 @@ bool RecordRuntime::checkRecorderProcesses()
         std::cerr << "[ERROR] sensor recorder exited, last_exit=" << sensorRecorder_.lastExitCode() << std::endl;
     }
     return cameraOk && sensorOk;
+}
+
+std::optional<RecordRuntime::HealthFault> RecordRuntime::evaluateHardwareHealth() const
+{
+    if (access(options_.diskRoot.c_str(), W_OK) != 0)
+    {
+        return HealthFault{
+            LedState::Error1,
+            "disk_not_writable",
+            "Disk not writable or mount lost: " + options_.diskRoot,
+        };
+    }
+
+    std::vector<std::string> missingDevicePaths;
+    for (const char *path : kCriticalDevicePaths)
+    {
+        if (path == nullptr || *path == '\0')
+        {
+            continue;
+        }
+        if (!fs::exists(path))
+        {
+            missingDevicePaths.emplace_back(path);
+        }
+    }
+    if (!missingDevicePaths.empty())
+    {
+        return HealthFault{
+            LedState::Error2,
+            "critical_devices_missing",
+            "Critical device nodes missing: " + joinStrings(missingDevicePaths, ", "),
+        };
+    }
+
+    const auto hmiHealth = panelManager_.getHealthSnapshot(kHmiActiveTimeoutMs);
+    if (!hmiHealth.hasConnectedDevice)
+    {
+        return HealthFault{
+            LedState::Error2,
+            "hmi_all_disconnected",
+            "All HMI ports are disconnected",
+        };
+    }
+    if (!hmiHealth.disconnectedPorts.empty())
+    {
+        return HealthFault{
+            LedState::Error2,
+            "hmi_ports_disconnected",
+            "HMI ports disconnected: " + joinStrings(hmiHealth.disconnectedPorts, ", "),
+        };
+    }
+    if (!hmiHealth.inputConnected)
+    {
+        return HealthFault{
+            LedState::Error2,
+            "hmi_input_disconnected",
+            "Input HMI port disconnected",
+        };
+    }
+    if (!hmiHealth.inputActive)
+    {
+        return HealthFault{
+            LedState::Error2,
+            "hmi_input_inactive",
+            "Input HMI port inactive for more than " + std::to_string(kHmiActiveTimeoutMs) + "ms",
+        };
+    }
+    if (!hmiHealth.inactivePorts.empty())
+    {
+        return HealthFault{
+            LedState::Error2,
+            "hmi_ports_inactive",
+            "HMI ports inactive: " + joinStrings(hmiHealth.inactivePorts, ", "),
+        };
+    }
+
+    return std::nullopt;
+}
+
+void RecordRuntime::monitorHardwareHealth()
+{
+    const uint64_t nowMs = currentSteadyMs();
+    if ((nowMs - lastHealthCheckMs_) < kHealthCheckIntervalMs)
+    {
+        return;
+    }
+    lastHealthCheckMs_ = nowMs;
+
+    const auto fault = evaluateHardwareHealth();
+    if (fault.has_value())
+    {
+        const std::string errorKey = fault->key + "|" + fault->detail;
+        if (healthStatus_ != HealthStatus::Error || lastHealthErrorKey_ != errorKey)
+        {
+            std::cerr << "[ERROR] hardware health fault (" << fault->key << "): "
+                      << fault->detail << std::endl;
+            setLedState(fault->ledState);
+            sendAudioCommand("error");
+        }
+        healthStatus_ = HealthStatus::Error;
+        lastHealthErrorKey_ = errorKey;
+        return;
+    }
+
+    if (healthStatus_ == HealthStatus::Error)
+    {
+        std::cout << "[INFO] hardware health recovered" << std::endl;
+        if (isRecording_)
+        {
+            setLedState(LedState::Recording);
+        }
+        else
+        {
+            setLedState(LedState::Ready);
+            sendAudioCommand("ready");
+        }
+    }
+
+    healthStatus_ = HealthStatus::Ok;
+    lastHealthErrorKey_.clear();
 }
 
 void RecordRuntime::setLedState(LedState state, double progress)
@@ -1817,6 +1981,52 @@ bool RecordRuntime::GripperPanelManager::hasConnectedDevice() const
         }
     }
     return false;
+}
+
+RecordRuntime::GripperPanelManager::HealthSnapshot RecordRuntime::GripperPanelManager::getHealthSnapshot(uint64_t activeTimeoutMs) const
+{
+    HealthSnapshot health;
+
+    for (size_t index = 0; index < drivers_.size(); ++index)
+    {
+        const auto &driver = drivers_[index];
+        if (driver == nullptr)
+        {
+            continue;
+        }
+
+        const bool connected = driver->isConnected();
+        if (connected)
+        {
+            health.hasConnectedDevice = true;
+        }
+        else
+        {
+            health.disconnectedPorts.push_back(driver->getPort());
+        }
+
+        if (index == inputDriverIndex_)
+        {
+            health.inputConnected = connected;
+        }
+
+        if (!connected)
+        {
+            continue;
+        }
+
+        const auto snapshot = driver->getSnapshot(activeTimeoutMs);
+        if (!snapshot.active)
+        {
+            health.inactivePorts.push_back(driver->getPort());
+        }
+        if (index == inputDriverIndex_)
+        {
+            health.inputActive = snapshot.active;
+        }
+    }
+
+    return health;
 }
 
 void RecordRuntime::GripperPanelManager::maybeReconnectDriver(size_t index)

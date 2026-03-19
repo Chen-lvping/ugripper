@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -96,10 +97,20 @@ private:
     class GripperPanelManager
     {
     public:
+        struct HealthSnapshot
+        {
+            bool hasConnectedDevice = false;
+            bool inputConnected = false;
+            bool inputActive = false;
+            std::vector<std::string> disconnectedPorts;
+            std::vector<std::string> inactivePorts;
+        };
+
         bool connect(const std::vector<std::string> &ports);
         void disconnect();
         bool hasConnectedDevice() const;
         bool poll(int timeoutMs, ButtonSnapshot *snapshot);
+        HealthSnapshot getHealthSnapshot(uint64_t activeTimeoutMs) const;
         void setLedEffect(const GripperLedEffect &effect);
         void setLedColor(uint8_t red, uint8_t green, uint8_t blue);
         void turnOff();
@@ -190,6 +201,20 @@ private:
         bool shutdownPromptPlayed = false;
     };
 
+    enum class HealthStatus
+    {
+        Unknown,
+        Ok,
+        Error,
+    };
+
+    struct HealthFault
+    {
+        LedState ledState = LedState::Error5;
+        std::string key;
+        std::string detail;
+    };
+
     static GripperLedEffect makeLedEffect(LedState state, double progress = 0.0);
     static std::string readEnvValue(const std::string &envFile, const std::string &key);
     static std::string queryPackageVersion(const std::string &packageName);
@@ -211,6 +236,8 @@ private:
     bool recordAudioClip(const std::string &audioType, bool monitorUpButton);
     bool attachPendingPreAudio(const std::string &episodeDir);
     bool checkRecorderProcesses();
+    std::optional<HealthFault> evaluateHardwareHealth() const;
+    void monitorHardwareHealth();
     bool startAudioPlayer();
     void stopAudioPlayer();
     void maintainAudioPlayer();
@@ -233,6 +260,9 @@ private:
     std::string lastEpisodeDir_;
     std::string pendingPreAudioFile_;
     std::string audioRecoveryCommand_;
+    HealthStatus healthStatus_ = HealthStatus::Unknown;
+    std::string lastHealthErrorKey_;
+    uint64_t lastHealthCheckMs_ = 0;
     bool audioPlayerStarted_ = false;
     uint64_t lastAudioPlayerStartAttemptMs_ = 0;
     std::unique_ptr<EpisodeManager> episodeManager_;

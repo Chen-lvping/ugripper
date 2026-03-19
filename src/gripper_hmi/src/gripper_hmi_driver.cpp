@@ -80,7 +80,7 @@ bool GripperHmiDriver::connect()
     sp_flush(serialPort_, SP_BUF_BOTH);
 
     rxBuffer_.clear();
-    pendingStateRequest_ = false;
+    pendingStateRequest_ = true;
     pendingLedUpdate_ = false;
     pendingLedColor_ = {};
     ledEffectEnabled_ = false;
@@ -89,7 +89,7 @@ bool GripperHmiDriver::connect()
     pendingLedColor_ = GripperLedColor{0, 0, 0};
     lastRenderedColor_ = {255, 255, 255};
     lastLedRenderAtMs_ = 0;
-    lastStateRequestAtMs_ = currentSteadyMs();
+    lastStateRequestAtMs_ = 0;
     lastLedWriteAtMs_ = 0;
     {
         std::lock_guard<std::mutex> lock(stateMutex_);

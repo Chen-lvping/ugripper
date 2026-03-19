@@ -71,14 +71,16 @@ rm -rf "$TMP_PY_DIR"
 
 当前 `build_deb.sh` 的打包 staging 默认按 `rsync` 增量复用：
 - 项目主体与 `.venv` 分两次同步，避免每次都先删掉再重拷 `.venv`。
-- `-q/--quick` 默认继续跳过 C++ 编译，并额外把 `dpkg-deb` 压缩级别降到 `-z1`，优先缩短出包时间。
+- 默认 `dpkg-deb` 压缩口径改为 `xz -1`，在当前包体和构建速度之间取更平衡的默认值。
+- `-q/--quick` 默认继续跳过 C++ 编译，并沿用 `xz -1` 的较快压缩口径，优先缩短出包时间。
 - 如需手动覆盖压缩参数，可在打包前设置 `DPKG_DEB_COMPRESSOR`、`DPKG_DEB_LEVEL`、`DPKG_DEB_STRATEGY`、`DPKG_DEB_UNIFORM_COMPRESSION`。
 - 如需直接复用仓库外或主目录已有的 `.venv` / `build` 产物，可设置 `PACKAGED_VENV_SOURCE`、`PACKAGED_BUILD_DIR`。
 
 示例：
 
 ```bash
-DPKG_DEB_LEVEL=1 ./build_deb.sh -q
+./build_deb.sh
+./build_deb.sh -q
 DPKG_DEB_COMPRESSOR=xz DPKG_DEB_LEVEL=3 ./build_deb.sh
 PACKAGED_VENV_SOURCE=/home/ubuntu/proj/ugripper_v2/.venv \
 PACKAGED_BUILD_DIR=/home/ubuntu/proj/ugripper_v2/build \
