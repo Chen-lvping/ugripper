@@ -16,6 +16,7 @@ from pulse_audio_utils import (
     PulseAudioTargetNotFoundError,
     configure_pulse_audio_env,
     get_forced_usb_audio_target,
+    is_supported_usb_audio_input_device,
     probe_forced_usb_audio_target,
     pulse_audio_env,
 )
@@ -82,13 +83,13 @@ def _find_event_device() -> Path:
             key, value = line.split("=", 1)
             properties[key.strip()] = value.strip()
 
-        if properties.get("ID_VENDOR_ID") != "0020" or properties.get("ID_MODEL_ID") != "0b21":
+        if not is_supported_usb_audio_input_device(properties):
             continue
         if properties.get("ID_INPUT_KEY") != "1":
             continue
         return candidate
 
-    raise FileNotFoundError("USB headset key input device not found")
+    raise FileNotFoundError("supported USB headset key input device not found")
 
 
 def _run_pactl(*args: str) -> None:
@@ -103,14 +104,14 @@ def _handle_volume_key(code: int) -> None:
     if code == KEY_VOLUMEUP:
         _run_pactl("set-sink-mute", sink, "0")
         _run_pactl("set-sink-volume", sink, f"+{VOLUME_STEP}")
-        print(f"[INFO] USB headset volume up -> {sink}", flush=True)
+        print(f"[INFO] preferred audio volume up -> {sink}", flush=True)
     elif code == KEY_VOLUMEDOWN:
         _run_pactl("set-sink-mute", sink, "0")
         _run_pactl("set-sink-volume", sink, f"-{VOLUME_STEP}")
-        print(f"[INFO] USB headset volume down -> {sink}", flush=True)
+        print(f"[INFO] preferred audio volume down -> {sink}", flush=True)
     elif code == KEY_MUTE:
         _run_pactl("set-sink-mute", sink, "toggle")
-        print(f"[INFO] USB headset mute toggle -> {sink}", flush=True)
+        print(f"[INFO] preferred audio mute toggle -> {sink}", flush=True)
 
 
 class AudioPlayer:
@@ -167,7 +168,7 @@ class AudioPlayer:
         self.key_thread.start()
         self.backend_thread.start()
         print(f"Audio language: {self.lang}; search dirs: {self.audio_dirs}", flush=True)
-        print("Audio daemon started. Waiting for USB headset and commands...", flush=True)
+        print("Audio daemon started. Waiting for preferred audio device and commands...", flush=True)
 
     def _ensure_pipe(self):
         try:
@@ -285,9 +286,9 @@ class AudioPlayer:
                 had_backend = self.target is not None or self.pygame is not None
                 self._teardown_audio_backend_locked()
             if had_backend:
-                print("[WARN] USB headset disappeared from PulseAudio, audio playback paused", flush=True)
+                print("[WARN] no usable PulseAudio sink available, audio playback paused", flush=True)
             elif log_missing and not self.backend_wait_logged:
-                print("[WARN] audio backend waiting for USB headset sink", flush=True)
+                print("[WARN] audio backend waiting for a usable PulseAudio sink", flush=True)
             self.backend_wait_logged = True
             return False
 
@@ -299,7 +300,7 @@ class AudioPlayer:
             target = setup_audio_device()
         except (PulseAudioTargetNotFoundError, PulseAudioProbeError) as exc:
             if log_missing and not self.backend_wait_logged:
-                print(f"[WARN] audio backend waiting for USB headset sink: {exc}", flush=True)
+                print(f"[WARN] audio backend waiting for a usable PulseAudio target: {exc}", flush=True)
             self.backend_wait_logged = True
             return False
 
@@ -316,11 +317,12 @@ class AudioPlayer:
             )
         if previous_sink and previous_sink != target.sink.name:
             print(
-                f"[INFO] USB headset sink changed: {previous_sink} -> {target.sink.name}",
+                f"[INFO] preferred audio sink changed: {previous_sink} -> {target.sink.name}",
                 flush=True,
             )
+        selection_label = "USB headset" if target.is_usb else "system default"
         print(
-            f"[INFO] audio backend bound to USB headset sink: {target.sink.name} "
+            f"[INFO] audio backend bound to {selection_label} sink: {target.sink.name} "
             f"({target.sink.description})",
             flush=True,
         )
@@ -394,7 +396,7 @@ class AudioPlayer:
 
     def play_sound(self, sound_name: str):
         if not self.refresh_audio_backend(log_missing=True):
-            print(f"[WARN] skip sound because USB headset is not ready: {sound_name}", flush=True)
+            print(f"[WARN] skip sound because no audio backend is ready: {sound_name}", flush=True)
             return
 
         looping = sound_name in LOOPING_SOUNDS

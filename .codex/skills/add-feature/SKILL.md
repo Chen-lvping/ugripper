@@ -1,6 +1,6 @@
 ---
 name: add-feature
-description: 为 ugripper 项目执行新增功能（add feature）类需求的标准工作流。用于用户提出“add feature / 加功能 / 新增功能”等请求时：先阅读 docs/agent/overview.md 理解当前实现，再先给实现计划并等待确认，然后以 heredoc 方式修改代码，并同步创建或维护 docs 文档；收尾阶段需根据用户指示或改动复杂度决定是否更新 build_deb.sh 与 usb_updater_build.sh 版本号，并默认联动 auto-release-deb 完成建议编译。
+description: 为 ugripper 项目执行新增功能（add feature）类需求的标准工作流。用于用户提出“add feature / 加功能 / 新增功能”等请求时：先阅读 docs/agent/overview.md 理解当前实现，再先给实现计划并等待确认，然后以 heredoc 方式修改代码，并同步创建或维护 docs 文档；收尾阶段默认沿用 build 脚本里的现有版本打包，只有用户明确要求时才更新 build_deb.sh 与 usb_updater_build.sh 版本号，并默认联动 auto-release-deb 完成建议编译。
 ---
 
 # add-feature
@@ -10,7 +10,7 @@ description: 为 ugripper 项目执行新增功能（add feature）类需求的�
 1. 先阅读 `docs/agent/overview.md`，再开始设计方案。
 2. 输出“实现计划 + 影响文件列表 + 文档同步计划”，进入等待开工状态。
 3. 只有收到用户**明确的确认并开始指令**后，才开始改代码与文档。
-4. 代码改完后，先做版本号决策（是否修改 `build_deb.sh` / `usb_updater_build.sh`）。
+4. 代码改完后，先确认用户是否明确要求修改版本号；未明确要求时，默认沿用当前脚本版本。
 5. 功能修改确认后，默认调用 `auto-release-deb`（由该 skill 完成判定与编译）。
 6. 编译完成后，再给最终汇报。
 
@@ -40,26 +40,26 @@ description: 为 ugripper 项目执行新增功能（add feature）类需求的�
    - `build_deb.sh` 的 `VERSION`（ugripper 主包）
    - `usb_updater_build.sh` 的 `PKG_VERSION`（ugripper-usb-updater）
 2. 决策优先级：
-   - 用户明确指示 > 自动判断。
-3. 自动判断（仅在用户未明确指示时）：
-   - 仅文档/注释/skill 元数据等非功能改动：默认不改版本号。
-   - 仅影响主包功能或运行逻辑：只改 `build_deb.sh`。
-   - 仅影响 updater（如 `auto_update/*`、`usb_updater_build.sh`）：只改 `usb_updater_build.sh`。
-   - 同时影响主包与 updater：两个版本都改。
-4. 升级级别：
+   - 用户明确指示 > 默认不修改。
+3. 默认行为（用户未明确要求改版本号时）：
+   - 不修改任何版本字段。
+   - 直接沿用 `build_deb.sh` / `usb_updater_build.sh` 里的当前版本执行打包。
+4. 只有在用户明确要求“更新版本号 / bump 版本 / 发新版本”时，才执行版本修改。
+5. 升级级别：
    - 默认 `.z`（patch）。
    - 跨模块功能扩展、需要运维侧额外关注时可升 `.y`（minor）。
    - 明确不兼容变更才升 `.x`（major）。
    - 无充分依据时，一律回落 `.z`。
-5. 修改方式（沿用原 auto-release-deb 的 semver 规则）：
+6. 修改方式（沿用原 auto-release-deb 的 semver 规则）：
    - `bash .codex/skills/add-feature/scripts/bump_release_versions.sh --target ugripper --bump .z`
    - `bash .codex/skills/add-feature/scripts/bump_release_versions.sh --target updater --bump .z`
    - `bash .codex/skills/add-feature/scripts/bump_release_versions.sh --target both --bump .y`
-   - 不改版本号：`bash .codex/skills/add-feature/scripts/bump_release_versions.sh --no-bump --reason "docs-only change"`
-6. 汇报要求：
+   - 不改版本号：直接说明“沿用当前脚本版本打包”，无需调用 bump 脚本。
+7. 汇报要求：
    - 必须说明“改/不改版本号”的决策理由。
    - 若有修改，必须给出每个脚本的旧版本 -> 新版本。
-7. 构建范围判定与编译执行统一由 `auto-release-deb` 负责；`add-feature` 不在内部重复判定或重复编译。
+   - 若未修改，必须明确说明“沿用的脚本版本分别是什么”。
+8. 构建范围判定与编译执行统一由 `auto-release-deb` 负责；`add-feature` 不在内部重复判定或重复编译。
 
 ## 发布与编译联动规则（新增）
 

@@ -8,7 +8,11 @@ import sys
 import time
 from pathlib import Path
 
-from pulse_audio_utils import get_forced_usb_audio_target, pulse_audio_env
+from pulse_audio_utils import (
+    get_forced_usb_audio_target,
+    is_supported_usb_audio_input_device,
+    pulse_audio_env,
+)
 
 INPUT_EVENT_FORMAT = "llHHI"
 INPUT_EVENT_SIZE = struct.calcsize(INPUT_EVENT_FORMAT)
@@ -42,13 +46,13 @@ def _find_event_device() -> Path:
             key, value = line.split("=", 1)
             props[key.strip()] = value.strip()
 
-        if props.get("ID_VENDOR_ID") != "0020" or props.get("ID_MODEL_ID") != "0b21":
+        if not is_supported_usb_audio_input_device(props):
             continue
         if props.get("ID_INPUT_KEY") != "1":
             continue
         return candidate
 
-    raise FileNotFoundError("USB headset key input device not found")
+    raise FileNotFoundError("supported USB headset key input device not found")
 
 
 def _run_pactl(*args: str) -> None:

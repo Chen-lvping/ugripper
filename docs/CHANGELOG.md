@@ -5,6 +5,7 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased - 2026-03-16
+- 音频目标选择从“强制单一 USB 耳机”扩展为“优先受支持 USB 耳机，否则回退系统默认声卡”：当前同时兼容 `0020:0b21 (liyuany USB Audio)` 与 `0023:0b23 (liyuany USB PnP Sound Device)`，耳机热插入后会自动从默认声卡切回耳机，拔出后则回退默认播放/录音设备。
 - 数据盘启动链路进一步收敛：`pack_script/postinst` 现在会在安装/升级 `ugripper` 时自动把现场 `/home/user/lib/exfat.ko` 复制进 `/lib/modules/<kernel>/extra/` 并写入 `/etc/modules-load.d/ugripper-exfat.conf`，让已生产设备仅靠升级主包也能在后续开机更早加载 `exfat`；同时 `config/99-fixed-usb-map.rules` 改为直接使用 `systemd-mount` 固定挂载 `/mnt/data_disk`，并在 USB 分区 `remove` 事件里显式卸载清理，再通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@<dev>.service`，不再把 `mount_data_disk.sh` 作为主路径挂载协调器。
 - `usb-auto-update@.service` 现在显式排在 `mnt-data_disk.mount` 后启动，`usb_auto_update.sh` 等待 `/mnt/data_disk` 挂上当前设备的重试窗口也从 `3s` 提升到 `6s`，降低开机或热插拔时 mount/updater 并发启动导致的扫描超时。
 - 修复提示音重叠播放：`audio/audio_play.py` 改为“后触发抢占前触发”的提示音语义，新的 one-shot 或 loop 命令到达后会立即打断当前播放，`writing` / `calibrating` 等 loop 提示不再与 `recording_stop`、`ready`、`validation_failed` 等关键语音叠播；`record_runtime` 也会在守护进程恢复后按当前阶段补发对应提示，避免 `writing` 阶段误播 `ready`。

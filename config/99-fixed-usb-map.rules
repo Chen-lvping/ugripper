@@ -121,7 +121,9 @@ ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86
 # ========================
 # 3. USB audio headset
 # ========================
-# v2 音频改为外接 USB 耳机（liyuany USB Audio, 0020:0b21）。
+# v2 音频优先使用受支持的外接 USB 耳机；当前兼容两款 liyuany 设备：
+# - USB Audio             (0020:0b21)
+# - USB PnP Sound Device  (0023:0b23)
 # 这里按设备指纹匹配，不绑定具体物理口；插在板载 4 个 USB 口任意一个都能识别。
 SUBSYSTEM=="usb", ATTR{idVendor}=="0020", ATTR{idProduct}=="0b21",   MODE:="0666", TAG+="uaccess"
 SUBSYSTEM=="sound", KERNEL=="card*", ATTRS{idVendor}=="0020", ATTRS{idProduct}=="0b21",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_card"
@@ -129,6 +131,12 @@ SUBSYSTEM=="sound", KERNEL=="controlC*", ATTRS{idVendor}=="0020", ATTRS{idProduc
 SUBSYSTEM=="sound", KERNEL=="pcmC*D*p", ATTRS{idVendor}=="0020", ATTRS{idProduct}=="0b21",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_playback"
 SUBSYSTEM=="sound", KERNEL=="pcmC*D*c", ATTRS{idVendor}=="0020", ATTRS{idProduct}=="0b21",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_capture"
 SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="0020", ATTRS{idProduct}=="0b21", MODE:="0666", SYMLINK+="input/ugripper_usb_audio_keys"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0023", ATTR{idProduct}=="0b23",   MODE:="0666", TAG+="uaccess"
+SUBSYSTEM=="sound", KERNEL=="card*", ATTRS{idVendor}=="0023", ATTRS{idProduct}=="0b23",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_card"
+SUBSYSTEM=="sound", KERNEL=="controlC*", ATTRS{idVendor}=="0023", ATTRS{idProduct}=="0b23",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_control"
+SUBSYSTEM=="sound", KERNEL=="pcmC*D*p", ATTRS{idVendor}=="0023", ATTRS{idProduct}=="0b23",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_playback"
+SUBSYSTEM=="sound", KERNEL=="pcmC*D*c", ATTRS{idVendor}=="0023", ATTRS{idProduct}=="0b23",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_capture"
+SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="0023", ATTRS{idProduct}=="0b23", MODE:="0666", SYMLINK+="input/ugripper_usb_audio_keys"
 
 # ========================
 # 2. Storage devices

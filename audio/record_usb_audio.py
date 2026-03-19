@@ -24,7 +24,7 @@ def forward_signal(signum: int, _frame) -> None:
 def main() -> int:
     global parecord_process
 
-    parser = argparse.ArgumentParser(description="Record audio from the ugripper USB headset microphone via PulseAudio.")
+    parser = argparse.ArgumentParser(description="Record audio from the preferred PulseAudio source.")
     parser.add_argument("--output", required=True, type=Path, help="Target wav path")
     parser.add_argument("--seconds", type=float, default=0.0, help="Optional max duration; <=0 means wait for SIGINT/SIGTERM")
     args = parser.parse_args()

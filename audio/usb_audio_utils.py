@@ -6,13 +6,27 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-USB_AUDIO_VENDOR_ID = "0020"
-USB_AUDIO_PRODUCT_ID = "0b21"
-USB_AUDIO_VENDOR_NAME = "liyuany"
-USB_AUDIO_PRODUCT_NAME = "USB Audio"
+SUPPORTED_USB_AUDIO_DEVICES = (
+    {
+        "vendor_id": "0020",
+        "product_id": "0b21",
+        "vendor_name": "liyuany",
+        "product_name": "USB Audio",
+    },
+    {
+        "vendor_id": "0023",
+        "product_id": "0b23",
+        "vendor_name": "liyuany",
+        "product_name": "USB PnP Sound Device",
+    },
+)
 USB_AUDIO_CONTROL_SYMLINK = Path("/dev/snd/ugripper_usb_audio_control")
 USB_AUDIO_PLAYBACK_SYMLINK = Path("/dev/snd/ugripper_usb_audio_playback")
 USB_AUDIO_CAPTURE_SYMLINK = Path("/dev/snd/ugripper_usb_audio_capture")
+
+
+def _normalize_usb_name(value: str) -> str:
+    return value.lower().replace(" ", "_").replace("-", "_")
 
 
 @dataclass
@@ -77,22 +91,26 @@ def require_usb_audio_device() -> UsbAudioDevice:
     if not usb_info:
         raise UsbAudioProbeError("USB audio ALSA symlink exists but udev USB metadata is unavailable")
 
-    expected = {
-        "ID_VENDOR_ID": USB_AUDIO_VENDOR_ID,
-        "ID_MODEL_ID": USB_AUDIO_PRODUCT_ID,
-    }
-    for key, value in expected.items():
-        if usb_info.get(key) != value:
-            raise UsbAudioProbeError(
-                f"USB audio metadata mismatch for {key}: expected {value}, got {usb_info.get(key)}"
-            )
+    vendor_id = (usb_info.get("ID_VENDOR_ID") or "").lower()
+    model_id = (usb_info.get("ID_MODEL_ID") or "").lower()
+    vendor_name = (usb_info.get("ID_VENDOR") or usb_info.get("ID_VENDOR_FROM_DATABASE") or "").lower()
+    model_name = _normalize_usb_name(usb_info.get("ID_MODEL") or usb_info.get("ID_MODEL_FROM_DATABASE") or "")
 
-    vendor_name = usb_info.get("ID_VENDOR") or usb_info.get("ID_VENDOR_FROM_DATABASE") or ""
-    model_name = usb_info.get("ID_MODEL") or usb_info.get("ID_MODEL_FROM_DATABASE") or ""
-    if vendor_name and USB_AUDIO_VENDOR_NAME.lower() not in vendor_name.lower():
-        raise UsbAudioProbeError(f"USB audio vendor mismatch: expected {USB_AUDIO_VENDOR_NAME}, got {vendor_name}")
-    if model_name and "usb_audio" not in model_name.lower() and USB_AUDIO_PRODUCT_NAME.lower() not in model_name.lower():
-        raise UsbAudioProbeError(f"USB audio product mismatch: expected {USB_AUDIO_PRODUCT_NAME}, got {model_name}")
+    for supported in SUPPORTED_USB_AUDIO_DEVICES:
+        if vendor_id == supported["vendor_id"] and model_id == supported["product_id"]:
+            return device
+        if (
+            supported["vendor_name"].lower() in vendor_name
+            and _normalize_usb_name(supported["product_name"]) in model_name
+        ):
+            return device
+
+    supported_list = ", ".join(
+        f'{item["vendor_id"]}:{item["product_id"]}' for item in SUPPORTED_USB_AUDIO_DEVICES
+    )
+    raise UsbAudioProbeError(
+        f"USB audio metadata mismatch: expected one of {supported_list}, got {vendor_id}:{model_id}"
+    )
 
     return device
 

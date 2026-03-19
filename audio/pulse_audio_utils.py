@@ -7,12 +7,24 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-USB_AUDIO_VENDOR_ID = "0020"
-USB_AUDIO_PRODUCT_ID = "0b21"
-USB_AUDIO_VENDOR_NAME = "liyuany"
-USB_AUDIO_PRODUCT_NAME = "USB Audio"
-USB_AUDIO_SINK_PREFIX = "alsa_output.usb-liyuany_USB_Audio"
-USB_AUDIO_SOURCE_PREFIX = "alsa_input.usb-liyuany_USB_Audio"
+SUPPORTED_USB_AUDIO_DEVICES = (
+    {
+        "vendor_id": "0020",
+        "product_id": "0b21",
+        "vendor_name": "liyuany",
+        "product_name": "USB Audio",
+        "sink_prefix": "alsa_output.usb-liyuany_USB_Audio",
+        "source_prefix": "alsa_input.usb-liyuany_USB_Audio",
+    },
+    {
+        "vendor_id": "0023",
+        "product_id": "0b23",
+        "vendor_name": "liyuany",
+        "product_name": "USB PnP Sound Device",
+        "sink_prefix": "alsa_output.usb-liyuany_USB_PnP_Sound_Device",
+        "source_prefix": "alsa_input.usb-liyuany_USB_PnP_Sound_Device",
+    },
+)
 DEFAULT_DISABLED_MODULES = ("module-suspend-on-idle",)
 MODULE_APPLY_SETTLE_SEC = 0.2
 
@@ -30,6 +42,7 @@ class PulseAudioTarget:
     sink: PulseAudioEndpoint
     source: Optional[PulseAudioEndpoint]
     server: Optional[str]
+    is_usb: bool = False
     unloaded_modules: tuple[str, ...] = ()
 
 
@@ -119,20 +132,92 @@ def _card_from_properties(properties: dict) -> Optional[int]:
         return None
 
 
-def _matches_target(properties: dict, endpoint_name: str, prefix: str) -> bool:
-    if properties.get("device.bus") == "usb" and \
-       properties.get("device.vendor.id") == USB_AUDIO_VENDOR_ID and \
-       properties.get("device.product.id") == USB_AUDIO_PRODUCT_ID:
-        return True
+def _matches_supported_usb_audio_device(properties: dict, endpoint_name: str = "") -> bool:
+    endpoint_name = endpoint_name or ""
+    vendor_id = (
+        properties.get("device.vendor.id")
+        or properties.get("ID_VENDOR_ID")
+        or ""
+    ).lower()
+    product_id = (
+        properties.get("device.product.id")
+        or properties.get("ID_MODEL_ID")
+        or ""
+    ).lower()
+    vendor_name = (
+        properties.get("device.vendor.name")
+        or properties.get("device.vendor.name".upper())
+        or properties.get("ID_VENDOR")
+        or properties.get("ID_VENDOR_FROM_DATABASE")
+        or ""
+    ).lower()
+    product_name = (
+        properties.get("device.product.name")
+        or properties.get("device.product.name".upper())
+        or properties.get("ID_MODEL")
+        or properties.get("ID_MODEL_FROM_DATABASE")
+        or ""
+    ).lower()
 
-    if properties.get("device.vendor.name") == USB_AUDIO_VENDOR_NAME and \
-       properties.get("device.product.name") == USB_AUDIO_PRODUCT_NAME:
-        return True
+    for device in SUPPORTED_USB_AUDIO_DEVICES:
+        if vendor_id == device["vendor_id"] and product_id == device["product_id"]:
+            return True
 
-    return endpoint_name.startswith(prefix)
+        if device["vendor_name"].lower() in vendor_name and device["product_name"].lower() in product_name:
+            return True
+
+        if endpoint_name.startswith(device["sink_prefix"]) or endpoint_name.startswith(device["source_prefix"]):
+            return True
+
+    return False
 
 
-def _pick_endpoint(items: list[dict], prefix: str, *, allow_monitor: bool) -> Optional[PulseAudioEndpoint]:
+def is_supported_usb_audio_input_device(properties: dict) -> bool:
+    return _matches_supported_usb_audio_device(properties)
+
+
+def _pick_supported_usb_endpoint(
+    items: list[dict],
+    *,
+    allow_monitor: bool,
+    kind: str,
+    preferred_card: Optional[int] = None,
+) -> Optional[PulseAudioEndpoint]:
+    for device in SUPPORTED_USB_AUDIO_DEVICES:
+        prefix = device[f"{kind}_prefix"]
+        for item in items:
+            properties = item.get("properties") or {}
+            name = item.get("name") or ""
+            if not allow_monitor and properties.get("device.class") == "monitor":
+                continue
+            if not allow_monitor and name.endswith(".monitor"):
+                continue
+            if preferred_card is not None and _card_from_properties(properties) != preferred_card:
+                continue
+            if not _matches_supported_usb_audio_device(properties, name):
+                continue
+            if not name.startswith(prefix) and not (
+                (properties.get("device.vendor.id") or "").lower() == device["vendor_id"]
+                and (properties.get("device.product.id") or "").lower() == device["product_id"]
+            ):
+                continue
+            return PulseAudioEndpoint(
+                name=name,
+                description=item.get("description") or name,
+                card=_card_from_properties(properties),
+                properties=properties,
+            )
+    return None
+
+
+def _pick_named_endpoint(
+    items: list[dict],
+    endpoint_name: Optional[str],
+    *,
+    allow_monitor: bool,
+) -> Optional[PulseAudioEndpoint]:
+    if not endpoint_name:
+        return None
     for item in items:
         properties = item.get("properties") or {}
         name = item.get("name") or ""
@@ -140,7 +225,34 @@ def _pick_endpoint(items: list[dict], prefix: str, *, allow_monitor: bool) -> Op
             continue
         if not allow_monitor and name.endswith(".monitor"):
             continue
-        if not _matches_target(properties, name, prefix):
+        if name != endpoint_name:
+            continue
+        return PulseAudioEndpoint(
+            name=name,
+            description=item.get("description") or name,
+            card=_card_from_properties(properties),
+            properties=properties,
+        )
+    return None
+
+
+def _pick_default_endpoint(
+    items: list[dict],
+    *,
+    allow_monitor: bool,
+    info_key: str,
+) -> Optional[PulseAudioEndpoint]:
+    info = _read_pactl_info()
+    named = _pick_named_endpoint(items, info.get(info_key), allow_monitor=allow_monitor)
+    if named is not None:
+        return named
+
+    for item in items:
+        properties = item.get("properties") or {}
+        name = item.get("name") or ""
+        if not allow_monitor and properties.get("device.class") == "monitor":
+            continue
+        if not allow_monitor and name.endswith(".monitor"):
             continue
         return PulseAudioEndpoint(
             name=name,
@@ -192,22 +304,36 @@ def disable_pulse_idle_suspend() -> tuple[str, ...]:
 
 def get_forced_usb_audio_target(require_source: bool = False) -> PulseAudioTarget:
     sinks = _run_pactl_json("list", "sinks")
-    sink = _pick_endpoint(sinks, USB_AUDIO_SINK_PREFIX, allow_monitor=False)
+    sink = _pick_supported_usb_endpoint(sinks, allow_monitor=False, kind="sink")
+    is_usb = sink is not None
+    if sink is None:
+        sink = _pick_default_endpoint(sinks, allow_monitor=False, info_key="Default Sink")
     if sink is None:
         raise PulseAudioTargetNotFoundError(
-            f"target USB headset not found in PulseAudio sinks (need {USB_AUDIO_VENDOR_ID}:{USB_AUDIO_PRODUCT_ID})"
+            "no usable PulseAudio sink found (supported USB headset or default sink)"
         )
 
     sources = _run_pactl_json("list", "sources")
-    source = _pick_endpoint(sources, USB_AUDIO_SOURCE_PREFIX, allow_monitor=False)
+    source = None
+    if is_usb:
+        source = _pick_supported_usb_endpoint(
+            sources,
+            allow_monitor=False,
+            kind="source",
+            preferred_card=sink.card,
+        )
+        if source is None:
+            source = _pick_supported_usb_endpoint(sources, allow_monitor=False, kind="source")
+    if source is None:
+        source = _pick_default_endpoint(sources, allow_monitor=False, info_key="Default Source")
     if require_source and source is None:
         raise PulseAudioTargetNotFoundError(
-            f"target USB headset microphone not found in PulseAudio sources (need {USB_AUDIO_VENDOR_ID}:{USB_AUDIO_PRODUCT_ID})"
+            "no usable PulseAudio source found (supported USB headset mic or default source)"
         )
 
     info = _read_pactl_info()
     server = info.get("Server String")
-    return PulseAudioTarget(sink=sink, source=source, server=server)
+    return PulseAudioTarget(sink=sink, source=source, server=server, is_usb=is_usb)
 
 
 def probe_forced_usb_audio_target(require_source: bool = False) -> Optional[PulseAudioTarget]:

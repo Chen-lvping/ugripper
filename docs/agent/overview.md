@@ -29,8 +29,8 @@
 | 相机录制 | `build/src/camera_recorder/camera_recorder` | 按 YAML 配置启动独立相机录制子进程 | 8 路 `mkv`（默认） |
 | 传感器录制 | `build/src/sensor_recorder/sensor_recorder` | 录制左右 IMU/encoder，分别输出 MCAP | `sensor_data_left.mcap`、`sensor_data_right.mcap` |
 | HMI 类库 | `src/gripper_hmi` | 读取夹爪按键，并在驱动内部以单线程 owner 线程完成状态查询、灯效生成与 RGB 指令发送；默认由状态机切灯效，必要时仍可直接下发 RGB | 按键快照、RGB 指令 |
-| 音频播放 | `audio/audio_play.py` | 绑定 USB 耳机 sink，播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
-| 音频采集 | `audio/record_usb_audio.py` | 从 USB 耳机麦克风录制原始音频，供 pre/post 处理链路使用 | 临时 wav 文件 |
+| 音频播放 | `audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
+| 音频采集 | `audio/record_usb_audio.py` | 优先从受支持 USB 耳机麦克风录音，无耳机时回退系统默认 source，供 pre/post 处理链路使用 | 临时 wav 文件 |
 | 数据盘挂载 | `config/99-fixed-usb-map.rules` | 限定允许物理 USB 口，使用 `systemd-mount` 将数据盘挂到 `/mnt/data_disk`，并在同一 udev 事件里拉起 updater | `/mnt/data_disk`、`usb-auto-update@<dev>.service` |
 | USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级、配置导入、主相机标定导入、encoder 校准触发 | `/etc/environment`、`calibration.json` |
 | 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、复用 `/mnt/data_disk` 触发左右编码器并行 zeroing、恢复服务 | `build/src/sensor_recorder/zeroing` |
@@ -185,13 +185,13 @@
 - `/mnt/data_disk` 只作为固定挂载点使用：安装阶段会预创建为 `root:root 0555`，业务不会把本地空目录当成数据目录；只有真实数据盘挂载成功后才允许继续启动录制服务。
 
 ### 8.3 音频链路关键行为
-- `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音，并优先绑定 PulseAudio 中型号为 `0020:0b21` 的 USB 音频设备；若耳机晚于服务启动才出现，守护进程会先启动 FIFO 和监听线程，再在耳机出现后自动建链。
-- 提示音主线程通过 FIFO 收命令后使用 `pygame.mixer` 播放到指定 USB sink；启动时只做一次短静音预热、每段提示音前补前导静音，不再维持常驻静音 keepalive。
-- `audio/audio_play.py` 只有在真实绑定 USB sink 并完成播放后端初始化后才会写 `/tmp/umi_audio_ready`；耳机拔掉或 backend teardown 时会移除该标记，避免业务把“进程活着”误判成“提示音已可播放”。
+- `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音，并优先绑定 PulseAudio 中受支持的 USB 音频设备；当前兼容 `0020:0b21 (liyuany USB Audio)` 与 `0023:0b23 (liyuany USB PnP Sound Device)`。若无耳机，则回退系统默认 sink/source；耳机晚于服务启动才出现时，守护进程会先启动 FIFO 和监听线程，再在耳机出现后自动切回耳机。
+- 提示音主线程通过 FIFO 收命令后使用 `pygame.mixer` 播放到当前选中的 PulseAudio sink；启动时只做一次短静音预热、每段提示音前补前导静音，不再维持常驻静音 keepalive。
+- `audio/audio_play.py` 只有在真实绑定到一个可用的 PulseAudio 播放目标并完成后端初始化后才会写 `/tmp/umi_audio_ready`；当前无论是受支持 USB 耳机还是系统默认声卡，都需要建好 backend 才会进入 ready，backend teardown 时会移除该标记，避免业务把“进程活着”误判成“提示音已可播放”。
 - 提示音调度采用“后触发抢占前触发”的语义，不做排队串行；新的命令到达后会立即停止当前 one-shot 或 loop 提示，再播放最新命令。当前 `writing`、`calibrating` 属于 loop 提示，但同样会被后续命令直接打断。
-- `record_runtime` 会在主循环内监测音频守护进程；若守护进程异常退出会按节流策略自动重拉起，若只是耳机尚未出现或热插拔后 sink 暂时缺失，则保持守护进程存活并等待 `/tmp/umi_audio_ready` 恢复；恢复到空闲态时会重新补发一次 `ready`，非空闲阶段则补发 `writing` / `validation_failed` / `error` 等当前阶段提示。
-- 耳机运行中被拔掉时，音频守护进程不会退出，而是撤销 ready 标记并暂停播放；耳机重新插入并重新出现在 PulseAudio 后，会自动重新绑定 sink，后续提示音恢复。
-- 播放/录音初始化前会受控执行 `pactl unload-module module-suspend-on-idle`，避免 USB 耳机在长时间空闲或热插拔恢复后出现首段吞音；该动作只收敛在初始化阶段，不在每次提示音、录音或音量键事件里重复切换模块。
+- `record_runtime` 会在主循环内监测音频守护进程；若守护进程异常退出会按节流策略自动重拉起。正常情况下，音频守护进程会在“受支持 USB 耳机”和“系统默认声卡”之间自动切换，并在 `/tmp/umi_audio_ready` 恢复后补发空闲态 `ready` 或当前阶段提示。
+- 耳机运行中被拔掉时，音频守护进程不会退出，而是自动退回系统默认声卡；耳机重新插入并重新出现在 PulseAudio 后，会自动重新绑定回耳机，后续提示音恢复。
+- 播放/录音初始化前会受控执行 `pactl unload-module module-suspend-on-idle`，避免 USB 耳机或默认声卡在长时间空闲、热插拔恢复或首次切换后出现首段吞音；该动作只收敛在初始化阶段，不在每次提示音、录音或音量键事件里重复切换模块。
 - `py_script/usb_audio_mic_test.py --playback` 默认只做“原生采集 + SoX 后处理导出”，不再默认硬套旧 `noise.prof`；若需去噪，先运行 `py_script/usb_audio_noise_profile.py` 生成当前环境底噪 profile，再显式传入 `--denoise --noise-profile <path>`。
 - 现场回归优先覆盖两类场景：耳机长时间空闲后的首次播放 `python3 py_script/usb_audio_play_test.py`，以及长时间空闲后的首次录音 `python3 py_script/usb_audio_mic_test.py --playback`；两项测试都应在日志中看到 `Disabled PulseAudio suspend modules: ...`。
 - 回滚方式：若需恢复 PulseAudio 默认模块状态，可重启当前用户的 PulseAudio 会话，或重启 `ugripper.service` 让音频守护进程重新按默认环境启动；无需在运行期反复手工切换 `module-suspend-on-idle`。
