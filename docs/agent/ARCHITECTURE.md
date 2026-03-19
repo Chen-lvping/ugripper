@@ -43,7 +43,7 @@
 ### 2.3 Master/Slave 协同控制
 - 通信：TCP `12345` 端口。
 - 指令：`START|episode_xxxx|master_sn` / `STOP|0`。
-- 机制：Master 侧发送指令，Slave 侧 `nc -l -p 12345` 监听后执行本地 `start_recording/stop_recording`，并在停录后将 `paired_master_sn` 写入当前 episode 的 `info.json`。
+- 机制：Master 侧异步发送指令；Slave 侧使用常驻 `nc -lk -p 12345` 逐行监听并立即执行本地 `start_recording/stop_recording`，避免单次监听超时退出带来的固定时延，并在停录后将 `paired_master_sn` 写入当前 episode 的 `info.json`。
 
 ### 2.4 反馈与状态通道
 - `led_manager.py`：监听 `/tmp/umi_led_pipe`，呈现 `INIT/READY/RECORDING/ERROR/EXIT` 与 `CALIB_PRE/CALIB_RUN/CALIB_DONE`。

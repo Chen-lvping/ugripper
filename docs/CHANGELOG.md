@@ -1,11 +1,11 @@
 # Changelog
 
-## Unreleased - 2026-03-16
+## v1.1.14 - 2026-03-16
 - Left 夹爪新增自动主从切换：`end0` 已插线且 `192.168.1.100` 可达时自动作为 `slave` 运行并受右臂 master 控制；拔线或对端不可达时自动回到 `master`。
 - `auto_calibration/monitor_network.sh` 增强为 Left 侧自动角色监控：插线仍会补触发一次 `block add` udev 规则，目标角色变化连续确认两次后自动重启 `ugripper.service`，让业务按新角色重新启动。
 - `run_record.sh` 的 Left 侧 `paired_master_sn` 记录逻辑收敛到“仅 Slave 运行态”生效，避免 Left 独立 `master` 模式下输出误导性日志。
-
-## v1.1.14 - 2026-03-13
+- 修复主从同步监听时差：Slave 侧改为常驻 `nc -lk` 逐行监听并立即处理 `START/STOP`，消除单次 `nc -w 1` 监听带来的约 1 秒固定时延。
+- 修复 slave 夹爪拔线重插后的首条录制命令发送失败：Right master 在发送 `START` 前会先基于 `end0` 做 `ping` 预探测并记录 `ip neigh` 状态，随后使用更长超时的同步 `nc` 单次发送 `START`；若发送失败会打印退出码与邻居表状态，便于继续定位链路恢复阶段的首发失败问题。
 - 音频提示自恢复增强：`run_record.sh` 在发送提示音前会检查 `audio_play.py` 是否仍存活，异常退出时自动拉起。
 - 语音录制结束后会主动重启音频播放子进程，降低同卡录放切换后提示音长期失效的概率。
 - `audio/audio_play.py` 新增低噪声异常日志与 `pygame` mixer 重建逻辑，便于现场抓取“有报错后无声音”的问题。

@@ -10,7 +10,7 @@
 - `DEVICE_SIDE`：物理侧（`left|right`）。
 - `DEVICE_ROLE`：控制角色配置项（`master|slave`）；Right 侧固定按 `master` 运行，Left 侧在运行时按网络状态自动决策角色。
 - Master：按键控制、音频提示、发网络命令给对端。
-- Slave：监听 `START|episode_xxx|master_sn` / `STOP|0`，按命令同步录制。
+- Slave：通过常驻 `nc -lk` 监听 `START|episode_xxx|master_sn` / `STOP|0`，收到整行命令后立即同步录制。
 - Left 自动角色规则：`end0` 已插线且 `192.168.1.100` 可达时切为 `slave`；未插线、对端不可达或链路异常时回到 `master`。
 - 同步端口：`12345`（`nc`）。
 
@@ -20,7 +20,7 @@
  - 加载持久化标定文件：`/etc/ugripper/config/calibration/calibration.json`（缺失时回退 fake 模板）。
 2. 后台 `monitor_loop` 运行健康检查（约 50ms 一次）并维护错误灯效状态。
 3. `start_recording`：
-- Master 先下发网络 `START|<episode_dir>|<master_sn>` 给 Slave。
+- Master 先异步下发网络 `START|<episode_dir>|<master_sn>` 给 Slave；Slave 常驻监听并立即处理，避免因单次 `nc` 超时退出带来约 1 秒启动时差。
 - 开录前刷新一次持久化标定（支持 U 盘重复导入后立即生效）。
 - 将当前运行时元数据复制到 `episode/metadata.json`，其中包含 `device_role`、`camera_codec`、`ugripper_version`、`ugripper_usb_updater_version` 与 `data_format_version`，便于后处理识别数据来源与结构版本。
 - 将当前有效标定复制到 `episode/calibration.json`（Lerobot 风格）。

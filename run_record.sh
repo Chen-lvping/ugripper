@@ -50,6 +50,10 @@ IP_RIGHT="192.168.1.100"
 IP_LEFT="192.168.1.101"
 SYNC_PORT=12345
 NETWORK_INTERFACE="end0"
+SYNC_SEND_TIMEOUT_SEC="${SYNC_SEND_TIMEOUT_SEC:-3}"
+SYNC_PING_TIMEOUT_SEC="${SYNC_PING_TIMEOUT_SEC:-2}"
+SYNC_PING_ATTEMPTS="${SYNC_PING_ATTEMPTS:-3}"
+SYNC_PING_INTERVAL_SEC="${SYNC_PING_INTERVAL_SEC:-0.2}"
 
 DEVICE_SIDE="$(get_env_value "DEVICE_SIDE" || true)"
 CURRENT_SIDE="${DEVICE_SIDE:-Right}"
@@ -225,6 +229,7 @@ LAST_MONITOR_ERROR_MSG=""             # 最近一次监控错误详情（用于�
 FAYS_PRESENT_CACHE_FILE="/dev/shm/umi_fays_present"  # Fays 在位检测缓存（1=在位，0=不在位）
 FAYS_USB_SPEED_CACHE_FILE="/dev/shm/umi_fays_usb_speed_mbps"  # Fays USB 速率缓存（Mb/s）
 MONITOR_PID=""
+PID_SLAVE_FAYS_MAINTAINER=""
 RECORDING_LOCK_FILE="/tmp/umi_recording.lock" # 录制锁文件
 # ERROR 灯效分级定义（数字越小越严重）
 # ERROR_1: 数据完整性异常（存储/录制校验）
@@ -936,14 +941,80 @@ send_network_command() {
     local cmd=$1
     local arg=$2
     local payload="${cmd}|${arg}"
+    local send_rc=0
 
-    # 只发送，不在主流程等待对端响应/连接结果。
+    if [ "$cmd" = "START" ] && [ "$CURRENT_SIDE_LOWER" = "right" ]; then
+        if ! prime_sync_connection; then
+            echo "[WARNING]:Sync preflight failed before START; still attempt single START send."
+        fi
+
+        if printf "%s\n" "$payload" | nc -N -w "$SYNC_SEND_TIMEOUT_SEC" "$SYNC_TARGET_IP" "$SYNC_PORT" >/dev/null 2>&1; then
+            echo "[INFO]:Sent to peer (${PEER_SIDE_LOWER}) (sync): ${payload}"
+            log_sync_neighbor_state "after_start_send_ok"
+            return 0
+        fi
+
+        send_rc=$?
+        echo "[ERROR]:Failed to send START to peer (${PEER_SIDE_LOWER}) rc=${send_rc} timeout=${SYNC_SEND_TIMEOUT_SEC}s payload=${payload}"
+        log_sync_neighbor_state "after_start_send_fail"
+        return "$send_rc"
+    fi
+
+    # 非 START 命令保持异步，不阻塞主流程。
     (
-        printf "%s\n" "$payload" | nc "$SYNC_TARGET_IP" "$SYNC_PORT" >/dev/null 2>&1 || true
+        printf "%s\n" "$payload" | nc -N -w 1 "$SYNC_TARGET_IP" "$SYNC_PORT" >/dev/null 2>&1 || true
     ) &
     echo "Sent to peer (${PEER_SIDE_LOWER}) (async): ${payload}"
 }
 
+log_sync_neighbor_state() {
+    local tag="$1"
+    local neigh_line=""
+
+    neigh_line=$(ip neigh show to "$SYNC_TARGET_IP" dev "$NETWORK_INTERFACE" 2>/dev/null | tr '\n' ' ' | xargs || true)
+    if [ -n "$neigh_line" ]; then
+        echo "[INFO]:Sync neighbor ${tag}: ${neigh_line}"
+    else
+        echo "[INFO]:Sync neighbor ${tag}: <empty>"
+    fi
+}
+
+prime_sync_connection() {
+    local carrier_state=""
+    local attempt=1
+    local ping_rc=0
+
+    if [ "$IS_MASTER" != true ] || [ "$CURRENT_SIDE_LOWER" != "right" ]; then
+        return 0
+    fi
+
+    carrier_state="$(read_network_carrier_state || true)"
+    if [ "$carrier_state" != "1" ]; then
+        echo "[WARNING]:Skip sync preflight because ${NETWORK_INTERFACE} carrier=${carrier_state:-unknown}."
+        return 1
+    fi
+
+    log_sync_neighbor_state "before_start"
+
+    while [ "$attempt" -le "$SYNC_PING_ATTEMPTS" ]; do
+        if ping -I "$NETWORK_INTERFACE" -c 1 -W "$SYNC_PING_TIMEOUT_SEC" "$SYNC_TARGET_IP" >/dev/null 2>&1; then
+            echo "[INFO]:Sync ping succeeded before START (attempt ${attempt}/${SYNC_PING_ATTEMPTS})."
+            log_sync_neighbor_state "after_ping_ok"
+            return 0
+        fi
+
+        ping_rc=$?
+        echo "[WARNING]:Sync ping failed before START (attempt ${attempt}/${SYNC_PING_ATTEMPTS}, rc=${ping_rc}, timeout=${SYNC_PING_TIMEOUT_SEC}s)."
+        log_sync_neighbor_state "after_ping_fail"
+
+        if [ "$attempt" -lt "$SYNC_PING_ATTEMPTS" ]; then
+            sleep "$SYNC_PING_INTERVAL_SEC"
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    return 1
+}
 # 函数：计算新路径并创建文件夹
 # 修改：支持传入指定的文件夹名 (用于 Left 同步 Right 的命名)
 prepare_directory() {
@@ -1559,6 +1630,58 @@ check_and_maintain_fays() {
             fi
         fi
     fi
+}
+
+start_slave_fays_maintainer() {
+    if [ -n "$PID_SLAVE_FAYS_MAINTAINER" ] && is_pid_alive "$PID_SLAVE_FAYS_MAINTAINER"; then
+        return 0
+    fi
+
+    (
+        while true; do
+            check_and_maintain_fays
+            sleep 0.2
+        done
+    ) &
+    PID_SLAVE_FAYS_MAINTAINER=$!
+    echo "[INFO]:Slave Fays maintainer PID: $PID_SLAVE_FAYS_MAINTAINER"
+    return 0
+}
+
+handle_slave_network_command() {
+    local raw_msg="$1"
+    local cmd=""
+    local arg=""
+    local master_sn=""
+
+    IFS='|' read -r cmd arg master_sn _ <<< "$raw_msg"
+
+    echo "[INFO]:Received Network Command: $cmd Args: $arg MasterSN: ${master_sn:-N/A}"
+
+    case "$cmd" in
+        "START")
+            if [ "$IS_RECORDING" = false ]; then
+                echo "[INFO]:Trigger: Start Recording (Sync Dir: $arg)"
+                start_recording "$arg" "$master_sn"
+            else
+                echo "[WARNING]:Ignored: Already recording."
+            fi
+            ;;
+        "STOP")
+            if [ "$IS_RECORDING" = true ]; then
+                echo "[INFO]:Trigger: Stop Recording"
+                stop_recording
+            else
+                echo "[WARNING]:Ignored: Not recording."
+            fi
+            ;;
+        "NOOP")
+            echo "[INFO]:Ignored: NOOP sync preflight."
+            ;;
+        *)
+            echo "[WARNING]:Unknown command: $cmd"
+            ;;
+    esac
 }
 
 get_video_timestamp_span_sec() {
@@ -2208,10 +2331,14 @@ stop_recording() {
     echo "[INFO]:stop_recording phase=data_sync_final elapsed=${step_elapsed_sec}s"
 
     step_begin_ts=$(timing_now)
-    set_state "READY"
-    notify_audio "ready"
-    step_elapsed_sec=$(timing_elapsed_sec "$step_begin_ts")
-    echo "[INFO]:stop_recording phase=ready_notify elapsed=${step_elapsed_sec}s"
+    if [ "$validation_failed" = true ]; then
+        echo "[INFO]:stop_recording phase=ready_notify skipped (validation failed, keep error state)"
+    else
+        set_state "READY"
+        notify_audio "ready"
+        step_elapsed_sec=$(timing_elapsed_sec "$step_begin_ts")
+        echo "[INFO]:stop_recording phase=ready_notify elapsed=${step_elapsed_sec}s"
+    fi
 
     total_elapsed_sec=$(timing_elapsed_sec "$stop_recording_begin_ts")
     echo "[INFO]:stop_recording total elapsed=${total_elapsed_sec}s (from notify_audio 'recording_stop' to stop_recording end)"
@@ -2315,6 +2442,10 @@ cleanup() {
     if [ -n "$PID_LOG_SYNC" ]; then
         force_stop_pid "$PID_LOG_SYNC" "Log sync"
     fi
+
+    if [ -n "$PID_SLAVE_FAYS_MAINTAINER" ]; then
+        force_stop_pid "$PID_SLAVE_FAYS_MAINTAINER" "Slave Fays maintainer"
+    fi
     
     # 5. 清理临时文件
     rm -rf "$AUDIO_TEMP_DIR"
@@ -2366,45 +2497,17 @@ if [ "$IS_MASTER" != true ]; then
     # 播放准备就绪提示音
     notify_audio "ready"
 
-    # 网络监听循环
+    start_slave_fays_maintainer
+
+    # 网络监听循环：常驻监听，收到整行命令后立即处理，避免每条命令等待 nc 超时退出。
     while true; do
-        check_and_maintain_fays
+        while IFS= read -r raw_msg; do
+            [ -n "$raw_msg" ] || continue
+            handle_slave_network_command "$raw_msg"
+        done < <(nc -lk -p "$SYNC_PORT" 2>/dev/null)
 
-        # 会阻塞执行
-        
-        # === 网络监听 ===
-        # 监听 TCP 端口，收到数据后退出 nc
-        # 格式: START|episode_xxxx|master_sn 或 STOP|0
-        raw_msg=$(nc -l -p "$SYNC_PORT" -w 1)
-        
-        if [ -n "$raw_msg" ]; then
-            IFS='|' read -r cmd arg master_sn _ <<< "$raw_msg"
-            
-            echo "[INFO]:Received Network Command: $cmd Args: $arg MasterSN: ${master_sn:-N/A}"
-
-            case "$cmd" in
-                "START")
-                    if [ "$IS_RECORDING" = false ]; then
-                        echo "[INFO]:Trigger: Start Recording (Sync Dir: $arg)"
-                        start_recording "$arg" "$master_sn"
-                    else
-                        echo "[WARNING]:Ignored: Already recording."
-                    fi
-                    ;;
-                "STOP")
-                    if [ "$IS_RECORDING" = true ]; then
-                        echo "[INFO]:Trigger: Stop Recording"
-                        stop_recording
-                    else
-                        echo "[WARNING]:Ignored: Not recording."
-                    fi
-                    ;;
-                *)
-                    echo "[WARNING]:Unknown command: $cmd"
-                    ;;
-            esac
-        fi
-        
+        echo "[WARNING]:Slave network listener exited unexpectedly. Restarting..."
+        sleep 0.2
     done
 
 else
