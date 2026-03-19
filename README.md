@@ -5,6 +5,7 @@
 ## 文档入口
 - 唯一总览文档：`docs/agent/overview.md`
 - 历史变更记录：`docs/CHANGELOG.md`
+- 仓库内测试脚本说明：`test/README.md`
 
 推荐先读 `docs/agent/overview.md`；`docs/CHANGELOG.md` 只用于追溯阶段性变更，不作为当前功能口径。
 
@@ -22,6 +23,19 @@ sudo systemctl status ugripper.service
 sudo systemctl restart ugripper.service
 sudo journalctl -u ugripper.service -f
 ```
+
+## 仓库内测试脚本
+`test/scripts/` 目前收纳现场验证脚本，不属于默认安装主链路，也不会随当前 `deb` 默认安装到 `/opt/ugripper`。
+
+常见入口：
+
+```bash
+bash test/scripts/camera_test.sh
+bash test/scripts/camera_crash_capture.sh
+bash test/scripts/testVideoPipe.sh
+```
+
+更具体的脚本说明、环境变量和注意事项见 `test/README.md`。
 
 ## Python 环境初始化
 首次部署时，手动用 `uv` 按依赖表重建项目内可打包的 `.venv`。

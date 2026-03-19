@@ -5,7 +5,7 @@
 
 ## 1. 当前系统一句话
 - 当前系统默认以**单机双手、本地控制**方式运行。
-- 主控制链路已经收口到 `build/src/record_runtime/record_runtime`，`run_record.sh` 只负责进入安装目录并 `exec` 该二进制。
+- 主控制链路已经收口到 `build/src/record_runtime/record_runtime`，`run_record.sh` 负责等待数据盘、维护 v1 风格运行日志，并拉起该二进制。
 - 默认录制产物为 **2 路主相机 + 2 路 stereo + 4 路触觉相机 + 左右两份传感器 MCAP**。
 - HMI 按键、RGB 灯效、提示音、pre/post 音频录制、停录校验和双键关机请求都已纳入当前运行时。
 - U 盘流程统一负责 `deb` 升级、`config.txt` 导入、主相机标定导入和 encoder 零位校准触发。
@@ -18,13 +18,14 @@
 - 数据目录：`/mnt/data_disk/<device_sn_lower>/data`
 - 持久化标定目录：`/etc/ugripper/config/calibration`
 - 日志目录：`/var/log/ugripper`
+- 运行日志镜像目录：`/mnt/data_disk/logs`
 - U 盘升级入口：`auto_update/usb_auto_update.sh`
 
 ## 3. 模块总览
 | 模块 | 入口 | 当前职责 | 关键输入/输出 |
 | --- | --- | --- | --- |
 | systemd 主服务 | `pack_script/ugripper.service` | 以 `ubuntu` 用户拉起录制服务 | `/opt/ugripper/run_record.sh` |
-| 薄壳启动脚本 | `run_record.sh` | 切到安装目录并直接 `exec record_runtime` | 无 |
+| 薄壳启动脚本 | `run_record.sh` | 切到安装目录、等待 `/mnt/data_disk` 可写、维护本地 `/tmp` 到 `/mnt/data_disk/logs` 的增量日志同步，再拉起 `record_runtime` | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/umi_sys_<sn>_<date>.log` |
 | 主运行时 | `build/src/record_runtime/record_runtime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
 | 相机录制 | `build/src/camera_recorder/camera_recorder` | 按 YAML 配置启动独立相机录制子进程 | 8 路 `mkv`（默认） |
 | 传感器录制 | `build/src/sensor_recorder/sensor_recorder` | 录制左右 IMU/encoder，分别输出 MCAP | `sensor_data_left.mcap`、`sensor_data_right.mcap` |
@@ -40,14 +41,17 @@
 2. 后续开机时，`systemd-modules-load` 会优先加载 `exfat`；允许的 USB 数据盘分区再由 `config/99-fixed-usb-map.rules` 直接触发 `systemd-mount` 挂载到 `/mnt/data_disk`。
 3. systemd 启动 `ugripper.service`。
 4. 服务进入 `/opt/ugripper/run_record.sh`。
-5. `run_record.sh` 检查 `./build/src/record_runtime/record_runtime` 是否存在，并等待 `/mnt/data_disk` 成为真实可写挂载点后再 `exec`。
-6. `record_runtime` 启动后读取 `/etc/environment`，至少关注：
+5. `run_record.sh` 读取 `/etc/environment` 中的 `DEVICE_SN`，建立当天运行日志文件名 `umi_sys_<device_sn_lower>_<YYYYMMDD>.log`。
+6. `run_record.sh` 检查 `./build/src/record_runtime/record_runtime` 是否存在，并等待 `/mnt/data_disk` 成为真实可写挂载点。
+7. 数据盘可写后，`run_record.sh` 启动 v1 风格日志维护：业务 stdout/stderr 先落到 `/tmp`，再按增量方式同步到 `/mnt/data_disk/logs`，并清理本地与数据盘上同 SN 的非当天日志。
+8. `run_record.sh` 再拉起 `record_runtime`；运行时退出前会额外补一次日志同步。
+9. `record_runtime` 启动后读取 `/etc/environment`，至少关注：
    - `DEVICE_SN`：决定数据目录。
    - `CAMERA_CODEC`：非法值会回退到 `h264`。
    - `UGRIPPER_LANG`：决定提示音语言。
-7. 运行时连接左右夹爪 HMI、启动 LED 渲染线程、尝试拉起音频守护进程。
+10. 运行时连接左右夹爪 HMI、启动 LED 渲染线程、尝试拉起音频守护进程。
    - HMI 状态查询与 LED RGB 下发会在单个 gripper 串口内由驱动 owner 线程统一调度；`record_runtime` 只切换灯效模式，不再跨线程推送录制态的 500ms 亮灭边沿；若有专项诊断或直控需求，仍可走 direct RGB 通道覆盖当前效果。
-8. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
+11. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
 
 ## 5. 状态机与按键行为
 ### 5.1 空闲态与阈值
@@ -182,7 +186,10 @@
 - 音频临时目录：`/tmp/umi_audio`
 - 关机触发文件：`/tmp/umi_shutdown_request`
 - 数据目录：`/mnt/data_disk/<device_sn_lower>/data`
+- 运行日志：`/tmp/umi_sys_<device_sn_lower>_<YYYYMMDD>.log`
+- 数据盘日志镜像：`/mnt/data_disk/logs/umi_sys_<device_sn_lower>_<YYYYMMDD>.log`
 - `/mnt/data_disk` 只作为固定挂载点使用：安装阶段会预创建为 `root:root 0555`，业务不会把本地空目录当成数据目录；只有真实数据盘挂载成功后才允许继续启动录制服务。
+- 运行日志维护当前参考 V1 口径：本地先写 `/tmp`，后台每 5 秒增量同步到 `/mnt/data_disk/logs`，并只保留当天同 SN 日志。
 
 ### 8.3 音频链路关键行为
 - `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音，并优先绑定 PulseAudio 中受支持的 USB 音频设备；当前兼容 `0020:0b21 (liyuany USB Audio)` 与 `0023:0b23 (liyuany USB PnP Sound Device)`。若无耳机，则回退系统默认 sink/source；耳机晚于服务启动才出现时，守护进程会先启动 FIFO 和监听线程，再在耳机出现后自动切回耳机。
@@ -283,7 +290,13 @@ sudo tail -n 200 /var/log/ugripper/usb_auto_update.log
 sudo tail -n 200 /var/log/ugripper/boot_install.log
 ```
 
-### 10.4 设备映射优先检查
+### 10.4 运行日志
+```bash
+tail -n 200 /tmp/umi_sys_<device_sn_lower>_$(date +%Y%m%d).log
+tail -n 200 /mnt/data_disk/logs/umi_sys_<device_sn_lower>_$(date +%Y%m%d).log
+```
+
+### 10.5 设备映射优先检查
 优先检查以下 symlink / 设备是否存在且方向正确：
 - `/dev/left_cam_main`
 - `/dev/right_cam_main`
@@ -298,16 +311,26 @@ sudo tail -n 200 /var/log/ugripper/boot_install.log
 - `/dev/left_gripper`
 - `/dev/right_gripper`
 
-### 10.5 快速定位建议
+### 10.6 快速定位建议
 - 不能启动：先看 `ugripper.service` 日志和 `record_runtime` 是否成功拉起。
 - 能录不能停：优先检查 HMI 按键事件、状态机和 `sensor_recorder` / `camera_recorder` 退出路径。
-- 少文件或校验失败：先核对六路视频、双 MCAP、`metadata.json`、`calibration.json` 是否完整。
+- 少文件或校验失败：先核对八路视频、双 MCAP、`metadata.json`、`calibration.json` 是否完整。
 - 音频异常：优先看 USB 耳机枚举、PulseAudio sink/source、`module-suspend-on-idle` 是否已在初始化阶段被卸载。
+- 运行日志缺失：先看 `/tmp/umi_sys_<sn>_<date>.log` 是否生成，再看 `/mnt/data_disk/logs/` 是否存在当天镜像，最后核对 `/mnt/data_disk` 是否仍是真实可写挂载点。
 - U 盘流程异常：先看 `/var/log/ugripper/usb_auto_update.log`，再区分是包安装、配置导入、标定导入还是 encoder 校准失败。
+
+### 10.7 仓库内测试脚本
+- 仓库根目录下的 `test/scripts/` 用于存放仓库侧、现场定向验证用脚本，不属于 `ugripper.service` 默认运行链路。
+- 当前目录包含：
+  - `camera_test.sh`：直接拉起多路 `ffmpeg` 验证非主相机录制稳定性，并记录运行态信息。
+  - `camera_crash_capture.sh`：在 `camera_test.sh` 基础上额外持续抓取内核日志、进程、中断与内存信息，适合定位 crash / hang。
+  - `testVideoPipe.sh`：快速枚举指定 `/dev/video*` 节点的视频格式能力。
+- 建议从仓库根目录显式执行 `bash test/scripts/<script>.sh`；详细参数与注意事项见 `test/README.md`。
 
 ## 11. 当前使用注意点
 - `config/camera_recorder.yaml` 当前 8 路配置全部默认启用；若现场需要裁剪录制集合，应明确同步调整 `record_runtime` 的 `--only` 参数与 episode 校验清单。
 - 仓库内仍有部分后处理脚本依赖旧输出命名或旧假设，不能默认视为当前主链路的一部分。
+- `test/scripts/` 下的脚本属于仓库侧辅助工具，默认不随主包安装；若现场需要长期保留，应明确同步部署方式与使用说明。
 - `info.json` 会生成，但当前不属于最小强校验集合。
 - 现场调试若需要同时访问不同子网设备，应由系统侧或人工维护额外地址/路由；主包不负责托管这些网络策略。
 - 校准、导入与恢复动作仍分散在多个 shell 脚本和 service 中；当前功能可用，但维护时需要注意入口分散。
