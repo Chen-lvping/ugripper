@@ -109,6 +109,7 @@
 - `camera_recorder` 当前会并发拉起全部已选中的相机子进程，不再在管理层按 YAML 顺序逐路等待启动返回。
 - 停录阶段也会并发向各路相机子进程发 stop，并在全部 stop 返回后统一 poll 状态，降低多路顺序收尾导致 `info.json` 缺失或容器未 finalize 的风险。
 - 主相机模式是 `direct-copy-h265`：主摄始终走相机原生码流直封装，不做二次编码；实际拉流格式跟随 `CAMERA_CODEC` 选择 `h264` 或 `h265`。
+- 主摄 YAML 现支持可选 `uvc_roll_absolute`：若配置了标准 UVC `Roll Absolute` 目标值，`camera_recorder` 会在起录前先读取当前值；仅当当前值与目标值不一致时才通过 `libusb` 下发更新，并在设备节点恢复后继续走原有码流直封装，避免为翻转引入二次编解码。
 - 触觉 / 双目模式保留 `hybrid-decode-encode` / `stereo-hybrid-decode-encode`。
 - stereo 当前默认按 `1280x400@60` 录制，并在 YAML 内使用更激进的 HEVC CQP（`qp_init=34`、`qp_min=28`、`qp_max=42`、`qp_min_i=24`、`qp_max_i=42`）；该组参数基于同一段 `1280x400@60` 原始 MJPEG 样本压测，可将单路码率压到 `1Mbps` 以下。
 - 每路相机由独立子进程承载；单路失败不会由 `camera_recorder` 主动连带停掉其他相机。

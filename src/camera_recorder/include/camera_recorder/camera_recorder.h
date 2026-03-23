@@ -34,6 +34,7 @@ struct CameraConfig {
     std::string name;
     std::string device;
     CameraRecordMode mode = CameraRecordMode::HybridDecodeEncode;
+    std::optional<int> uvc_roll_absolute;
     int width = 0;
     int height = 0;
     int fps = 0;

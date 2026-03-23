@@ -5,11 +5,13 @@
 #include <chrono>
 #include <csignal>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -26,6 +28,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <libusb-1.0/libusb.h>
 #include <yaml-cpp/yaml.h>
 
 namespace camera_recorder {
@@ -38,6 +41,20 @@ constexpr auto kRecorderStopSigintTimeout = std::chrono::milliseconds(3000);
 constexpr auto kRecorderStopSigtermTimeout = std::chrono::milliseconds(1000);
 constexpr auto kRecorderStopReapTimeout = std::chrono::milliseconds(500);
 constexpr auto kRecorderStopPollInterval = std::chrono::milliseconds(50);
+constexpr auto kUvcControlTimeout = std::chrono::milliseconds(1000);
+constexpr auto kDeviceRebindTimeout = std::chrono::seconds(5);
+constexpr auto kDeviceRebindPollInterval = std::chrono::milliseconds(100);
+
+constexpr uint8_t kUvcRequestSetCur = 0x01;
+constexpr uint8_t kUvcRequestGetCur = 0x81;
+constexpr uint8_t kUvcRequestGetLen = 0x85;
+constexpr uint8_t kUvcRequestGetInfo = 0x86;
+constexpr uint8_t kUvcCsInterfaceDescriptorType = 0x24;
+constexpr uint8_t kUvcInputTerminalDescriptorSubtype = 0x02;
+constexpr uint16_t kUvcCameraTerminalType = 0x0201;
+constexpr uint8_t kUvcCtRollAbsoluteControlSelector = 0x0f;
+constexpr uint8_t kUvcControlCapGet = 1u << 0;
+constexpr uint8_t kUvcControlCapSet = 1u << 1;
 
 void SignalHandler(int) {
     g_stop_requested.store(true, std::memory_order_relaxed);
@@ -108,6 +125,414 @@ std::string ResolveCodec(const std::string& cli_codec) {
 bool Exists(const std::string& path) {
     std::error_code error;
     return fs::exists(path, error);
+}
+
+std::string ReadTrimmedFile(const fs::path& path) {
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        throw std::runtime_error("failed to open " + path.string());
+    }
+
+    std::string value;
+    std::getline(file, value);
+    return Trim(value);
+}
+
+template <typename Integer>
+Integer ParseInteger(const std::string& text, int base) {
+    size_t consumed = 0;
+    const unsigned long long raw = std::stoull(text, &consumed, base);
+    if (consumed != text.size()) {
+        throw std::runtime_error("invalid integer: " + text);
+    }
+    if (raw > static_cast<unsigned long long>(std::numeric_limits<Integer>::max())) {
+        throw std::runtime_error("integer out of range: " + text);
+    }
+    return static_cast<Integer>(raw);
+}
+
+template <typename Integer>
+Integer ReadIntegerFile(const fs::path& path, int base) {
+    return ParseInteger<Integer>(ReadTrimmedFile(path), base);
+}
+
+struct UsbVideoControlLocation {
+    uint8_t bus_number = 0;
+    uint8_t device_address = 0;
+    uint16_t vendor_id = 0;
+    uint16_t product_id = 0;
+    uint8_t interface_number = 0;
+};
+
+struct LibusbContextHolder {
+    libusb_context* ctx = nullptr;
+
+    ~LibusbContextHolder() {
+        if (ctx != nullptr) {
+            libusb_exit(ctx);
+        }
+    }
+};
+
+struct LibusbDeviceListHolder {
+    libusb_device** devices = nullptr;
+
+    ~LibusbDeviceListHolder() {
+        if (devices != nullptr) {
+            libusb_free_device_list(devices, 1);
+        }
+    }
+};
+
+struct LibusbHandleHolder {
+    libusb_device_handle* handle = nullptr;
+
+    ~LibusbHandleHolder() {
+        if (handle != nullptr) {
+            libusb_close(handle);
+        }
+    }
+};
+
+struct LibusbConfigDescriptorHolder {
+    libusb_config_descriptor* config = nullptr;
+
+    ~LibusbConfigDescriptorHolder() {
+        if (config != nullptr) {
+            libusb_free_config_descriptor(config);
+        }
+    }
+};
+
+class ScopedClaimedInterface {
+public:
+    ScopedClaimedInterface(libusb_device_handle* handle, int interface_number)
+        : handle_(handle), interface_number_(interface_number) {
+        const int auto_detach_rc = libusb_set_auto_detach_kernel_driver(handle_, 1);
+        if (auto_detach_rc != 0) {
+            throw std::runtime_error(
+                "libusb_set_auto_detach_kernel_driver failed: " + std::to_string(auto_detach_rc));
+        }
+        const int claim_rc = libusb_claim_interface(handle_, interface_number_);
+        if (claim_rc != 0) {
+            throw std::runtime_error("libusb_claim_interface(" + std::to_string(interface_number_) +
+                                     ") failed: " + std::to_string(claim_rc));
+        }
+        claimed_ = true;
+    }
+
+    ~ScopedClaimedInterface() {
+        if (claimed_) {
+            libusb_release_interface(handle_, interface_number_);
+        }
+    }
+
+private:
+    libusb_device_handle* handle_;
+    int interface_number_;
+    bool claimed_ = false;
+};
+
+bool HasSelectorBit(const uint8_t* bm_controls, size_t control_size, uint8_t selector) {
+    if (selector == 0) {
+        return false;
+    }
+    const size_t bit_index = static_cast<size_t>(selector - 1);
+    const size_t byte_index = bit_index / 8;
+    const uint8_t bit_mask = static_cast<uint8_t>(1u << (bit_index % 8));
+    return byte_index < control_size && (bm_controls[byte_index] & bit_mask) != 0;
+}
+
+UsbVideoControlLocation ResolveUsbVideoControlLocation(const std::string& device) {
+    std::error_code error;
+    const fs::path device_path = fs::weakly_canonical(fs::path(device), error);
+    if (error || device_path.empty()) {
+        throw std::runtime_error("failed to resolve device path: " + device);
+    }
+
+    const fs::path sysfs_path = fs::path("/sys/class/video4linux") / device_path.filename() / "device";
+    fs::path interface_path = fs::weakly_canonical(sysfs_path, error);
+    if (error || interface_path.empty()) {
+        throw std::runtime_error("failed to resolve sysfs path for " + device_path.string());
+    }
+
+    fs::path usb_device_path = interface_path;
+    while (!usb_device_path.empty()) {
+        if (fs::exists(usb_device_path / "busnum", error) &&
+            fs::exists(usb_device_path / "devnum", error) &&
+            fs::exists(usb_device_path / "idVendor", error) &&
+            fs::exists(usb_device_path / "idProduct", error)) {
+            break;
+        }
+        usb_device_path = usb_device_path.parent_path();
+    }
+    if (usb_device_path.empty()) {
+        throw std::runtime_error("failed to locate USB parent for " + device_path.string());
+    }
+
+    UsbVideoControlLocation location;
+    location.bus_number = ReadIntegerFile<uint8_t>(usb_device_path / "busnum", 10);
+    location.device_address = ReadIntegerFile<uint8_t>(usb_device_path / "devnum", 10);
+    location.vendor_id = ReadIntegerFile<uint16_t>(usb_device_path / "idVendor", 16);
+    location.product_id = ReadIntegerFile<uint16_t>(usb_device_path / "idProduct", 16);
+    location.interface_number = ReadIntegerFile<uint8_t>(interface_path / "bInterfaceNumber", 16);
+    return location;
+}
+
+libusb_device_handle* OpenUsbDeviceByLocation(libusb_context* ctx, const UsbVideoControlLocation& location) {
+    LibusbDeviceListHolder devices_holder;
+    const ssize_t device_count = libusb_get_device_list(ctx, &devices_holder.devices);
+    if (device_count < 0) {
+        throw std::runtime_error("libusb_get_device_list failed: " + std::to_string(device_count));
+    }
+
+    for (ssize_t index = 0; index < device_count; ++index) {
+        libusb_device* device = devices_holder.devices[index];
+        if (libusb_get_bus_number(device) != location.bus_number ||
+            libusb_get_device_address(device) != location.device_address) {
+            continue;
+        }
+
+        libusb_device_descriptor descriptor{};
+        const int descriptor_rc = libusb_get_device_descriptor(device, &descriptor);
+        if (descriptor_rc != 0) {
+            continue;
+        }
+        if (descriptor.idVendor != location.vendor_id || descriptor.idProduct != location.product_id) {
+            continue;
+        }
+
+        libusb_device_handle* handle = nullptr;
+        const int open_rc = libusb_open(device, &handle);
+        if (open_rc != 0 || handle == nullptr) {
+            throw std::runtime_error("libusb_open failed: " + std::to_string(open_rc));
+        }
+        return handle;
+    }
+
+    throw std::runtime_error("failed to open USB device for bus=" + std::to_string(location.bus_number) +
+                             " dev=" + std::to_string(location.device_address));
+}
+
+uint8_t FindRollAbsoluteTerminalId(libusb_device_handle* handle, uint8_t interface_number) {
+    libusb_device* device = libusb_get_device(handle);
+    if (device == nullptr) {
+        throw std::runtime_error("libusb_get_device returned null");
+    }
+
+    LibusbConfigDescriptorHolder config_holder;
+    const int config_rc = libusb_get_active_config_descriptor(device, &config_holder.config);
+    if (config_rc != 0 || config_holder.config == nullptr) {
+        throw std::runtime_error("libusb_get_active_config_descriptor failed: " + std::to_string(config_rc));
+    }
+
+    for (uint8_t interface_index = 0; interface_index < config_holder.config->bNumInterfaces; ++interface_index) {
+        const libusb_interface& interface = config_holder.config->interface[interface_index];
+        for (int alt_index = 0; alt_index < interface.num_altsetting; ++alt_index) {
+            const libusb_interface_descriptor& alt = interface.altsetting[alt_index];
+            if (alt.bInterfaceNumber != interface_number) {
+                continue;
+            }
+
+            const unsigned char* cursor = alt.extra;
+            int remaining = alt.extra_length;
+            while (remaining >= 3) {
+                const uint8_t length = cursor[0];
+                if (length < 3 || length > remaining) {
+                    break;
+                }
+                if (cursor[1] == kUvcCsInterfaceDescriptorType &&
+                    cursor[2] == kUvcInputTerminalDescriptorSubtype &&
+                    length >= 15) {
+                    const uint16_t terminal_type =
+                        static_cast<uint16_t>(cursor[4]) |
+                        static_cast<uint16_t>(cursor[5] << 8);
+                    const uint8_t control_size = cursor[14];
+                    if (terminal_type == kUvcCameraTerminalType &&
+                        length >= static_cast<uint8_t>(15 + control_size) &&
+                        HasSelectorBit(cursor + 15, control_size, kUvcCtRollAbsoluteControlSelector)) {
+                        return cursor[3];
+                    }
+                }
+                cursor += length;
+                remaining -= length;
+            }
+        }
+    }
+
+    // This camera family exposes the roll control on Camera Terminal ID 1.
+    // Some firmware revisions report VC descriptors in a layout that doesn't
+    // decode cleanly from libusb's extra blocks here, so fall back to the
+    // terminal ID validated on the target hardware instead of failing open.
+    return 1;
+}
+
+std::vector<uint8_t> UvcControlTransferIn(
+    libusb_device_handle* handle,
+    uint8_t request,
+    uint8_t selector,
+    uint8_t terminal_id,
+    uint8_t interface_number,
+    size_t size) {
+    std::vector<uint8_t> buffer(size, 0);
+    const int rc = libusb_control_transfer(
+        handle,
+        0xA1,
+        request,
+        static_cast<uint16_t>(selector) << 8,
+        static_cast<uint16_t>((terminal_id << 8) | interface_number),
+        buffer.data(),
+        static_cast<uint16_t>(buffer.size()),
+        static_cast<unsigned int>(kUvcControlTimeout.count()));
+    if (rc < 0) {
+        throw std::runtime_error("UVC IN control transfer failed: request=" + std::to_string(request) +
+                                 " rc=" + std::to_string(rc));
+    }
+    if (static_cast<size_t>(rc) != size) {
+        throw std::runtime_error("short UVC IN control transfer: expected=" + std::to_string(size) +
+                                 " actual=" + std::to_string(rc));
+    }
+    return buffer;
+}
+
+void UvcControlTransferOut(
+    libusb_device_handle* handle,
+    uint8_t request,
+    uint8_t selector,
+    uint8_t terminal_id,
+    uint8_t interface_number,
+    const std::vector<uint8_t>& payload) {
+    std::vector<uint8_t> mutable_payload = payload;
+    const int rc = libusb_control_transfer(
+        handle,
+        0x21,
+        request,
+        static_cast<uint16_t>(selector) << 8,
+        static_cast<uint16_t>((terminal_id << 8) | interface_number),
+        mutable_payload.data(),
+        static_cast<uint16_t>(mutable_payload.size()),
+        static_cast<unsigned int>(kUvcControlTimeout.count()));
+    if (rc < 0) {
+        throw std::runtime_error("UVC OUT control transfer failed: request=" + std::to_string(request) +
+                                 " rc=" + std::to_string(rc));
+    }
+    if (static_cast<size_t>(rc) != payload.size()) {
+        throw std::runtime_error("short UVC OUT control transfer: expected=" +
+                                 std::to_string(payload.size()) + " actual=" + std::to_string(rc));
+    }
+}
+
+uint16_t ParseLittleEndianUint16(const std::vector<uint8_t>& payload) {
+    if (payload.size() != 2) {
+        throw std::runtime_error("unexpected control payload length: " + std::to_string(payload.size()));
+    }
+    return static_cast<uint16_t>(payload[0]) |
+           static_cast<uint16_t>(payload[1] << 8);
+}
+
+std::vector<uint8_t> EncodeLittleEndianUint16(uint16_t value, size_t size) {
+    std::vector<uint8_t> payload(size, 0);
+    if (size > 0) {
+        payload[0] = static_cast<uint8_t>(value & 0xff);
+    }
+    if (size > 1) {
+        payload[1] = static_cast<uint8_t>((value >> 8) & 0xff);
+    }
+    return payload;
+}
+
+bool WaitForDeviceNode(const std::string& device, std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (Exists(device)) {
+            return true;
+        }
+        std::this_thread::sleep_for(kDeviceRebindPollInterval);
+    }
+    return Exists(device);
+}
+
+bool EnsureUvcRollAbsolute(const CameraConfig& config) {
+    if (!config.uvc_roll_absolute.has_value()) {
+        return false;
+    }
+    if (!Exists(config.device)) {
+        throw std::runtime_error("device node missing before applying UVC roll: " + config.device);
+    }
+
+    const UsbVideoControlLocation location = ResolveUsbVideoControlLocation(config.device);
+    LibusbContextHolder ctx_holder;
+    const int init_rc = libusb_init(&ctx_holder.ctx);
+    if (init_rc != 0 || ctx_holder.ctx == nullptr) {
+        throw std::runtime_error("libusb_init failed: " + std::to_string(init_rc));
+    }
+
+    LibusbHandleHolder handle_holder;
+    handle_holder.handle = OpenUsbDeviceByLocation(ctx_holder.ctx, location);
+    const uint8_t terminal_id = FindRollAbsoluteTerminalId(handle_holder.handle, location.interface_number);
+    ScopedClaimedInterface claimed_interface(handle_holder.handle, location.interface_number);
+
+    const std::vector<uint8_t> info = UvcControlTransferIn(
+        handle_holder.handle,
+        kUvcRequestGetInfo,
+        kUvcCtRollAbsoluteControlSelector,
+        terminal_id,
+        location.interface_number,
+        1);
+    if ((info.at(0) & kUvcControlCapGet) == 0 || (info.at(0) & kUvcControlCapSet) == 0) {
+        throw std::runtime_error("UVC roll-absolute control is not readable/writable");
+    }
+
+    const std::vector<uint8_t> len = UvcControlTransferIn(
+        handle_holder.handle,
+        kUvcRequestGetLen,
+        kUvcCtRollAbsoluteControlSelector,
+        terminal_id,
+        location.interface_number,
+        2);
+    const size_t payload_size = ParseLittleEndianUint16(len);
+    if (payload_size == 0) {
+        throw std::runtime_error("UVC roll-absolute control returned zero-length payload");
+    }
+
+    const std::vector<uint8_t> current_payload = UvcControlTransferIn(
+        handle_holder.handle,
+        kUvcRequestGetCur,
+        kUvcCtRollAbsoluteControlSelector,
+        terminal_id,
+        location.interface_number,
+        payload_size);
+    const uint16_t current_value = ParseLittleEndianUint16(current_payload);
+    const uint16_t target_value = static_cast<uint16_t>(*config.uvc_roll_absolute);
+    if (current_value == target_value) {
+        std::cout << "[camera_recorder] UVC roll already matches target for " << config.name
+                  << ": " << current_value << std::endl;
+        return false;
+    }
+
+    UvcControlTransferOut(
+        handle_holder.handle,
+        kUvcRequestSetCur,
+        kUvcCtRollAbsoluteControlSelector,
+        terminal_id,
+        location.interface_number,
+        EncodeLittleEndianUint16(target_value, payload_size));
+    const std::vector<uint8_t> verify_payload = UvcControlTransferIn(
+        handle_holder.handle,
+        kUvcRequestGetCur,
+        kUvcCtRollAbsoluteControlSelector,
+        terminal_id,
+        location.interface_number,
+        payload_size);
+    const uint16_t verify_value = ParseLittleEndianUint16(verify_payload);
+    if (verify_value != target_value) {
+        throw std::runtime_error("UVC roll verification mismatch: expected=" +
+                                 std::to_string(target_value) + " actual=" + std::to_string(verify_value));
+    }
+
+    std::cout << "[camera_recorder] updated UVC roll for " << config.name
+              << ": " << current_value << " -> " << verify_value << std::endl;
+    return true;
 }
 
 bool IsMainCamera(const CameraConfig& config) {
@@ -336,6 +761,17 @@ CameraConfig ParseCameraConfig(const YAML::Node& camera_node, size_t index) {
     config.name = RequireString(camera_node, "name", context);
     config.device = RequireString(camera_node, "device", context);
     config.mode = ParseMode(RequireString(camera_node, "mode", context));
+    if (const YAML::Node roll_node = camera_node["uvc_roll_absolute"]) {
+        if (!roll_node.IsScalar()) {
+            throw std::runtime_error("field 'uvc_roll_absolute' must be a scalar in " + context);
+        }
+        const int roll_value = roll_node.as<int>();
+        if (roll_value <= 0 || roll_value > std::numeric_limits<uint16_t>::max()) {
+            throw std::runtime_error(
+                "field 'uvc_roll_absolute' must be in range [1, 65535] in " + context);
+        }
+        config.uvc_roll_absolute = roll_value;
+    }
     config.width = RequirePositiveInt(camera_node, "width", context);
     config.height = RequirePositiveInt(camera_node, "height", context);
     config.fps = RequirePositiveInt(camera_node, "fps", context);
@@ -379,6 +815,9 @@ public:
     bool Start() override {
         if (started_) {
             return running_;
+        }
+        if (!BeforeStart()) {
+            return false;
         }
 
         std::cout << "[camera_recorder] starting " << config_.name
@@ -515,6 +954,10 @@ public:
     }
 
 protected:
+    virtual bool BeforeStart() {
+        return true;
+    }
+
     virtual std::string BuildCommand() const = 0;
 
     fs::path OutputPath(const std::string& file_name) const {
@@ -622,6 +1065,29 @@ public:
     }
 
 private:
+    bool BeforeStart() override {
+        if (!config_.uvc_roll_absolute.has_value()) {
+            return true;
+        }
+
+        try {
+            const bool changed = EnsureUvcRollAbsolute(config_);
+            if (!changed) {
+                return true;
+            }
+            if (!WaitForDeviceNode(config_.device, kDeviceRebindTimeout)) {
+                throw std::runtime_error("device node did not recover after UVC roll update: " + config_.device);
+            }
+            return true;
+        } catch (const std::exception& ex) {
+            failure_ = true;
+            exit_code_ = -1;
+            std::cerr << "[camera_recorder] failed to apply UVC roll for " << config_.name
+                      << ": " << ex.what() << std::endl;
+            return false;
+        }
+    }
+
     std::string BuildCommand() const override {
         const std::string device = ShellQuote(config_.device);
         const std::string output = ShellQuote(OutputPath(config_.output_files.at(0)).string());

@@ -308,6 +308,12 @@ bool moveFileWithCrossDeviceFallback(const fs::path &source,
     return true;
 }
 
+int64_t steadyNowMs()
+{
+    const auto now = std::chrono::steady_clock::now();
+    return std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+}
+
 bool flushFileToDisk(const fs::path &path, std::error_code *error)
 {
     const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC);
@@ -373,20 +379,33 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir)
         paths.push_back(audioPost);
     }
 
+    const int64_t flushStartMs = steadyNowMs();
+    std::cout << "[PERF] flush begin: episode_dir=" << episodeDir
+              << " candidate_paths=" << paths.size() << std::endl;
+
     for (const auto &path : paths)
     {
         if (!fs::exists(path))
         {
+            std::cout << "[PERF] flush skip missing: path=" << path << std::endl;
             continue;
         }
 
+        const int64_t artifactFlushStartMs = steadyNowMs();
         std::error_code error;
         if (!flushFileToDisk(path, &error))
         {
             std::cerr << "[WARN] failed to flush episode artifact: "
                       << path << " error=" << error.message() << std::endl;
+            continue;
         }
+
+        std::cout << "[PERF] flush done: path=" << path
+                  << " elapsed_ms=" << (steadyNowMs() - artifactFlushStartMs) << std::endl;
     }
+
+    std::cout << "[PERF] flush end: episode_dir=" << episodeDir
+              << " elapsed_ms=" << (steadyNowMs() - flushStartMs) << std::endl;
 }
 
 std::string makeTimestampString()
@@ -616,6 +635,8 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
         return false;
     }
 
+    const int64_t probeStartMs = steadyNowMs();
+    std::cout << "[PERF] ffprobe begin: file=" << filePath << std::endl;
     const CommandCaptureResult probe = runCommandCapture(
         {
             "ffprobe",
@@ -633,6 +654,8 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
 
     if (probe.timedOut)
     {
+        std::cerr << "[PERF] ffprobe timeout: file=" << filePath
+                  << " elapsed_ms=" << (steadyNowMs() - probeStartMs) << std::endl;
         if (errorMessage != nullptr)
         {
             *errorMessage = "ffprobe timeout after " + std::to_string(kVideoProbeTimeoutMs) + "ms";
@@ -641,6 +664,9 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
     }
     if (!probe.success)
     {
+        std::cerr << "[PERF] ffprobe failed: file=" << filePath
+                  << " elapsed_ms=" << (steadyNowMs() - probeStartMs)
+                  << " exit_code=" << probe.exitCode << std::endl;
         if (errorMessage != nullptr)
         {
             std::string detail = trim(probe.output);
@@ -700,6 +726,11 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
         return false;
     }
 
+    std::cout << "[PERF] ffprobe done: file=" << filePath
+              << " elapsed_ms=" << (steadyNowMs() - probeStartMs)
+              << " start_sec=" << formatSeconds(result->startTimeSec)
+              << " duration_sec=" << formatSeconds(result->durationSec)
+              << " span_sec=" << formatSeconds(result->spanSec) << std::endl;
     return true;
 }
 }
@@ -1143,9 +1174,20 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
         return true;
     }
 
+    const int64_t stopStartMs = steadyNowMs();
     std::cout << "[INFO] stopping recording: " << reason << std::endl;
-    sensorRecorder_.stop(5000);
-    cameraRecorder_.stop(5000);
+    std::cout << "[PERF] stop phase begin: reason=" << reason
+              << " episode_dir=" << currentEpisodeDir_ << std::endl;
+
+    const int64_t sensorStopStartMs = steadyNowMs();
+    const bool sensorStopOk = sensorRecorder_.stop(5000);
+    std::cout << "[PERF] stop sensor_recorder done: ok=" << (sensorStopOk ? "true" : "false")
+              << " elapsed_ms=" << (steadyNowMs() - sensorStopStartMs) << std::endl;
+
+    const int64_t cameraStopStartMs = steadyNowMs();
+    const bool cameraStopOk = cameraRecorder_.stop(5000);
+    std::cout << "[PERF] stop camera_recorder done: ok=" << (cameraStopOk ? "true" : "false")
+              << " elapsed_ms=" << (steadyNowMs() - cameraStopStartMs) << std::endl;
 
     setLedState(LedState::Ready);
     sendAudioCommand("recording_stop");
@@ -1159,10 +1201,19 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
     setAudioRecoveryCommand("writing");
     sendAudioCommand("writing");
     setLedState(LedState::Init);
+    const int64_t writePhaseStartMs = steadyNowMs();
+    std::cout << "[PERF] writing phase begin: episode_dir=" << currentEpisodeDir_ << std::endl;
     flushEpisodeArtifactsToDisk(fs::path(currentEpisodeDir_));
+    std::cout << "[PERF] writing phase end: episode_dir=" << currentEpisodeDir_
+              << " elapsed_ms=" << (steadyNowMs() - writePhaseStartMs) << std::endl;
 
     std::string errorMessage;
+    const int64_t validatePhaseStartMs = steadyNowMs();
+    std::cout << "[PERF] validation phase begin: episode_dir=" << currentEpisodeDir_ << std::endl;
     const bool valid = episodeManager_->validateEpisode(currentEpisodeDir_, &errorMessage);
+    std::cout << "[PERF] validation phase end: episode_dir=" << currentEpisodeDir_
+              << " valid=" << (valid ? "true" : "false")
+              << " elapsed_ms=" << (steadyNowMs() - validatePhaseStartMs) << std::endl;
     if (!valid)
     {
         std::cerr << "[ERROR] episode validation failed: " << errorMessage << std::endl;
@@ -1175,6 +1226,8 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
         setLedState(LedState::Error5);
         setAudioRecoveryCommand("error");
         sendAudioCommand("error");
+        std::cout << "[PERF] stop phase end: due_to_error=true"
+                  << " total_elapsed_ms=" << (steadyNowMs() - stopStartMs) << std::endl;
         return false;
     }
 
@@ -1183,12 +1236,16 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
         setLedState(LedState::Error1);
         setAudioRecoveryCommand("validation_failed");
         sendAudioCommand("validation_failed");
+        std::cout << "[PERF] stop phase end: valid=false"
+                  << " total_elapsed_ms=" << (steadyNowMs() - stopStartMs) << std::endl;
         return false;
     }
 
     setLedState(LedState::Ready);
     setAudioRecoveryCommand("ready");
     sendAudioCommand("ready");
+    std::cout << "[PERF] stop phase end: valid=true"
+              << " total_elapsed_ms=" << (steadyNowMs() - stopStartMs) << std::endl;
     return true;
 }
 
@@ -2279,6 +2336,8 @@ bool RecordRuntime::EpisodeManager::prepareEpisode(const std::string &episodeDir
 
 bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDir, std::string *errorMessage) const
 {
+    const int64_t validateStartMs = steadyNowMs();
+    std::cout << "[PERF] validateEpisode begin: episode_dir=" << episodeDir << std::endl;
     const std::vector<std::string> requiredFiles = {
         "sensor_data_left.mcap",
         "sensor_data_right.mcap",
@@ -2427,6 +2486,9 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         }
     }
 
+    std::cout << "[PERF] validateEpisode end: episode_dir=" << episodeDir
+              << " elapsed_ms=" << (steadyNowMs() - validateStartMs)
+              << " reference_span_sec=" << formatSeconds(referenceSpanSec) << std::endl;
     return true;
 }
 

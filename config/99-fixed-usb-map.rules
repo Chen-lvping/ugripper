@@ -45,6 +45,8 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.1", \
   SYMLINK+="left_tcam_r"
 
 # ---- Right main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
+SUBSYSTEM=="usb", KERNELS=="1-1.4.4", ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", TAG+="uaccess"
+SUBSYSTEM=="usb", KERNELS=="5-1.4.4", ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", TAG+="uaccess"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.4", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
   SYMLINK+="right_cam_main"
@@ -53,6 +55,8 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.4", \
   SYMLINK+="right_cam_main"
 
 # ---- Left main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
+SUBSYSTEM=="usb", KERNELS=="9-1.4.4", ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", TAG+="uaccess"
+SUBSYSTEM=="usb", KERNELS=="11-1.4.4", ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", TAG+="uaccess"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.4", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
   SYMLINK+="left_cam_main"
