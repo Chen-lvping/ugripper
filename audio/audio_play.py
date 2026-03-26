@@ -133,6 +133,7 @@ class AudioPlayer:
         self.target = None
         self.audio_env = os.environ.copy()
         self.backend_wait_logged = False
+        self.key_device_wait_logged = False
         self.active_sound_name = None
         self.active_sound_looping = False
 
@@ -461,9 +462,12 @@ class AudioPlayer:
                 try:
                     device_path = _find_event_device()
                     fd = os.open(device_path, os.O_RDONLY | os.O_NONBLOCK)
+                    self.key_device_wait_logged = False
                     print(f"[INFO] listening USB headset keys from {device_path}", flush=True)
                 except Exception as exc:
-                    print(f"[WARN] key device not ready: {exc}", flush=True)
+                    if not self.key_device_wait_logged:
+                        print(f"[WARN] key device not ready: {exc}", flush=True)
+                        self.key_device_wait_logged = True
                     self.stop_event.wait(RETRY_SEC)
                     continue
 

@@ -52,12 +52,14 @@ public:
     static constexpr uint8_t kRecvHead2 = 0xA5;
     static constexpr uint8_t kIndexKeyReport = 0x01;
     static constexpr uint8_t kIndexBeepBase = 0x04;
+    static constexpr uint8_t kIndexBeepFree = 0x0E;
     static constexpr uint8_t kIndexRgbLight = 0x0F;
     static constexpr uint8_t kFuncPwmGet = 0x02;
 
     static uint8_t calculateXor(const uint8_t *data, size_t length);
     static std::optional<GripperParsedFrame> tryConsumeFrame(std::vector<uint8_t> &buffer);
     static std::array<uint8_t, 7> buildBeepStateRequest();
+    static std::array<uint8_t, 7> buildSetBeepCommand(const GripperBeepState &state);
     static std::array<uint8_t, 8> buildSetRgbCommand(const GripperLedColor &color);
 
 private:

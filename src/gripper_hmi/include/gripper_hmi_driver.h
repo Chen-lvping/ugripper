@@ -27,6 +27,9 @@ struct GripperHmiSnapshot
 class GripperHmiDriver
 {
 public:
+    static constexpr uint16_t kDefaultBeepDuty = 50;
+    static constexpr uint16_t kDefaultBeepFrequency = 4000;
+
     GripperHmiDriver(const std::string &port, uint32_t baudrate = 115200, const std::string &name = "GripperHmiDriver");
     ~GripperHmiDriver();
 
@@ -38,6 +41,9 @@ public:
     bool setLedColor(const GripperLedColor &color);
     bool setLedColor(uint8_t red, uint8_t green, uint8_t blue);
     bool setLedEffect(const GripperLedEffect &effect);
+    bool setBeepState(const GripperBeepState &state);
+    bool setBeepEnabled(bool enabled);
+    bool silenceBeep();
 
     bool pollOnce(int timeoutMs = 20);
     bool waitForKeyChange(int timeoutMs, GripperKeyReport *report);
@@ -71,6 +77,10 @@ private:
     bool pendingStateRequest_ = false;
     bool pendingLedUpdate_ = false;
     GripperLedColor pendingLedColor_{};
+    bool pendingBeepUpdate_ = false;
+    GripperBeepState pendingBeepState_{};
+    GripperBeepState activeBeepState_{};
+    uint64_t lastBeepWriteAtMs_ = 0;
     bool ledEffectEnabled_ = false;
     bool ledEffectDirty_ = false;
     GripperLedEffect ledEffect_{};

@@ -116,6 +116,25 @@ std::array<uint8_t, 7> GripperHmiProtocol::buildBeepStateRequest()
     return frame;
 }
 
+std::array<uint8_t, 7> GripperHmiProtocol::buildSetBeepCommand(const GripperBeepState &state)
+{
+    // The legacy UGripper driver writes the actual buzzer command through
+    // INDEX_WORD_BEEP_FREE (0x0E). INDEX_WORD_BEEP_BASE (0x04) is only used
+    // for querying the current PWM state.
+    const uint8_t duty = static_cast<uint8_t>(std::min<uint16_t>(state.duty, 0xFF));
+    std::array<uint8_t, 7> frame = {
+        kSendHead1,
+        kSendHead2,
+        kIndexBeepFree,
+        duty,
+        static_cast<uint8_t>((state.frequency >> 8) & 0xFF),
+        static_cast<uint8_t>(state.frequency & 0xFF),
+        0x00,
+    };
+    frame[6] = calculateXor(frame.data(), frame.size() - 1);
+    return frame;
+}
+
 std::array<uint8_t, 8> GripperHmiProtocol::buildSetRgbCommand(const GripperLedColor &color)
 {
     std::array<uint8_t, 8> frame = {

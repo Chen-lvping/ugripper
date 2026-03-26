@@ -64,6 +64,7 @@ apply_dirty_snapshot() {
     .
     ':(exclude).worktrees/**'
     ':(exclude).codex/todo-hub/runtime.json'
+    ':(exclude).codex/todo-hub/root_path.txt'
     ':(exclude).codex/todo-hub/tasks/**'
   )
 

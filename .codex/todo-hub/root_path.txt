@@ -1,1 +1,1 @@
-/home/ubuntu/proj/ugripper_v2
+/home/ubuntu/proj/proj/ugripper_v2

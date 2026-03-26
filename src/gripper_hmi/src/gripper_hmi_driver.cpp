@@ -12,6 +12,7 @@ namespace
 constexpr uint64_t kStateRequestIntervalMs = 1000;
 constexpr uint64_t kLedRenderIntervalMs = GripperLedEffectRenderer::recommendedRenderIntervalMs();
 constexpr uint64_t kLedResendIntervalMs = 250;
+constexpr uint64_t kBeepResendIntervalMs = 20;
 }
 
 static std::string resolveSerialPortPath(const std::string &configuredPort)
@@ -82,7 +83,10 @@ bool GripperHmiDriver::connect()
     rxBuffer_.clear();
     pendingStateRequest_ = true;
     pendingLedUpdate_ = false;
+    pendingBeepUpdate_ = false;
     pendingLedColor_ = {};
+    pendingBeepState_ = {};
+    activeBeepState_ = {};
     ledEffectEnabled_ = false;
     ledEffectDirty_ = false;
     ledEffect_ = {};
@@ -91,6 +95,7 @@ bool GripperHmiDriver::connect()
     lastLedRenderAtMs_ = 0;
     lastStateRequestAtMs_ = 0;
     lastLedWriteAtMs_ = 0;
+    lastBeepWriteAtMs_ = 0;
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         keyPressed_.fill(false);
@@ -112,6 +117,7 @@ void GripperHmiDriver::disconnect()
         ioRunning_ = false;
         pendingStateRequest_ = false;
         pendingLedUpdate_ = false;
+        pendingBeepUpdate_ = false;
     }
     ioCv_.notify_all();
     if (ioThread_.joinable())
@@ -167,6 +173,7 @@ void GripperHmiDriver::handleIoFailureLocked(const char *operation)
     std::cerr << name_ << ": " << operation << " failed on " << port_ << std::endl;
     pendingStateRequest_ = false;
     pendingLedUpdate_ = false;
+    pendingBeepUpdate_ = false;
     ioRunning_ = false;
     if (serialPort_ != nullptr)
     {
@@ -221,6 +228,35 @@ bool GripperHmiDriver::setLedEffect(const GripperLedEffect &effect)
     ledEffectDirty_ = true;
     ioCv_.notify_one();
     return true;
+}
+
+bool GripperHmiDriver::setBeepState(const GripperBeepState &state)
+{
+    std::lock_guard<std::mutex> ioLock(ioMutex_);
+    if (serialPort_ == nullptr)
+    {
+        return false;
+    }
+
+    pendingBeepState_ = state;
+    activeBeepState_ = state;
+    pendingBeepUpdate_ = true;
+    ioCv_.notify_one();
+    return true;
+}
+
+bool GripperHmiDriver::setBeepEnabled(bool enabled)
+{
+    if (!enabled)
+    {
+        return silenceBeep();
+    }
+    return setBeepState(GripperBeepState{kDefaultBeepDuty, kDefaultBeepFrequency});
+}
+
+bool GripperHmiDriver::silenceBeep()
+{
+    return setBeepState(GripperBeepState{0, 0});
 }
 
 void GripperHmiDriver::handleParsedFrame(const GripperParsedFrame &frame)
@@ -330,6 +366,10 @@ void GripperHmiDriver::ioLoop()
                                   (nowMs - lastLedWriteAtMs_) >= kLedResendIntervalMs;
         const bool ledPrioritySend = pendingLedUpdate_ || ledEffectDirty_ || colorChanged;
         const bool ledShouldSend = ledPrioritySend || ledResendDue;
+        const bool beepKeepaliveEnabled = activeBeepState_.duty > 0;
+        const bool beepResendDue = beepKeepaliveEnabled &&
+                                   (lastBeepWriteAtMs_ == 0 ||
+                                    (nowMs - lastBeepWriteAtMs_) >= kBeepResendIntervalMs);
 
         // Mirror the old driver_origin split: preserve LED edges first, then use
         // low-frequency keepalive traffic so serial writes do not mask blink transitions.
@@ -345,7 +385,23 @@ void GripperHmiDriver::ioLoop()
             ledEffectDirty_ = false;
         }
 
-        if (stateDue)
+        bool sentBeepUpdate = false;
+        if (pendingBeepUpdate_ || beepResendDue)
+        {
+            const auto frame = GripperHmiProtocol::buildSetBeepCommand(activeBeepState_);
+            if (writeFrameLocked(frame.data(), frame.size()))
+            {
+                lastBeepWriteAtMs_ = nowMs;
+                if (pendingBeepUpdate_)
+                {
+                    pendingBeepUpdate_ = false;
+                    pendingStateRequest_ = true;
+                    sentBeepUpdate = true;
+                }
+            }
+        }
+
+        if (stateDue && !pendingBeepUpdate_ && !sentBeepUpdate)
         {
             const auto frame = GripperHmiProtocol::buildBeepStateRequest();
             pendingStateRequest_ = false;
@@ -384,10 +440,18 @@ void GripperHmiDriver::ioLoop()
         {
             waitMs = std::min(waitMs, kStateRequestIntervalMs - (nowMs - lastStateRequestAtMs_));
         }
+        if (beepKeepaliveEnabled)
+        {
+            const uint64_t beepWaitMs =
+                (lastBeepWriteAtMs_ == 0 || (nowMs - lastBeepWriteAtMs_) >= kBeepResendIntervalMs)
+                    ? 1
+                    : (kBeepResendIntervalMs - (nowMs - lastBeepWriteAtMs_));
+            waitMs = std::min(waitMs, beepWaitMs);
+        }
         waitMs = std::max<uint64_t>(1, waitMs);
 
         ioCv_.wait_for(ioLock, std::chrono::milliseconds(waitMs), [this]() {
-            return !ioRunning_ || pendingStateRequest_ || pendingLedUpdate_;
+            return !ioRunning_ || pendingStateRequest_ || pendingLedUpdate_ || pendingBeepUpdate_;
         });
     }
 }

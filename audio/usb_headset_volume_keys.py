@@ -82,6 +82,7 @@ class VolumeKeyListener:
         self.running = True
         self.fd = None
         self.device_path: Path | None = None
+        self.device_wait_logged = False
         signal.signal(signal.SIGINT, self._shutdown)
         signal.signal(signal.SIGTERM, self._shutdown)
 
@@ -101,6 +102,7 @@ class VolumeKeyListener:
     def _open_device(self):
         self.device_path = _find_event_device()
         self.fd = os.open(self.device_path, os.O_RDONLY | os.O_NONBLOCK)
+        self.device_wait_logged = False
         print(f"[INFO] listening USB headset keys from {self.device_path}", flush=True)
 
     def run(self):
@@ -109,7 +111,9 @@ class VolumeKeyListener:
                 try:
                     self._open_device()
                 except Exception as exc:
-                    print(f"[WARN] key device not ready: {exc}", flush=True)
+                    if not self.device_wait_logged:
+                        print(f"[WARN] key device not ready: {exc}", flush=True)
+                        self.device_wait_logged = True
                     time.sleep(RETRY_SEC)
                     continue
 

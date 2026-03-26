@@ -18,6 +18,8 @@ static constexpr size_t kBtnDownKeyIndex = 1;
 
 namespace {
 std::atomic<bool> g_stop_requested{false};
+constexpr int kBeepStateProbeDelayMs = 80;
+constexpr int kBeepStateProbeIntervalMs = 100;
 
 void handleSignal(int signal)
 {
@@ -47,9 +49,14 @@ struct TestOptions
     int durationSec = 10;
     int pollMs = 20;
     bool setLed = false;
+    bool enableBeep = false;
+    bool customBeep = false;
     bool ledOnly = false;
     bool stateMode = false;
     bool showHelp = false;
+    int beepDurationMs = 0;
+    int beepDuty = static_cast<int>(GripperHmiDriver::kDefaultBeepDuty);
+    int beepFreq = static_cast<int>(GripperHmiDriver::kDefaultBeepFrequency);
     GripperLedColor color{32, 0, 0};
     GripperLedEffect effect{};
 };
@@ -57,12 +64,16 @@ struct TestOptions
 static void printUsage(const char *program)
 {
     std::cout
-        << "Usage: " << program << " [--port PATH]... [--baud N] [--duration SEC] [--poll-ms N] [--rgb R G B] [--state NAME] [--led-only]\n"
+        << "Usage: " << program << " [--port PATH]... [--baud N] [--duration SEC] [--poll-ms N] [--rgb R G B] [--beep [--beep-ms N]] [--beep-duty N [--beep-freq N] [--beep-ms N]] [--state NAME] [--led-only]\n"
         << "State examples:\n"
         << "  --state READY\n"
         << "  --state RECORDING\n"
         << "  --state ERROR_1\n"
         << "  --state CALIB_RUN:0.5\n"
+        << "Beep example:\n"
+        << "  --beep --beep-ms 300\n"
+        << "  --beep-duty 50 --beep-freq 1000 --beep-ms 300\n"
+        << "  beep uses fixed tested defaults for active buzzer: duty=30 freq=1000\n"
         << "Defaults:\n"
         << "  --port /dev/right_gripper\n"
         << "  --port /dev/left_gripper\n"
@@ -188,6 +199,52 @@ static bool parseOptions(int argc, char **argv, TestOptions *options)
             continue;
         }
 
+        if (argument == "--beep")
+        {
+            options->enableBeep = true;
+            continue;
+        }
+
+        if (argument == "--beep-duty")
+        {
+            int value = 0;
+            if (index + 1 >= argc || !parseInt(argv[++index], &value) || value < 0 || value > 255)
+            {
+                std::cerr << "Invalid value for --beep-duty" << std::endl;
+                return false;
+            }
+            options->enableBeep = true;
+            options->customBeep = true;
+            options->beepDuty = value;
+            continue;
+        }
+
+        if (argument == "--beep-freq")
+        {
+            int value = 0;
+            if (index + 1 >= argc || !parseInt(argv[++index], &value) || value < 0 || value > 65535)
+            {
+                std::cerr << "Invalid value for --beep-freq" << std::endl;
+                return false;
+            }
+            options->enableBeep = true;
+            options->customBeep = true;
+            options->beepFreq = value;
+            continue;
+        }
+
+        if (argument == "--beep-ms")
+        {
+            int value = 0;
+            if (index + 1 >= argc || !parseInt(argv[++index], &value) || value < 0)
+            {
+                std::cerr << "Invalid value for --beep-ms" << std::endl;
+                return false;
+            }
+            options->beepDurationMs = value;
+            continue;
+        }
+
         if (argument == "--state")
         {
             if (index + 1 >= argc)
@@ -262,11 +319,24 @@ int main(int argc, char **argv)
     {
         std::cout << "LED state mode: " << GripperLedEffectRenderer::stateText(options.effect) << std::endl;
     }
+    if (options.enableBeep)
+    {
+        std::cout << "Beep request: enabled=true"
+                  << " mode=" << (options.customBeep ? "custom" : "default")
+                  << " duty=" << options.beepDuty
+                  << " freq=" << options.beepFreq
+                  << " duration_ms=" << options.beepDurationMs
+                  << std::endl;
+    }
 
     const auto startedAt = std::chrono::steady_clock::now();
     auto lastStatePrint = startedAt;
     std::array<uint8_t, 3> lastColor{255, 255, 255};
     GripperLedEffectRenderer renderer;
+    bool beepApplied = false;
+    bool beepSilenced = false;
+    auto beepStartedAt = startedAt;
+    auto lastBeepStateRequestAt = startedAt - std::chrono::milliseconds(kBeepStateProbeIntervalMs);
 
     while (!g_stop_requested.load())
     {
@@ -308,11 +378,67 @@ int main(int argc, char **argv)
             options.setLed = false;
         }
 
-        if (!options.ledOnly)
+        if (options.enableBeep && !beepApplied)
         {
+            const GripperBeepState beepState{
+                static_cast<uint16_t>(options.beepDuty),
+                static_cast<uint16_t>(options.beepFreq),
+            };
             for (auto &device : devices)
             {
-                device->requestState();
+                const bool ok = options.customBeep
+                                    ? device->setBeepState(beepState)
+                                    : device->setBeepEnabled(true);
+                if (!ok)
+                {
+                    std::cerr << "Failed to enable beep on: " << device->getPort() << std::endl;
+                }
+            }
+            beepApplied = true;
+            beepStartedAt = now;
+        }
+
+        if (options.enableBeep && !beepSilenced && options.beepDurationMs > 0)
+        {
+            const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - beepStartedAt).count();
+            if (elapsedMs >= options.beepDurationMs)
+            {
+                for (auto &device : devices)
+                {
+                    if (!device->silenceBeep())
+                    {
+                        std::cerr << "Failed to silence beep on: " << device->getPort() << std::endl;
+                    }
+                }
+                beepSilenced = true;
+            }
+        }
+
+        if (!options.ledOnly)
+        {
+            bool requestedBeepStateThisLoop = false;
+            for (auto &device : devices)
+            {
+                bool shouldRequestState = true;
+                if (options.enableBeep)
+                {
+                    const auto elapsedSinceBeepMs =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now - beepStartedAt).count();
+                    const auto elapsedSinceLastProbeMs =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(now - lastBeepStateRequestAt).count();
+                    shouldRequestState = beepApplied &&
+                                         elapsedSinceBeepMs >= kBeepStateProbeDelayMs &&
+                                         elapsedSinceLastProbeMs >= kBeepStateProbeIntervalMs;
+                }
+
+                if (shouldRequestState)
+                {
+                    device->requestState();
+                    if (options.enableBeep)
+                    {
+                        requestedBeepStateThisLoop = true;
+                    }
+                }
                 GripperKeyReport report;
                 if (device->waitForKeyChange(options.pollMs, &report))
                 {
@@ -328,7 +454,13 @@ int main(int argc, char **argv)
                 }
             }
 
-            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastStatePrint).count() >= 1000)
+            if (options.enableBeep && requestedBeepStateThisLoop)
+            {
+                lastBeepStateRequestAt = now;
+            }
+
+            const int statePrintIntervalMs = options.enableBeep ? 100 : 1000;
+            if (std::chrono::duration_cast<std::chrono::milliseconds>(now - lastStatePrint).count() >= statePrintIntervalMs)
             {
                 lastStatePrint = now;
                 for (auto &device : devices)
