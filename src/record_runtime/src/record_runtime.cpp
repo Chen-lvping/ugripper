@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <regex>
 #include <sstream>
 #include <sys/stat.h>
@@ -41,6 +42,7 @@ constexpr uint64_t kHmiActiveTimeoutMs = 2500;
 constexpr double kMinReasonableVideoSpanSec = 0.2;
 constexpr double kMaxVideoSpanGapSec = 5.0;
 constexpr int kVideoProbeTimeoutMs = 1500;
+constexpr int kUdevadmProbeTimeoutMs = 2000;
 
 struct EpisodeVideoArtifact
 {
@@ -90,6 +92,22 @@ struct CommandCaptureResult
     int exitCode = -1;
     std::string output;
 };
+
+struct TactileCalibrationTarget
+{
+    const char *cameraName;
+    const char *side;
+    const char *devicePath;
+    const char *jsonPath;
+    const char *serialPlaceholder;
+};
+
+constexpr std::array<TactileCalibrationTarget, 4> kTactileCalibrationTargets = {{
+    {"left_tcam_l", "left", "/dev/left_tcam_l", "observation.images.left_tcam_l", "{{LEFT_TCAM_L_SERIAL}}"},
+    {"left_tcam_r", "left", "/dev/left_tcam_r", "observation.images.left_tcam_r", "{{LEFT_TCAM_R_SERIAL}}"},
+    {"right_tcam_l", "right", "/dev/right_tcam_l", "observation.images.right_tcam_l", "{{RIGHT_TCAM_L_SERIAL}}"},
+    {"right_tcam_r", "right", "/dev/right_tcam_r", "observation.images.right_tcam_r", "{{RIGHT_TCAM_R_SERIAL}}"},
+}};
 
 json makeStereoPlaceholderFromTemplate(const json *templateEntry)
 {
@@ -150,6 +168,35 @@ json makeStereoPlaceholderFromTemplate(const json *templateEntry)
     return placeholder;
 }
 
+json makeTactileCalibrationEntry(const json *templateEntry, const std::string &serialPlaceholder)
+{
+    json entry = json::object();
+    if (templateEntry != nullptr && templateEntry->is_object())
+    {
+        entry = *templateEntry;
+    }
+
+    if (!entry.contains("shape") || !entry["shape"].is_array())
+    {
+        entry["shape"] = json::array({480, 640, 3});
+    }
+    if (!entry.contains("names") || !entry["names"].is_array())
+    {
+        entry["names"] = json::array({"height", "width", "channels"});
+    }
+    if (!entry.contains("info"))
+    {
+        entry["info"] = nullptr;
+    }
+    if (!entry.contains("dtype"))
+    {
+        entry["dtype"] = "video";
+    }
+
+    entry["serial"] = serialPlaceholder;
+    return entry;
+}
+
 void appendCalibrationNote(json *calibrationInfo, const std::string &message)
 {
     if (calibrationInfo == nullptr || !calibrationInfo->is_object())
@@ -178,6 +225,84 @@ void removeIfPresent(json *root, const std::string &key)
     {
         root->erase(key);
     }
+}
+
+void replaceJsonStringValues(json *node, const std::string &placeholder, const std::string &replacement)
+{
+    if (node == nullptr || placeholder.empty())
+    {
+        return;
+    }
+
+    if (node->is_string())
+    {
+        std::string value = node->get<std::string>();
+        size_t position = value.find(placeholder);
+        while (position != std::string::npos)
+        {
+            value.replace(position, placeholder.size(), replacement);
+            position = value.find(placeholder, position + replacement.size());
+        }
+        *node = value;
+        return;
+    }
+
+    if (node->is_array())
+    {
+        for (json &item : *node)
+        {
+            replaceJsonStringValues(&item, placeholder, replacement);
+        }
+        return;
+    }
+
+    if (node->is_object())
+    {
+        for (auto &item : node->items())
+        {
+            replaceJsonStringValues(&item.value(), placeholder, replacement);
+        }
+    }
+}
+
+std::string legacyTactileJsonPathForSide(const std::string &side)
+{
+    return side == "left" ? "observation.images.gripper_left_tactile"
+                          : "observation.images.gripper_right_tactile";
+}
+
+std::string legacyTactileSerialPlaceholderForSide(const std::string &side)
+{
+    return side == "left" ? "{{TACTILE_LEFT_SERIAL}}"
+                          : "{{TACTILE_RIGHT_SERIAL}}";
+}
+
+std::vector<std::string> tactileTemplateCandidateKeys(const TactileCalibrationTarget &target)
+{
+    std::vector<std::string> keys;
+    keys.push_back(target.jsonPath);
+    for (const auto &candidate : kTactileCalibrationTargets)
+    {
+        if (std::string(candidate.side) == target.side && std::string(candidate.jsonPath) != target.jsonPath)
+        {
+            keys.push_back(candidate.jsonPath);
+        }
+    }
+    keys.push_back(legacyTactileJsonPathForSide(target.side));
+    return keys;
+}
+
+const json *findSourceCalibrationEntry(const std::map<std::string, json> &entries, const std::vector<std::string> &keys)
+{
+    for (const std::string &key : keys)
+    {
+        const auto it = entries.find(key);
+        if (it != entries.end() && it->second.is_object())
+        {
+            return &it->second;
+        }
+    }
+    return nullptr;
 }
 
 bool loadJsonFile(const std::string &path, json *output, std::string *errorMessage)
@@ -622,6 +747,183 @@ CommandCaptureResult runCommandCapture(const std::vector<std::string> &arguments
         result.success = (result.exitCode == 0);
     }
     return result;
+}
+
+std::optional<std::string> extractUsbSerialFromUdevadmOutput(const std::string &output)
+{
+    const std::regex serialPattern(R"SER(ATTRS\{serial\}=="([^"]+)")SER");
+    std::vector<std::string> blockLines;
+
+    const auto inspectBlock = [&blockLines, &serialPattern]() -> std::optional<std::string>
+    {
+        bool hasUsbSubsystem = false;
+        bool hasUsbDriver = false;
+        std::string serial;
+
+        for (const std::string &line : blockLines)
+        {
+            const std::string trimmedLine = trim(line);
+            if (trimmedLine.find(R"(SUBSYSTEMS=="usb")") != std::string::npos)
+            {
+                hasUsbSubsystem = true;
+            }
+            if (trimmedLine.find(R"(DRIVERS=="usb")") != std::string::npos)
+            {
+                hasUsbDriver = true;
+            }
+
+            std::smatch match;
+            if (serial.empty() && std::regex_search(trimmedLine, match, serialPattern) && match.size() >= 2)
+            {
+                const std::string candidate = match[1].str();
+                if (candidate.rfind("xhci-", 0) != 0)
+                {
+                    serial = candidate;
+                }
+            }
+        }
+
+        if (hasUsbSubsystem && hasUsbDriver && !serial.empty())
+        {
+            return serial;
+        }
+        return std::nullopt;
+    };
+
+    std::stringstream stream(output);
+    std::string line;
+    while (std::getline(stream, line))
+    {
+        if (trim(line).empty())
+        {
+            if (const auto serial = inspectBlock())
+            {
+                return serial;
+            }
+            blockLines.clear();
+            continue;
+        }
+        blockLines.push_back(line);
+    }
+
+    return inspectBlock();
+}
+
+std::optional<std::string> probeUsbSerialForDeviceNode(const std::string &devicePath, std::string *detail)
+{
+    if (!fs::exists(devicePath))
+    {
+        if (detail != nullptr)
+        {
+            *detail = "device node missing";
+        }
+        return std::nullopt;
+    }
+
+    const CommandCaptureResult probe = runCommandCapture(
+        {"udevadm", "info", "--attribute-walk", "--name=" + devicePath},
+        kUdevadmProbeTimeoutMs);
+
+    if (probe.timedOut)
+    {
+        if (detail != nullptr)
+        {
+            *detail = "udevadm timed out after " + std::to_string(kUdevadmProbeTimeoutMs) + "ms";
+        }
+        return std::nullopt;
+    }
+    if (!probe.success)
+    {
+        if (detail != nullptr)
+        {
+            std::string commandError = trim(probe.output);
+            if (commandError.empty())
+            {
+                commandError = "udevadm exited with code " + std::to_string(probe.exitCode);
+            }
+            *detail = commandError;
+        }
+        return std::nullopt;
+    }
+
+    const auto serial = extractUsbSerialFromUdevadmOutput(probe.output);
+    if (!serial.has_value() && detail != nullptr)
+    {
+        *detail = "no parent usb ATTRS{serial} found";
+    }
+    return serial;
+}
+
+void injectRuntimeTactileSerial(json *calibrationJson,
+                                const TactileCalibrationTarget &target,
+                                const std::string &runtimeSerial,
+                                const std::string &probeDetail,
+                                const std::string &sourceFile,
+                                const std::string &persistCalibrationFile)
+{
+    if (calibrationJson == nullptr || !calibrationJson->is_object())
+    {
+        return;
+    }
+
+    json &entry = (*calibrationJson)[target.jsonPath];
+    if (!entry.is_object())
+    {
+        entry = json::object();
+    }
+
+    const std::string previous = entry.value("serial", std::string());
+    if (previous.empty())
+    {
+        std::cout << "[INFO] tactile serial missing in source calibration, inject runtime value:"
+                  << " camera=" << target.cameraName
+                  << " device=" << target.devicePath
+                  << " serial=" << runtimeSerial << std::endl;
+    }
+    else if (previous == target.serialPlaceholder)
+    {
+        std::cout << "[INFO] tactile serial placeholder resolved at runtime:"
+                  << " camera=" << target.cameraName
+                  << " placeholder=" << target.serialPlaceholder
+                  << " device=" << target.devicePath
+                  << " serial=" << runtimeSerial << std::endl;
+    }
+    else if (previous != runtimeSerial)
+    {
+        std::cerr << "[WARN] tactile serial mismatch, correcting episode calibration only:"
+                  << " camera=" << target.cameraName
+                  << " source_serial=" << previous
+                  << " runtime_serial=" << runtimeSerial
+                  << " source_file=" << sourceFile
+                  << " persist_rewritten=false" << std::endl;
+    }
+    else
+    {
+        std::cout << "[INFO] tactile serial matches runtime hardware:"
+                  << " camera=" << target.cameraName
+                  << " device=" << target.devicePath
+                  << " serial=" << runtimeSerial << std::endl;
+    }
+
+    if (!probeDetail.empty())
+    {
+        std::cout << "[INFO] tactile serial probe detail:"
+                  << " camera=" << target.cameraName
+                  << " detail=" << probeDetail << std::endl;
+    }
+
+    replaceJsonStringValues(calibrationJson, target.serialPlaceholder, runtimeSerial);
+    entry["serial"] = runtimeSerial;
+
+    if (sourceFile == persistCalibrationFile &&
+        previous != runtimeSerial &&
+        !previous.empty() &&
+        previous != target.serialPlaceholder)
+    {
+        std::cout << "[INFO] persist calibration remains unchanged;"
+                  << " episode calibration now uses runtime tactile serial for camera=" << target.cameraName
+                  << std::endl;
+    }
 }
 
 bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::string *errorMessage)
@@ -2584,6 +2886,23 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
         std::cerr << "[WARN] invalid persist calibration, fallback to " << sourceFile << std::endl;
     }
 
+    std::map<std::string, json> sourceCalibrationEntries;
+    for (const auto &target : kTactileCalibrationTargets)
+    {
+        if (calibrationJson.contains(target.jsonPath) && calibrationJson[target.jsonPath].is_object())
+        {
+            sourceCalibrationEntries.emplace(target.jsonPath, calibrationJson[target.jsonPath]);
+        }
+    }
+    for (const std::string side : {"left", "right"})
+    {
+        const std::string legacyJsonPath = legacyTactileJsonPathForSide(side);
+        if (calibrationJson.contains(legacyJsonPath) && calibrationJson[legacyJsonPath].is_object())
+        {
+            sourceCalibrationEntries.emplace(legacyJsonPath, calibrationJson[legacyJsonPath]);
+        }
+    }
+
     json leftStereoTemplate;
     json rightStereoTemplate;
     const json *leftStereoTemplatePtr = nullptr;
@@ -2617,6 +2936,14 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
     calibrationJson["observation.images.left_stereo"] = makeStereoPlaceholderFromTemplate(leftStereoTemplatePtr);
     calibrationJson["observation.images.right_stereo"] = makeStereoPlaceholderFromTemplate(rightStereoTemplatePtr);
 
+    for (const auto &target : kTactileCalibrationTargets)
+    {
+        const json *templateEntry = findSourceCalibrationEntry(
+            sourceCalibrationEntries,
+            tactileTemplateCandidateKeys(target));
+        calibrationJson[target.jsonPath] = makeTactileCalibrationEntry(templateEntry, target.serialPlaceholder);
+    }
+
     if (!calibrationJson.contains("metadata") || !calibrationJson["metadata"].is_object())
     {
         calibrationJson["metadata"] = json::object();
@@ -2634,6 +2961,55 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
     appendCalibrationNote(
         &calibrationInfo,
         "Stereo calibration entries are placeholder values migrated from the legacy Fays template until dedicated stereo calibration is available.");
+    appendCalibrationNote(
+        &calibrationInfo,
+        "Episode tactile calibration now includes only per-camera entries for left_tcam_l, left_tcam_r, right_tcam_l and right_tcam_r; persist calibration is not rewritten.");
+
+    if (!commandExists("udevadm"))
+    {
+        std::cerr << "[WARN] udevadm not found in PATH, skip runtime tactile serial injection" << std::endl;
+    }
+    else
+    {
+        std::map<std::string, std::string> sideReplacementSerials;
+        for (const auto &target : kTactileCalibrationTargets)
+        {
+            std::string detail;
+            const auto serial = probeUsbSerialForDeviceNode(target.devicePath, &detail);
+            if (!serial.has_value())
+            {
+                std::cerr << "[WARN] failed to resolve runtime tactile serial for camera=" << target.cameraName
+                          << " device=" << target.devicePath
+                          << " detail=" << detail
+                          << "; keep source calibration value" << std::endl;
+                continue;
+            }
+
+            injectRuntimeTactileSerial(
+                &calibrationJson,
+                target,
+                *serial,
+                detail,
+                sourceFile,
+                persistCalibrationFile_);
+
+            if (sideReplacementSerials.find(target.side) == sideReplacementSerials.end())
+            {
+                sideReplacementSerials.emplace(target.side, *serial);
+            }
+        }
+
+        for (const auto &entry : sideReplacementSerials)
+        {
+            replaceJsonStringValues(
+                &calibrationJson,
+                legacyTactileSerialPlaceholderForSide(entry.first),
+                entry.second);
+        }
+    }
+
+    removeIfPresent(&calibrationJson, "observation.images.gripper_left_tactile");
+    removeIfPresent(&calibrationJson, "observation.images.gripper_right_tactile");
 
     std::ofstream output(episodeDir + "/calibration.json");
     if (!output.is_open())

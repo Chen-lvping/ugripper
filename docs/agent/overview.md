@@ -90,7 +90,7 @@
    - `data_format_version=1`
    - `record_runtime=cpp`
    - `reset_recording=<true|false>`
-3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `config/fakeCamCalib.json`。episode 内会保留主摄与触觉相机标定，并将旧 Fays 标定块替换为 `left_stereo` / `right_stereo` 占位标定。
+3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `config/fakeCamCalib.json`。episode 内会保留主摄与触觉相机标定，并将旧 Fays 标定块替换为 `left_stereo` / `right_stereo` 占位标定；同时会在本次起录时用 `udevadm` 从现场 `/dev/left_tcam_l`、`/dev/left_tcam_r`、`/dev/right_tcam_l`、`/dev/right_tcam_r` 分别回填 4 路真实 tactile USB serial，并在 episode `calibration.json` 中仅保留 `observation.images.left_tcam_l`、`left_tcam_r`、`right_tcam_l`、`right_tcam_r` 四个独立标定项。若持久化 calibration 里还只有旧的 `gripper_left_tactile` / `gripper_right_tactile`，运行时会按左右侧复制参数到四路独立项，但 episode 输出不再保留旧键。不回写持久化 calibration。
 4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 在每路首个 pre-mux packet 锁定 `PTS + 系统时间` 后统一生成。
 5. 若已准备 pre audio，则移动到本次 episode 的 `audio_pre.wav`。
 6. 并行启动：
@@ -328,12 +328,34 @@ tail -n 200 /mnt/data_disk/logs/umi_sys_<device_sn_lower>_$(date +%Y%m%d).log
 - 不能启动：先看 `ugripper.service` 日志和 `record_runtime` 是否成功拉起。
 - 能录不能停：优先检查 HMI 按键事件、状态机和 `sensor_recorder` / `camera_recorder` 退出路径。
 - 少文件或校验失败：先核对八路视频、双 MCAP、`metadata.json`、`calibration.json` 是否完整。
+- tactile serial 不对：先分别用 `udevadm info --attribute-walk --name=/dev/left_tcam_l`、`/dev/left_tcam_r`、`/dev/right_tcam_l`、`/dev/right_tcam_r` 向上核对 USB `ATTRS{serial}`，再对比 episode `calibration.json` 中 `observation.images.left_tcam_l.serial`、`left_tcam_r.serial`、`right_tcam_l.serial`、`right_tcam_r.serial`；当前口径只修正 episode，不回写 `/etc/ugripper/config/calibration/calibration.json`，且不再输出 `gripper_left_tactile` / `gripper_right_tactile` 两个旧键。
 - 进入错误灯效但录制进程还活着：优先检查 `/mnt/data_disk` 是否仍可写、关键 `/dev/*` 设备节点是否还在，以及 HMI 是否持续响应。
 - 音频异常：优先看 USB 耳机枚举、PulseAudio sink/source、`module-suspend-on-idle` 是否已在初始化阶段被卸载。
 - 运行日志缺失：先看 `/tmp/umi_sys_<sn>_<date>.log` 是否生成，再看 `/mnt/data_disk/logs/` 是否存在当天镜像，最后核对 `/mnt/data_disk` 是否仍是真实可写挂载点。
 - U 盘流程异常：先看 `/var/log/ugripper/usb_auto_update.log`，再区分是包安装、配置导入、标定导入还是 encoder 校准失败。
 
-### 10.7 仓库内测试脚本
+### 10.7 tactile serial 定向核对
+```bash
+udevadm info --attribute-walk --name=/dev/left_tcam_l | sed -n '/SUBSYSTEMS==\"usb\"/,/ATTRS{serial}/p'
+udevadm info --attribute-walk --name=/dev/left_tcam_r | sed -n '/SUBSYSTEMS==\"usb\"/,/ATTRS{serial}/p'
+udevadm info --attribute-walk --name=/dev/right_tcam_l | sed -n '/SUBSYSTEMS==\"usb\"/,/ATTRS{serial}/p'
+udevadm info --attribute-walk --name=/dev/right_tcam_r | sed -n '/SUBSYSTEMS==\"usb\"/,/ATTRS{serial}/p'
+
+python3 - <<'PY'
+import json, pathlib
+path = pathlib.Path('/mnt/data_disk/<device_sn_lower>/data/episode_<date>_<index>/calibration.json')
+data = json.loads(path.read_text())
+for key in [
+    'observation.images.left_tcam_l',
+    'observation.images.left_tcam_r',
+    'observation.images.right_tcam_l',
+    'observation.images.right_tcam_r',
+]:
+    print(key, data[key]['serial'])
+PY
+```
+
+### 10.8 仓库内测试脚本
 - 仓库根目录下的 `test/scripts/` 用于存放仓库侧、现场定向验证用脚本，不属于 `ugripper.service` 默认运行链路。
 - 当前目录包含：
   - `camera_test.sh`：直接拉起多路 `ffmpeg` 验证非主相机录制稳定性，并记录运行态信息。

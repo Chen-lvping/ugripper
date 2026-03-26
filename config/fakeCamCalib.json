@@ -28,7 +28,7 @@
         "dtype": "video",
         "fps": 60
     },
-    "observation.images.gripper_left_tactile": {
+    "observation.images.left_tcam_l": {
         "shape": [
             480,
             640,
@@ -41,9 +41,9 @@
         ],
         "info": null,
         "dtype": "video",
-        "serial": "{{TACTILE_LEFT_SERIAL}}"
+        "serial": "{{LEFT_TCAM_L_SERIAL}}"
     },
-    "observation.images.gripper_right_tactile": {
+    "observation.images.left_tcam_r": {
         "shape": [
             480,
             640,
@@ -56,11 +56,41 @@
         ],
         "info": null,
         "dtype": "video",
-        "serial": "{{TACTILE_RIGHT_SERIAL}}"
+        "serial": "{{LEFT_TCAM_R_SERIAL}}"
+    },
+    "observation.images.right_tcam_l": {
+        "shape": [
+            480,
+            640,
+            3
+        ],
+        "names": [
+            "height",
+            "width",
+            "channels"
+        ],
+        "info": null,
+        "dtype": "video",
+        "serial": "{{RIGHT_TCAM_L_SERIAL}}"
+    },
+    "observation.images.right_tcam_r": {
+        "shape": [
+            480,
+            640,
+            3
+        ],
+        "names": [
+            "height",
+            "width",
+            "channels"
+        ],
+        "info": null,
+        "dtype": "video",
+        "serial": "{{RIGHT_TCAM_R_SERIAL}}"
     },
     "calibration_info": {
         "calibration_date": "2025-01-09",
         "calibration_status": "uncalibrated",
-        "notes": "Replace {{CAM_MAIN}} with actual camera name (e.g., cam_left or cam_right) and {{TACTILE_LEFT_SERIAL}}/{{TACTILE_RIGHT_SERIAL}} with USB serial numbers"
+        "notes": "Replace {{CAM_MAIN}} with actual camera name (e.g., cam_left or cam_right); tactile placeholders are resolved at runtime for left_tcam_l/left_tcam_r/right_tcam_l/right_tcam_r."
     }
 }

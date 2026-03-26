@@ -4,6 +4,12 @@
 >
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
+## Unreleased - 2026-03-26
+- `record_runtime` 恢复 v1 风格的运行时 tactile serial 注入：每次生成 episode `calibration.json` 时，都会从现场 `/dev/left_tcam_*`、`/dev/right_tcam_*` 向上读取 USB `ATTRS{serial}`，并写入当前 episode；当前按 `*_l` 优先、`*_r` 回退，并在同侧两路 serial 不一致时输出 warning。
+- 当持久化 calibration 中的 tactile serial 与现场硬件不一致时，当前口径为“修正 episode、输出明确日志、不回写 persist calibration”。
+- episode `calibration.json` 的 tactile 标定项扩展为 4 路独立输出：`left_tcam_l`、`left_tcam_r`、`right_tcam_l`、`right_tcam_r` 会各自带上参数和现场 serial；若源 calibration 仍是旧的左右各 1 路结构，运行时会按左右侧复制参数并保留旧键兼容。
+- episode `calibration.json` 进一步移除了 `gripper_left_tactile` / `gripper_right_tactile` 两个旧键，最终输出只保留 4 路真实 tactile 相机标定项。
+
 ## v1.2.6 - 2026-03-20
 - 翻转左右主摄画面，恢复正常拍摄方向。
 
