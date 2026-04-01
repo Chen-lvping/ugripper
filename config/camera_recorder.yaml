@@ -23,13 +23,14 @@ cameras:
     width: 1280
     height: 400
     fps: 60
+    output_fps: 30
     output_files: [left_stereo.mkv]
     input_thread_queue_size: 128
-    qp_init: 34
-    qp_max: 42
-    qp_min: 28
-    qp_max_i: 42
-    qp_min_i: 24
+    qp_init: 30
+    qp_max: 38
+    qp_min: 24
+    qp_max_i: 38
+    qp_min_i: 20
 
   - name: right_stereo
     device: /dev/right_stereo
@@ -37,13 +38,14 @@ cameras:
     width: 1280
     height: 400
     fps: 60
+    output_fps: 30
     output_files: [right_stereo.mkv]
     input_thread_queue_size: 128
-    qp_init: 34
-    qp_max: 42
-    qp_min: 28
-    qp_max_i: 42
-    qp_min_i: 24
+    qp_init: 30
+    qp_max: 38
+    qp_min: 24
+    qp_max_i: 38
+    qp_min_i: 20
 
   - name: left_tcam_l
     device: /dev/left_tcam_l

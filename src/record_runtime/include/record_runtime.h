@@ -35,6 +35,8 @@ struct RecordRuntimeOptions
     std::string exampleCalibrationFile = "./calibration.json";
     std::string fallbackCalibrationFile = "./config/fakeCamCalib.json";
     std::string cameraCodec = "h264";
+    std::string stereoControlFile = "/tmp/umi_stereo_camera_control.json";
+    std::string stereoStatusFile = "/tmp/umi_stereo_camera_status.json";
     int pollMs = 20;
 };
 
@@ -222,6 +224,7 @@ private:
     static std::string jsonEscape(const std::string &value);
     static uint64_t currentSteadyMs();
     static uint64_t currentEpochMs();
+    static int64_t currentEpochUs();
     static bool fileExistsAndNotEmpty(const std::string &path);
     static bool runCommandSync(const std::vector<std::string> &arguments);
 
@@ -241,6 +244,16 @@ private:
     bool startAudioPlayer();
     void stopAudioPlayer();
     void maintainAudioPlayer();
+    bool startStereoDaemon();
+    void stopStereoDaemon();
+    void maintainStereoDaemon();
+    bool writeStereoControl(bool recording,
+                            const std::string &episodeDir,
+                            int64_t startSystemTimeUs,
+                            int64_t stopSystemTimeUs);
+    bool waitForStereoFinalize(const std::string &episodeDir, int timeoutMs, std::string *errorMessage);
+    bool mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const;
+    bool syncRuntimeLogToDisk(const char *reason) const;
     void setAudioRecoveryCommand(std::string command);
     void sendAudioCommand(const std::string &command) const;
     void setLedState(LedState state, double progress = 0.0);
@@ -265,10 +278,14 @@ private:
     uint64_t lastHealthCheckMs_ = 0;
     bool audioPlayerStarted_ = false;
     uint64_t lastAudioPlayerStartAttemptMs_ = 0;
+    bool stereoDaemonStarted_ = false;
+    uint64_t lastStereoDaemonStartAttemptMs_ = 0;
+    uint64_t stereoCommandSeq_ = 0;
     std::unique_ptr<EpisodeManager> episodeManager_;
     GripperPanelManager panelManager_;
     std::unique_ptr<HmiLedController> ledController_;
     ProcessRunner audioPlayer_{"audio_player"};
+    ProcessRunner stereoDaemon_{"stereo_camera_daemon"};
     ProcessRunner cameraRecorder_{"camera_recorder"};
     ProcessRunner sensorRecorder_{"sensor_recorder"};
 };

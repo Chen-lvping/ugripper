@@ -19,6 +19,7 @@
 #include <map>
 #include <regex>
 #include <sstream>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -30,13 +31,16 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace {
-constexpr const char *kCameraStreamsCsv = "left_cam_main,right_cam_main,left_stereo,right_stereo,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r";
+constexpr const char *kSessionCameraStreamsCsv = "left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r";
+constexpr const char *kStereoCameraStreamsCsv = "left_stereo,right_stereo";
 constexpr uint64_t kActionDebounceMs = 250;
 constexpr uint64_t kLongPressThresholdMs = 800;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
 constexpr uint64_t kShutdownPromptThresholdMs = 2000;
 constexpr uint64_t kAudioPlayerRestartIntervalMs = 2000;
 constexpr uint64_t kAudioPlayerReadyGraceMs = 3000;
+constexpr uint64_t kStereoDaemonRestartIntervalMs = 2000;
+constexpr uint64_t kStereoFinalizeWaitPollMs = 100;
 constexpr uint64_t kHealthCheckIntervalMs = 1000;
 constexpr uint64_t kHmiActiveTimeoutMs = 2500;
 constexpr double kMinReasonableVideoSpanSec = 0.2;
@@ -109,6 +113,62 @@ constexpr std::array<TactileCalibrationTarget, 4> kTactileCalibrationTargets = {
     {"right_tcam_r", "right", "/dev/right_tcam_r", "observation.images.right_tcam_r", "{{RIGHT_TCAM_R_SERIAL}}"},
 }};
 
+bool writeTextFileAtomically(const fs::path &path, const std::string &content, std::string *errorMessage)
+{
+    const fs::path parent = path.parent_path();
+    std::error_code error;
+    if (!parent.empty())
+    {
+        fs::create_directories(parent, error);
+        if (error)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "create parent directory failed: " + error.message();
+            }
+            return false;
+        }
+    }
+
+    const fs::path tempPath = path.string() + ".tmp";
+    {
+        std::ofstream output(tempPath, std::ios::trunc);
+        if (!output.is_open())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "cannot open temp file for write: " + tempPath.string();
+            }
+            return false;
+        }
+        output << content;
+        output.flush();
+        if (!output.good())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "failed to write temp file: " + tempPath.string();
+            }
+            output.close();
+            fs::remove(tempPath, error);
+            return false;
+        }
+    }
+
+    fs::rename(tempPath, path, error);
+    if (error)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "rename temp file failed: " + error.message();
+        }
+        fs::remove(tempPath, error);
+        return false;
+    }
+
+    return true;
+}
+
 json makeStereoPlaceholderFromTemplate(const json *templateEntry)
 {
     json placeholder = json::object();
@@ -117,11 +177,26 @@ json makeStereoPlaceholderFromTemplate(const json *templateEntry)
         placeholder = *templateEntry;
     }
 
-    placeholder["shape"] = json::array({800, 2560, 3});
-    placeholder["names"] = json::array({"height", "width", "channels"});
-    placeholder["info"] = nullptr;
-    placeholder["dtype"] = "video";
-    placeholder["fps"] = 60;
+    if (!placeholder.contains("shape") || !placeholder["shape"].is_array())
+    {
+        placeholder["shape"] = json::array({400, 1280, 3});
+    }
+    if (!placeholder.contains("names") || !placeholder["names"].is_array())
+    {
+        placeholder["names"] = json::array({"height", "width", "channels"});
+    }
+    if (!placeholder.contains("info"))
+    {
+        placeholder["info"] = nullptr;
+    }
+    if (!placeholder.contains("dtype"))
+    {
+        placeholder["dtype"] = "video";
+    }
+    if (!placeholder.contains("fps"))
+    {
+        placeholder["fps"] = 60;
+    }
 
     if (!placeholder.contains("camera_model"))
     {
@@ -136,31 +211,14 @@ json makeStereoPlaceholderFromTemplate(const json *templateEntry)
         placeholder["distortion_coeffs"] = json::array({0.0, 0.0, 0.0, 0.0});
     }
 
-    if (placeholder.contains("intrinsics") && placeholder["intrinsics"].is_object() && !placeholder["intrinsics"].empty())
-    {
-        const auto firstIntrinsics = placeholder["intrinsics"].begin().value();
-        if (firstIntrinsics.is_object())
-        {
-            json scaled = firstIntrinsics;
-            const double fx = scaled.value("fx", 320.0) * 4.0;
-            const double fy = scaled.value("fy", 240.0) * (800.0 / 480.0);
-            const double ppx = scaled.value("ppx", 320.0) * 4.0;
-            const double ppy = scaled.value("ppy", 240.0) * (800.0 / 480.0);
-            scaled["fx"] = fx;
-            scaled["fy"] = fy;
-            scaled["ppx"] = ppx;
-            scaled["ppy"] = ppy;
-            placeholder["intrinsics"] = json::object({{"2560x800", scaled}});
-        }
-    }
-    else
+    if (!placeholder.contains("intrinsics") || !placeholder["intrinsics"].is_object() || placeholder["intrinsics"].empty())
     {
         placeholder["intrinsics"] = json::object({
-            {"2560x800", {
+            {"1280x400", {
                 {"fx", 1280.0},
                 {"fy", 400.0},
-                {"ppx", 1280.0},
-                {"ppy", 400.0},
+                {"ppx", 640.0},
+                {"ppy", 200.0},
             }},
         });
     }
@@ -471,7 +529,80 @@ bool flushFileToDisk(const fs::path &path, std::error_code *error)
     return true;
 }
 
-void flushEpisodeArtifactsToDisk(const fs::path &episodeDir)
+bool flushDirectoryToDisk(const fs::path &path, std::error_code *error)
+{
+    const int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_DIRECTORY);
+    if (fd < 0)
+    {
+        if (error != nullptr)
+        {
+            *error = std::error_code(errno, std::generic_category());
+        }
+        return false;
+    }
+
+    if (::fsync(fd) != 0)
+    {
+        const std::error_code syncError(errno, std::generic_category());
+        close(fd);
+        if (error != nullptr)
+        {
+            *error = syncError;
+        }
+        return false;
+    }
+
+    close(fd);
+
+    if (error != nullptr)
+    {
+        error->clear();
+    }
+    return true;
+}
+
+void flushEpisodeDirectoriesToDisk(const fs::path &episodeDir, const char *phaseLabel)
+{
+    if (episodeDir.empty())
+    {
+        return;
+    }
+
+    std::vector<fs::path> directories;
+    directories.push_back(episodeDir);
+
+    const fs::path parentDir = episodeDir.parent_path();
+    if (!parentDir.empty() && parentDir != episodeDir)
+    {
+        directories.push_back(parentDir);
+    }
+
+    for (const auto &directory : directories)
+    {
+        if (!fs::exists(directory))
+        {
+            std::cout << "[PERF] flush dir skip missing: phase=" << phaseLabel
+                      << " path=" << directory << std::endl;
+            continue;
+        }
+
+        const int64_t dirFlushStartMs = steadyNowMs();
+        std::error_code error;
+        if (!flushDirectoryToDisk(directory, &error))
+        {
+            std::cerr << "[WARN] failed to flush episode directory: phase=" << phaseLabel
+                      << " path=" << directory
+                      << " error=" << error.message() << std::endl;
+            continue;
+        }
+
+        std::cout << "[PERF] flush dir done: phase=" << phaseLabel
+                  << " path=" << directory
+                  << " elapsed_ms=" << (steadyNowMs() - dirFlushStartMs) << std::endl;
+    }
+}
+
+void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, const char *phaseLabel)
 {
     if (episodeDir.empty())
     {
@@ -505,7 +636,8 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir)
     }
 
     const int64_t flushStartMs = steadyNowMs();
-    std::cout << "[PERF] flush begin: episode_dir=" << episodeDir
+    std::cout << "[PERF] flush begin: phase=" << phaseLabel
+              << " episode_dir=" << episodeDir
               << " candidate_paths=" << paths.size() << std::endl;
 
     for (const auto &path : paths)
@@ -529,7 +661,10 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir)
                   << " elapsed_ms=" << (steadyNowMs() - artifactFlushStartMs) << std::endl;
     }
 
-    std::cout << "[PERF] flush end: episode_dir=" << episodeDir
+    flushEpisodeDirectoriesToDisk(episodeDir, phaseLabel);
+
+    std::cout << "[PERF] flush end: phase=" << phaseLabel
+              << " episode_dir=" << episodeDir
               << " elapsed_ms=" << (steadyNowMs() - flushStartMs) << std::endl;
 }
 
@@ -538,6 +673,44 @@ std::string makeTimestampString()
     const auto now = std::chrono::system_clock::now();
     const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
     return std::to_string(nowMs);
+}
+
+std::string makeLocalDateTimeString()
+{
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+    std::tm localTime{};
+    localtime_r(&nowTime, &localTime);
+
+    char timeBuffer[32] = {0};
+    std::strftime(timeBuffer, sizeof(timeBuffer), "%Y-%m-%d %H:%M:%S", &localTime);
+    return std::string(timeBuffer);
+}
+
+void writeValidationErrorLog(const fs::path &episodeDir, const std::string &errorMessage)
+{
+    if (episodeDir.empty())
+    {
+        return;
+    }
+
+    const fs::path errorLogPath = episodeDir / "validation_error.log";
+    const std::string details = errorMessage.empty() ? "unknown validation error" : errorMessage;
+    const std::string content = "Validation failed at " + makeLocalDateTimeString() + ": " + details + "\n";
+
+    std::string writeError;
+    if (!writeTextFileAtomically(errorLogPath, content, &writeError))
+    {
+        std::cerr << "[WARN] failed to write validation_error.log: " << writeError << std::endl;
+        return;
+    }
+
+    std::error_code flushError;
+    if (!flushFileToDisk(errorLogPath, &flushError))
+    {
+        std::cerr << "[WARN] failed to flush validation_error.log: " << flushError.message() << std::endl;
+    }
+    flushEpisodeDirectoriesToDisk(episodeDir, "validation_error");
 }
 
 bool commandExists(const std::string &command)
@@ -1153,6 +1326,7 @@ bool RecordRuntime::initialize()
     setLedState(LedState::Init);
 
     startAudioPlayer();
+    startStereoDaemon();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     setLedState(LedState::Ready);
@@ -1178,6 +1352,7 @@ int RecordRuntime::run()
     {
         const uint64_t loopStartMs = currentSteadyMs();
         maintainAudioPlayer();
+        maintainStereoDaemon();
         monitorHardwareHealth();
 
         ButtonSnapshot buttons;
@@ -1197,6 +1372,7 @@ int RecordRuntime::run()
     }
 
     stopRecording(false, "shutdown");
+    stopStereoDaemon();
     setLedState(LedState::Exit);
     return 0;
 }
@@ -1327,6 +1503,657 @@ void RecordRuntime::maintainAudioPlayer()
     startAudioPlayer();
 }
 
+bool RecordRuntime::startStereoDaemon()
+{
+    std::error_code error;
+    fs::remove(options_.stereoStatusFile, error);
+    fs::remove(options_.stereoControlFile, error);
+    lastStereoDaemonStartAttemptMs_ = currentSteadyMs();
+
+    if (!writeStereoControl(false, "", 0, 0))
+    {
+        std::cerr << "[WARN] failed to reset stereo control file before launch" << std::endl;
+    }
+
+    const std::vector<std::string> args = {
+        options_.cameraRecorderBin,
+        "--stereo-daemon",
+        "--codec",
+        options_.cameraCodec,
+        "--control-file",
+        options_.stereoControlFile,
+        "--status-file",
+        options_.stereoStatusFile,
+        "--only",
+        kStereoCameraStreamsCsv,
+    };
+
+    if (!stereoDaemon_.start(args))
+    {
+        std::cerr << "[WARN] failed to launch stereo daemon" << std::endl;
+        stereoDaemonStarted_ = false;
+        return false;
+    }
+
+    stereoDaemonStarted_ = true;
+    return true;
+}
+
+void RecordRuntime::stopStereoDaemon()
+{
+    if (stereoDaemonStarted_)
+    {
+        writeStereoControl(false, "", 0, 0);
+    }
+    stereoDaemon_.stop(2000);
+    stereoDaemonStarted_ = false;
+}
+
+void RecordRuntime::maintainStereoDaemon()
+{
+    const uint64_t nowMs = currentSteadyMs();
+    if (stereoDaemon_.isRunning())
+    {
+        stereoDaemonStarted_ = true;
+        return;
+    }
+
+    if (stereoDaemonStarted_)
+    {
+        std::cerr << "[WARN] stereo daemon exited, will retry" << std::endl;
+        stereoDaemonStarted_ = false;
+    }
+
+    if ((nowMs - lastStereoDaemonStartAttemptMs_) < kStereoDaemonRestartIntervalMs)
+    {
+        return;
+    }
+    startStereoDaemon();
+}
+
+bool RecordRuntime::writeStereoControl(bool recording,
+                                       const std::string &episodeDir,
+                                       int64_t startSystemTimeUs,
+                                       int64_t stopSystemTimeUs)
+{
+    json root = json::object();
+    root["command_seq"] = ++stereoCommandSeq_;
+    root["recording"] = recording;
+    root["episode_dir"] = episodeDir;
+    root["start_system_time_us"] = startSystemTimeUs;
+    root["stop_system_time_us"] = stopSystemTimeUs;
+
+    std::string errorMessage;
+    if (!writeTextFileAtomically(options_.stereoControlFile, root.dump(2) + "\n", &errorMessage))
+    {
+        std::cerr << "[WARN] failed to write stereo control file: " << errorMessage << std::endl;
+        return false;
+    }
+    return true;
+}
+
+bool RecordRuntime::waitForStereoFinalize(const std::string &episodeDir, int timeoutMs, std::string *errorMessage)
+{
+    const uint64_t startMs = currentSteadyMs();
+    while ((currentSteadyMs() - startMs) < static_cast<uint64_t>(timeoutMs))
+    {
+        json status;
+        bool statusLoaded = false;
+        std::ifstream input(options_.stereoStatusFile);
+        if (input.is_open())
+        {
+            try
+            {
+                status = json::parse(input);
+                statusLoaded = true;
+            }
+            catch (const std::exception &)
+            {
+                statusLoaded = false;
+            }
+        }
+
+        if (statusLoaded)
+        {
+            const std::string lastFinalizeError = status.value("last_finalize_error", std::string());
+            const bool finalizePending = status.value("finalize_pending", false);
+            const std::string activeEpisodeDir = status.value("active_episode_dir", std::string());
+            const std::string lastFinalizedEpisodeDir = status.value("last_finalized_episode_dir", std::string());
+            if (!lastFinalizeError.empty() && !finalizePending &&
+                (activeEpisodeDir.empty() || activeEpisodeDir == episodeDir))
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage = lastFinalizeError;
+                }
+                return false;
+            }
+
+            if (status.contains("last_session") && status["last_session"].is_object())
+            {
+                const json &lastSession = status["last_session"];
+                if (lastSession.value("episode_dir", std::string()) == episodeDir)
+                {
+                    return true;
+                }
+            }
+
+            if (!finalizePending && lastFinalizedEpisodeDir == episodeDir)
+            {
+                if (errorMessage != nullptr && errorMessage->empty())
+                {
+                    *errorMessage = "stereo daemon finalized the session without session metadata";
+                }
+                return false;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kStereoFinalizeWaitPollMs));
+    }
+    if (errorMessage != nullptr && errorMessage->empty())
+    {
+        *errorMessage = "timed out waiting for stereo session metadata";
+    }
+    return false;
+}
+
+bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const
+{
+    const fs::path baseInfoPath = fs::path(episodeDir) / "info.json";
+
+    std::ifstream baseInput(baseInfoPath);
+    if (!baseInput.is_open())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "cannot open base info.json";
+        }
+        return false;
+    }
+
+    json baseInfo;
+    try
+    {
+        baseInfo = json::parse(baseInput);
+    }
+    catch (const std::exception &ex)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = std::string("failed to parse episode info: ") + ex.what();
+        }
+        return false;
+    }
+
+    std::ifstream statusInput(options_.stereoStatusFile);
+    if (!statusInput.is_open())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "cannot open stereo status file";
+        }
+        return false;
+    }
+
+    json status;
+    try
+    {
+        status = json::parse(statusInput);
+    }
+    catch (const std::exception &ex)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = std::string("failed to parse stereo status: ") + ex.what();
+        }
+        return false;
+    }
+
+    if (!status.contains("last_session") || !status["last_session"].is_object())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "stereo status missing last_session";
+        }
+        return false;
+    }
+
+    const json &stereoSession = status["last_session"];
+    if (stereoSession.value("episode_dir", std::string()) != episodeDir)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "stereo last_session does not match episode";
+        }
+        return false;
+    }
+
+    if (!stereoSession.contains("cameras") || !stereoSession["cameras"].is_object())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "stereo last_session missing cameras object";
+        }
+        return false;
+    }
+
+    for (const char *cameraName : {"left_stereo", "right_stereo"})
+    {
+        if (!stereoSession["cameras"].contains(cameraName))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = std::string("stereo last_session missing camera entry: ") + cameraName;
+            }
+            return false;
+        }
+        const json &cameraInfo = stereoSession["cameras"][cameraName];
+        if (!cameraInfo.contains("record_time_offset_us"))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = std::string("stereo camera info missing record_time_offset_us: ") + cameraName;
+            }
+            return false;
+        }
+        baseInfo[std::string(cameraName) + "_record_time_offset_us"] = cameraInfo["record_time_offset_us"];
+    }
+    baseInfo["stereo_session"] = stereoSession;
+
+    std::ofstream output(baseInfoPath, std::ios::trunc);
+    if (!output.is_open())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "cannot rewrite merged info.json";
+        }
+        return false;
+    }
+    output << baseInfo.dump(2) << '\n';
+    return true;
+}
+
+bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
+{
+    std::cout.flush();
+    std::cerr.flush();
+    std::fflush(stdout);
+    std::fflush(stderr);
+
+    const std::string deviceSnLower = toLower(deviceSn_.empty() ? "unknown_device" : deviceSn_);
+    const std::string filePrefix = "umi_sys_" + deviceSnLower + "_";
+    const fs::path localLogDir("/tmp");
+    fs::path sourcePath;
+    fs::file_time_type newestWriteTime{};
+    bool foundSource = false;
+
+    std::error_code iterError;
+    for (fs::directory_iterator it(localLogDir, iterError), end; !iterError && it != end; it.increment(iterError))
+    {
+        const fs::directory_entry &entry = *it;
+        if (!entry.is_regular_file())
+        {
+            continue;
+        }
+
+        const std::string fileName = entry.path().filename().string();
+        if (fileName.size() <= filePrefix.size() + 4 ||
+            fileName.compare(0, filePrefix.size(), filePrefix) != 0 ||
+            fileName.compare(fileName.size() - 4, 4, ".log") != 0)
+        {
+            continue;
+        }
+
+        std::error_code timeError;
+        const fs::file_time_type writeTime = entry.last_write_time(timeError);
+        if (timeError)
+        {
+            continue;
+        }
+
+        if (!foundSource || writeTime > newestWriteTime)
+        {
+            sourcePath = entry.path();
+            newestWriteTime = writeTime;
+            foundSource = true;
+        }
+    }
+
+    if (iterError)
+    {
+        std::cerr << "[WARN] failed to scan runtime log directory for sync";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << iterError.message() << std::endl;
+        return false;
+    }
+
+    if (!foundSource)
+    {
+        std::cerr << "[WARN] no runtime log file found for sync";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": prefix=" << filePrefix << std::endl;
+        return false;
+    }
+
+    const fs::path diskRoot(options_.diskRoot);
+    std::error_code diskRootError;
+    if (!fs::exists(diskRoot, diskRootError) || !fs::is_directory(diskRoot, diskRootError))
+    {
+        std::cerr << "[WARN] skip runtime log sync";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": disk root unavailable: " << diskRoot << std::endl;
+        return false;
+    }
+
+    bool mounted = false;
+    std::ifstream mountInfo("/proc/self/mountinfo");
+    if (mountInfo.is_open())
+    {
+        std::string line;
+        while (std::getline(mountInfo, line))
+        {
+            const size_t separator = line.find(" - ");
+            const std::string leftPart = separator == std::string::npos ? line : line.substr(0, separator);
+            std::istringstream fields(leftPart);
+            std::string mountId;
+            std::string parentId;
+            std::string majorMinor;
+            std::string root;
+            std::string mountPoint;
+            if (!(fields >> mountId >> parentId >> majorMinor >> root >> mountPoint))
+            {
+                continue;
+            }
+            if (mountPoint == diskRoot.string())
+            {
+                mounted = true;
+                break;
+            }
+        }
+    }
+
+    if (!mounted)
+    {
+        std::cerr << "[WARN] skip runtime log sync";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": disk root is not mounted: " << diskRoot << std::endl;
+        return false;
+    }
+
+    if (access(diskRoot.c_str(), W_OK) != 0)
+    {
+        std::cerr << "[WARN] skip runtime log sync";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": disk root not writable: " << diskRoot
+                  << " error=" << std::strerror(errno) << std::endl;
+        return false;
+    }
+
+    const fs::path destDir = diskRoot / "logs";
+    std::error_code mkdirError;
+    fs::create_directories(destDir, mkdirError);
+    if (mkdirError)
+    {
+        std::cerr << "[WARN] failed to create runtime log directory";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << destDir << " error=" << mkdirError.message() << std::endl;
+        return false;
+    }
+
+    const fs::path destPath = destDir / sourcePath.filename();
+    const std::string sourceStem = sourcePath.stem().string();
+    const fs::path statePath = fs::path("/tmp") / (sourceStem + ".pos");
+    const fs::path lockPath = fs::path("/tmp") / (sourceStem + ".lock");
+
+    const int lockFd = open(lockPath.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
+    if (lockFd < 0)
+    {
+        std::cerr << "[WARN] failed to open runtime log sync lock";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << lockPath << " error=" << std::strerror(errno) << std::endl;
+        return false;
+    }
+
+    const auto closeLock = [&]() {
+        flock(lockFd, LOCK_UN);
+        close(lockFd);
+    };
+
+    if (flock(lockFd, LOCK_EX) != 0)
+    {
+        std::cerr << "[WARN] failed to acquire runtime log sync lock";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << lockPath << " error=" << std::strerror(errno) << std::endl;
+        close(lockFd);
+        return false;
+    }
+
+    int64_t lastPos = 0;
+    {
+        std::ifstream stateInput(statePath);
+        if (stateInput.is_open())
+        {
+            stateInput >> lastPos;
+            if (!stateInput.good() && !stateInput.eof())
+            {
+                lastPos = 0;
+            }
+        }
+    }
+    if (lastPos < 0)
+    {
+        lastPos = 0;
+    }
+
+    const int srcFd = open(sourcePath.c_str(), O_RDONLY | O_CLOEXEC);
+    if (srcFd < 0)
+    {
+        std::cerr << "[WARN] failed to open runtime log source";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << sourcePath << " error=" << std::strerror(errno) << std::endl;
+        closeLock();
+        return false;
+    }
+
+    struct stat sourceStat
+    {
+    };
+    if (fstat(srcFd, &sourceStat) != 0)
+    {
+        std::cerr << "[WARN] failed to stat runtime log source";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << sourcePath << " error=" << std::strerror(errno) << std::endl;
+        close(srcFd);
+        closeLock();
+        return false;
+    }
+
+    int64_t currentSize = static_cast<int64_t>(sourceStat.st_size);
+    if (currentSize < lastPos)
+    {
+        lastPos = 0;
+    }
+
+    if (currentSize <= lastPos)
+    {
+        close(srcFd);
+        closeLock();
+        std::cout << "[INFO] runtime log already synced";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cout << " after " << reason;
+        }
+        std::cout << ": " << destPath << std::endl;
+        return true;
+    }
+
+    const int destFd = open(destPath.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (destFd < 0)
+    {
+        std::cerr << "[WARN] failed to open runtime log destination";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << destPath << " error=" << std::strerror(errno) << std::endl;
+        close(srcFd);
+        closeLock();
+        return false;
+    }
+
+    if (lseek(srcFd, static_cast<off_t>(lastPos), SEEK_SET) < 0)
+    {
+        std::cerr << "[WARN] failed to seek runtime log source";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << sourcePath << " error=" << std::strerror(errno) << std::endl;
+        close(destFd);
+        close(srcFd);
+        closeLock();
+        return false;
+    }
+
+    std::array<char, 64 * 1024> buffer{};
+    int64_t remaining = currentSize - lastPos;
+    while (remaining > 0)
+    {
+        const size_t chunkSize = static_cast<size_t>(std::min<int64_t>(remaining, static_cast<int64_t>(buffer.size())));
+        const ssize_t readSize = read(srcFd, buffer.data(), chunkSize);
+        if (readSize < 0)
+        {
+            std::cerr << "[WARN] failed to read runtime log source";
+            if (reason != nullptr && *reason != '\0')
+            {
+                std::cerr << " after " << reason;
+            }
+            std::cerr << ": " << sourcePath << " error=" << std::strerror(errno) << std::endl;
+            close(destFd);
+            close(srcFd);
+            closeLock();
+            return false;
+        }
+        if (readSize == 0)
+        {
+            break;
+        }
+
+        ssize_t totalWritten = 0;
+        while (totalWritten < readSize)
+        {
+            const ssize_t written = write(destFd, buffer.data() + totalWritten, static_cast<size_t>(readSize - totalWritten));
+            if (written <= 0)
+            {
+                std::cerr << "[WARN] failed to append runtime log destination";
+                if (reason != nullptr && *reason != '\0')
+                {
+                    std::cerr << " after " << reason;
+                }
+                std::cerr << ": " << destPath << " error=" << std::strerror(errno) << std::endl;
+                close(destFd);
+                close(srcFd);
+                closeLock();
+                return false;
+            }
+            totalWritten += written;
+        }
+
+        remaining -= readSize;
+    }
+
+    if (::fsync(destFd) != 0)
+    {
+        std::cerr << "[WARN] failed to flush runtime log destination";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << destPath << " error=" << std::strerror(errno) << std::endl;
+        close(destFd);
+        close(srcFd);
+        closeLock();
+        return false;
+    }
+
+    close(destFd);
+    close(srcFd);
+
+    std::string stateWriteError;
+    if (!writeTextFileAtomically(statePath, std::to_string(currentSize), &stateWriteError))
+    {
+        std::cerr << "[WARN] failed to update runtime log sync state";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << stateWriteError << std::endl;
+        closeLock();
+        return false;
+    }
+
+    std::error_code flushError;
+    if (!flushDirectoryToDisk(destDir, &flushError))
+    {
+        std::cerr << "[WARN] failed to flush runtime log directory";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << destDir << " error=" << flushError.message() << std::endl;
+    }
+    if (!flushDirectoryToDisk(diskRoot, &flushError))
+    {
+        std::cerr << "[WARN] failed to flush disk root after runtime log sync";
+        if (reason != nullptr && *reason != '\0')
+        {
+            std::cerr << " after " << reason;
+        }
+        std::cerr << ": " << diskRoot << " error=" << flushError.message() << std::endl;
+    }
+
+    closeLock();
+
+    std::cout << "[INFO] synced runtime log to disk";
+    if (reason != nullptr && *reason != '\0')
+    {
+        std::cout << " after " << reason;
+    }
+    std::cout << ": src=" << sourcePath
+              << " dest=" << destPath
+              << " bytes=" << (currentSize - lastPos) << std::endl;
+    return true;
+}
+
 void RecordRuntime::sendAudioCommand(const std::string &command) const
 {
     if (command.empty() || !audioPlayerStarted_)
@@ -1402,6 +2229,27 @@ bool RecordRuntime::startRecording(bool resetRecording)
 
     attachPendingPreAudio(currentEpisodeDir_);
 
+    if (!fs::exists(options_.cameraRecorderBin))
+    {
+        std::cerr << "[ERROR] camera recorder binary not found: "
+                  << options_.cameraRecorderBin << std::endl;
+        setLedState(LedState::Error5);
+        setAudioRecoveryCommand("error");
+        sendAudioCommand("error");
+        return false;
+    }
+    if (!fs::exists(options_.sensorRecorderBin))
+    {
+        std::cerr << "[ERROR] sensor recorder binary not found: "
+                  << options_.sensorRecorderBin << std::endl;
+        setLedState(LedState::Error5);
+        setAudioRecoveryCommand("error");
+        sendAudioCommand("error");
+        return false;
+    }
+
+    const int64_t sessionStartSystemTimeUs = currentEpochUs();
+
     const std::vector<std::string> cameraArgs = {
         options_.cameraRecorderBin,
         "--codec",
@@ -1409,7 +2257,7 @@ bool RecordRuntime::startRecording(bool resetRecording)
         "--output-dir",
         currentEpisodeDir_,
         "--only",
-        kCameraStreamsCsv,
+        kSessionCameraStreamsCsv,
     };
     const std::vector<std::string> sensorArgs = {
         options_.sensorRecorderBin,
@@ -1455,6 +2303,17 @@ bool RecordRuntime::startRecording(bool resetRecording)
         return false;
     }
 
+    if (!writeStereoControl(true, currentEpisodeDir_, sessionStartSystemTimeUs, 0))
+    {
+        std::cerr << "[ERROR] failed to start stereo session for episode " << currentEpisodeDir_ << std::endl;
+        cameraRecorder_.stop(2000);
+        sensorRecorder_.stop(2000);
+        setLedState(LedState::Error5);
+        setAudioRecoveryCommand("error");
+        sendAudioCommand("error");
+        return false;
+    }
+
     isRecording_ = true;
     setLedState(LedState::Recording);
     setAudioRecoveryCommand("");
@@ -1477,6 +2336,7 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
     }
 
     const int64_t stopStartMs = steadyNowMs();
+    const int64_t stopSystemTimeUs = currentEpochUs();
     std::cout << "[INFO] stopping recording: " << reason << std::endl;
     std::cout << "[PERF] stop phase begin: reason=" << reason
               << " episode_dir=" << currentEpisodeDir_ << std::endl;
@@ -1490,6 +2350,12 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
     const bool cameraStopOk = cameraRecorder_.stop(5000);
     std::cout << "[PERF] stop camera_recorder done: ok=" << (cameraStopOk ? "true" : "false")
               << " elapsed_ms=" << (steadyNowMs() - cameraStopStartMs) << std::endl;
+
+    bool stereoStopOk = writeStereoControl(false, currentEpisodeDir_, 0, stopSystemTimeUs);
+    if (!stereoStopOk)
+    {
+        std::cerr << "[ERROR] failed to send stereo stop command" << std::endl;
+    }
 
     setLedState(LedState::Ready);
     sendAudioCommand("recording_stop");
@@ -1505,20 +2371,66 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
     setLedState(LedState::Init);
     const int64_t writePhaseStartMs = steadyNowMs();
     std::cout << "[PERF] writing phase begin: episode_dir=" << currentEpisodeDir_ << std::endl;
-    flushEpisodeArtifactsToDisk(fs::path(currentEpisodeDir_));
+    const fs::path episodePath(currentEpisodeDir_);
+    flushEpisodeArtifactsToDisk(episodePath, "pre_stereo_finalize");
+    std::string stereoFinalizeError;
+    std::string mergeError;
+    if (stereoStopOk && !waitForStereoFinalize(currentEpisodeDir_, 10000, &stereoFinalizeError))
+    {
+        std::cerr << "[ERROR] stereo finalize failed: " << stereoFinalizeError << std::endl;
+        stereoStopOk = false;
+    }
+    if (stereoStopOk)
+    {
+        if (!mergeEpisodeInfo(currentEpisodeDir_, &mergeError))
+        {
+            std::cerr << "[ERROR] failed to merge episode info: " << mergeError << std::endl;
+            stereoStopOk = false;
+        }
+    }
+    flushEpisodeArtifactsToDisk(episodePath, "final");
     std::cout << "[PERF] writing phase end: episode_dir=" << currentEpisodeDir_
               << " elapsed_ms=" << (steadyNowMs() - writePhaseStartMs) << std::endl;
 
     std::string errorMessage;
     const int64_t validatePhaseStartMs = steadyNowMs();
     std::cout << "[PERF] validation phase begin: episode_dir=" << currentEpisodeDir_ << std::endl;
-    const bool valid = episodeManager_->validateEpisode(currentEpisodeDir_, &errorMessage);
+    std::string episodeValidationError;
+    const bool episodeValid = episodeManager_->validateEpisode(currentEpisodeDir_, &episodeValidationError);
+    if (!stereoStopOk)
+    {
+        if (!stereoFinalizeError.empty())
+        {
+            errorMessage = stereoFinalizeError;
+        }
+        else if (!mergeError.empty())
+        {
+            errorMessage = mergeError;
+        }
+        else
+        {
+            errorMessage = "stereo session finalize failed";
+        }
+    }
+    if (!episodeValid)
+    {
+        if (errorMessage.empty())
+        {
+            errorMessage = episodeValidationError.empty() ? "episode validation failed" : episodeValidationError;
+        }
+        else if (!episodeValidationError.empty())
+        {
+            errorMessage += "; " + episodeValidationError;
+        }
+    }
+    const bool valid = stereoStopOk && episodeValid;
     std::cout << "[PERF] validation phase end: episode_dir=" << currentEpisodeDir_
               << " valid=" << (valid ? "true" : "false")
               << " elapsed_ms=" << (steadyNowMs() - validatePhaseStartMs) << std::endl;
     if (!valid)
     {
         std::cerr << "[ERROR] episode validation failed: " << errorMessage << std::endl;
+        writeValidationErrorLog(episodePath, errorMessage);
     }
 
     currentEpisodeDir_.clear();
@@ -1530,6 +2442,7 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
         sendAudioCommand("error");
         std::cout << "[PERF] stop phase end: due_to_error=true"
                   << " total_elapsed_ms=" << (steadyNowMs() - stopStartMs) << std::endl;
+        syncRuntimeLogToDisk("video stop");
         return false;
     }
 
@@ -1540,6 +2453,7 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
         sendAudioCommand("validation_failed");
         std::cout << "[PERF] stop phase end: valid=false"
                   << " total_elapsed_ms=" << (steadyNowMs() - stopStartMs) << std::endl;
+        syncRuntimeLogToDisk("video stop");
         return false;
     }
 
@@ -1548,6 +2462,7 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
     sendAudioCommand("ready");
     std::cout << "[PERF] stop phase end: valid=true"
               << " total_elapsed_ms=" << (steadyNowMs() - stopStartMs) << std::endl;
+    syncRuntimeLogToDisk("video stop");
     return true;
 }
 
@@ -1667,6 +2582,12 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
         return false;
     }
 
+    const auto finishAudioRecording = [&](bool ok) {
+        sendAudioCommand("audio_recording_stop");
+        syncRuntimeLogToDisk(audioType == "pre" ? "pre-audio stop" : "post-audio stop");
+        return ok;
+    };
+
     while (!stopRequested_.load())
     {
         ButtonSnapshot buttons;
@@ -1689,8 +2610,7 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
     {
         std::cerr << "[WARN] audio capture is empty" << std::endl;
         fs::remove(captureFile);
-        sendAudioCommand("audio_recording_stop");
-        return false;
+        return finishAudioRecording(false);
     }
 
     bool ok = false;
@@ -1716,8 +2636,7 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
     {
         std::cerr << "[ERROR] failed to process audio clip" << std::endl;
         fs::remove(outputFile);
-        sendAudioCommand("audio_recording_stop");
-        return false;
+        return finishAudioRecording(false);
     }
 
     if (audioType == "pre")
@@ -1747,8 +2666,7 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
         }
     }
 
-    sendAudioCommand("audio_recording_stop");
-    return true;
+    return finishAudioRecording(true);
 }
 
 void RecordRuntime::handleButtons(const ButtonSnapshot &buttons)
@@ -1903,6 +2821,45 @@ std::optional<RecordRuntime::HealthFault> RecordRuntime::evaluateHardwareHealth(
             LedState::Error2,
             "critical_devices_missing",
             "Critical device nodes missing: " + joinStrings(missingDevicePaths, ", "),
+        };
+    }
+
+    if (stereoDaemon_.pid() <= 0)
+    {
+        return HealthFault{
+            LedState::Error2,
+            "stereo_daemon_not_running",
+            "Stereo warmup daemon is not running",
+        };
+    }
+
+    std::ifstream stereoStatusInput(options_.stereoStatusFile);
+    if (!stereoStatusInput.is_open())
+    {
+        return HealthFault{
+            LedState::Error2,
+            "stereo_status_missing",
+            "Stereo status file missing: " + options_.stereoStatusFile,
+        };
+    }
+    try
+    {
+        json stereoStatus = json::parse(stereoStatusInput);
+        if (!stereoStatus.value("ready", false))
+        {
+            return HealthFault{
+                LedState::Error2,
+                "stereo_not_ready",
+                "Stereo warmup not ready: " + stereoStatus.value("service_state", std::string("unknown")),
+            };
+        }
+    }
+    catch (const std::exception &ex)
+    {
+        return HealthFault{
+            LedState::Error2,
+            "stereo_status_invalid",
+            std::string("Stereo status invalid: ") + ex.what(),
         };
     }
 
@@ -2099,6 +3056,12 @@ uint64_t RecordRuntime::currentEpochMs()
 {
     const auto now = std::chrono::system_clock::now();
     return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count());
+}
+
+int64_t RecordRuntime::currentEpochUs()
+{
+    const auto now = std::chrono::system_clock::now();
+    return static_cast<int64_t>(std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count());
 }
 
 bool RecordRuntime::fileExistsAndNotEmpty(const std::string &path)
@@ -2613,6 +3576,7 @@ std::string RecordRuntime::EpisodeManager::createNextEpisodeDir()
     {
         return {};
     }
+    flushEpisodeDirectoriesToDisk(episodePath, "create_episode_dir");
     return episodePath.string();
 }
 

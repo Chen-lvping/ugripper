@@ -18,9 +18,12 @@ struct Options {
     int duration_sec = 0;
     bool dry_run = false;
     bool allow_missing = false;
+    bool stereo_daemon = false;
     std::string ffmpeg_bin = "ffmpeg";
     std::string gst_bin = "gst-launch-1.0";
     fs::path config_yaml = "config/camera_recorder.yaml";
+    fs::path control_file = "/tmp/umi_stereo_camera_control.json";
+    fs::path status_file = "/tmp/umi_stereo_camera_status.json";
     std::set<std::string> only_names;
 };
 
@@ -35,12 +38,16 @@ struct CameraConfig {
     std::string device;
     CameraRecordMode mode = CameraRecordMode::HybridDecodeEncode;
     std::optional<int> uvc_roll_absolute;
+    std::string input_format;
+    int capture_width = 0;
+    int capture_height = 0;
     int width = 0;
     int height = 0;
     int fps = 0;
     int output_fps = 0;
     int eye_width = 0;
     int eye_height = 0;
+    std::string video_filter;
     std::vector<std::string> output_files;
     int input_thread_queue_size = 0;
     int qp_init = 30;
@@ -63,7 +70,12 @@ public:
     virtual bool HasStarted() const = 0;
     virtual bool HasFailure() const = 0;
     virtual std::optional<int> ExitCode() const = 0;
+    virtual bool HasWrittenOutput() const = 0;
     virtual std::optional<int64_t> RecordTimeOffsetUs() const = 0;
+    virtual std::optional<int64_t> FirstFramePtsUs() const = 0;
+    virtual std::optional<int64_t> FirstFrameSystemTimeUs() const = 0;
+    virtual std::optional<int64_t> LastFramePtsUs() const = 0;
+    virtual std::optional<int64_t> LastFrameSystemTimeUs() const = 0;
 };
 
 class CameraRecorderManager {
@@ -90,5 +102,6 @@ Options ParseArgs(int argc, char** argv);
 std::vector<CameraConfig> LoadCameraConfigList(const fs::path& yaml_path);
 std::string ModeName(CameraRecordMode mode);
 void InstallSignalHandlers();
+bool RunStereoDaemon(const Options& options, const std::vector<CameraConfig>& configs);
 
 }  // namespace camera_recorder

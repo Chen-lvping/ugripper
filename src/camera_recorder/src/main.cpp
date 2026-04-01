@@ -12,8 +12,13 @@ int main(int argc, char** argv) {
 
         const Options options = ParseArgs(argc, argv);
         const std::vector<CameraConfig> configs = LoadCameraConfigList(options.config_yaml);
-        std::filesystem::create_directories(options.output_dir);
         InstallSignalHandlers();
+
+        if (options.stereo_daemon) {
+            return RunStereoDaemon(options, configs) ? 0 : 1;
+        }
+
+        std::filesystem::create_directories(options.output_dir);
 
         CameraRecorderManager manager(options);
         std::vector<std::string> missing_devices;
@@ -33,15 +38,6 @@ int main(int argc, char** argv) {
             std::cerr << "[camera_recorder] no camera process to start" << std::endl;
             return 2;
         }
-
-        std::cout << "[camera_recorder] codec=" << options.codec
-                  << " output_dir=" << options.output_dir
-                  << " duration=" << options.duration_sec
-                  << " config_yaml=" << options.config_yaml
-                  << " allow_missing=" << (options.allow_missing ? "true" : "false")
-                  << " only_count=" << options.only_names.size()
-                  << std::endl;
-        std::cout << "[camera_recorder] note: main cameras use direct stream copy selected by codec (h264/h265) and do not re-encode" << std::endl;
 
         if (options.dry_run) {
             for (const auto& recorder : manager.recorders()) {

@@ -30,10 +30,13 @@
 
 #include <libusb-1.0/libusb.h>
 #include <yaml-cpp/yaml.h>
+#include <nlohmann/json.hpp>
 
 namespace camera_recorder {
 
 namespace {
+
+using json = nlohmann::json;
 
 std::atomic<bool> g_stop_requested{false};
 
@@ -44,6 +47,13 @@ constexpr auto kRecorderStopPollInterval = std::chrono::milliseconds(50);
 constexpr auto kUvcControlTimeout = std::chrono::milliseconds(1000);
 constexpr auto kDeviceRebindTimeout = std::chrono::seconds(5);
 constexpr auto kDeviceRebindPollInterval = std::chrono::milliseconds(100);
+constexpr auto kStereoDaemonPollInterval = std::chrono::milliseconds(200);
+constexpr auto kStereoRestartInterval = std::chrono::milliseconds(1000);
+constexpr auto kStereoFinalizeSettle = std::chrono::milliseconds(700);
+constexpr auto kStereoWarmupReadySettle = std::chrono::milliseconds(1200);
+constexpr auto kStereoWarmupKeyframeInterval = std::chrono::milliseconds(250);
+constexpr int kStereoSessionMaxRestartAttempts = 2;
+constexpr int64_t kUsPerSecond = 1'000'000;
 
 constexpr uint8_t kUvcRequestSetCur = 0x01;
 constexpr uint8_t kUvcRequestGetCur = 0x81;
@@ -81,6 +91,167 @@ std::string ShellQuote(const std::string& value) {
     }
     out += "'";
     return out;
+}
+
+bool EnsureDirectory(const fs::path& path) {
+    std::error_code error;
+    fs::create_directories(path, error);
+    return !error;
+}
+
+std::vector<std::string> ListSortedFiles(const fs::path& dir, const std::string& extension) {
+    std::error_code error;
+    std::vector<std::string> files;
+    if (!fs::exists(dir, error)) {
+        return files;
+    }
+    for (const auto& entry : fs::directory_iterator(dir, error)) {
+        if (error || !entry.is_regular_file()) {
+            continue;
+        }
+        if (entry.path().extension() != extension) {
+            continue;
+        }
+        files.push_back(entry.path().filename().string());
+    }
+    std::sort(files.begin(), files.end());
+    return files;
+}
+
+std::string JoinArgumentsForShell(const std::vector<std::string>& args) {
+    std::ostringstream oss;
+    for (size_t index = 0; index < args.size(); ++index) {
+        if (index > 0) {
+            oss << ' ';
+        }
+        oss << ShellQuote(args[index]);
+    }
+    return oss.str();
+}
+
+bool RunShellCommandCapture(const std::vector<std::string>& args, std::string* output, int* exit_code) {
+    if (output != nullptr) {
+        output->clear();
+    }
+    if (exit_code != nullptr) {
+        *exit_code = -1;
+    }
+    if (args.empty()) {
+        return false;
+    }
+
+    const std::string command = JoinArgumentsForShell(args) + " 2>&1";
+    std::unique_ptr<FILE, decltype(&pclose)> pipe(popen(command.c_str(), "r"), pclose);
+    if (!pipe) {
+        return false;
+    }
+
+    char buffer[4096];
+    while (fgets(buffer, sizeof(buffer), pipe.get()) != nullptr) {
+        if (output != nullptr) {
+            *output += buffer;
+        }
+    }
+
+    const int status = pclose(pipe.release());
+    if (exit_code != nullptr) {
+        if (WIFEXITED(status)) {
+            *exit_code = WEXITSTATUS(status);
+        } else if (WIFSIGNALED(status)) {
+            *exit_code = 128 + WTERMSIG(status);
+        } else {
+            *exit_code = status;
+        }
+    }
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+std::optional<json> ReadJsonFile(const fs::path& path) {
+    std::ifstream input(path);
+    if (!input.is_open()) {
+        return std::nullopt;
+    }
+    try {
+        return json::parse(input);
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+bool WriteJsonFile(const fs::path& path, const json& value) {
+    const fs::path parent = path.parent_path();
+    if (!parent.empty() && !EnsureDirectory(parent)) {
+        return false;
+    }
+    const fs::path temp_path = path.string() + ".tmp";
+    {
+        std::ofstream output(temp_path, std::ios::trunc);
+        if (!output.is_open()) {
+            return false;
+        }
+        output << value.dump(2) << '\n';
+        output.flush();
+        if (!output.good()) {
+            output.close();
+            std::error_code cleanup_error;
+            fs::remove(temp_path, cleanup_error);
+            return false;
+        }
+    }
+    std::error_code rename_error;
+    fs::rename(temp_path, path, rename_error);
+    if (rename_error) {
+        std::error_code cleanup_error;
+        fs::remove(temp_path, cleanup_error);
+        return false;
+    }
+    return true;
+}
+
+std::optional<int64_t> ParseSecondsTextUs(const std::string& text) {
+    try {
+        const long double seconds = std::stold(Trim(text));
+        return static_cast<int64_t>(std::llround(seconds * static_cast<long double>(kUsPerSecond)));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+struct VideoWindowUs {
+    int64_t start_pts_us = 0;
+    int64_t duration_us = 0;
+};
+
+std::optional<VideoWindowUs> ProbeVideoWindowUs(const fs::path& path) {
+    std::string output;
+    int exit_code = -1;
+    if (!RunShellCommandCapture({
+            "ffprobe",
+            "-v", "error",
+            "-show_entries", "format=start_time,duration",
+            "-of", "default=nokey=1:noprint_wrappers=1",
+            path.string(),
+        }, &output, &exit_code)) {
+        return std::nullopt;
+    }
+
+    std::istringstream stream(output);
+    std::string start_line;
+    std::string duration_line;
+    if (!std::getline(stream, start_line) || !std::getline(stream, duration_line)) {
+        return std::nullopt;
+    }
+
+    const auto start_pts_us = ParseSecondsTextUs(start_line);
+    const auto duration_us = ParseSecondsTextUs(duration_line);
+    if (!start_pts_us.has_value() || !duration_us.has_value()) {
+        return std::nullopt;
+    }
+
+    VideoWindowUs window;
+    window.start_pts_us = *start_pts_us;
+    window.duration_us = *duration_us;
+    return window;
 }
 
 std::string ReadEnvFileValue(const std::string& key) {
@@ -505,8 +676,6 @@ bool EnsureUvcRollAbsolute(const CameraConfig& config) {
     const uint16_t current_value = ParseLittleEndianUint16(current_payload);
     const uint16_t target_value = static_cast<uint16_t>(*config.uvc_roll_absolute);
     if (current_value == target_value) {
-        std::cout << "[camera_recorder] UVC roll already matches target for " << config.name
-                  << ": " << current_value << std::endl;
         return false;
     }
 
@@ -530,8 +699,6 @@ bool EnsureUvcRollAbsolute(const CameraConfig& config) {
                                  std::to_string(target_value) + " actual=" + std::to_string(verify_value));
     }
 
-    std::cout << "[camera_recorder] updated UVC roll for " << config.name
-              << ": " << current_value << " -> " << verify_value << std::endl;
     return true;
 }
 
@@ -641,6 +808,18 @@ std::optional<int64_t> ParseFramePtsUsFromGstIdentityLine(const std::string& lin
     return static_cast<int64_t>(std::llround(total_seconds * 1'000'000.0L));
 }
 
+std::optional<int64_t> ParseFramePtsUsFromProgressLine(const std::string& line) {
+    const std::string key = "out_time_us=";
+    if (line.rfind(key, 0) != 0) {
+        return std::nullopt;
+    }
+    try {
+        return std::stoll(Trim(line.substr(key.size())));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
 std::string GetRkmppEncoder(const std::string& codec) {
     return codec == "h264" ? "h264_rkmpp" : "hevc_rkmpp";
 }
@@ -679,6 +858,76 @@ std::string CommonEncodeArgs(const std::string& codec, const CameraConfig& confi
         oss << "-profile:v main ";
     }
     return oss.str();
+}
+
+std::string CaptureInputFormat(const CameraConfig& config) {
+    return config.input_format.empty() ? "mjpeg" : config.input_format;
+}
+
+int CaptureWidth(const CameraConfig& config) {
+    return config.capture_width > 0 ? config.capture_width : config.width;
+}
+
+int CaptureHeight(const CameraConfig& config) {
+    return config.capture_height > 0 ? config.capture_height : config.height;
+}
+
+bool UsesFrameDropWithPreservedPts(const CameraConfig& config) {
+    return config.output_fps > 0 &&
+           config.output_fps < config.fps &&
+           config.fps > 0 &&
+           (config.fps % config.output_fps) == 0;
+}
+
+int FrameDropModulo(const CameraConfig& config) {
+    return UsesFrameDropWithPreservedPts(config) ? (config.fps / config.output_fps) : 1;
+}
+
+std::optional<std::string> BuildVideoFilter(const CameraConfig& config) {
+    std::vector<std::string> filters;
+    if (CaptureWidth(config) != config.width || CaptureHeight(config) != config.height) {
+        std::ostringstream scale;
+        // When we intentionally sample down from a larger source, nearest keeps
+        // the "every other pixel/line" semantics stable instead of adding blur.
+        scale << "scale=" << config.width << ':' << config.height << ":flags=neighbor";
+        filters.push_back(scale.str());
+    }
+
+    if (!config.video_filter.empty()) {
+        filters.push_back(config.video_filter);
+    }
+
+    if (config.output_fps > 0 && config.output_fps != config.fps) {
+        if (UsesFrameDropWithPreservedPts(config)) {
+            std::ostringstream select;
+            // Drop frames by index while keeping the surviving frames on the
+            // original timeline. This avoids rebuilding a synthetic CFR PTS axis.
+            select << "select=not(mod(n\\," << FrameDropModulo(config) << "))";
+            filters.push_back(select.str());
+        } else {
+            filters.push_back("fps=" + std::to_string(config.output_fps));
+        }
+    }
+
+    if (filters.empty()) {
+        return std::nullopt;
+    }
+
+    std::ostringstream oss;
+    for (size_t index = 0; index < filters.size(); ++index) {
+        if (index > 0) {
+            oss << ',';
+        }
+        oss << filters[index];
+    }
+    return oss.str();
+}
+
+std::string OutputTimingArgs(const CameraConfig& config) {
+    if (!UsesFrameDropWithPreservedPts(config)) {
+        return "";
+    }
+    return "-fps_mode passthrough -enc_time_base -1 ";
 }
 
 CameraRecordMode ParseMode(const std::string& mode_text) {
@@ -723,6 +972,20 @@ int OptionalInt(const YAML::Node& parent, const std::string& key, int default_va
         throw std::runtime_error("field '" + key + "' must be a scalar in " + context);
     }
     return node.as<int>();
+}
+
+std::string OptionalString(const YAML::Node& parent,
+                           const std::string& key,
+                           const std::string& default_value,
+                           const std::string& context) {
+    const YAML::Node node = parent[key];
+    if (!node) {
+        return default_value;
+    }
+    if (!node.IsScalar()) {
+        throw std::runtime_error("field '" + key + "' must be a scalar in " + context);
+    }
+    return Trim(node.as<std::string>());
 }
 
 int RequirePositiveInt(const YAML::Node& parent, const std::string& key, const std::string& context) {
@@ -772,16 +1035,21 @@ CameraConfig ParseCameraConfig(const YAML::Node& camera_node, size_t index) {
         }
         config.uvc_roll_absolute = roll_value;
     }
+    config.input_format = OptionalString(camera_node, "input_format", "", context);
+    config.capture_width = OptionalInt(camera_node, "capture_width", 0, context);
+    config.capture_height = OptionalInt(camera_node, "capture_height", 0, context);
     config.width = RequirePositiveInt(camera_node, "width", context);
     config.height = RequirePositiveInt(camera_node, "height", context);
     config.fps = RequirePositiveInt(camera_node, "fps", context);
     config.output_fps = OptionalInt(camera_node, "output_fps", 0, context);
     config.eye_width = OptionalInt(camera_node, "eye_width", 0, context);
     config.eye_height = OptionalInt(camera_node, "eye_height", 0, context);
+    config.video_filter = OptionalString(camera_node, "video_filter", "", context);
     config.output_files = RequireOutputFiles(camera_node, context);
     config.input_thread_queue_size = OptionalInt(camera_node, "input_thread_queue_size", 0, context);
-    if (config.input_thread_queue_size < 0) {
-        throw std::runtime_error("field 'input_thread_queue_size' must be >= 0 in " + context);
+    if (config.capture_width < 0 || config.capture_height < 0 || config.input_thread_queue_size < 0) {
+        throw std::runtime_error(
+            "fields 'capture_width', 'capture_height', and 'input_thread_queue_size' must be >= 0 in " + context);
     }
     config.qp_init = OptionalInt(camera_node, "qp_init", config.qp_init, context);
     config.qp_max = OptionalInt(camera_node, "qp_max", config.qp_max, context);
@@ -948,9 +1216,33 @@ public:
         return exit_code_;
     }
 
+    bool HasWrittenOutput() const override {
+        return false;
+    }
+
     std::optional<int64_t> RecordTimeOffsetUs() const override {
         std::lock_guard<std::mutex> lock(first_frame_mutex_);
         return record_time_offset_us_;
+    }
+
+    std::optional<int64_t> FirstFramePtsUs() const override {
+        std::lock_guard<std::mutex> lock(first_frame_mutex_);
+        return first_frame_pts_us_;
+    }
+
+    std::optional<int64_t> FirstFrameSystemTimeUs() const override {
+        std::lock_guard<std::mutex> lock(first_frame_mutex_);
+        return first_frame_system_time_us_;
+    }
+
+    std::optional<int64_t> LastFramePtsUs() const override {
+        std::lock_guard<std::mutex> lock(first_frame_mutex_);
+        return last_frame_pts_us_;
+    }
+
+    std::optional<int64_t> LastFrameSystemTimeUs() const override {
+        std::lock_guard<std::mutex> lock(first_frame_mutex_);
+        return last_frame_system_time_us_;
     }
 
 protected:
@@ -964,22 +1256,20 @@ protected:
         return options_.output_dir / file_name;
     }
 
-    void MaybeLockFirstFrame(int64_t frame_pts_us) {
+    void UpdateFrameTiming(int64_t frame_pts_us) {
         std::lock_guard<std::mutex> lock(first_frame_mutex_);
+        const int64_t system_time_us = CurrentSystemTimeUs();
         if (record_time_offset_us_.has_value()) {
+            last_frame_pts_us_ = frame_pts_us;
+            last_frame_system_time_us_ = system_time_us;
             return;
         }
 
-        const int64_t system_time_us = CurrentSystemTimeUs();
         first_frame_pts_us_ = frame_pts_us;
         first_frame_system_time_us_ = system_time_us;
         record_time_offset_us_ = system_time_us - frame_pts_us;
-
-        std::cout << "[camera_recorder] first frame locked: " << config_.name
-                  << " frame_pts_us=" << frame_pts_us
-                  << " system_time_us=" << system_time_us
-                  << " record_time_offset_us=" << *record_time_offset_us_
-                  << std::endl;
+        last_frame_pts_us_ = frame_pts_us;
+        last_frame_system_time_us_ = system_time_us;
     }
 
     void HandleOutputLine(const std::string& raw_line) {
@@ -989,15 +1279,19 @@ protected:
         }
 
         if (const auto pts_us = ParseFramePtsUsFromStatsLine(line); pts_us.has_value()) {
-            MaybeLockFirstFrame(*pts_us);
+            UpdateFrameTiming(*pts_us);
             return;
         }
         if (const auto pts_us = ParseFramePtsUsFromDebugTsLine(line); pts_us.has_value()) {
-            MaybeLockFirstFrame(*pts_us);
+            UpdateFrameTiming(*pts_us);
             return;
         }
         if (const auto pts_us = ParseFramePtsUsFromGstIdentityLine(line); pts_us.has_value()) {
-            MaybeLockFirstFrame(*pts_us);
+            UpdateFrameTiming(*pts_us);
+            return;
+        }
+        if (const auto pts_us = ParseFramePtsUsFromProgressLine(line); pts_us.has_value()) {
+            UpdateFrameTiming(*pts_us);
             return;
         }
 
@@ -1054,6 +1348,8 @@ protected:
     mutable std::mutex first_frame_mutex_;
     std::optional<int64_t> first_frame_pts_us_;
     std::optional<int64_t> first_frame_system_time_us_;
+    std::optional<int64_t> last_frame_pts_us_;
+    std::optional<int64_t> last_frame_system_time_us_;
     std::optional<int64_t> record_time_offset_us_;
 };
 
@@ -1135,6 +1431,7 @@ private:
     std::string BuildCommand() const override {
         const std::string device = ShellQuote(config_.device);
         const std::string output = ShellQuote(OutputPath(config_.output_files.at(0)).string());
+        const auto video_filter = BuildVideoFilter(config_);
 
         std::ostringstream oss;
         oss << options_.ffmpeg_bin
@@ -1142,11 +1439,15 @@ private:
         if (config_.input_thread_queue_size > 0) {
             oss << "-thread_queue_size " << config_.input_thread_queue_size << ' ';
         }
-        oss << "-f v4l2 -input_format mjpeg "
+        oss << "-f v4l2 -input_format " << CaptureInputFormat(config_) << ' '
             << "-framerate " << config_.fps << ' '
-            << "-video_size " << config_.width << 'x' << config_.height << ' '
-            << "-i " << device << ' '
-            << CommonEncodeArgs(options_.codec, config_)
+            << "-video_size " << CaptureWidth(config_) << 'x' << CaptureHeight(config_) << ' '
+            << "-i " << device << ' ';
+        if (video_filter.has_value()) {
+            oss << "-vf " << ShellQuote(*video_filter) << ' ';
+        }
+        oss << CommonEncodeArgs(options_.codec, config_)
+            << OutputTimingArgs(config_)
             << "-stats_mux_pre pipe:1 "
             << "-stats_mux_pre_fmt " << ShellQuote("{pts} {tb}") << ' '
             << output;
@@ -1165,6 +1466,7 @@ private:
     std::string BuildCommand() const override {
         const std::string device = ShellQuote(config_.device);
         const std::string output = ShellQuote(OutputPath(config_.output_files.at(0)).string());
+        const auto video_filter = BuildVideoFilter(config_);
 
         std::ostringstream oss;
         oss << options_.ffmpeg_bin
@@ -1172,11 +1474,15 @@ private:
         if (config_.input_thread_queue_size > 0) {
             oss << "-thread_queue_size " << config_.input_thread_queue_size << ' ';
         }
-        oss << "-f v4l2 -input_format mjpeg "
+        oss << "-f v4l2 -input_format " << CaptureInputFormat(config_) << ' '
             << "-framerate " << config_.fps << ' '
-            << "-video_size " << config_.width << 'x' << config_.height << ' '
-            << "-i " << device << ' '
-            << CommonEncodeArgs(options_.codec, config_)
+            << "-video_size " << CaptureWidth(config_) << 'x' << CaptureHeight(config_) << ' '
+            << "-i " << device << ' ';
+        if (video_filter.has_value()) {
+            oss << "-vf " << ShellQuote(*video_filter) << ' ';
+        }
+        oss << CommonEncodeArgs(options_.codec, config_)
+            << OutputTimingArgs(config_)
             << "-stats_mux_pre pipe:1 "
             << "-stats_mux_pre_fmt " << ShellQuote("{pts} {tb}") << ' '
             << output;
@@ -1195,6 +1501,629 @@ std::unique_ptr<CameraRecorder> CreateRecorder(const CameraConfig& config, const
     }
     throw std::runtime_error("unknown camera record mode");
 }
+
+int StereoWarmupPort(const std::string& camera_name) {
+    if (camera_name == "left_stereo") {
+        return 19041;
+    }
+    if (camera_name == "right_stereo") {
+        return 19042;
+    }
+    return 19050;
+}
+
+std::string StereoWarmupOutputUrl(int port) {
+    return "udp://127.0.0.1:" + std::to_string(port) + "?pkt_size=1316";
+}
+
+std::string StereoWarmupInputUrl(int port) {
+    return "udp://127.0.0.1:" + std::to_string(port) +
+           "?fifo_size=1000000&overrun_nonfatal=1";
+}
+
+class StereoWarmupRecorder final : public ShellCameraRecorder {
+public:
+    StereoWarmupRecorder(CameraConfig config, Options options, int udp_port)
+        : ShellCameraRecorder(std::move(config), std::move(options)),
+          udp_port_(udp_port) {
+        command_ = BuildCommand();
+    }
+
+private:
+    std::string BuildCommand() const override {
+        const std::string device = ShellQuote(config_.device);
+        const std::string output_url = ShellQuote(StereoWarmupOutputUrl(udp_port_));
+        const auto video_filter = BuildVideoFilter(config_);
+        const double keyframe_interval_sec =
+            static_cast<double>(kStereoWarmupKeyframeInterval.count()) / 1000.0;
+        const int encoded_fps = config_.output_fps > 0 ? config_.output_fps : config_.fps;
+        const int gop = std::max(1, static_cast<int>(
+            std::llround(static_cast<long double>(encoded_fps) * keyframe_interval_sec)));
+
+        std::ostringstream force_key_frames;
+        force_key_frames << "expr:gte(t,n_forced*" << std::fixed << std::setprecision(3)
+                         << keyframe_interval_sec << ")";
+
+        std::ostringstream oss;
+        oss << options_.ffmpeg_bin
+            << " -hide_banner -loglevel warning -nostats -y ";
+        if (config_.input_thread_queue_size > 0) {
+            oss << "-thread_queue_size " << config_.input_thread_queue_size << ' ';
+        }
+        oss << "-f v4l2 -input_format " << CaptureInputFormat(config_) << ' '
+            << "-framerate " << config_.fps << ' '
+            << "-video_size " << CaptureWidth(config_) << 'x' << CaptureHeight(config_) << ' '
+            << "-i " << device << ' ';
+        if (video_filter.has_value()) {
+            oss << "-vf " << ShellQuote(*video_filter) << ' ';
+        }
+        oss << CommonEncodeArgs(options_.codec, config_)
+            << OutputTimingArgs(config_)
+            << "-bsf:v dump_extra=freq=keyframe "
+            << "-g " << gop << ' '
+            << "-keyint_min " << gop << ' '
+            << "-force_key_frames " << ShellQuote(force_key_frames.str()) << ' '
+            << "-progress pipe:1 "
+            << "-stats_period 0.5 "
+            << "-stats_mux_pre pipe:1 "
+            << "-stats_mux_pre_fmt " << ShellQuote("{pts} {tb}") << ' '
+            << "-muxdelay 0 "
+            << "-muxpreload 0 "
+            << "-mpegts_flags resend_headers+initial_discontinuity+pat_pmt_at_frames "
+            << "-mpegts_copyts 1 "
+            << "-f mpegts "
+            << output_url;
+        return oss.str();
+    }
+
+    int udp_port_ = 0;
+};
+
+class StereoSessionRecorder final : public ShellCameraRecorder {
+public:
+    StereoSessionRecorder(CameraConfig config,
+                          Options options,
+                          fs::path output_path,
+                          int udp_port)
+        : ShellCameraRecorder(std::move(config), std::move(options)),
+          output_path_(std::move(output_path)),
+          udp_port_(udp_port) {
+        command_ = BuildCommand();
+    }
+
+    bool HasWrittenOutput() const override {
+        std::error_code error;
+        return fs::exists(output_path_, error) && fs::file_size(output_path_, error) > 0;
+    }
+
+private:
+    bool BeforeStart() override {
+        const fs::path parent = output_path_.parent_path();
+        return parent.empty() || EnsureDirectory(parent);
+    }
+
+    std::string BuildCommand() const override {
+        const std::string input_url = ShellQuote(StereoWarmupInputUrl(udp_port_));
+        const std::string output = ShellQuote(output_path_.string());
+
+        std::ostringstream oss;
+        oss << options_.ffmpeg_bin
+            << " -hide_banner -loglevel warning -nostats -y "
+            << "-thread_queue_size 512 "
+            << "-fflags +genpts+discardcorrupt "
+            << "-err_detect ignore_err "
+            << "-analyzeduration 1500000 "
+            << "-probesize 1500000 "
+            << "-f mpegts "
+            << "-i " << input_url << ' '
+            << "-map 0:v:0 -an "
+            << "-progress pipe:1 "
+            << "-stats_period 0.5 "
+            << "-c copy "
+            << "-copyinkf "
+            << "-muxdelay 0 "
+            << "-muxpreload 0 "
+            << output;
+        return oss.str();
+    }
+
+    fs::path output_path_;
+    int udp_port_ = 0;
+};
+
+struct StereoCommandState {
+    uint64_t command_seq = 0;
+    bool recording = false;
+    std::string episode_dir;
+    int64_t start_system_time_us = 0;
+    int64_t stop_system_time_us = 0;
+};
+
+class StereoCameraTrack {
+public:
+    StereoCameraTrack(CameraConfig config, Options options)
+        : config_(std::move(config)),
+          options_(std::move(options)),
+          udp_port_(StereoWarmupPort(config_.name)) {}
+
+    void Stop() {
+        if (session_recorder_) {
+            session_recorder_->Stop();
+            session_recorder_.reset();
+        }
+        if (warmup_recorder_) {
+            warmup_recorder_->Stop();
+            warmup_recorder_.reset();
+        }
+        session_episode_dir_.clear();
+        session_failed_ = false;
+        session_restart_attempts_ = 0;
+    }
+
+    void Poll(bool session_active) {
+        if (warmup_recorder_) {
+            warmup_recorder_->Poll();
+            if (!warmup_recorder_->IsRunning()) {
+                if (session_recorder_ && session_recorder_->IsRunning()) {
+                    session_failed_ = true;
+                    last_error_ = "stereo warmup exited during active session for " + config_.name;
+                    session_recorder_->Stop();
+                    session_recorder_.reset();
+                }
+                warmup_recorder_.reset();
+            }
+        }
+
+        if (session_recorder_) {
+            session_recorder_->Poll();
+            const bool session_has_progress =
+                session_recorder_->FirstFrameSystemTimeUs().has_value() || session_recorder_->HasWrittenOutput();
+            if (!session_recorder_->IsRunning() && !stop_requested_by_control_ && !session_failed_) {
+                if (!session_has_progress &&
+                    session_restart_attempts_ <= kStereoSessionMaxRestartAttempts &&
+                    ready()) {
+                    std::cout << "[camera_recorder] stereo session recorder exited before first frame, restarting: "
+                              << config_.name
+                              << " attempt=" << (session_restart_attempts_ + 1)
+                              << std::endl;
+                    session_recorder_.reset();
+                    std::string restart_error;
+                    if (!StartSessionRecorder(session_episode_dir_, &restart_error)) {
+                        session_failed_ = true;
+                        last_error_ = restart_error;
+                    }
+                } else {
+                    session_failed_ = true;
+                    last_error_ = "stereo session recorder exited early for " + config_.name;
+                }
+            }
+        }
+
+        if ((!warmup_recorder_ || !warmup_recorder_->IsRunning()) &&
+            (!session_active || !session_recorder_)) {
+            TryStartWarmupRecorder();
+        }
+    }
+
+    bool ready() const {
+        if (!warmup_recorder_ || !warmup_recorder_->IsRunning()) {
+            return false;
+        }
+        const auto first_frame_system_time_us = warmup_recorder_->FirstFrameSystemTimeUs();
+        const auto last_frame_system_time_us = warmup_recorder_->LastFrameSystemTimeUs();
+        if (first_frame_system_time_us.has_value() && last_frame_system_time_us.has_value()) {
+            return (CurrentSystemTimeUs() - *last_frame_system_time_us) <= (2 * kUsPerSecond);
+        }
+        return (CurrentSystemTimeUs() - last_start_attempt_system_time_us_) >=
+               (kStereoWarmupReadySettle.count() * 1000);
+    }
+
+    std::string state() const {
+        if (session_recorder_ && session_recorder_->IsRunning()) {
+            return ready() ? "recording" : "recording_recovering";
+        }
+        if (ready()) {
+            return "ready";
+        }
+        if (warmup_recorder_ && warmup_recorder_->IsRunning()) {
+            return "warming";
+        }
+        if (!last_error_.empty()) {
+            return "recovering";
+        }
+        return "not_ready";
+    }
+
+    const std::string& name() const {
+        return config_.name;
+    }
+
+    json BuildStatusJson() const {
+        json value = json::object();
+        value["state"] = state();
+        value["device"] = config_.device;
+        value["udp_port"] = udp_port_;
+        value["ready"] = ready();
+        if (warmup_recorder_) {
+            if (const auto offset = warmup_recorder_->RecordTimeOffsetUs(); offset.has_value()) {
+                value["record_time_offset_us"] = *offset;
+            }
+            if (const auto first = warmup_recorder_->FirstFrameSystemTimeUs(); first.has_value()) {
+                value["first_frame_system_time_us"] = *first;
+            }
+            if (const auto last = warmup_recorder_->LastFrameSystemTimeUs(); last.has_value()) {
+                value["last_frame_system_time_us"] = *last;
+            }
+        }
+        value["session_recording"] = session_recorder_ && session_recorder_->IsRunning();
+        if (!last_error_.empty()) {
+            value["last_error"] = last_error_;
+        }
+        return value;
+    }
+
+    bool StartSession(const std::string& episode_dir,
+                      int64_t start_system_time_us,
+                      std::string* error_message) {
+        if (!ready()) {
+            if (error_message != nullptr) {
+                *error_message = "stereo warmup not ready for " + config_.name;
+            }
+            return false;
+        }
+        if (session_recorder_ && session_recorder_->IsRunning()) {
+            if (error_message != nullptr) {
+                *error_message = "stereo session already active for " + config_.name;
+            }
+            return false;
+        }
+
+        if (!StartSessionRecorder(episode_dir, error_message)) {
+            return false;
+        }
+
+        session_episode_dir_ = episode_dir;
+        session_start_system_time_us_ = start_system_time_us;
+        stop_requested_by_control_ = false;
+        session_failed_ = false;
+        last_error_.clear();
+        return true;
+    }
+
+    void AbortSessionStart() {
+        stop_requested_by_control_ = true;
+        session_failed_ = false;
+        session_start_system_time_us_ = 0;
+        session_episode_dir_.clear();
+        session_restart_attempts_ = 0;
+        if (session_recorder_) {
+            session_recorder_->Stop();
+            session_recorder_.reset();
+        }
+    }
+
+    void CancelSession() {
+        AbortSessionStart();
+    }
+
+    bool FinalizeSession(const std::string& episode_dir,
+                         int64_t start_system_time_us,
+                         int64_t stop_system_time_us,
+                         json* info_json,
+                         std::string* error_message) {
+        stop_requested_by_control_ = true;
+
+        if (session_episode_dir_ != episode_dir) {
+            if (error_message != nullptr) {
+                *error_message = "stereo session episode mismatch for " + config_.name;
+            }
+            return false;
+        }
+
+        auto recorder = std::move(session_recorder_);
+        session_episode_dir_.clear();
+        if (!recorder) {
+            if (error_message != nullptr) {
+                *error_message = "stereo session recorder missing for " + config_.name;
+            }
+            return false;
+        }
+
+        recorder->Stop();
+        recorder->Poll();
+
+        if (session_failed_) {
+            if (error_message != nullptr) {
+                *error_message = last_error_.empty() ? ("stereo session failed for " + config_.name) : last_error_;
+            }
+            session_failed_ = false;
+            return false;
+        }
+
+        const fs::path final_output = fs::path(episode_dir) / config_.output_files.at(0);
+        std::error_code fs_error;
+        if (!fs::exists(final_output, fs_error) || fs::file_size(final_output, fs_error) == 0) {
+            if (error_message != nullptr) {
+                *error_message = "stereo output missing or empty for " + config_.name + ": " + final_output.string();
+            }
+            return false;
+        }
+
+        auto record_time_offset_us = recorder->RecordTimeOffsetUs();
+        auto first_frame_pts_us = recorder->FirstFramePtsUs();
+        auto first_frame_system_time_us = recorder->FirstFrameSystemTimeUs();
+        auto last_frame_pts_us = recorder->LastFramePtsUs();
+        auto last_frame_system_time_us = recorder->LastFrameSystemTimeUs();
+        if (!record_time_offset_us.has_value() ||
+            !first_frame_pts_us.has_value() ||
+            !first_frame_system_time_us.has_value() ||
+            !last_frame_pts_us.has_value() ||
+            !last_frame_system_time_us.has_value()) {
+            const auto warmup_offset_us = warmup_recorder_ ? warmup_recorder_->RecordTimeOffsetUs()
+                                                           : std::optional<int64_t>{};
+            const auto probed_window = ProbeVideoWindowUs(final_output);
+            if (warmup_offset_us.has_value() && probed_window.has_value()) {
+                record_time_offset_us = warmup_offset_us;
+                first_frame_pts_us = probed_window->start_pts_us;
+                first_frame_system_time_us = *record_time_offset_us + *first_frame_pts_us;
+                last_frame_pts_us = probed_window->start_pts_us + probed_window->duration_us;
+                last_frame_system_time_us = *record_time_offset_us + *last_frame_pts_us;
+            } else {
+                if (error_message != nullptr) {
+                    *error_message = "stereo timing metadata incomplete for " + config_.name;
+                }
+                return false;
+            }
+        }
+
+        json camera_info = json::object();
+        camera_info["record_time_offset_us"] = *record_time_offset_us;
+        camera_info["first_written_frame_pts_us"] = *first_frame_pts_us;
+        camera_info["first_written_frame_system_time_us"] = *first_frame_system_time_us;
+        camera_info["last_written_frame_pts_us"] = *last_frame_pts_us;
+        camera_info["last_written_frame_system_time_us"] = *last_frame_system_time_us;
+
+        if (info_json != nullptr) {
+            (*info_json)[config_.name] = camera_info;
+        }
+        session_failed_ = false;
+        session_start_system_time_us_ = 0;
+        session_restart_attempts_ = 0;
+        return true;
+    }
+
+private:
+    bool StartSessionRecorder(const std::string& episode_dir, std::string* error_message) {
+        auto recorder = std::make_unique<StereoSessionRecorder>(
+            config_,
+            options_,
+            fs::path(episode_dir) / config_.output_files.at(0),
+            udp_port_);
+        if (!recorder->Start()) {
+            if (error_message != nullptr) {
+                *error_message = "failed to start stereo session recorder for " + config_.name;
+            }
+            return false;
+        }
+
+        session_recorder_ = std::move(recorder);
+        ++session_restart_attempts_;
+        return true;
+    }
+
+    void TryStartWarmupRecorder() {
+        const int64_t now_us = CurrentSystemTimeUs();
+        if ((now_us - last_start_attempt_system_time_us_) < (kStereoRestartInterval.count() * 1000)) {
+            return;
+        }
+        last_start_attempt_system_time_us_ = now_us;
+
+        if (!Exists(config_.device)) {
+            last_error_ = "device node missing: " + config_.device;
+            return;
+        }
+
+        auto recorder = std::make_unique<StereoWarmupRecorder>(config_, options_, udp_port_);
+        if (!recorder->Start()) {
+            last_error_ = "failed to start warmup recorder";
+            return;
+        }
+
+        warmup_recorder_ = std::move(recorder);
+        last_error_.clear();
+    }
+
+    CameraConfig config_;
+    Options options_;
+    int udp_port_ = 0;
+    std::unique_ptr<StereoWarmupRecorder> warmup_recorder_;
+    std::unique_ptr<StereoSessionRecorder> session_recorder_;
+    std::string session_episode_dir_;
+    int64_t session_start_system_time_us_ = 0;
+    bool stop_requested_by_control_ = false;
+    bool session_failed_ = false;
+    int session_restart_attempts_ = 0;
+    int64_t last_start_attempt_system_time_us_ = 0;
+    std::string last_error_;
+};
+
+class StereoDaemonRunner {
+public:
+    StereoDaemonRunner(Options options, std::vector<CameraConfig> configs)
+        : options_(std::move(options)) {
+        for (const auto& config : configs) {
+            const bool selected =
+                options_.only_names.empty() || options_.only_names.count(config.name) > 0;
+            if (!selected || config.mode != CameraRecordMode::StereoHybridDecodeEncode) {
+                continue;
+            }
+            tracks_.emplace_back(config, options_);
+        }
+    }
+
+    bool Run() {
+        if (tracks_.empty()) {
+            std::cerr << "[camera_recorder] stereo daemon found no stereo cameras to manage" << std::endl;
+            return false;
+        }
+
+        while (!g_stop_requested.load(std::memory_order_relaxed)) {
+            ApplyControlCommand();
+            const bool session_active = command_state_.recording || finalize_pending_;
+            for (auto& track : tracks_) {
+                track.Poll(session_active);
+            }
+            if (finalize_pending_) {
+                MaybeFinalizeStoppedSession();
+            }
+            WriteStatus();
+            std::this_thread::sleep_for(kStereoDaemonPollInterval);
+        }
+        ShutdownTracks();
+        WriteStatus();
+        return true;
+    }
+
+private:
+    void ShutdownTracks() {
+        for (auto& track : tracks_) {
+            track.Stop();
+        }
+    }
+
+    void ApplyControlCommand() {
+        const auto parsed = ReadJsonFile(options_.control_file);
+        if (!parsed.has_value() || !parsed->is_object()) {
+            return;
+        }
+        const json& root = *parsed;
+        const uint64_t command_seq = root.value("command_seq", static_cast<uint64_t>(0));
+        if (command_seq == command_state_.command_seq) {
+            return;
+        }
+
+        command_state_.command_seq = command_seq;
+        command_state_.recording = root.value("recording", false);
+        command_state_.episode_dir = root.value("episode_dir", std::string());
+        command_state_.start_system_time_us = root.value("start_system_time_us", static_cast<int64_t>(0));
+        command_state_.stop_system_time_us = root.value("stop_system_time_us", static_cast<int64_t>(0));
+
+        if (command_state_.recording) {
+            finalize_pending_ = false;
+            last_finalize_error_.clear();
+            last_session_result_ = json::object();
+            active_episode_dir_ = command_state_.episode_dir;
+            active_start_system_time_us_ = command_state_.start_system_time_us;
+            active_stop_system_time_us_ = 0;
+            for (auto& track : tracks_) {
+                std::string error_message;
+                if (!track.StartSession(active_episode_dir_, active_start_system_time_us_, &error_message)) {
+                    last_finalize_error_ = error_message;
+                    for (auto& rollback_track : tracks_) {
+                        rollback_track.AbortSessionStart();
+                    }
+                    active_episode_dir_.clear();
+                    active_start_system_time_us_ = 0;
+                    active_stop_system_time_us_ = 0;
+                    command_state_.recording = false;
+                    return;
+                }
+            }
+            return;
+        }
+
+        if (!active_episode_dir_.empty() &&
+            command_state_.episode_dir == active_episode_dir_ &&
+            command_state_.stop_system_time_us > 0) {
+            finalize_pending_ = true;
+            active_stop_system_time_us_ = command_state_.stop_system_time_us;
+            finalize_requested_steady_us_ = CurrentSteadyTimeUs();
+        }
+    }
+
+    void MaybeFinalizeStoppedSession() {
+        const int64_t elapsed_us = CurrentSteadyTimeUs() - finalize_requested_steady_us_;
+        if (elapsed_us < (kStereoFinalizeSettle.count() * 1000)) {
+            return;
+        }
+
+        json stereo_info = json::object();
+        stereo_info["cameras"] = json::object();
+        stereo_info["episode_dir"] = active_episode_dir_;
+        stereo_info["start_system_time_us"] = active_start_system_time_us_;
+        stereo_info["stop_system_time_us"] = active_stop_system_time_us_;
+
+        for (auto& track : tracks_) {
+            std::string error_message;
+            if (!track.FinalizeSession(active_episode_dir_,
+                                       active_start_system_time_us_,
+                                       active_stop_system_time_us_,
+                                       &stereo_info["cameras"],
+                                       &error_message)) {
+                for (auto& rollback_track : tracks_) {
+                    rollback_track.CancelSession();
+                }
+                last_finalize_error_ = error_message;
+                finalize_pending_ = false;
+                active_episode_dir_.clear();
+                active_start_system_time_us_ = 0;
+                active_stop_system_time_us_ = 0;
+                return;
+            }
+        }
+
+        last_session_result_ = stereo_info;
+        last_finalize_error_.clear();
+
+        finalize_pending_ = false;
+        last_finalized_episode_dir_ = active_episode_dir_;
+        active_episode_dir_.clear();
+        active_start_system_time_us_ = 0;
+        active_stop_system_time_us_ = 0;
+    }
+
+    void WriteStatus() const {
+        json status = json::object();
+        status["recording"] = command_state_.recording;
+        status["finalize_pending"] = finalize_pending_;
+        status["active_episode_dir"] = active_episode_dir_;
+        status["last_finalized_episode_dir"] = last_finalized_episode_dir_;
+        status["last_finalize_error"] = last_finalize_error_;
+        status["last_session"] = last_session_result_;
+        status["ready"] = true;
+        status["service_state"] = finalize_pending_ ? "finalizing" : "warming";
+        status["cameras"] = json::object();
+
+        bool all_ready = true;
+        for (const auto& track : tracks_) {
+            const json camera_status = track.BuildStatusJson();
+            const bool camera_ready = camera_status.value("ready", false);
+            all_ready = all_ready && camera_ready;
+            status["cameras"][track.name()] = camera_status;
+        }
+        status["ready"] = all_ready;
+        if (finalize_pending_) {
+            status["service_state"] = "finalizing";
+        } else if (command_state_.recording) {
+            status["service_state"] = all_ready ? "recording" : "recording_recovering";
+        } else {
+            status["service_state"] = all_ready ? "ready" : "warming";
+        }
+        WriteJsonFile(options_.status_file, status);
+    }
+
+    Options options_;
+    std::vector<StereoCameraTrack> tracks_;
+    StereoCommandState command_state_;
+    bool finalize_pending_ = false;
+    std::string active_episode_dir_;
+    std::string last_finalized_episode_dir_;
+    std::string last_finalize_error_;
+    json last_session_result_ = json::object();
+    int64_t active_start_system_time_us_ = 0;
+    int64_t active_stop_system_time_us_ = 0;
+    int64_t finalize_requested_steady_us_ = 0;
+};
 
 }  // namespace
 
@@ -1284,9 +2213,6 @@ bool CameraRecorderManager::MonitorUntilStop() {
 }
 
 void CameraRecorderManager::StopAll() {
-    std::cout << "[camera_recorder] stopping all recorders in parallel, count="
-              << recorders_.size() << std::endl;
-
     std::vector<std::thread> stop_threads;
     stop_threads.reserve(recorders_.size());
     for (size_t index = 0; index < recorders_.size(); ++index) {
@@ -1301,17 +2227,12 @@ void CameraRecorderManager::StopAll() {
         }
     }
 
-    std::cout << "[camera_recorder] all recorder stop calls returned" << std::endl;
-
     for (auto& recorder : recorders_) {
         recorder->Poll();
         if (recorder->HasFailure()) {
             had_failure_ = true;
         }
     }
-
-    std::cout << "[camera_recorder] stop poll completed, had_failure="
-              << (had_failure_ ? "true" : "false") << std::endl;
 }
 
 bool CameraRecorderManager::empty() const {
@@ -1397,11 +2318,18 @@ Options ParseArgs(int argc, char** argv) {
             }
         } else if (arg == "--allow-missing") {
             options.allow_missing = true;
+        } else if (arg == "--stereo-daemon") {
+            options.stereo_daemon = true;
+        } else if (arg == "--control-file") {
+            options.control_file = require_value(arg);
+        } else if (arg == "--status-file") {
+            options.status_file = require_value(arg);
         } else if (arg == "--dry-run") {
             options.dry_run = true;
         } else if (arg == "-h" || arg == "--help") {
             std::cout
                 << "Usage: camera_recorder --output-dir DIR [--codec h264|h265] [--duration SEC] [--config-yaml PATH] [--allow-missing] [--only a,b] [--dry-run]\n"
+                << "   or: camera_recorder --stereo-daemon [--config-yaml PATH] [--control-file PATH] [--status-file PATH]\n"
                 << "Records main/tactile/stereo streams with YAML-driven recorder classes.\n";
             std::exit(0);
         } else {
@@ -1409,7 +2337,7 @@ Options ParseArgs(int argc, char** argv) {
         }
     }
 
-    if (options.output_dir.empty()) {
+    if (!options.stereo_daemon && options.output_dir.empty()) {
         throw std::runtime_error("--output-dir is required");
     }
 
@@ -1462,6 +2390,11 @@ std::string ModeName(CameraRecordMode mode) {
         return "stereo-hybrid-decode-encode";
     }
     return "unknown";
+}
+
+bool RunStereoDaemon(const Options& options, const std::vector<CameraConfig>& configs) {
+    StereoDaemonRunner runner(options, configs);
+    return runner.Run();
 }
 
 void InstallSignalHandlers() {
