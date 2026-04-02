@@ -18,4 +18,5 @@ target_link_libraries(record_runtime
     PRIVATE
         gripper_hmi
         pthread
+        mcap
 )

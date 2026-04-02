@@ -1,14 +1,20 @@
 #include "camera_recorder/camera_recorder.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cmath>
+#include <condition_variable>
 #include <cstdint>
+#include <cstring>
+#include <deque>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -24,6 +30,11 @@
 #include <utility>
 #include <vector>
 
+#include <fcntl.h>
+#include <linux/videodev2.h>
+#include <poll.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -49,9 +60,12 @@ constexpr auto kDeviceRebindTimeout = std::chrono::seconds(5);
 constexpr auto kDeviceRebindPollInterval = std::chrono::milliseconds(100);
 constexpr auto kStereoDaemonPollInterval = std::chrono::milliseconds(200);
 constexpr auto kStereoRestartInterval = std::chrono::milliseconds(1000);
-constexpr auto kStereoFinalizeSettle = std::chrono::milliseconds(700);
 constexpr auto kStereoWarmupReadySettle = std::chrono::milliseconds(1200);
-constexpr auto kStereoWarmupKeyframeInterval = std::chrono::milliseconds(250);
+constexpr auto kStereoSessionEofGrace = std::chrono::milliseconds(500);
+constexpr auto kStereoSessionEofGraceNoOutput = std::chrono::milliseconds(10000);
+constexpr auto kStereoSessionSigintTimeout = std::chrono::milliseconds(1500);
+constexpr auto kStereoSessionSigintTimeoutNoOutput = std::chrono::milliseconds(3000);
+constexpr auto kStereoSessionSigtermTimeout = std::chrono::milliseconds(400);
 constexpr int kStereoSessionMaxRestartAttempts = 2;
 constexpr int64_t kUsPerSecond = 1'000'000;
 
@@ -720,6 +734,22 @@ int64_t BootTimeOffsetUs() {
     return CurrentSystemTimeUs() - CurrentSteadyTimeUs();
 }
 
+bool WriteAll(int fd, const uint8_t* data, size_t size) {
+    size_t written = 0;
+    while (written < size) {
+        const ssize_t rc = write(fd, data + written, size - written);
+        if (rc > 0) {
+            written += static_cast<size_t>(rc);
+            continue;
+        }
+        if (rc < 0 && errno == EINTR) {
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
 std::optional<int64_t> ParseFramePtsUsFromStatsLine(const std::string& line) {
     const size_t separator = line.find(' ');
     if (separator == std::string::npos) {
@@ -883,6 +913,10 @@ int FrameDropModulo(const CameraConfig& config) {
     return UsesFrameDropWithPreservedPts(config) ? (config.fps / config.output_fps) : 1;
 }
 
+int StereoSessionFps(const CameraConfig& config) {
+    return config.output_fps > 0 ? config.output_fps : config.fps;
+}
+
 std::optional<std::string> BuildVideoFilter(const CameraConfig& config) {
     std::vector<std::string> filters;
     if (CaptureWidth(config) != config.width || CaptureHeight(config) != config.height) {
@@ -928,6 +962,13 @@ std::string OutputTimingArgs(const CameraConfig& config) {
         return "";
     }
     return "-fps_mode passthrough -enc_time_base -1 ";
+}
+
+std::optional<std::string> BuildStereoSessionVideoFilter(const CameraConfig& config) {
+    CameraConfig session_config = config;
+    session_config.fps = StereoSessionFps(config);
+    session_config.output_fps = session_config.fps;
+    return BuildVideoFilter(session_config);
 }
 
 CameraRecordMode ParseMode(const std::string& mode_text) {
@@ -1502,93 +1543,498 @@ std::unique_ptr<CameraRecorder> CreateRecorder(const CameraConfig& config, const
     throw std::runtime_error("unknown camera record mode");
 }
 
-int StereoWarmupPort(const std::string& camera_name) {
-    if (camera_name == "left_stereo") {
-        return 19041;
-    }
-    if (camera_name == "right_stereo") {
-        return 19042;
-    }
-    return 19050;
-}
+struct StereoCapturedFrame {
+    std::vector<uint8_t> jpeg_bytes;
+    int64_t system_time_us = 0;
+    uint64_t sequence = 0;
+};
 
-std::string StereoWarmupOutputUrl(int port) {
-    return "udp://127.0.0.1:" + std::to_string(port) + "?pkt_size=1316";
-}
-
-std::string StereoWarmupInputUrl(int port) {
-    return "udp://127.0.0.1:" + std::to_string(port) +
-           "?fifo_size=1000000&overrun_nonfatal=1";
-}
-
-class StereoWarmupRecorder final : public ShellCameraRecorder {
+class StereoWarmupCapture {
 public:
-    StereoWarmupRecorder(CameraConfig config, Options options, int udp_port)
-        : ShellCameraRecorder(std::move(config), std::move(options)),
-          udp_port_(udp_port) {
-        command_ = BuildCommand();
+    using FrameHandler = std::function<void(StereoCapturedFrame&& frame)>;
+
+    StereoWarmupCapture(CameraConfig config, FrameHandler frame_handler)
+        : config_(std::move(config)),
+          frame_handler_(std::move(frame_handler)) {}
+
+    ~StereoWarmupCapture() {
+        Stop();
+    }
+
+    bool Start(std::string* error_message) {
+        Stop();
+
+        stop_requested_.store(false, std::memory_order_relaxed);
+        running_.store(false, std::memory_order_relaxed);
+        forward_frames_.store(false, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            first_frame_system_time_us_.reset();
+            last_frame_system_time_us_.reset();
+            last_error_.clear();
+        }
+        frame_sequence_ = 0;
+
+        if (!OpenDevice(error_message)) {
+            CleanupDevice();
+            return false;
+        }
+
+        started_system_time_us_ = CurrentSystemTimeUs();
+        running_.store(true, std::memory_order_release);
+        capture_thread_ = std::thread([this]() { CaptureLoop(); });
+        return true;
+    }
+
+    void Stop() {
+        stop_requested_.store(true, std::memory_order_relaxed);
+        if (capture_thread_.joinable()) {
+            capture_thread_.join();
+        }
+        running_.store(false, std::memory_order_release);
+        CleanupDevice();
+        forward_frames_.store(false, std::memory_order_relaxed);
+    }
+
+    bool IsRunning() const {
+        return running_.load(std::memory_order_acquire);
+    }
+
+    void SetForwardFrames(bool enabled) {
+        forward_frames_.store(enabled, std::memory_order_release);
+    }
+
+    std::optional<int64_t> FirstFrameSystemTimeUs() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return first_frame_system_time_us_;
+    }
+
+    std::optional<int64_t> LastFrameSystemTimeUs() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return last_frame_system_time_us_;
+    }
+
+    int64_t started_system_time_us() const {
+        return started_system_time_us_;
+    }
+
+    std::string last_error() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return last_error_;
     }
 
 private:
-    std::string BuildCommand() const override {
-        const std::string device = ShellQuote(config_.device);
-        const std::string output_url = ShellQuote(StereoWarmupOutputUrl(udp_port_));
-        const auto video_filter = BuildVideoFilter(config_);
-        const double keyframe_interval_sec =
-            static_cast<double>(kStereoWarmupKeyframeInterval.count()) / 1000.0;
-        const int encoded_fps = config_.output_fps > 0 ? config_.output_fps : config_.fps;
-        const int gop = std::max(1, static_cast<int>(
-            std::llround(static_cast<long double>(encoded_fps) * keyframe_interval_sec)));
+    struct MmapBuffer {
+        void* data = nullptr;
+        size_t length = 0;
+    };
 
-        std::ostringstream force_key_frames;
-        force_key_frames << "expr:gte(t,n_forced*" << std::fixed << std::setprecision(3)
-                         << keyframe_interval_sec << ")";
-
-        std::ostringstream oss;
-        oss << options_.ffmpeg_bin
-            << " -hide_banner -loglevel warning -nostats -y ";
-        if (config_.input_thread_queue_size > 0) {
-            oss << "-thread_queue_size " << config_.input_thread_queue_size << ' ';
+    static bool RetryIoctl(int fd, unsigned long request, void* arg) {
+        while (true) {
+            const int rc = ioctl(fd, request, arg);
+            if (rc == 0) {
+                return true;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
         }
-        oss << "-f v4l2 -input_format " << CaptureInputFormat(config_) << ' '
-            << "-framerate " << config_.fps << ' '
-            << "-video_size " << CaptureWidth(config_) << 'x' << CaptureHeight(config_) << ' '
-            << "-i " << device << ' ';
-        if (video_filter.has_value()) {
-            oss << "-vf " << ShellQuote(*video_filter) << ' ';
-        }
-        oss << CommonEncodeArgs(options_.codec, config_)
-            << OutputTimingArgs(config_)
-            << "-bsf:v dump_extra=freq=keyframe "
-            << "-g " << gop << ' '
-            << "-keyint_min " << gop << ' '
-            << "-force_key_frames " << ShellQuote(force_key_frames.str()) << ' '
-            << "-progress pipe:1 "
-            << "-stats_period 0.5 "
-            << "-stats_mux_pre pipe:1 "
-            << "-stats_mux_pre_fmt " << ShellQuote("{pts} {tb}") << ' '
-            << "-muxdelay 0 "
-            << "-muxpreload 0 "
-            << "-mpegts_flags resend_headers+initial_discontinuity+pat_pmt_at_frames "
-            << "-mpegts_copyts 1 "
-            << "-f mpegts "
-            << output_url;
-        return oss.str();
     }
 
-    int udp_port_ = 0;
+    bool OpenDevice(std::string* error_message) {
+        fd_ = open(config_.device.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (fd_ < 0) {
+            if (error_message != nullptr) {
+                *error_message = "failed to open stereo device " + config_.device + ": " + std::strerror(errno);
+            }
+            return false;
+        }
+
+        v4l2_capability capability{};
+        if (!RetryIoctl(fd_, VIDIOC_QUERYCAP, &capability)) {
+            if (error_message != nullptr) {
+                *error_message = "VIDIOC_QUERYCAP failed for " + config_.device + ": " + std::strerror(errno);
+            }
+            return false;
+        }
+        if ((capability.capabilities & V4L2_CAP_VIDEO_CAPTURE) == 0 ||
+            (capability.capabilities & V4L2_CAP_STREAMING) == 0) {
+            if (error_message != nullptr) {
+                *error_message = "stereo device lacks capture/streaming capability: " + config_.device;
+            }
+            return false;
+        }
+
+        v4l2_format format{};
+        format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        format.fmt.pix.width = static_cast<uint32_t>(CaptureWidth(config_));
+        format.fmt.pix.height = static_cast<uint32_t>(CaptureHeight(config_));
+        format.fmt.pix.pixelformat = V4L2_PIX_FMT_MJPEG;
+        format.fmt.pix.field = V4L2_FIELD_ANY;
+        if (!RetryIoctl(fd_, VIDIOC_S_FMT, &format)) {
+            if (error_message != nullptr) {
+                *error_message = "VIDIOC_S_FMT failed for " + config_.device + ": " + std::strerror(errno);
+            }
+            return false;
+        }
+        if (format.fmt.pix.pixelformat != V4L2_PIX_FMT_MJPEG) {
+            if (error_message != nullptr) {
+                *error_message = "stereo device did not accept MJPEG format: " + config_.device;
+            }
+            return false;
+        }
+
+        v4l2_streamparm streamparm{};
+        streamparm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        streamparm.parm.capture.timeperframe.numerator = 1;
+        streamparm.parm.capture.timeperframe.denominator = static_cast<uint32_t>(config_.fps);
+        RetryIoctl(fd_, VIDIOC_S_PARM, &streamparm);
+
+        v4l2_requestbuffers request{};
+        request.count = 4;
+        request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        request.memory = V4L2_MEMORY_MMAP;
+        if (!RetryIoctl(fd_, VIDIOC_REQBUFS, &request) || request.count < 2) {
+            if (error_message != nullptr) {
+                *error_message = "VIDIOC_REQBUFS failed for " + config_.device + ": " + std::strerror(errno);
+            }
+            return false;
+        }
+
+        buffers_.assign(request.count, {});
+        for (uint32_t index = 0; index < request.count; ++index) {
+            v4l2_buffer buffer{};
+            buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buffer.memory = V4L2_MEMORY_MMAP;
+            buffer.index = index;
+            if (!RetryIoctl(fd_, VIDIOC_QUERYBUF, &buffer)) {
+                if (error_message != nullptr) {
+                    *error_message = "VIDIOC_QUERYBUF failed for " + config_.device + ": " + std::strerror(errno);
+                }
+                return false;
+            }
+
+            void* mapped = mmap(nullptr,
+                                buffer.length,
+                                PROT_READ | PROT_WRITE,
+                                MAP_SHARED,
+                                fd_,
+                                static_cast<off_t>(buffer.m.offset));
+            if (mapped == MAP_FAILED) {
+                if (error_message != nullptr) {
+                    *error_message = "mmap failed for " + config_.device + ": " + std::strerror(errno);
+                }
+                return false;
+            }
+            buffers_[index].data = mapped;
+            buffers_[index].length = buffer.length;
+
+            if (!RetryIoctl(fd_, VIDIOC_QBUF, &buffer)) {
+                if (error_message != nullptr) {
+                    *error_message = "VIDIOC_QBUF failed for " + config_.device + ": " + std::strerror(errno);
+                }
+                return false;
+            }
+        }
+
+        v4l2_buf_type buffer_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (!RetryIoctl(fd_, VIDIOC_STREAMON, &buffer_type)) {
+            if (error_message != nullptr) {
+                *error_message = "VIDIOC_STREAMON failed for " + config_.device + ": " + std::strerror(errno);
+            }
+            return false;
+        }
+        streaming_ = true;
+        return true;
+    }
+
+    void CaptureLoop() {
+        while (!stop_requested_.load(std::memory_order_relaxed)) {
+            pollfd poll_fd{};
+            poll_fd.fd = fd_;
+            poll_fd.events = POLLIN | POLLPRI;
+            const int poll_rc = poll(&poll_fd, 1, 200);
+            if (poll_rc == 0) {
+                continue;
+            }
+            if (poll_rc < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                SetFailure("stereo poll failed for " + config_.name + ": " + std::strerror(errno));
+                break;
+            }
+            if ((poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                SetFailure("stereo device poll error for " + config_.name);
+                break;
+            }
+
+            v4l2_buffer buffer{};
+            buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buffer.memory = V4L2_MEMORY_MMAP;
+            if (!RetryIoctl(fd_, VIDIOC_DQBUF, &buffer)) {
+                if (errno == EAGAIN) {
+                    continue;
+                }
+                SetFailure("VIDIOC_DQBUF failed for " + config_.name + ": " + std::strerror(errno));
+                break;
+            }
+            if (buffer.index >= buffers_.size()) {
+                SetFailure("VIDIOC_DQBUF returned invalid index for " + config_.name);
+                break;
+            }
+
+            const int64_t now_us = CurrentSystemTimeUs();
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                if (!first_frame_system_time_us_.has_value()) {
+                    first_frame_system_time_us_ = now_us;
+                }
+                last_frame_system_time_us_ = now_us;
+            }
+
+            if (forward_frames_.load(std::memory_order_acquire) &&
+                frame_handler_ &&
+                buffer.bytesused > 0) {
+                StereoCapturedFrame frame;
+                frame.system_time_us = now_us;
+                frame.sequence = frame_sequence_++;
+                frame.jpeg_bytes.resize(buffer.bytesused);
+                std::memcpy(frame.jpeg_bytes.data(), buffers_[buffer.index].data, buffer.bytesused);
+                frame_handler_(std::move(frame));
+            }
+
+            if (!RetryIoctl(fd_, VIDIOC_QBUF, &buffer)) {
+                SetFailure("VIDIOC_QBUF failed for " + config_.name + ": " + std::strerror(errno));
+                break;
+            }
+        }
+
+        running_.store(false, std::memory_order_release);
+    }
+
+    void CleanupDevice() {
+        if (fd_ >= 0 && streaming_) {
+            v4l2_buf_type buffer_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            RetryIoctl(fd_, VIDIOC_STREAMOFF, &buffer_type);
+            streaming_ = false;
+        }
+        for (auto& buffer : buffers_) {
+            if (buffer.data != nullptr && buffer.length > 0) {
+                munmap(buffer.data, buffer.length);
+            }
+        }
+        buffers_.clear();
+        if (fd_ >= 0) {
+            close(fd_);
+            fd_ = -1;
+        }
+    }
+
+    void SetFailure(const std::string& error_message) {
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            last_error_ = error_message;
+        }
+        running_.store(false, std::memory_order_release);
+    }
+
+    CameraConfig config_;
+    FrameHandler frame_handler_;
+    int fd_ = -1;
+    bool streaming_ = false;
+    std::vector<MmapBuffer> buffers_;
+    std::thread capture_thread_;
+    std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> running_{false};
+    std::atomic<bool> forward_frames_{false};
+    mutable std::mutex state_mutex_;
+    std::optional<int64_t> first_frame_system_time_us_;
+    std::optional<int64_t> last_frame_system_time_us_;
+    std::string last_error_;
+    int64_t started_system_time_us_ = 0;
+    uint64_t frame_sequence_ = 0;
 };
 
-class StereoSessionRecorder final : public ShellCameraRecorder {
+class StereoSessionRecorder final : public CameraRecorder {
 public:
-    StereoSessionRecorder(CameraConfig config,
-                          Options options,
-                          fs::path output_path,
-                          int udp_port)
-        : ShellCameraRecorder(std::move(config), std::move(options)),
+    StereoSessionRecorder(CameraConfig config, Options options, fs::path output_path)
+        : config_(std::move(config)),
+          options_(std::move(options)),
           output_path_(std::move(output_path)),
-          udp_port_(udp_port) {
-        command_ = BuildCommand();
+          command_(BuildCommand()) {}
+
+    ~StereoSessionRecorder() override {
+        Stop();
+    }
+
+    const CameraConfig& config() const override {
+        return config_;
+    }
+
+    const std::string& command() const override {
+        return command_;
+    }
+
+    bool Start() override {
+        if (started_) {
+            return running_;
+        }
+
+        const fs::path parent = output_path_.parent_path();
+        if (!parent.empty() && !EnsureDirectory(parent)) {
+            failure_ = true;
+            exit_code_ = -1;
+            return false;
+        }
+
+        std::cout << "[camera_recorder] starting stereo session " << config_.name << std::endl;
+        std::cout << "[camera_recorder] cmd: " << command_ << std::endl;
+
+        int input_pipe[2] = {-1, -1};
+        int output_pipe[2] = {-1, -1};
+        if (pipe(input_pipe) != 0 || pipe(output_pipe) != 0) {
+            if (input_pipe[0] >= 0) {
+                close(input_pipe[0]);
+                close(input_pipe[1]);
+            }
+            if (output_pipe[0] >= 0) {
+                close(output_pipe[0]);
+                close(output_pipe[1]);
+            }
+            failure_ = true;
+            exit_code_ = -1;
+            return false;
+        }
+
+        pid_t pid = fork();
+        if (pid < 0) {
+            close(input_pipe[0]);
+            close(input_pipe[1]);
+            close(output_pipe[0]);
+            close(output_pipe[1]);
+            failure_ = true;
+            exit_code_ = -1;
+            return false;
+        }
+
+        if (pid == 0) {
+            setsid();
+            dup2(input_pipe[0], STDIN_FILENO);
+            dup2(output_pipe[1], STDOUT_FILENO);
+            dup2(output_pipe[1], STDERR_FILENO);
+            close(input_pipe[0]);
+            close(input_pipe[1]);
+            close(output_pipe[0]);
+            close(output_pipe[1]);
+            execl("/bin/bash", "bash", "-lc", command_.c_str(), static_cast<char*>(nullptr));
+            _exit(127);
+        }
+
+        close(input_pipe[0]);
+        close(output_pipe[1]);
+        pid_ = pid;
+        write_fd_ = input_pipe[1];
+        started_ = true;
+        running_ = true;
+        StartOutputReaderThread(output_pipe[0]);
+        writer_thread_ = std::thread([this]() { WriterLoop(); });
+        Poll();
+        return running_;
+    }
+
+    void Poll() override {
+        if (!running_ || pid_ <= 0) {
+            return;
+        }
+
+        int status = 0;
+        const pid_t result = waitpid(pid_, &status, WNOHANG);
+        if (result == 0 || result == -1) {
+            return;
+        }
+
+        running_ = false;
+        exit_code_ = DecodeExitCode(status);
+        if (!stop_requested_) {
+            failure_ = true;
+            std::cerr << "[camera_recorder] stereo session exited early: " << config_.name
+                      << " exit_code=" << *exit_code_ << std::endl;
+        } else {
+            std::cout << "[camera_recorder] stereo session stopped: " << config_.name
+                      << " exit_code=" << *exit_code_ << std::endl;
+        }
+    }
+
+    void Stop() override {
+        if (!started_) {
+            JoinThreads();
+            return;
+        }
+
+        RequestStop();
+
+        const auto eof_timeout =
+            HasWrittenOutput() ? kStereoSessionEofGrace : kStereoSessionEofGraceNoOutput;
+        const auto eof_deadline = std::chrono::steady_clock::now() + eof_timeout;
+        while (running_ && std::chrono::steady_clock::now() < eof_deadline) {
+            Poll();
+            if (!running_) {
+                break;
+            }
+            std::this_thread::sleep_for(kRecorderStopPollInterval);
+        }
+
+        if (running_ && pid_ > 0) {
+            kill(-pid_, SIGINT);
+            const auto sigint_timeout =
+                HasWrittenOutput() ? kStereoSessionSigintTimeout : kStereoSessionSigintTimeoutNoOutput;
+            const auto sigint_deadline = std::chrono::steady_clock::now() + sigint_timeout;
+            while (running_ && std::chrono::steady_clock::now() < sigint_deadline) {
+                Poll();
+                if (!running_) {
+                    break;
+                }
+                std::this_thread::sleep_for(kRecorderStopPollInterval);
+            }
+        }
+
+        if (running_ && pid_ > 0) {
+            kill(-pid_, SIGTERM);
+            const auto sigterm_deadline = std::chrono::steady_clock::now() + kStereoSessionSigtermTimeout;
+            while (running_ && std::chrono::steady_clock::now() < sigterm_deadline) {
+                Poll();
+                if (!running_) {
+                    break;
+                }
+                std::this_thread::sleep_for(kRecorderStopPollInterval);
+            }
+        }
+
+        if (running_ && pid_ > 0) {
+            kill(-pid_, SIGKILL);
+            Poll();
+        }
+
+        CloseWriteFd();
+        JoinThreads();
+    }
+
+    bool IsRunning() const override {
+        return running_;
+    }
+
+    bool HasStarted() const override {
+        return started_;
+    }
+
+    bool HasFailure() const override {
+        return failure_;
+    }
+
+    std::optional<int> ExitCode() const override {
+        return exit_code_;
     }
 
     bool HasWrittenOutput() const override {
@@ -1596,39 +2042,271 @@ public:
         return fs::exists(output_path_, error) && fs::file_size(output_path_, error) > 0;
     }
 
-private:
-    bool BeforeStart() override {
-        const fs::path parent = output_path_.parent_path();
-        return parent.empty() || EnsureDirectory(parent);
+    std::optional<int64_t> RecordTimeOffsetUs() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return record_time_offset_us_;
     }
 
-    std::string BuildCommand() const override {
-        const std::string input_url = ShellQuote(StereoWarmupInputUrl(udp_port_));
+    std::optional<int64_t> FirstFramePtsUs() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return first_frame_pts_us_;
+    }
+
+    std::optional<int64_t> FirstFrameSystemTimeUs() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return first_frame_system_time_us_;
+    }
+
+    std::optional<int64_t> LastFramePtsUs() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return last_frame_pts_us_;
+    }
+
+    std::optional<int64_t> LastFrameSystemTimeUs() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return last_frame_system_time_us_;
+    }
+
+    bool PushFrame(std::vector<uint8_t> jpeg_bytes, int64_t system_time_us) {
+        std::unique_lock<std::mutex> lock(queue_mutex_);
+        if (!running_ || stop_requested_ || failure_) {
+            return false;
+        }
+        queue_cv_.wait(lock, [this]() {
+            return frame_queue_.size() < 8 || writer_stop_requested_ || !running_;
+        });
+        if (!running_ || writer_stop_requested_ || failure_) {
+            return false;
+        }
+        frame_queue_.push_back({std::move(jpeg_bytes), system_time_us});
+        lock.unlock();
+        queue_cv_.notify_all();
+        return true;
+    }
+
+    std::optional<int64_t> FirstSubmittedFrameSystemTimeUs() const {
+        std::lock_guard<std::mutex> lock(submitted_mutex_);
+        return first_submitted_frame_system_time_us_;
+    }
+
+    std::optional<int64_t> LastSubmittedFrameSystemTimeUs() const {
+        std::lock_guard<std::mutex> lock(submitted_mutex_);
+        return last_submitted_frame_system_time_us_;
+    }
+
+    uint64_t SubmittedFrameCount() const {
+        std::lock_guard<std::mutex> lock(submitted_mutex_);
+        return submitted_frame_count_;
+    }
+
+    void RequestStop() {
+        if (!started_ || stop_initiated_) {
+            return;
+        }
+
+        stop_requested_ = true;
+        stop_initiated_ = true;
+        {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            writer_stop_requested_ = true;
+        }
+        queue_cv_.notify_all();
+        if (writer_thread_.joinable()) {
+            writer_thread_.join();
+        }
+    }
+
+private:
+    struct QueuedFrame {
+        std::vector<uint8_t> jpeg_bytes;
+        int64_t system_time_us = 0;
+    };
+
+    std::string BuildCommand() const {
         const std::string output = ShellQuote(output_path_.string());
+        const auto video_filter = BuildStereoSessionVideoFilter(config_);
 
         std::ostringstream oss;
         oss << options_.ffmpeg_bin
             << " -hide_banner -loglevel warning -nostats -y "
-            << "-thread_queue_size 512 "
-            << "-fflags +genpts+discardcorrupt "
-            << "-err_detect ignore_err "
-            << "-analyzeduration 1500000 "
-            << "-probesize 1500000 "
-            << "-f mpegts "
-            << "-i " << input_url << ' '
-            << "-map 0:v:0 -an "
-            << "-progress pipe:1 "
-            << "-stats_period 0.5 "
-            << "-c copy "
-            << "-copyinkf "
-            << "-muxdelay 0 "
-            << "-muxpreload 0 "
+            << "-fflags +genpts "
+            << "-f mjpeg "
+            << "-framerate " << StereoSessionFps(config_) << ' '
+            << "-i pipe:0 "
+            << "-map 0:v:0 -an ";
+        if (video_filter.has_value()) {
+            oss << "-vf " << ShellQuote(*video_filter) << ' ';
+        }
+        oss << CommonEncodeArgs(options_.codec, config_)
+            << "-stats_mux_pre pipe:1 "
+            << "-stats_mux_pre_fmt " << ShellQuote("{pts} {tb}") << ' '
             << output;
         return oss.str();
     }
 
+    void WriterLoop() {
+        while (true) {
+            QueuedFrame frame;
+            {
+                std::unique_lock<std::mutex> lock(queue_mutex_);
+                queue_cv_.wait(lock, [this]() {
+                    return writer_stop_requested_ || !frame_queue_.empty();
+                });
+                if (frame_queue_.empty()) {
+                    if (writer_stop_requested_) {
+                        break;
+                    }
+                    continue;
+                }
+                frame = std::move(frame_queue_.front());
+                frame_queue_.pop_front();
+                queue_cv_.notify_all();
+            }
+
+            if (write_fd_ < 0) {
+                failure_ = true;
+                break;
+            }
+            if (!WriteAll(write_fd_,
+                          reinterpret_cast<const uint8_t*>(frame.jpeg_bytes.data()),
+                          frame.jpeg_bytes.size())) {
+                if (!stop_requested_) {
+                    failure_ = true;
+                    std::cerr << "[camera_recorder] failed to write stereo frame to ffmpeg stdin: "
+                              << config_.name << std::endl;
+                }
+                break;
+            }
+
+            std::lock_guard<std::mutex> lock(submitted_mutex_);
+            if (!first_submitted_frame_system_time_us_.has_value()) {
+                first_submitted_frame_system_time_us_ = frame.system_time_us;
+            }
+            last_submitted_frame_system_time_us_ = frame.system_time_us;
+            ++submitted_frame_count_;
+            submitted_frame_system_times_.push_back(frame.system_time_us);
+        }
+
+        CloseWriteFd();
+        queue_cv_.notify_all();
+    }
+
+    void HandleOutputLine(const std::string& raw_line) {
+        const std::string line = Trim(raw_line);
+        if (line.empty()) {
+            return;
+        }
+
+        if (const auto pts_us = ParseFramePtsUsFromStatsLine(line); pts_us.has_value()) {
+            UpdateFrameTiming(*pts_us, TakeSubmittedFrameSystemTimeUs());
+            return;
+        }
+        if (const auto pts_us = ParseFramePtsUsFromProgressLine(line); pts_us.has_value()) {
+            UpdateFrameTiming(*pts_us, TakeSubmittedFrameSystemTimeUs());
+            return;
+        }
+
+        std::cout << "[" << config_.name << "] " << line << std::endl;
+    }
+
+    void StartOutputReaderThread(int read_fd) {
+        output_reader_thread_ = std::thread([this, read_fd]() {
+            std::unique_ptr<FILE, decltype(&fclose)> stream(fdopen(read_fd, "r"), fclose);
+            if (!stream) {
+                close(read_fd);
+                return;
+            }
+
+            char* line = nullptr;
+            size_t line_capacity = 0;
+            while (true) {
+                const ssize_t line_size = getline(&line, &line_capacity, stream.get());
+                if (line_size < 0) {
+                    break;
+                }
+                HandleOutputLine(std::string(line, static_cast<size_t>(line_size)));
+            }
+            free(line);
+        });
+    }
+
+    void JoinThreads() {
+        if (output_reader_thread_.joinable()) {
+            output_reader_thread_.join();
+        }
+        if (writer_thread_.joinable()) {
+            writer_thread_.join();
+        }
+    }
+
+    void CloseWriteFd() {
+        if (write_fd_ >= 0) {
+            close(write_fd_);
+            write_fd_ = -1;
+        }
+    }
+
+    std::optional<int64_t> TakeSubmittedFrameSystemTimeUs() {
+        std::lock_guard<std::mutex> lock(submitted_mutex_);
+        if (submitted_frame_system_times_.empty()) {
+            return std::nullopt;
+        }
+        const int64_t system_time_us = submitted_frame_system_times_.front();
+        submitted_frame_system_times_.pop_front();
+        return system_time_us;
+    }
+
+    void UpdateFrameTiming(int64_t frame_pts_us, std::optional<int64_t> system_time_us) {
+        const int64_t effective_system_time_us = system_time_us.value_or(CurrentSystemTimeUs());
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        if (!record_time_offset_us_.has_value()) {
+            first_frame_pts_us_ = frame_pts_us;
+            first_frame_system_time_us_ = effective_system_time_us;
+            record_time_offset_us_ = effective_system_time_us - frame_pts_us;
+        }
+        last_frame_pts_us_ = frame_pts_us;
+        last_frame_system_time_us_ = effective_system_time_us;
+    }
+
+    static int DecodeExitCode(int status) {
+        if (WIFEXITED(status)) {
+            return WEXITSTATUS(status);
+        }
+        if (WIFSIGNALED(status)) {
+            return 128 + WTERMSIG(status);
+        }
+        return status;
+    }
+
+    CameraConfig config_;
+    Options options_;
     fs::path output_path_;
-    int udp_port_ = 0;
+    std::string command_;
+    pid_t pid_ = -1;
+    int write_fd_ = -1;
+    bool started_ = false;
+    bool running_ = false;
+    bool stop_requested_ = false;
+    bool stop_initiated_ = false;
+    bool writer_stop_requested_ = false;
+    bool failure_ = false;
+    std::optional<int> exit_code_;
+    std::thread output_reader_thread_;
+    std::thread writer_thread_;
+    mutable std::mutex queue_mutex_;
+    std::condition_variable queue_cv_;
+    std::deque<QueuedFrame> frame_queue_;
+    mutable std::mutex submitted_mutex_;
+    std::deque<int64_t> submitted_frame_system_times_;
+    std::optional<int64_t> first_submitted_frame_system_time_us_;
+    std::optional<int64_t> last_submitted_frame_system_time_us_;
+    uint64_t submitted_frame_count_ = 0;
+    mutable std::mutex timing_mutex_;
+    std::optional<int64_t> first_frame_pts_us_;
+    std::optional<int64_t> first_frame_system_time_us_;
+    std::optional<int64_t> last_frame_pts_us_;
+    std::optional<int64_t> last_frame_system_time_us_;
+    std::optional<int64_t> record_time_offset_us_;
 };
 
 struct StereoCommandState {
@@ -1644,91 +2322,109 @@ public:
     StereoCameraTrack(CameraConfig config, Options options)
         : config_(std::move(config)),
           options_(std::move(options)),
-          udp_port_(StereoWarmupPort(config_.name)) {}
+          frame_drop_modulo_(std::max(1, FrameDropModulo(config_))) {}
 
     void Stop() {
-        if (session_recorder_) {
-            session_recorder_->Stop();
-            session_recorder_.reset();
+        if (warmup_capture_) {
+            warmup_capture_->SetForwardFrames(false);
         }
-        if (warmup_recorder_) {
-            warmup_recorder_->Stop();
-            warmup_recorder_.reset();
+        auto recorder = TakeSessionRecorder();
+        if (recorder) {
+            recorder->Stop();
         }
+        if (warmup_capture_) {
+            warmup_capture_->Stop();
+            warmup_capture_.reset();
+        }
+        std::lock_guard<std::mutex> lock(state_mutex_);
         session_episode_dir_.clear();
+        session_start_system_time_us_ = 0;
+        stop_requested_by_control_ = false;
         session_failed_ = false;
         session_restart_attempts_ = 0;
+        last_error_.clear();
     }
 
-    void Poll(bool session_active) {
-        if (warmup_recorder_) {
-            warmup_recorder_->Poll();
-            if (!warmup_recorder_->IsRunning()) {
-                if (session_recorder_ && session_recorder_->IsRunning()) {
-                    session_failed_ = true;
-                    last_error_ = "stereo warmup exited during active session for " + config_.name;
-                    session_recorder_->Stop();
-                    session_recorder_.reset();
-                }
-                warmup_recorder_.reset();
+    void Poll(bool /*session_active*/) {
+        if (warmup_capture_ && !warmup_capture_->IsRunning()) {
+            warmup_capture_->SetForwardFrames(false);
+            auto recorder = TakeSessionRecorder();
+            if (recorder) {
+                recorder->Stop();
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                session_failed_ = true;
+                last_error_ = warmup_capture_->last_error().empty()
+                                  ? ("stereo warmup exited during active session for " + config_.name)
+                                  : warmup_capture_->last_error();
             }
+            warmup_capture_.reset();
         }
 
-        if (session_recorder_) {
-            session_recorder_->Poll();
-            const bool session_has_progress =
-                session_recorder_->FirstFrameSystemTimeUs().has_value() || session_recorder_->HasWrittenOutput();
-            if (!session_recorder_->IsRunning() && !stop_requested_by_control_ && !session_failed_) {
-                if (!session_has_progress &&
-                    session_restart_attempts_ <= kStereoSessionMaxRestartAttempts &&
-                    ready()) {
-                    std::cout << "[camera_recorder] stereo session recorder exited before first frame, restarting: "
-                              << config_.name
-                              << " attempt=" << (session_restart_attempts_ + 1)
-                              << std::endl;
-                    session_recorder_.reset();
-                    std::string restart_error;
-                    if (!StartSessionRecorder(session_episode_dir_, &restart_error)) {
+        std::string restart_episode_dir;
+        bool should_restart = false;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (session_recorder_) {
+                session_recorder_->Poll();
+                const bool session_running = session_recorder_->IsRunning();
+                const bool session_has_progress =
+                    session_recorder_->FirstFrameSystemTimeUs().has_value() || session_recorder_->HasWrittenOutput();
+                if (!session_running && !stop_requested_by_control_ && !session_failed_) {
+                    if (!session_has_progress &&
+                        session_restart_attempts_ <= kStereoSessionMaxRestartAttempts &&
+                        ready()) {
+                        std::cout << "[camera_recorder] stereo session recorder exited before first frame, restarting: "
+                                  << config_.name
+                                  << " attempt=" << (session_restart_attempts_ + 1)
+                                  << std::endl;
+                        restart_episode_dir = session_episode_dir_;
+                        should_restart = true;
+                    } else {
                         session_failed_ = true;
-                        last_error_ = restart_error;
+                        last_error_ = "stereo session recorder exited early for " + config_.name;
                     }
-                } else {
-                    session_failed_ = true;
-                    last_error_ = "stereo session recorder exited early for " + config_.name;
                 }
             }
         }
+        if (should_restart) {
+            TakeSessionRecorder();
+            std::string restart_error;
+            if (!StartSessionRecorder(restart_episode_dir, &restart_error)) {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                session_failed_ = true;
+                last_error_ = restart_error;
+            }
+        }
 
-        if ((!warmup_recorder_ || !warmup_recorder_->IsRunning()) &&
-            (!session_active || !session_recorder_)) {
-            TryStartWarmupRecorder();
+        if (!warmup_capture_ || !warmup_capture_->IsRunning()) {
+            TryStartWarmupCapture();
         }
     }
 
     bool ready() const {
-        if (!warmup_recorder_ || !warmup_recorder_->IsRunning()) {
+        if (!warmup_capture_ || !warmup_capture_->IsRunning()) {
             return false;
         }
-        const auto first_frame_system_time_us = warmup_recorder_->FirstFrameSystemTimeUs();
-        const auto last_frame_system_time_us = warmup_recorder_->LastFrameSystemTimeUs();
+        const auto first_frame_system_time_us = warmup_capture_->FirstFrameSystemTimeUs();
+        const auto last_frame_system_time_us = warmup_capture_->LastFrameSystemTimeUs();
         if (first_frame_system_time_us.has_value() && last_frame_system_time_us.has_value()) {
             return (CurrentSystemTimeUs() - *last_frame_system_time_us) <= (2 * kUsPerSecond);
         }
-        return (CurrentSystemTimeUs() - last_start_attempt_system_time_us_) >=
+        return (CurrentSystemTimeUs() - warmup_capture_->started_system_time_us()) >=
                (kStereoWarmupReadySettle.count() * 1000);
     }
 
     std::string state() const {
-        if (session_recorder_ && session_recorder_->IsRunning()) {
+        if (SessionRecorderRunning()) {
             return ready() ? "recording" : "recording_recovering";
         }
         if (ready()) {
             return "ready";
         }
-        if (warmup_recorder_ && warmup_recorder_->IsRunning()) {
+        if (warmup_capture_ && warmup_capture_->IsRunning()) {
             return "warming";
         }
-        if (!last_error_.empty()) {
+        if (!LastError().empty()) {
             return "recovering";
         }
         return "not_ready";
@@ -1742,22 +2438,19 @@ public:
         json value = json::object();
         value["state"] = state();
         value["device"] = config_.device;
-        value["udp_port"] = udp_port_;
         value["ready"] = ready();
-        if (warmup_recorder_) {
-            if (const auto offset = warmup_recorder_->RecordTimeOffsetUs(); offset.has_value()) {
-                value["record_time_offset_us"] = *offset;
-            }
-            if (const auto first = warmup_recorder_->FirstFrameSystemTimeUs(); first.has_value()) {
+        if (warmup_capture_) {
+            if (const auto first = warmup_capture_->FirstFrameSystemTimeUs(); first.has_value()) {
                 value["first_frame_system_time_us"] = *first;
             }
-            if (const auto last = warmup_recorder_->LastFrameSystemTimeUs(); last.has_value()) {
+            if (const auto last = warmup_capture_->LastFrameSystemTimeUs(); last.has_value()) {
                 value["last_frame_system_time_us"] = *last;
             }
         }
-        value["session_recording"] = session_recorder_ && session_recorder_->IsRunning();
-        if (!last_error_.empty()) {
-            value["last_error"] = last_error_;
+        value["session_recording"] = SessionRecorderRunning();
+        const std::string last_error = LastError();
+        if (!last_error.empty()) {
+            value["last_error"] = last_error;
         }
         return value;
     }
@@ -1771,7 +2464,7 @@ public:
             }
             return false;
         }
-        if (session_recorder_ && session_recorder_->IsRunning()) {
+        if (SessionRecorderRunning()) {
             if (error_message != nullptr) {
                 *error_message = "stereo session already active for " + config_.name;
             }
@@ -1782,6 +2475,7 @@ public:
             return false;
         }
 
+        std::lock_guard<std::mutex> lock(state_mutex_);
         session_episode_dir_ = episode_dir;
         session_start_system_time_us_ = start_system_time_us;
         stop_requested_by_control_ = false;
@@ -1791,14 +2485,20 @@ public:
     }
 
     void AbortSessionStart() {
-        stop_requested_by_control_ = true;
-        session_failed_ = false;
-        session_start_system_time_us_ = 0;
-        session_episode_dir_.clear();
-        session_restart_attempts_ = 0;
-        if (session_recorder_) {
-            session_recorder_->Stop();
-            session_recorder_.reset();
+        if (warmup_capture_) {
+            warmup_capture_->SetForwardFrames(false);
+        }
+        auto recorder = TakeSessionRecorder();
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            stop_requested_by_control_ = true;
+            session_failed_ = false;
+            session_start_system_time_us_ = 0;
+            session_episode_dir_.clear();
+            session_restart_attempts_ = 0;
+        }
+        if (recorder) {
+            recorder->Stop();
         }
     }
 
@@ -1806,22 +2506,50 @@ public:
         AbortSessionStart();
     }
 
-    bool FinalizeSession(const std::string& episode_dir,
-                         int64_t start_system_time_us,
-                         int64_t stop_system_time_us,
-                         json* info_json,
-                         std::string* error_message) {
+    bool BeginFinalize(const std::string& episode_dir, std::string* error_message) {
+        if (warmup_capture_) {
+            warmup_capture_->SetForwardFrames(false);
+        }
+        std::lock_guard<std::mutex> lock(state_mutex_);
         stop_requested_by_control_ = true;
-
         if (session_episode_dir_ != episode_dir) {
             if (error_message != nullptr) {
                 *error_message = "stereo session episode mismatch for " + config_.name;
             }
             return false;
         }
+        if (!session_recorder_) {
+            if (error_message != nullptr) {
+                *error_message = "stereo session recorder missing for " + config_.name;
+            }
+            return false;
+        }
+        session_recorder_->RequestStop();
+        return true;
+    }
 
-        auto recorder = std::move(session_recorder_);
-        session_episode_dir_.clear();
+    bool FinalizeSession(const std::string& episode_dir,
+                         int64_t start_system_time_us,
+                         int64_t stop_system_time_us,
+                         json* info_json,
+                         std::string* error_message) {
+        if (warmup_capture_) {
+            warmup_capture_->SetForwardFrames(false);
+        }
+
+        std::unique_ptr<StereoSessionRecorder> recorder;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            stop_requested_by_control_ = true;
+            if (session_episode_dir_ != episode_dir) {
+                if (error_message != nullptr) {
+                    *error_message = "stereo session episode mismatch for " + config_.name;
+                }
+                return false;
+            }
+            recorder = std::move(session_recorder_);
+            session_episode_dir_.clear();
+        }
         if (!recorder) {
             if (error_message != nullptr) {
                 *error_message = "stereo session recorder missing for " + config_.name;
@@ -1832,11 +2560,20 @@ public:
         recorder->Stop();
         recorder->Poll();
 
-        if (session_failed_) {
-            if (error_message != nullptr) {
-                *error_message = last_error_.empty() ? ("stereo session failed for " + config_.name) : last_error_;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            if (session_failed_) {
+                if (error_message != nullptr) {
+                    *error_message = last_error_.empty() ? ("stereo session failed for " + config_.name) : last_error_;
+                }
+                session_failed_ = false;
+                return false;
             }
-            session_failed_ = false;
+        }
+        if (recorder->HasFailure() && !recorder->HasWrittenOutput()) {
+            if (error_message != nullptr) {
+                *error_message = "stereo session encoder failed for " + config_.name;
+            }
             return false;
         }
 
@@ -1859,20 +2596,41 @@ public:
             !first_frame_system_time_us.has_value() ||
             !last_frame_pts_us.has_value() ||
             !last_frame_system_time_us.has_value()) {
-            const auto warmup_offset_us = warmup_recorder_ ? warmup_recorder_->RecordTimeOffsetUs()
-                                                           : std::optional<int64_t>{};
-            const auto probed_window = ProbeVideoWindowUs(final_output);
-            if (warmup_offset_us.has_value() && probed_window.has_value()) {
-                record_time_offset_us = warmup_offset_us;
-                first_frame_pts_us = probed_window->start_pts_us;
-                first_frame_system_time_us = *record_time_offset_us + *first_frame_pts_us;
-                last_frame_pts_us = probed_window->start_pts_us + probed_window->duration_us;
-                last_frame_system_time_us = *record_time_offset_us + *last_frame_pts_us;
-            } else {
-                if (error_message != nullptr) {
-                    *error_message = "stereo timing metadata incomplete for " + config_.name;
+            const auto first_submitted_system_time_us = recorder->FirstSubmittedFrameSystemTimeUs();
+            const auto last_submitted_system_time_us = recorder->LastSubmittedFrameSystemTimeUs();
+            const uint64_t submitted_frame_count = recorder->SubmittedFrameCount();
+            const int session_fps = std::max(1, StereoSessionFps(config_));
+            if (first_submitted_system_time_us.has_value() &&
+                last_submitted_system_time_us.has_value() &&
+                submitted_frame_count > 0) {
+                first_frame_pts_us = 0;
+                if (submitted_frame_count > 1) {
+                    const long double last_pts_us_ld =
+                        (static_cast<long double>(submitted_frame_count - 1) * 1'000'000.0L) /
+                        static_cast<long double>(session_fps);
+                    last_frame_pts_us = static_cast<int64_t>(std::llround(last_pts_us_ld));
+                } else {
+                    last_frame_pts_us = 0;
                 }
-                return false;
+                first_frame_system_time_us = *first_submitted_system_time_us;
+                last_frame_system_time_us = *last_submitted_system_time_us;
+                record_time_offset_us = *first_frame_system_time_us;
+            } else {
+                const auto probed_window = ProbeVideoWindowUs(final_output);
+                if (first_submitted_system_time_us.has_value() &&
+                    last_submitted_system_time_us.has_value() &&
+                    probed_window.has_value()) {
+                    first_frame_pts_us = probed_window->start_pts_us;
+                    last_frame_pts_us = probed_window->start_pts_us + probed_window->duration_us;
+                    first_frame_system_time_us = *first_submitted_system_time_us;
+                    last_frame_system_time_us = *last_submitted_system_time_us;
+                    record_time_offset_us = *first_frame_system_time_us - *first_frame_pts_us;
+                } else {
+                    if (error_message != nullptr) {
+                        *error_message = "stereo timing metadata incomplete for " + config_.name;
+                    }
+                    return false;
+                }
             }
         }
 
@@ -1886,9 +2644,12 @@ public:
         if (info_json != nullptr) {
             (*info_json)[config_.name] = camera_info;
         }
-        session_failed_ = false;
-        session_start_system_time_us_ = 0;
-        session_restart_attempts_ = 0;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            session_failed_ = false;
+            session_start_system_time_us_ = 0;
+            session_restart_attempts_ = 0;
+        }
         return true;
     }
 
@@ -1897,8 +2658,7 @@ private:
         auto recorder = std::make_unique<StereoSessionRecorder>(
             config_,
             options_,
-            fs::path(episode_dir) / config_.output_files.at(0),
-            udp_port_);
+            fs::path(episode_dir) / config_.output_files.at(0));
         if (!recorder->Start()) {
             if (error_message != nullptr) {
                 *error_message = "failed to start stereo session recorder for " + config_.name;
@@ -1906,12 +2666,18 @@ private:
             return false;
         }
 
-        session_recorder_ = std::move(recorder);
-        ++session_restart_attempts_;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            session_recorder_ = std::move(recorder);
+            ++session_restart_attempts_;
+        }
+        if (warmup_capture_) {
+            warmup_capture_->SetForwardFrames(true);
+        }
         return true;
     }
 
-    void TryStartWarmupRecorder() {
+    void TryStartWarmupCapture() {
         const int64_t now_us = CurrentSystemTimeUs();
         if ((now_us - last_start_attempt_system_time_us_) < (kStereoRestartInterval.count() * 1000)) {
             return;
@@ -1923,20 +2689,55 @@ private:
             return;
         }
 
-        auto recorder = std::make_unique<StereoWarmupRecorder>(config_, options_, udp_port_);
-        if (!recorder->Start()) {
-            last_error_ = "failed to start warmup recorder";
+        auto capture = std::make_unique<StereoWarmupCapture>(
+            config_,
+            [this](StereoCapturedFrame&& frame) { HandleCapturedFrame(std::move(frame)); });
+        std::string error_message;
+        if (!capture->Start(&error_message)) {
+            last_error_ = error_message.empty() ? "failed to start stereo warmup capture" : error_message;
             return;
         }
 
-        warmup_recorder_ = std::move(recorder);
+        warmup_capture_ = std::move(capture);
         last_error_.clear();
+    }
+
+    void HandleCapturedFrame(StereoCapturedFrame&& frame) {
+        if (frame_drop_modulo_ > 1 && (frame.sequence % static_cast<uint64_t>(frame_drop_modulo_)) != 0) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!session_recorder_ || !session_recorder_->IsRunning()) {
+            return;
+        }
+        if (!session_recorder_->PushFrame(std::move(frame.jpeg_bytes), frame.system_time_us) &&
+            !stop_requested_by_control_) {
+            session_failed_ = true;
+            last_error_ = "failed to queue stereo frame for " + config_.name;
+        }
+    }
+
+    bool SessionRecorderRunning() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return session_recorder_ && session_recorder_->IsRunning();
+    }
+
+    std::string LastError() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return last_error_;
+    }
+
+    std::unique_ptr<StereoSessionRecorder> TakeSessionRecorder() {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return std::move(session_recorder_);
     }
 
     CameraConfig config_;
     Options options_;
-    int udp_port_ = 0;
-    std::unique_ptr<StereoWarmupRecorder> warmup_recorder_;
+    int frame_drop_modulo_ = 1;
+    std::unique_ptr<StereoWarmupCapture> warmup_capture_;
+    mutable std::mutex state_mutex_;
     std::unique_ptr<StereoSessionRecorder> session_recorder_;
     std::string session_episode_dir_;
     int64_t session_start_system_time_us_ = 0;
@@ -1957,7 +2758,7 @@ public:
             if (!selected || config.mode != CameraRecordMode::StereoHybridDecodeEncode) {
                 continue;
             }
-            tracks_.emplace_back(config, options_);
+            tracks_.push_back(std::make_unique<StereoCameraTrack>(config, options_));
         }
     }
 
@@ -1971,7 +2772,7 @@ public:
             ApplyControlCommand();
             const bool session_active = command_state_.recording || finalize_pending_;
             for (auto& track : tracks_) {
-                track.Poll(session_active);
+                track->Poll(session_active);
             }
             if (finalize_pending_) {
                 MaybeFinalizeStoppedSession();
@@ -1987,7 +2788,7 @@ public:
 private:
     void ShutdownTracks() {
         for (auto& track : tracks_) {
-            track.Stop();
+            track->Stop();
         }
     }
 
@@ -2017,10 +2818,10 @@ private:
             active_stop_system_time_us_ = 0;
             for (auto& track : tracks_) {
                 std::string error_message;
-                if (!track.StartSession(active_episode_dir_, active_start_system_time_us_, &error_message)) {
+                if (!track->StartSession(active_episode_dir_, active_start_system_time_us_, &error_message)) {
                     last_finalize_error_ = error_message;
                     for (auto& rollback_track : tracks_) {
-                        rollback_track.AbortSessionStart();
+                        rollback_track->AbortSessionStart();
                     }
                     active_episode_dir_.clear();
                     active_start_system_time_us_ = 0;
@@ -2037,16 +2838,10 @@ private:
             command_state_.stop_system_time_us > 0) {
             finalize_pending_ = true;
             active_stop_system_time_us_ = command_state_.stop_system_time_us;
-            finalize_requested_steady_us_ = CurrentSteadyTimeUs();
         }
     }
 
     void MaybeFinalizeStoppedSession() {
-        const int64_t elapsed_us = CurrentSteadyTimeUs() - finalize_requested_steady_us_;
-        if (elapsed_us < (kStereoFinalizeSettle.count() * 1000)) {
-            return;
-        }
-
         json stereo_info = json::object();
         stereo_info["cameras"] = json::object();
         stereo_info["episode_dir"] = active_episode_dir_;
@@ -2055,13 +2850,28 @@ private:
 
         for (auto& track : tracks_) {
             std::string error_message;
-            if (!track.FinalizeSession(active_episode_dir_,
-                                       active_start_system_time_us_,
-                                       active_stop_system_time_us_,
-                                       &stereo_info["cameras"],
-                                       &error_message)) {
+            if (!track->BeginFinalize(active_episode_dir_, &error_message)) {
                 for (auto& rollback_track : tracks_) {
-                    rollback_track.CancelSession();
+                    rollback_track->CancelSession();
+                }
+                last_finalize_error_ = error_message;
+                finalize_pending_ = false;
+                active_episode_dir_.clear();
+                active_start_system_time_us_ = 0;
+                active_stop_system_time_us_ = 0;
+                return;
+            }
+        }
+
+        for (auto& track : tracks_) {
+            std::string error_message;
+            if (!track->FinalizeSession(active_episode_dir_,
+                                        active_start_system_time_us_,
+                                        active_stop_system_time_us_,
+                                        &stereo_info["cameras"],
+                                        &error_message)) {
+                for (auto& rollback_track : tracks_) {
+                    rollback_track->CancelSession();
                 }
                 last_finalize_error_ = error_message;
                 finalize_pending_ = false;
@@ -2096,10 +2906,10 @@ private:
 
         bool all_ready = true;
         for (const auto& track : tracks_) {
-            const json camera_status = track.BuildStatusJson();
+            const json camera_status = track->BuildStatusJson();
             const bool camera_ready = camera_status.value("ready", false);
             all_ready = all_ready && camera_ready;
-            status["cameras"][track.name()] = camera_status;
+            status["cameras"][track->name()] = camera_status;
         }
         status["ready"] = all_ready;
         if (finalize_pending_) {
@@ -2113,7 +2923,7 @@ private:
     }
 
     Options options_;
-    std::vector<StereoCameraTrack> tracks_;
+    std::vector<std::unique_ptr<StereoCameraTrack>> tracks_;
     StereoCommandState command_state_;
     bool finalize_pending_ = false;
     std::string active_episode_dir_;
@@ -2122,7 +2932,6 @@ private:
     json last_session_result_ = json::object();
     int64_t active_start_system_time_us_ = 0;
     int64_t active_stop_system_time_us_ = 0;
-    int64_t finalize_requested_steady_us_ = 0;
 };
 
 }  // namespace
@@ -2401,6 +3210,7 @@ void InstallSignalHandlers() {
     g_stop_requested.store(false, std::memory_order_relaxed);
     std::signal(SIGINT, SignalHandler);
     std::signal(SIGTERM, SignalHandler);
+    std::signal(SIGPIPE, SIG_IGN);
 }
 
 }  // namespace camera_recorder

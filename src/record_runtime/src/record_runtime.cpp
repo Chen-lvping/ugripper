@@ -1,5 +1,6 @@
 #include "record_runtime.h"
 
+#include <mcap/reader.hpp>
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -45,6 +46,9 @@ constexpr uint64_t kHealthCheckIntervalMs = 1000;
 constexpr uint64_t kHmiActiveTimeoutMs = 2500;
 constexpr double kMinReasonableVideoSpanSec = 0.2;
 constexpr double kMaxVideoSpanGapSec = 5.0;
+constexpr int64_t kEncoderTailWindowNs = 1000LL * 1000LL * 1000LL;
+constexpr int64_t kEncoderTailMaxLagNs = 1000LL * 1000LL * 1000LL;
+constexpr size_t kEncoderTailChunkScanLimit = 4;
 constexpr int kVideoProbeTimeoutMs = 1500;
 constexpr int kUdevadmProbeTimeoutMs = 2000;
 
@@ -88,6 +92,25 @@ struct VideoProbeResult
     double durationSec = 0.0;
     double spanSec = 0.0;
 };
+
+struct EncoderTailCheckTarget
+{
+    const char *side;
+    const char *mcapFileName;
+    const char *encoderTopic;
+    std::array<const char *, 4> referenceCameraNames;
+};
+
+constexpr std::array<EncoderTailCheckTarget, 2> kEncoderTailCheckTargets = {{
+    {"left",
+     "sensor_data_left.mcap",
+     "encoder_left",
+     {"left_cam_main", "left_stereo", "left_tcam_l", "left_tcam_r"}},
+    {"right",
+     "sensor_data_right.mcap",
+     "encoder_right",
+     {"right_cam_main", "right_stereo", "right_tcam_l", "right_tcam_r"}},
+}};
 
 struct CommandCaptureResult
 {
@@ -1206,6 +1229,174 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
               << " start_sec=" << formatSeconds(result->startTimeSec)
               << " duration_sec=" << formatSeconds(result->durationSec)
               << " span_sec=" << formatSeconds(result->spanSec) << std::endl;
+    return true;
+}
+
+bool loadLastTopicLogTimeFromTailChunks(const std::string &mcapPath,
+                                        const std::string &topic,
+                                        uint64_t *lastLogTimeNs,
+                                        uint64_t *messageCount,
+                                        std::string *errorMessage)
+{
+    if (lastLogTimeNs == nullptr || messageCount == nullptr)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "internal error: missing encoder tail result slot";
+        }
+        return false;
+    }
+
+    *lastLogTimeNs = 0;
+    *messageCount = 0;
+
+    mcap::McapReader reader;
+    const auto openStatus = reader.open(mcapPath);
+    if (!openStatus.ok())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to open mcap: " + openStatus.message;
+        }
+        return false;
+    }
+
+    std::string summaryProblem;
+    const auto summaryStatus = reader.readSummary(
+        mcap::ReadSummaryMethod::AllowFallbackScan,
+        [&summaryProblem](const mcap::Status &status) {
+            if (summaryProblem.empty())
+            {
+                summaryProblem = status.message;
+            }
+        });
+    if (!summaryStatus.ok())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to read mcap summary: " + summaryStatus.message;
+            if (!summaryProblem.empty())
+            {
+                *errorMessage += " (" + summaryProblem + ")";
+            }
+        }
+        return false;
+    }
+
+    std::vector<mcap::ChannelId> matchingChannels;
+    for (const auto &[channelId, channel] : reader.channels())
+    {
+        if (channel != nullptr && channel->topic == topic)
+        {
+            matchingChannels.push_back(channelId);
+        }
+    }
+
+    if (matchingChannels.empty())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "missing topic in mcap: " + topic;
+        }
+        return false;
+    }
+
+    if (reader.statistics().has_value())
+    {
+        for (const auto channelId : matchingChannels)
+        {
+            const auto countIt = reader.statistics()->channelMessageCounts.find(channelId);
+            if (countIt != reader.statistics()->channelMessageCounts.end())
+            {
+                *messageCount += countIt->second;
+            }
+        }
+    }
+
+    bool found = false;
+    auto *dataSource = reader.dataSource();
+    const auto &chunkIndexes = reader.chunkIndexes();
+    if (dataSource != nullptr && !chunkIndexes.empty())
+    {
+        size_t scannedChunks = 0;
+        for (auto it = chunkIndexes.rbegin();
+             it != chunkIndexes.rend() && scannedChunks < kEncoderTailChunkScanLimit && !found;
+             ++it, ++scannedChunks)
+        {
+            mcap::TypedRecordReader recordReader(
+                *dataSource,
+                it->chunkStartOffset,
+                it->chunkStartOffset + it->chunkLength);
+            recordReader.onMessage = [&](const mcap::Message &message,
+                                         mcap::ByteOffset,
+                                         std::optional<mcap::ByteOffset>) {
+                if (std::find(matchingChannels.begin(), matchingChannels.end(), message.channelId) ==
+                    matchingChannels.end())
+                {
+                    return;
+                }
+
+                if (!found || message.logTime > *lastLogTimeNs)
+                {
+                    *lastLogTimeNs = message.logTime;
+                    found = true;
+                }
+            };
+
+            while (recordReader.next())
+            {
+            }
+
+            if (!recordReader.status().ok() && errorMessage != nullptr && errorMessage->empty())
+            {
+                *errorMessage = "failed to read tail chunk: " + recordReader.status().message;
+            }
+        }
+    }
+
+    if (!found)
+    {
+        std::string readProblem;
+        mcap::ReadMessageOptions options;
+        options.topicFilter = [&topic](std::string_view candidateTopic) {
+            return candidateTopic == topic;
+        };
+
+        for (const auto &messageView : reader.readMessages(
+                 [&readProblem](const mcap::Status &status) {
+                     if (readProblem.empty())
+                     {
+                         readProblem = status.message;
+                     }
+                 },
+                 options))
+        {
+            if (!found || messageView.message.logTime > *lastLogTimeNs)
+            {
+                *lastLogTimeNs = messageView.message.logTime;
+                found = true;
+            }
+        }
+
+        if (!found && !readProblem.empty() && errorMessage != nullptr && errorMessage->empty())
+        {
+            *errorMessage = "failed to scan mcap messages: " + readProblem;
+        }
+    }
+
+    if (!found)
+    {
+        if (errorMessage != nullptr && errorMessage->empty())
+        {
+            *errorMessage = "topic has zero messages: " + topic;
+        }
+        return false;
+    }
+
+    if (*messageCount == 0)
+    {
+        *messageCount = 1;
+    }
     return true;
 }
 }
@@ -2341,21 +2532,21 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
     std::cout << "[PERF] stop phase begin: reason=" << reason
               << " episode_dir=" << currentEpisodeDir_ << std::endl;
 
-    const int64_t sensorStopStartMs = steadyNowMs();
-    const bool sensorStopOk = sensorRecorder_.stop(5000);
-    std::cout << "[PERF] stop sensor_recorder done: ok=" << (sensorStopOk ? "true" : "false")
-              << " elapsed_ms=" << (steadyNowMs() - sensorStopStartMs) << std::endl;
+    bool stereoStopOk = writeStereoControl(false, currentEpisodeDir_, 0, stopSystemTimeUs);
+    if (!stereoStopOk)
+    {
+        std::cerr << "[ERROR] failed to send stereo stop command" << std::endl;
+    }
 
     const int64_t cameraStopStartMs = steadyNowMs();
     const bool cameraStopOk = cameraRecorder_.stop(5000);
     std::cout << "[PERF] stop camera_recorder done: ok=" << (cameraStopOk ? "true" : "false")
               << " elapsed_ms=" << (steadyNowMs() - cameraStopStartMs) << std::endl;
 
-    bool stereoStopOk = writeStereoControl(false, currentEpisodeDir_, 0, stopSystemTimeUs);
-    if (!stereoStopOk)
-    {
-        std::cerr << "[ERROR] failed to send stereo stop command" << std::endl;
-    }
+    const int64_t sensorStopStartMs = steadyNowMs();
+    const bool sensorStopOk = sensorRecorder_.stop(5000);
+    std::cout << "[PERF] stop sensor_recorder done: ok=" << (sensorStopOk ? "true" : "false")
+              << " elapsed_ms=" << (steadyNowMs() - sensorStopStartMs) << std::endl;
 
     setLedState(LedState::Ready);
     sendAudioCommand("recording_stop");
@@ -3660,6 +3851,19 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     std::ostringstream infoBuffer;
     infoBuffer << infoInput.rdbuf();
     const std::string infoJson = infoBuffer.str();
+    json infoRoot;
+    try
+    {
+        infoRoot = json::parse(infoJson);
+    }
+    catch (const std::exception &ex)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = std::string("failed to parse info.json: ") + ex.what();
+        }
+        return false;
+    }
 
     double bootTimeOffset = 0.0;
     int64_t bootTimeOffsetUsFromFile = 0;
@@ -3688,6 +3892,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         return false;
     }
 
+    std::map<std::string, int64_t> recordTimeOffsetUsByCamera;
     for (const auto &artifact : kEpisodeVideoArtifacts)
     {
         int64_t recordTimeOffsetUs = 0;
@@ -3699,6 +3904,22 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                 *errorMessage = "info.json missing or invalid integer field: " + fieldName;
             }
             return false;
+        }
+        recordTimeOffsetUsByCamera[artifact.cameraName] = recordTimeOffsetUs;
+    }
+
+    std::map<std::string, int64_t> explicitTailVideoEndNsByCamera;
+    if (infoRoot.contains("stereo_session") && infoRoot["stereo_session"].is_object())
+    {
+        const json &stereoSession = infoRoot["stereo_session"];
+        const int64_t stopSystemTimeUs = stereoSession.value("stop_system_time_us", static_cast<int64_t>(0));
+        if (stopSystemTimeUs > 0)
+        {
+            // Stereo session files are written from the warmup stream and can contain buffered
+            // pre-roll around the command window. For encoder tail validation we care about the
+            // commanded session end, not the full muxed file duration seen by ffprobe.
+            explicitTailVideoEndNsByCamera["left_stereo"] = stopSystemTimeUs * 1000LL;
+            explicitTailVideoEndNsByCamera["right_stereo"] = stopSystemTimeUs * 1000LL;
         }
     }
 
@@ -3750,6 +3971,108 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
             }
             return false;
         }
+    }
+
+    for (const auto &target : kEncoderTailCheckTargets)
+    {
+        int64_t tailVideoEndNs = 0;
+        for (const auto *cameraName : target.referenceCameraNames)
+        {
+            const auto explicitEndIt = explicitTailVideoEndNsByCamera.find(cameraName);
+            if (explicitEndIt != explicitTailVideoEndNsByCamera.end())
+            {
+                tailVideoEndNs = std::max(tailVideoEndNs, explicitEndIt->second);
+                continue;
+            }
+
+            const auto offsetIt = recordTimeOffsetUsByCamera.find(cameraName);
+            if (offsetIt == recordTimeOffsetUsByCamera.end())
+            {
+                continue;
+            }
+
+            const auto probeIt = std::find_if(
+                probes.begin(),
+                probes.end(),
+                [cameraName](const VideoProbeResult &probe) {
+                    return probe.cameraName == cameraName;
+                });
+            if (probeIt == probes.end())
+            {
+                continue;
+            }
+
+            const int64_t candidateEndNs =
+                offsetIt->second * 1000LL +
+                static_cast<int64_t>(std::llround(probeIt->durationSec * 1000000000.0));
+            tailVideoEndNs = std::max(tailVideoEndNs, candidateEndNs);
+        }
+
+        if (tailVideoEndNs <= 0)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = std::string("failed to build encoder tail reference for side=") + target.side;
+            }
+            return false;
+        }
+
+        uint64_t lastEncoderLogTimeNs = 0;
+        uint64_t encoderMessageCount = 0;
+        std::string encoderTailError;
+        if (!loadLastTopicLogTimeFromTailChunks(
+                episodeDir + "/" + target.mcapFileName,
+                target.encoderTopic,
+                &lastEncoderLogTimeNs,
+                &encoderMessageCount,
+                &encoderTailError))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = std::string("encoder tail check failed for side=") + target.side +
+                                ": " + encoderTailError;
+            }
+            return false;
+        }
+
+        const int64_t tailWindowStartNs = std::max<int64_t>(0, tailVideoEndNs - kEncoderTailWindowNs);
+        if (static_cast<int64_t>(lastEncoderLogTimeNs) < tailWindowStartNs)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = std::string("encoder tail has no samples near episode end for side=") +
+                                target.side +
+                                " (last_encoder_ns=" + std::to_string(lastEncoderLogTimeNs) +
+                                ", tail_video_start_ns=" + std::to_string(tailWindowStartNs) +
+                                ", tail_video_end_ns=" + std::to_string(tailVideoEndNs) + ")";
+            }
+            return false;
+        }
+
+        int64_t lagNs = tailVideoEndNs - static_cast<int64_t>(lastEncoderLogTimeNs);
+        if (lagNs < 0)
+        {
+            lagNs = 0;
+        }
+        if (lagNs > kEncoderTailMaxLagNs)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = std::string("encoder tail lag too large for side=") + target.side +
+                                " (lag_ns=" + std::to_string(lagNs) +
+                                ", threshold_ns=" + std::to_string(kEncoderTailMaxLagNs) +
+                                ", tail_video_end_ns=" + std::to_string(tailVideoEndNs) +
+                                ", last_encoder_ns=" + std::to_string(lastEncoderLogTimeNs) + ")";
+            }
+            return false;
+        }
+
+        std::cout << "[PERF] encoder tail check pass:"
+                  << " side=" << target.side
+                  << " encoder_count=" << encoderMessageCount
+                  << " tail_video_end_ns=" << tailVideoEndNs
+                  << " last_encoder_ns=" << lastEncoderLogTimeNs
+                  << " lag_ms=" << (lagNs / 1000000.0) << std::endl;
     }
 
     std::cout << "[PERF] validateEpisode end: episode_dir=" << episodeDir

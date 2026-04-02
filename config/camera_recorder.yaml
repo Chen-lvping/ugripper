@@ -26,7 +26,7 @@ cameras:
     output_fps: 30
     output_files: [left_stereo.mkv]
     input_thread_queue_size: 128
-    qp_init: 30
+    qp_init: 31
     qp_max: 38
     qp_min: 24
     qp_max_i: 38
@@ -41,7 +41,7 @@ cameras:
     output_fps: 30
     output_files: [right_stereo.mkv]
     input_thread_queue_size: 128
-    qp_init: 30
+    qp_init: 31
     qp_max: 38
     qp_min: 24
     qp_max_i: 38
