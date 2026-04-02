@@ -1,6 +1,9 @@
 #include "gripper_hmi_protocol.h"
 
 #include <algorithm>
+#include <cstring>
+#include <iomanip>
+#include <sstream>
 
 uint8_t GripperHmiProtocol::calculateXor(const uint8_t *data, size_t length)
 {
@@ -15,6 +18,11 @@ uint8_t GripperHmiProtocol::calculateXor(const uint8_t *data, size_t length)
         value ^= data[index];
     }
     return value;
+}
+
+bool GripperHmiProtocol::validateXor(const uint8_t *data, size_t length, uint8_t expected)
+{
+    return calculateXor(data, length) == expected;
 }
 
 std::optional<GripperKeyReport> GripperHmiProtocol::decodeKeyReport(uint8_t rawCode)
@@ -37,6 +45,24 @@ std::optional<GripperKeyReport> GripperHmiProtocol::decodeKeyReport(uint8_t rawC
     }
 
     return std::nullopt;
+}
+
+std::array<uint8_t, 7> GripperHmiProtocol::buildStandardCommand(uint8_t indexWord,
+                                                                uint8_t functionWord,
+                                                                uint8_t dataHigh,
+                                                                uint8_t dataLow)
+{
+    std::array<uint8_t, 7> frame = {
+        kSendHead1,
+        kSendHead2,
+        indexWord,
+        functionWord,
+        dataHigh,
+        dataLow,
+        0x00,
+    };
+    frame[6] = calculateXor(frame.data(), frame.size() - 1);
+    return frame;
 }
 
 GripperKeyReport GripperHmiProtocol::buildUnknownKeyReport(uint8_t rawCode)
@@ -103,17 +129,7 @@ std::optional<GripperParsedFrame> GripperHmiProtocol::tryConsumeFrame(std::vecto
 
 std::array<uint8_t, 7> GripperHmiProtocol::buildBeepStateRequest()
 {
-    std::array<uint8_t, 7> frame = {
-        kSendHead1,
-        kSendHead2,
-        kIndexBeepBase,
-        kFuncPwmGet,
-        0x00,
-        0x00,
-        0x00,
-    };
-    frame[6] = calculateXor(frame.data(), frame.size() - 1);
-    return frame;
+    return buildStandardCommand(kIndexBeepBase, kFuncPwmGet, 0x00, 0x00);
 }
 
 std::array<uint8_t, 7> GripperHmiProtocol::buildSetBeepCommand(const GripperBeepState &state)
@@ -122,16 +138,11 @@ std::array<uint8_t, 7> GripperHmiProtocol::buildSetBeepCommand(const GripperBeep
     // INDEX_WORD_BEEP_FREE (0x0E). INDEX_WORD_BEEP_BASE (0x04) is only used
     // for querying the current PWM state.
     const uint8_t duty = static_cast<uint8_t>(std::min<uint16_t>(state.duty, 0xFF));
-    std::array<uint8_t, 7> frame = {
-        kSendHead1,
-        kSendHead2,
+    std::array<uint8_t, 7> frame = buildStandardCommand(
         kIndexBeepFree,
         duty,
         static_cast<uint8_t>((state.frequency >> 8) & 0xFF),
-        static_cast<uint8_t>(state.frequency & 0xFF),
-        0x00,
-    };
-    frame[6] = calculateXor(frame.data(), frame.size() - 1);
+        static_cast<uint8_t>(state.frequency & 0xFF));
     return frame;
 }
 
@@ -148,4 +159,98 @@ std::array<uint8_t, 8> GripperHmiProtocol::buildSetRgbCommand(const GripperLedCo
     };
     frame[6] = calculateXor(frame.data(), 6);
     return frame;
+}
+
+std::array<uint8_t, 7> GripperHmiProtocol::buildReadSerialNumberCommand()
+{
+    return buildStandardCommand(kIndexReadCalibrationData, kIndexSerialNumber, 0x00, 0x00);
+}
+
+std::array<uint8_t, 7> GripperHmiProtocol::buildWriteSerialNumberCommand()
+{
+    return buildStandardCommand(kIndexWriteCalibrationData, kIndexSerialNumber, 0x4E, 0x43);
+}
+
+std::array<uint8_t, GripperHmiProtocol::kSerialNumberFrameLength> GripperHmiProtocol::buildWriteSerialNumberFrame(
+    const uint8_t *chunkData,
+    size_t chunkSize)
+{
+    std::array<uint8_t, kSerialNumberFrameLength> frame = {};
+    frame[0] = kSendHead1;
+    frame[1] = kSendHead2;
+    const size_t copySize = std::min(chunkSize, kSerialNumberChunkSize);
+    if (chunkData != nullptr && copySize > 0)
+    {
+        std::memcpy(frame.data() + 2, chunkData, copySize);
+    }
+    frame[kSerialNumberFrameLength - 1] = calculateXor(frame.data(), kSerialNumberFrameLength - 1);
+    return frame;
+}
+
+std::array<uint8_t, 7> GripperHmiProtocol::buildBeginCalibrationWriteCommand()
+{
+    return buildStandardCommand(kIndexWriteCalibrationData, 0x5A, 0x72, 0x6F);
+}
+
+std::array<uint8_t, 7> GripperHmiProtocol::buildReadCalibrationChunkCommand(uint8_t packetIndex)
+{
+    return buildStandardCommand(kIndexReadCalibrationData, kFuncReadCalibrationData, 0x00, packetIndex);
+}
+
+std::array<uint8_t, GripperHmiProtocol::kCalibrationChunkFrameLength> GripperHmiProtocol::buildCalibrationChunkFrame(
+    uint8_t packetIndex,
+    const uint8_t *chunkData,
+    size_t chunkSize)
+{
+    std::array<uint8_t, kCalibrationChunkFrameLength> frame = {};
+    frame[0] = kSendHead1;
+    frame[1] = kSendHead2;
+    frame[2] = packetIndex;
+    const size_t copySize = std::min(chunkSize, kCalibrationChunkSize);
+    if (chunkData != nullptr && copySize > 0)
+    {
+        std::memcpy(frame.data() + 3, chunkData, copySize);
+    }
+    frame[kCalibrationChunkFrameLength - 1] = calculateXor(frame.data(), kCalibrationChunkFrameLength - 1);
+    return frame;
+}
+
+std::array<uint8_t, GripperHmiProtocol::kStopCalibrationWriteFrameLength> GripperHmiProtocol::buildEndCalibrationWriteCommand()
+{
+    std::array<uint8_t, kStopCalibrationWriteFrameLength> frame = {};
+    static constexpr char kCommandText[] = "Stop_WriteInData";
+    frame[0] = kSendHead1;
+    frame[1] = kSendHead2;
+    std::memcpy(frame.data() + 2, kCommandText, sizeof(kCommandText));
+    frame[kStopCalibrationWriteFrameLength - 1] = calculateXor(frame.data(), kStopCalibrationWriteFrameLength - 1);
+    return frame;
+}
+
+std::string GripperHmiProtocol::describeStatusCode(uint8_t statusCode)
+{
+    switch (statusCode)
+    {
+    case kStatusOk:
+        return "ok";
+    case kStatusAddressOutOfLimit:
+        return "address_out_of_limit";
+    case kStatusIndexError:
+        return "index_error";
+    case kStatusFunctionError:
+        return "function_error";
+    case kStatusMissingData:
+        return "missing_data";
+    case kStatusInvalidCommand:
+        return "invalid_command";
+    case kStatusChecksumError:
+        return "checksum_error";
+    default:
+    {
+        std::ostringstream stream;
+        stream << "unknown_status_0x"
+               << std::hex << std::uppercase << std::setw(2) << std::setfill('0')
+               << static_cast<unsigned int>(statusCode);
+        return stream.str();
+    }
+    }
 }

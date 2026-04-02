@@ -1,14 +1,17 @@
 #ifndef GRIPPER_HMI_DRIVER_H
 #define GRIPPER_HMI_DRIVER_H
 
+#include "gripper_hmi_calibration_data.h"
 #include "gripper_hmi_led_effects.h"
 #include "gripper_hmi_protocol.h"
 
 #include <libserialport.h>
 
 #include <array>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -44,6 +47,10 @@ public:
     bool setBeepState(const GripperBeepState &state);
     bool setBeepEnabled(bool enabled);
     bool silenceBeep();
+    bool readSerialNumber(std::string *serialNumber);
+    bool writeSerialNumber(const std::string &serialNumber);
+    bool readCalibrationData(gripper_hmi::GripperCalibrationDataV1 *calibrationData);
+    bool writeCalibrationData(const gripper_hmi::GripperCalibrationDataV1 &calibrationData);
 
     bool pollOnce(int timeoutMs = 20);
     bool waitForKeyChange(int timeoutMs, GripperKeyReport *report);
@@ -55,13 +62,45 @@ public:
     const std::string &getName() const { return name_; }
     const std::string &getPort() const { return port_; }
     uint32_t getBaudrate() const { return baudrate_; }
+    const std::string &getLastCommandError() const { return lastCommandError_; }
 
 private:
+    enum class ExclusiveFrameReadResult
+    {
+        Timeout,
+        Data,
+        Status,
+    };
+
     void ioLoop();
     bool writeFrameLocked(const uint8_t *data, size_t size);
     bool readAndProcessAvailableLocked();
+    bool pauseIoThreadForExclusiveCommand(std::unique_lock<std::mutex> *ioLock);
+    void resumeIoThreadLocked();
+    bool readBytesLocked(std::vector<uint8_t> *buffer, int timeoutMs);
+    bool readSizedFrameLocked(size_t frameSize, std::vector<uint8_t> *frame, int timeoutMs);
+    bool readAnyStatusFrameLocked(uint8_t *token, uint8_t *statusCode, int timeoutMs);
+    bool readStatusFrameLocked(uint8_t token, uint8_t *statusCode, int timeoutMs);
+    bool readExpectedStatusFrameLocked(uint8_t expectedToken, uint8_t *token, uint8_t *statusCode, int timeoutMs);
+    bool readDataFrameLocked(uint8_t token, size_t dataLength, std::vector<uint8_t> *payload, int timeoutMs);
+    bool readRawDataFrameLocked(size_t dataLength, std::vector<uint8_t> *payload, int timeoutMs);
+    bool readCalibrationFrameLocked(uint8_t expectedToken, std::vector<uint8_t> *payload, int timeoutMs);
+    ExclusiveFrameReadResult readRawDataOrStatusFrameLocked(size_t dataLength,
+                                                            std::vector<uint8_t> *payload,
+                                                            uint8_t *token,
+                                                            uint8_t *statusCode,
+                                                            int timeoutMs);
+    ExclusiveFrameReadResult readDataOrStatusFrameLocked(uint8_t expectedToken,
+                                                         size_t dataLength,
+                                                         std::vector<uint8_t> *payload,
+                                                         uint8_t *token,
+                                                         uint8_t *statusCode,
+                                                         int timeoutMs);
+    bool runExclusiveCommand(const std::function<bool()> &command);
     void handleIoFailureLocked(const char *operation);
     void handleParsedFrame(const GripperParsedFrame &frame);
+    void logConnectFailureLocked(const std::string &message);
+    void resetConnectFailureLogLocked(const std::string &resolvedPort);
     static uint64_t currentSteadyMs();
 
     std::string name_;
@@ -97,6 +136,11 @@ private:
     std::optional<GripperKeyReport> lastKeyReport_;
     uint64_t lastReceiveTimeMs_ = 0;
     uint64_t stateGeneration_ = 0;
+    std::string lastCommandError_;
+    std::string lastConnectFailureMessage_;
+    uint64_t lastConnectFailureLogAtMs_ = 0;
+    uint64_t firstConnectFailureAtMs_ = 0;
+    uint32_t suppressedConnectFailureCount_ = 0;
 };
 
 #endif

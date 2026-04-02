@@ -7,8 +7,12 @@
 #include <cstdint>
 #include <csignal>
 #include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <memory>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -20,6 +24,21 @@ namespace {
 std::atomic<bool> g_stop_requested{false};
 constexpr int kBeepStateProbeDelayMs = 80;
 constexpr int kBeepStateProbeIntervalMs = 100;
+
+template <size_t N>
+std::string joinFloatArray(const float (&values)[N])
+{
+    std::ostringstream stream;
+    for (size_t index = 0; index < N; ++index)
+    {
+        if (index != 0)
+        {
+            stream << ",";
+        }
+        stream << values[index];
+    }
+    return stream.str();
+}
 
 void handleSignal(int signal)
 {
@@ -54,9 +73,15 @@ struct TestOptions
     bool ledOnly = false;
     bool stateMode = false;
     bool showHelp = false;
+    bool readSerialNumber = false;
+    bool readCalibration = false;
+    bool hasWriteSerialNumber = false;
     int beepDurationMs = 0;
     int beepDuty = static_cast<int>(GripperHmiDriver::kDefaultBeepDuty);
     int beepFreq = static_cast<int>(GripperHmiDriver::kDefaultBeepFrequency);
+    std::string serialNumberToWrite;
+    std::string writeCalibrationBinPath;
+    std::string dumpCalibrationBinPath;
     GripperLedColor color{32, 0, 0};
     GripperLedEffect effect{};
 };
@@ -74,6 +99,11 @@ static void printUsage(const char *program)
         << "  --beep --beep-ms 300\n"
         << "  --beep-duty 50 --beep-freq 1000 --beep-ms 300\n"
         << "  beep uses fixed tested defaults for active buzzer: duty=30 freq=1000\n"
+        << "Protocol commands:\n"
+        << "  --read-sn\n"
+        << "  --write-sn DAG91126320001D6  # encoded into 32-byte field with trailing zeros\n"
+        << "  --read-calib [--dump-calib-bin /tmp/umi_calib.bin]\n"
+        << "  --write-calib-bin /tmp/umi_calib.bin\n"
         << "Defaults:\n"
         << "  --port /dev/right_gripper\n"
         << "  --port /dev/left_gripper\n"
@@ -267,6 +297,52 @@ static bool parseOptions(int argc, char **argv, TestOptions *options)
             continue;
         }
 
+        if (argument == "--read-sn")
+        {
+            options->readSerialNumber = true;
+            continue;
+        }
+
+        if (argument == "--write-sn")
+        {
+            if (index + 1 >= argc)
+            {
+                std::cerr << "Missing value for --write-sn" << std::endl;
+                return false;
+            }
+            options->serialNumberToWrite = argv[++index];
+            options->hasWriteSerialNumber = true;
+            continue;
+        }
+
+        if (argument == "--read-calib")
+        {
+            options->readCalibration = true;
+            continue;
+        }
+
+        if (argument == "--write-calib-bin")
+        {
+            if (index + 1 >= argc)
+            {
+                std::cerr << "Missing value for --write-calib-bin" << std::endl;
+                return false;
+            }
+            options->writeCalibrationBinPath = argv[++index];
+            continue;
+        }
+
+        if (argument == "--dump-calib-bin")
+        {
+            if (index + 1 >= argc)
+            {
+                std::cerr << "Missing value for --dump-calib-bin" << std::endl;
+                return false;
+            }
+            options->dumpCalibrationBinPath = argv[++index];
+            continue;
+        }
+
         std::cerr << "Unknown argument: " << argument << std::endl;
         return false;
     }
@@ -278,6 +354,85 @@ static bool parseOptions(int argc, char **argv, TestOptions *options)
     }
 
     return true;
+}
+
+static bool readBinaryFile(const std::string &path, std::vector<uint8_t> *buffer)
+{
+    if (buffer == nullptr)
+    {
+        return false;
+    }
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open())
+    {
+        return false;
+    }
+
+    buffer->assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+    return input.good() || input.eof();
+}
+
+static bool writeBinaryFile(const std::string &path, const uint8_t *data, size_t size)
+{
+    if (data == nullptr)
+    {
+        return false;
+    }
+
+    std::ofstream output(path, std::ios::binary);
+    if (!output.is_open())
+    {
+        return false;
+    }
+
+    output.write(reinterpret_cast<const char *>(data), static_cast<std::streamsize>(size));
+    return output.good();
+}
+
+static void printCalibrationSummary(const gripper_hmi::GripperCalibrationDataV1 &data)
+{
+    const auto &header = data.header;
+    std::cout
+        << "calibration.magic=" << std::string(header.magic, header.magic + 4) << '\n'
+        << "calibration.data_format_version=0x" << std::hex << header.dataFormatVersion << std::dec << '\n'
+        << "calibration.payload_size=" << header.payloadSize << '\n'
+        << "calibration.header_size=" << header.headerSize << '\n'
+        << "calibration.valid_fields=0x" << std::hex << header.validFields << std::dec << '\n'
+        << "rgb.camera_model_enum=" << data.rgbCamera.cameraModelEnum << '\n'
+        << "rgb.distortion_coefficients=" << joinFloatArray(data.rgbCamera.distortionCoefficients) << '\n'
+        << "rgb.intrinsics=" << joinFloatArray(data.rgbCamera.intrinsics) << '\n'
+        << "rgb.resolution=" << joinFloatArray(data.rgbCamera.resolution) << '\n'
+        << "stereo.cam0.camera_model_enum=" << data.stereoCam0.cameraModelEnum << '\n'
+        << "stereo.cam0.focal_length=" << joinFloatArray(data.stereoCam0.focalLength) << '\n'
+        << "stereo.cam0.principal_point=" << joinFloatArray(data.stereoCam0.principalPoint) << '\n'
+        << "stereo.cam0.distortion_coefficients=" << joinFloatArray(data.stereoCam0.distortionCoefficients) << '\n'
+        << "stereo.cam1.camera_model_enum=" << data.stereoCam1.cameraModelEnum << '\n'
+        << "stereo.cam1.focal_length=" << joinFloatArray(data.stereoCam1.focalLength) << '\n'
+        << "stereo.cam1.principal_point=" << joinFloatArray(data.stereoCam1.principalPoint) << '\n'
+        << "stereo.cam1.distortion_coefficients=" << joinFloatArray(data.stereoCam1.distortionCoefficients) << '\n'
+        << "extrinsics.t_ic_cam0_to_imu0=" << joinFloatArray(data.extrinsics.tIcCam0ToImu0) << '\n'
+        << "extrinsics.timeshift_cam0_to_imu0=" << data.extrinsics.timeshiftCam0ToImu0 << '\n'
+        << "extrinsics.t_ic_cam1_to_imu0=" << joinFloatArray(data.extrinsics.tIcCam1ToImu0) << '\n'
+        << "extrinsics.timeshift_cam1_to_imu0=" << data.extrinsics.timeshiftCam1ToImu0 << '\n'
+        << "extrinsics.baseline_norm=" << data.extrinsics.baselineNorm << '\n'
+        << "imu0.update_rate=" << data.imu0.updateRate << '\n'
+        << "imu0.accel_noise_density_discrete=" << data.imu0.accelerometerNoiseDensityDiscrete << '\n'
+        << "imu0.accel_random_walk=" << data.imu0.accelerometerRandomWalk << '\n'
+        << "imu0.gyro_noise_density_discrete=" << data.imu0.gyroscopeNoiseDensityDiscrete << '\n'
+        << "imu0.gyro_random_walk=" << data.imu0.gyroscopeRandomWalk << '\n'
+        << "residuals.cam0.mean=" << data.residuals.reprojectionErrorCam0Px.mean << '\n'
+        << "residuals.cam0.median=" << data.residuals.reprojectionErrorCam0Px.median << '\n'
+        << "residuals.cam0.stddev=" << data.residuals.reprojectionErrorCam0Px.stddev << '\n'
+        << "residuals.cam1.mean=" << data.residuals.reprojectionErrorCam1Px.mean << '\n'
+        << "residuals.cam1.median=" << data.residuals.reprojectionErrorCam1Px.median << '\n'
+        << "residuals.cam1.stddev=" << data.residuals.reprojectionErrorCam1Px.stddev << '\n'
+        << "residuals.gyro.mean=" << data.residuals.gyroscopeErrorImu0RadS.mean << '\n'
+        << "residuals.gyro.median=" << data.residuals.gyroscopeErrorImu0RadS.median << '\n'
+        << "residuals.gyro.stddev=" << data.residuals.gyroscopeErrorImu0RadS.stddev << '\n'
+        << "residuals.accel.mean=" << data.residuals.accelerometerErrorImu0MS2.mean << '\n'
+        << "residuals.accel.median=" << data.residuals.accelerometerErrorImu0MS2.median << '\n'
+        << "residuals.accel.stddev=" << data.residuals.accelerometerErrorImu0MS2.stddev << std::endl;
 }
 
 int main(int argc, char **argv)
@@ -315,6 +470,135 @@ int main(int argc, char **argv)
     }
 
     std::cout << "Connected " << devices.size() << " gripper HMI device(s)" << std::endl;
+
+    if (options.readSerialNumber || options.hasWriteSerialNumber ||
+        options.readCalibration || !options.writeCalibrationBinPath.empty())
+    {
+        bool allOk = true;
+
+        if (options.hasWriteSerialNumber)
+        {
+            for (auto &device : devices)
+            {
+                if (!device->writeSerialNumber(options.serialNumberToWrite))
+                {
+                    std::cerr << "Failed to write SN on: " << device->getPort();
+                    if (!device->getLastCommandError().empty())
+                    {
+                        std::cerr << " reason=" << device->getLastCommandError();
+                    }
+                    std::cerr << std::endl;
+                    allOk = false;
+                }
+                else
+                {
+                    std::cout << '[' << device->getPort() << "] write-sn ok: " << options.serialNumberToWrite << std::endl;
+                }
+            }
+        }
+
+        if (options.readSerialNumber)
+        {
+            for (auto &device : devices)
+            {
+                std::string serialNumber;
+                if (!device->readSerialNumber(&serialNumber))
+                {
+                    std::cerr << "Failed to read SN on: " << device->getPort();
+                    if (!device->getLastCommandError().empty())
+                    {
+                        std::cerr << " reason=" << device->getLastCommandError();
+                    }
+                    std::cerr << std::endl;
+                    allOk = false;
+                }
+                else
+                {
+                    std::cout << '[' << device->getPort() << "] sn=" << serialNumber << std::endl;
+                }
+            }
+        }
+
+        if (!options.writeCalibrationBinPath.empty())
+        {
+            std::vector<uint8_t> raw;
+            if (!readBinaryFile(options.writeCalibrationBinPath, &raw))
+            {
+                std::cerr << "Failed to read calibration binary: " << options.writeCalibrationBinPath << std::endl;
+                return 1;
+            }
+            if (raw.size() != gripper_hmi::kCalibrationPayloadSize)
+            {
+                std::cerr << "Invalid calibration binary size: " << raw.size()
+                          << " expected=" << gripper_hmi::kCalibrationPayloadSize << std::endl;
+                return 1;
+            }
+
+            gripper_hmi::GripperCalibrationDataV1 calibrationData{};
+            std::memcpy(&calibrationData, raw.data(), sizeof(calibrationData));
+            for (auto &device : devices)
+            {
+                if (!device->writeCalibrationData(calibrationData))
+                {
+                    std::cerr << "Failed to write calibration on: " << device->getPort();
+                    if (!device->getLastCommandError().empty())
+                    {
+                        std::cerr << " reason=" << device->getLastCommandError();
+                    }
+                    std::cerr << std::endl;
+                    allOk = false;
+                }
+                else
+                {
+                    std::cout << '[' << device->getPort() << "] write-calibration ok" << std::endl;
+                }
+            }
+        }
+
+        if (options.readCalibration)
+        {
+            for (auto &device : devices)
+            {
+                gripper_hmi::GripperCalibrationDataV1 calibrationData{};
+                if (!device->readCalibrationData(&calibrationData))
+                {
+                    std::cerr << "Failed to read calibration on: " << device->getPort();
+                    if (!device->getLastCommandError().empty())
+                    {
+                        std::cerr << " reason=" << device->getLastCommandError();
+                    }
+                    std::cerr << std::endl;
+                    allOk = false;
+                    continue;
+                }
+
+                std::cout << '[' << device->getPort() << "] calibration summary" << std::endl;
+                printCalibrationSummary(calibrationData);
+
+                if (!options.dumpCalibrationBinPath.empty())
+                {
+                    const std::string dumpPath =
+                        devices.size() == 1
+                            ? options.dumpCalibrationBinPath
+                            : options.dumpCalibrationBinPath + "." + device->getName() + ".bin";
+                    if (!writeBinaryFile(dumpPath,
+                                         reinterpret_cast<const uint8_t *>(&calibrationData),
+                                         sizeof(calibrationData)))
+                    {
+                        std::cerr << "Failed to dump calibration binary: " << dumpPath << std::endl;
+                        allOk = false;
+                    }
+                    else
+                    {
+                        std::cout << '[' << device->getPort() << "] dumped calibration: " << dumpPath << std::endl;
+                    }
+                }
+            }
+        }
+
+        return allOk ? 0 : 1;
+    }
+
     if (options.stateMode)
     {
         std::cout << "LED state mode: " << GripperLedEffectRenderer::stateText(options.effect) << std::endl;
