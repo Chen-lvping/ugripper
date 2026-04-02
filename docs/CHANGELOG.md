@@ -8,23 +8,16 @@
 - UMI HMI 标定写入新增 `AbortWriteInData` 恢复路径：写标定时收到 `0xFE` 会优先重发当前 chunk；若连续出现 `0xFE`，或后续读 SN / 读标定因上次未正常退出而返回 `0xF3/0xFE`，驱动会先发 abort 清理固件写入状态再重试。
 - U 盘自动安装名单扩展为 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`；根目录存在多个同包候选文件时会自动选择最高版本，并修复 updater 自升级后继续接力安装剩余名单的流程。当前不要求名单内包全部同时出现在 U 盘，只要本次实际需要升级的包都处理完成，就会播报升级完成提示。
 - 全部目标软件包安装完成后，USB 安装流程会直接使用新主包中的 `upgrade_completed.wav` 通过 PulseAudio 播放完成提示；若现场没有可用 sink，则只记日志，不把安装流程判失败。
+- 双目录制链路调整为“后台常驻 MJPEG 预热 + 会话写最终文件”，停录阶段先冻结本次 session 再逐路 finalize，并把 `stereo_session` 时间信息收口到 `info.json` 供最终校验与对齐使用。
 - 传感器写盘链路调整为“采样入队 + 每侧独立 MCAP 写线程”，并在出现 burst 消费时按名义频率回填局部时间戳，降低写盘抖动对 IMU / encoder 时间轴的影响。
+- 标定数据结构、协议文档和导入结果说明进一步收口到当前 `1024-byte` payload 口径，主机侧 `calibration.json` 也同步补齐 stereo / IMU 摘要字段。
 
 ## v1.2.7 - 2026-03-27
-- 新增 `standalone/gripper_hmi_toolkit/` 独立交付目录：提供仅包含 SN / 标定 bin 读写能力的最小 HMI 工具包，内含可独立编译的 C++ 库与 CLI、无第三方依赖的 Python 单文件脚本、README、C++/Python 例程以及 `1024-byte` 标定样例，支持通过 `--port` 指定目标串口并切换标定结束命令模式，便于脱离主仓录制链路做现场协议联调。
-- `src/gripper_hmi` 新增 UMI SN / 标定参数读写能力：当前在 HMI 驱动中提供 `read/write serial number` 与 `read/write calibration data` 接口，串口独占事务会短暂停掉后台 LED/按键 I/O 线程，事务结束后再恢复常驻调度。
-- 新增 `src/gripper_hmi/include/gripper_hmi_calibration_data.h`：定义严格 `1-byte pack` 的 1024-byte 标定参数结构，固定带 `calibration data format version=0x00010000`，并通过 `static_assert` / `offsetof` 校验尺寸与偏移。
-- 修正 HMI 独占传输状态机以贴合现场固件：移除基于 `Stop_WriteInData\0` 的预复位假设，SN 写入 ACK 按实测 8-byte 状态帧解析；标定写入恢复为当前 `V1.1` 固件要求的固定 `64 x 16B` 传输窗口，不足部分补 `0x00`，避免固件按“缺帧”返回 `F3` 并卡在参数写入状态机内；同时保留 `header.payloadSize` 作为内部有效数据长度，而不是把该字段也强行改写成 `1024`。
-- 新增 `docs/umi_calibration_protocol.md`：收敛为两套版本口径，即 `HMI firmware communication protocol version=V1.1` 与 `calibration data format version=0x00010000`，并记录 SN 固定 32-byte 字段（当前 SN 文本示例为 16-char，尾部补 `0x00`）、标定参数固定 `1024 byte` 内存布局与 `64 x 16B` 固定写入窗口。
-- U 盘标定导入扩展为“先匹配、后写入、最后提交”流程：`ugripper_calib/<DEVICE_SN>/` 下先按 `_left/_right` 识别导入目标，再读取现场 gripper SN 递归匹配对应 payload；夹爪侧会写入整套 RGB/stereo/IMU 标定，任一目标侧未匹配或写入失败时，不会更新持久化 `calibration.json`。
-- 重写双目热启动录制链路：左右 stereo 在后台常驻 warmup，按下录制后只新增 session writer，把实时流直接写入最终 `left_stereo.mkv/right_stereo.mkv`，不再生成 cache segment、`.concat.txt` 或 `stereo_info.json`。
-- 双目时间对齐回到和其他传感器一致的单 offset 语义：`info.json` 继续写 `<camera>_record_time_offset_us`，并额外在 `stereo_session.cameras.<stereo>` 中记录本次最终文件首尾写入帧的 `PTS / system time`，方便与其他流对齐。
-- `stereo_session` 现在记录本次双目 session 的 `episode_dir`、开启/停止系统时间和每路首尾帧时间戳；`record_runtime` 停录时直接从 stereo daemon 状态文件读取 `last_session` 并合并进最终 `info.json`。
-- 加强双目子进程清理：warmup / session ffmpeg 在停录、daemon 退出以及主进程异常退出时都会联动退出，降低遗留孤儿进程的风险。
-- `record_runtime` 恢复 v1 风格的运行时 tactile serial 注入：每次生成 episode `calibration.json` 时，都会从现场 `/dev/left_tcam_*`、`/dev/right_tcam_*` 向上读取 USB `ATTRS{serial}`，并写入当前 episode；当前按 `*_l` 优先、`*_r` 回退，并在同侧两路 serial 不一致时输出 warning。
-- 当持久化 calibration 中的 tactile serial 与现场硬件不一致时，当前口径为“修正 episode、输出明确日志、不回写 persist calibration”。
-- episode `calibration.json` 的 tactile 标定项扩展为 4 路独立输出：`left_tcam_l`、`left_tcam_r`、`right_tcam_l`、`right_tcam_r` 会各自带上参数和现场 serial；若源 calibration 仍是旧的左右各 1 路结构，运行时会按左右侧复制参数并保留旧键兼容。
-- episode `calibration.json` 进一步移除了 `gripper_left_tactile` / `gripper_right_tactile` 两个旧键，最终输出只保留 4 路真实 tactile 相机标定项。
+- 新增 `standalone/gripper_hmi_toolkit/` 独立工具目录，并在 `src/gripper_hmi` 中补齐 SN / 标定参数读写接口，方便现场直接做串口联调和参数读写。
+- 标定数据结构正式收口为 `1024-byte` 固定布局，协议传输窗口、头字段约束和相关文档也统一到同一口径。
+- U 盘标定导入支持先按 `DEVICE_SN` 与左右后缀识别目标，再按现场 gripper SN 匹配 payload；全部目标侧写入成功后才更新持久化 `calibration.json`。
+- 双目录制链路改为后台常驻预热 + session writer 写最终文件，`info.json` 同步补齐 `stereo_session` 时间信息，减少额外 sidecar 文件依赖。
+- episode 侧触觉标定输出扩展为 4 路独立相机条目，并按现场 USB serial 修正本次导出内容而不回写持久化标定。
 
 ## v1.2.6 - 2026-03-20
 - 翻转左右主摄画面，恢复正常拍摄方向。

@@ -10,8 +10,6 @@ DISK_ROOT="/mnt/data_disk"
 LOG_DIR_LOCAL="/tmp"
 LOG_DIR_DISK="$DISK_ROOT/logs"
 WAIT_INTERVAL_SEC=2
-WAIT_LOG_INTERVAL_SEC=30
-LOG_SYNC_INTERVAL_SEC=5
 
 trim_text() {
     local text="${1:-}"
@@ -68,7 +66,6 @@ LOG_FILE_LOCAL="$LOG_DIR_LOCAL/umi_sys_${DEVICE_SN_LOWER}_${TODAY}.log"
 LOG_FILE_DISK="$LOG_DIR_DISK/umi_sys_${DEVICE_SN_LOWER}_${TODAY}.log"
 LOG_SYNC_POS_FILE="/tmp/umi_sys_${DEVICE_SN_LOWER}_${TODAY}.pos"
 LOG_SYNC_LOCK_FILE="/tmp/umi_sys_${DEVICE_SN_LOWER}_${TODAY}.lock"
-PID_LOG_SYNC=""
 
 cleanup_old_logs() {
     local dir=""
@@ -167,25 +164,7 @@ sync_logs_once() {
     exec {lock_fd}>&-
 }
 
-sync_logs_to_disk() {
-    local src="$1"
-    local dest="$2"
-    local state_file="$3"
-    local lock_file="$4"
-
-    while true; do
-        sync_logs_once "$src" "$dest" "$state_file" "$lock_file" || true
-        sleep "$LOG_SYNC_INTERVAL_SEC"
-    done
-}
-
 cleanup() {
-    if [ -n "$PID_LOG_SYNC" ]; then
-        kill "$PID_LOG_SYNC" >/dev/null 2>&1 || true
-        wait "$PID_LOG_SYNC" 2>/dev/null || true
-        PID_LOG_SYNC=""
-    fi
-
     sync_logs_once "$LOG_FILE_LOCAL" "$LOG_FILE_DISK" "$LOG_SYNC_POS_FILE" "$LOG_SYNC_LOCK_FILE" || true
 }
 
@@ -197,22 +176,20 @@ exec > >(tee -a "$LOG_FILE_LOCAL") 2>&1
 
 trap cleanup EXIT
 
-last_wait_log_ts=0
+wait_logged=false
 while ! is_storage_ready; do
-    now_ts=$(date +%s)
-    if [ $((now_ts - last_wait_log_ts)) -ge "$WAIT_LOG_INTERVAL_SEC" ]; then
+    if [ "$wait_logged" = false ]; then
         echo "[INFO] waiting for writable data storage on $DISK_ROOT"
-        last_wait_log_ts=$now_ts
+        wait_logged=true
     fi
     sleep "$WAIT_INTERVAL_SEC"
 done
 
-cleanup_old_logs
+if [ "$wait_logged" = true ]; then
+    echo "[INFO] writable data storage ready on $DISK_ROOT"
+fi
 
-# Keep a local rolling log and incrementally mirror it to the mounted data disk.
-sync_logs_once "$LOG_FILE_LOCAL" "$LOG_FILE_DISK" "$LOG_SYNC_POS_FILE" "$LOG_SYNC_LOCK_FILE" || true
-sync_logs_to_disk "$LOG_FILE_LOCAL" "$LOG_FILE_DISK" "$LOG_SYNC_POS_FILE" "$LOG_SYNC_LOCK_FILE" &
-PID_LOG_SYNC=$!
+cleanup_old_logs
 
 runtime_exit_code=0
 if "$RUNTIME_BIN" "$@"; then

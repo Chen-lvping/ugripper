@@ -54,7 +54,7 @@
 - `src/gripper_hmi` 当前新增了 UMI SN / 标定参数协议封装：SN 固定为 32-byte 字段（当前现场 SN 文本示例为 16-char，尾部补 `0x00`），标定参数固定为 `1024 byte` 严格对齐结构；当前 payload 已覆盖 RGB 主相机、双目 `cam0/cam1`、`cam->imu` 外参、IMU 离散噪声/随机游走与残差统计，其中 header 会保留内部有效数据长度，但当前 `V1.1` 固件写入时仍必须补满 `64 x 16B` 数据包，具体协议见 `docs/umi_calibration_protocol.md`。
 - UMI 标定写入当前增加了异常恢复口径：若写入阶段收到 `0xFE`（当前 chunk 零数据校验错误），驱动会优先重发当前 chunk；若连续出现 `0xFE`，或后续读 SN / 读标定返回 `0xF3/0xFE`，则会发送一次 `AbortWriteInData` 清理固件残留写入状态后再重试。
 11. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
-12. `record_runtime` 初始化阶段会额外拉起一个常驻 stereo warmup daemon；其在空闲态持续维持左右双目拉流预热，并通过 `/tmp/umi_stereo_camera_status.json` 暴露 `ready/not-ready` 状态。
+12. `record_runtime` 初始化阶段会额外拉起一个常驻 stereo warmup daemon；其在空闲态持续维持左右双目 MJPEG 取流预热，并通过 `/tmp/umi_stereo_camera_status.json` 暴露 `ready/not-ready` 状态。
 
 ## 5. 状态机与按键行为
 ### 5.1 空闲态与阈值
@@ -99,7 +99,7 @@
 6. 并行启动：
    - `camera_recorder --codec <codec> --output-dir <episode> --only left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
    - `sensor_recorder <episode_dir>`
-7. 同时向 stereo warmup daemon 写入本次 session 控制文件，双目不重启采集管线，只从“预热态”切到“纳入当前 episode”的保存态。
+7. 同时向 stereo warmup daemon 写入本次 session 控制文件；双目不重启采集管线，只把本次 session 窗口内的帧纳入当前 episode，由 session writer 抽帧并编码落盘。
 8. 切换到 `RECORDING` 状态并播放开始提示音。
 
 ### 6.2 相机链路
@@ -111,25 +111,25 @@
   - tactile 仍按左右侧固定 kernel 路径命名，不做跨侧互换。
 - 当前运行时默认录制全部 8 路：左右主摄 + 左右 stereo + 4 路触觉。
 - 普通录制阶段的 `camera_recorder` 当前只会起左右主摄 + 4 路触觉；左右 stereo 由单独的 `camera_recorder --stereo-daemon` 常驻管理。
-- stereo daemon 在空闲态持续采集到短时 segment 缓冲；开始录制时只切 session 窗口，不重启双目采集进程。
+- stereo daemon 在空闲态持续常驻打开双目设备并消费 `MJPEG 60fps` 帧；开始录制时只新建 session writer，对会话窗口内帧做 `1/2` 抽帧并编码成 `H.265 30fps` 写入最终 `mkv`，不重启双目采集进程。
 - `camera_recorder` 当前会并发拉起全部已选中的相机子进程，不再在管理层按 YAML 顺序逐路等待启动返回。
 - 停录阶段也会并发向各路相机子进程发 stop，并在全部 stop 返回后统一 poll 状态，降低多路顺序收尾导致 `info.json` 缺失或容器未 finalize 的风险。
 - 主相机模式是 `direct-copy-h265`：主摄始终走相机原生码流直封装，不做二次编码；实际拉流格式跟随 `CAMERA_CODEC` 选择 `h264` 或 `h265`。
 - 主摄 YAML 现支持可选 `uvc_roll_absolute`：若配置了标准 UVC `Roll Absolute` 目标值，`camera_recorder` 会在起录前先读取当前值；仅当当前值与目标值不一致时才通过 `libusb` 下发更新，并在设备节点恢复后继续走原有码流直封装，避免为翻转引入二次编解码。
 - 触觉 / 双目模式保留 `hybrid-decode-encode` / `stereo-hybrid-decode-encode`。
-- stereo 当前默认按 `1280x400@60` 录制，并在 YAML 内使用更激进的 HEVC CQP（`qp_init=34`、`qp_min=28`、`qp_max=42`、`qp_min_i=24`、`qp_max_i=42`）；该组参数基于同一段 `1280x400@60` 原始 MJPEG 样本压测，可将单路码率压到 `1Mbps` 以下。
+- stereo 当前默认按设备 `1280x400@60` 常驻采集 MJPEG，session writer 按 `30fps` 抽帧后再编码成 `H.265` 写入 `mkv`；当前不再依赖后台 live encode + UDP relay。
 - 每路相机由独立子进程承载；单路失败不会由 `camera_recorder` 主动连带停掉其他相机。
 - stereo 热插拔语义：
   - 设备缺失时 daemon 状态降为 `not-ready/recovering`，运行日志会记录恢复前最后一帧时刻。
-  - 设备重新枚举后自动重建该路 warmup 拉流并重新进入预热态；若掉线发生在录制中，则当前 stereo session 会被标记失败并在停录阶段显式报错，避免静默产出错位文件。
+  - 设备重新枚举后自动重建该路 MJPEG warmup 取流并重新进入预热态；若掉线发生在录制中，则当前 stereo session 会被标记失败并在停录阶段显式报错，避免静默产出错位文件。
   - 最终 `left_stereo.mkv` / `right_stereo.mkv` 始终直接由录制会话写入单文件；不会在 episode 目录生成 `stereo_info.json`、`.concat.txt` 或后台 segment cache 文件。
 - `info.json` 的时间字段由 `camera_recorder` 负责写出，而不是在停录校验阶段回填：
   - `boot_time_offset`
   - `boot_time_offset_us`
   - 8 路 `<camera>_record_time_offset_us`
 - `info.json` 现额外包含 `stereo_session`，用于描述左右双目本次 session 的开启/停止系统时间，以及每路实际写入首尾帧的 PTS / 系统时间。
-- 当前实现参考 V1 语义，在每路相机首个 pre-mux packet 到达时原位锁定 `PTS/timebase + 系统时间`，用于保持 `frame_system_time_us = frame_pts_us + <camera>_record_time_offset_us` 的对齐方式。
-- 双目当前实现为“后台 warmup + 录制时直连最终文件”：空闲态常驻 ffmpeg 持续把编码流发送到本地 UDP；按下录制后，session writer 直接把该实时流写入当前 episode 的 `mkv`。
+- 当前实现参考 V1 语义：双目在后台常驻消费设备 MJPEG 帧，录制开始后只把 session 窗口内实际送入 writer 的首尾帧系统时间与 PTS 写入 `stereo_session`，用于保持 `frame_system_time_us = frame_pts_us + <camera>_record_time_offset_us` 的对齐方式。
+- 双目当前实现为“后台 MJPEG warmup + 录制时编码写最终文件”：空闲态不再保留 UDP / MPEG-TS live relay；按下录制后，session writer 只消费当前会话的 MJPEG 帧，抽帧后编码写入 `left/right_stereo.mkv`。
 - stereo 顶层 `<camera>_record_time_offset_us` 与主摄/触觉保持同一语义：都以“本次最终输出首个写入帧”的 `PTS -> 系统时间` 映射为准。若需要和其他传感器做更精确的边界对齐，可结合 `info.json.stereo_session.start_system_time_us / stop_system_time_us` 以及 `cameras.<stereo>.first_written_frame_*` 字段使用。
 
 ### 6.3 传感器链路
@@ -147,13 +147,14 @@
 - encoder 连接会优先尝试 `1Mbps`，失败后回退 `115200`。
 
 ### 6.4 停止录制
-1. 停止 `sensor_recorder` 与普通录制模式下的 `camera_recorder`。
-2. 向 stereo warmup daemon 发送 stop-session，请其停止当前双目 session writer，并保留后台 warmup 继续运行。
-3. 先发送 `recording_stop`，随后立即切到 `writing`；提示音采用“后触发抢占前触发”的语义，因此 `writing` 会直接打断仍在播放的上一条提示。
-4. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行 `sync`；停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
-5. `record_runtime` 等待 daemon 在状态文件中写出本次 `last_session`，再将其并入最终 `info.json`。
-6. 执行稳定校验：强校验合并后的 `info.json` 时间字段，并用轻量 `ffprobe` 检查 8 路视频可读性与时长合理性。
-7. 成功则回到 `READY` 并播放 `ready`；完整性失败则进入 `ERROR_1` 并播放 `validation_failed`；运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
+1. `record_runtime` 会先向 stereo warmup daemon 发送 stop-session，尽早冻结本次双目 session 的收尾边界，避免 stop 命令在普通相机与传感器都停完之后才传到双目链路。
+2. 在 stereo daemon 收到 stop-session 后，`record_runtime` 再停止普通录制模式下的 `camera_recorder`，最后停止 `sensor_recorder`。
+3. stereo daemon 收到 stop-session 后会先一次性冻结左右双目 session 的送帧边界，再逐路 finalize 文件，避免某一路在另一侧 finalize 期间继续长出额外尾巴；收尾完成后后台 warmup 继续运行。
+4. 先发送 `recording_stop`，随后立即切到 `writing`；提示音采用“后触发抢占前触发”的语义，因此 `writing` 会直接打断仍在播放的上一条提示。
+5. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行 `sync`；停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
+6. `record_runtime` 等待 daemon 在状态文件中写出本次 `last_session`，再将其并入最终 `info.json`。
+7. 执行稳定校验：强校验合并后的 `info.json` 时间字段，并用轻量 `ffprobe` 检查 8 路视频可读性与时长合理性。
+8. 成功则回到 `READY` 并播放 `ready`；完整性失败则进入 `ERROR_1` 并播放 `validation_failed`；运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
 
 ## 7. Episode 产物与检查
 ### 7.1 默认产物
@@ -192,7 +193,7 @@
 停录后当前按以下层次校验：
 - 文件存在性：八路 `mkv`、`sensor_data_left.mcap`、`sensor_data_right.mcap`、`metadata.json`、`calibration.json`、`info.json` 必须存在且非空。
 - `info.json` 字段完整性：强制包含 `boot_time_offset`、`boot_time_offset_us` 与 8 路 `<camera>_record_time_offset_us`，且 `boot_time_offset` 与 `boot_time_offset_us` 必须数值一致。
-- 若存在 `stereo_session`，其 `episode_dir`、`start_system_time_us`、`stop_system_time_us` 与左右 stereo camera entry 必须齐全；当前不再依赖额外 sidecar 文件来完成校验或时间合并。
+- 若存在 `stereo_session`，其 `episode_dir`、`start_system_time_us`、`stop_system_time_us` 与左右 stereo camera entry 必须齐全；当前不再依赖额外 sidecar 文件来完成校验或时间合并。encoder 尾部校验对 stereo 不再直接使用 `ffprobe duration` 推断 episode 结束点，而是优先使用 `stereo_session.stop_system_time_us` 作为双目 session 的尾部边界，避免 warmup/session 预热缓存把双目文件时长放大后误伤传感器尾部校验。
 - 视频可读性：每路 `mkv` 都必须能被 `ffprobe` 读出首个视频流与 `start_time/duration`。
 - 时长合理性：每路视频跨度都必须大于最小阈值，且不能比本次 episode 的最长视频短超过 `5s`。
 - 条件产物：若执行了 pre/post 音频录制，对应 wav 仍需存在。
@@ -267,7 +268,6 @@
 | 静态 IP | 主包不托管，沿用系统现有有线配置 |
 
 ### 9.3 U 盘支持内容
-- 主包升级：根目录放置 `ugripper_*_arm64*.deb`。
 - 自动安装名单：
   - `ugripper-usb-updater`
   - `ugripper`
@@ -275,11 +275,12 @@
   - `databot-device-joint`
   - `device-ota-mender`
 - updater 自升级：根目录放置 `ugripper-usb-updater*.deb`；若本次先装的是新版 updater，安装后的新脚本会在同一次插盘流程里继续按最新名单扫描剩余 `.deb`。
+- 主包升级：根目录放置 `ugripper_*_arm64*.deb`。
 - 配置导入：根目录 `config.txt`。
 - 标定数据导入：`ugripper_calib/<DEVICE_SN>/`，通过文件名后缀 `_left` / `_right` 区分左右主相机 `camchain`；对应夹爪侧 RGB/stereo/IMU payload 则按现场读出的 gripper SN 文本在该目录下递归匹配，优先 `.bin`，其次包含 `summary/imucam` 关键词的 `.md` 或当前 raw 目录（`rgb_video_ros-camchain.yaml + output-results-imucam.txt`），并按 `rgb_video_ros_imucam_parameter_summary.md` 口径生成 `1024-byte` 对齐数据结构；当前固件写入时固定补满 `64 x 16B` 传输窗口。
 - encoder 零位校准触发：根目录 `calibration.txt`。
-
 - 安装完成提示音：当本次 U 盘里实际需要升级的目标软件包全部处理结束后，`usb_auto_update.sh` 会直接从新安装的 `/opt/ugripper/audio*/upgrade_completed.wav` 里选取对应语言资源，并以 `paplay` + PulseAudio 播放升级完成提示音；当前不要求自动安装名单里的包必须全部同时出现在 U 盘。若现场没有可用 PulseAudio sink，则只记日志，不把安装流程判失败。
+
 ### 9.4 U 盘同次插入顺序
 当同一次 U 盘插入同时包含 `config.txt`、`ugripper_calib/` 和 `calibration.txt` 时，当前顺序是：
 1. 导入 `config.txt`
