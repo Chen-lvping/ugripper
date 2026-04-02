@@ -5,6 +5,7 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## v1.2.8 - 2026-04-02
+- UMI HMI 标定写入新增 `AbortWriteInData` 恢复路径：写标定时收到 `0xFE` 会优先重发当前 chunk；若连续出现 `0xFE`，或后续读 SN / 读标定因上次未正常退出而返回 `0xF3/0xFE`，驱动会先发 abort 清理固件写入状态再重试。
 - U 盘自动安装名单扩展为 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`；根目录存在多个同包候选文件时会自动选择最高版本，并修复 updater 自升级后继续接力安装剩余名单的流程。当前不要求名单内包全部同时出现在 U 盘，只要本次实际需要升级的包都处理完成，就会播报升级完成提示。
 - 全部目标软件包安装完成后，USB 安装流程会直接使用新主包中的 `upgrade_completed.wav` 通过 PulseAudio 播放完成提示；若现场没有可用 sink，则只记日志，不把安装流程判失败。
 - 传感器写盘链路调整为“采样入队 + 每侧独立 MCAP 写线程”，并在出现 burst 消费时按名义频率回填局部时间戳，降低写盘抖动对 IMU / encoder 时间轴的影响。

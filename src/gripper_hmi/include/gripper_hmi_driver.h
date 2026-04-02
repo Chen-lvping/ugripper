@@ -85,6 +85,7 @@ private:
     bool readDataFrameLocked(uint8_t token, size_t dataLength, std::vector<uint8_t> *payload, int timeoutMs);
     bool readRawDataFrameLocked(size_t dataLength, std::vector<uint8_t> *payload, int timeoutMs);
     bool readCalibrationFrameLocked(uint8_t expectedToken, std::vector<uint8_t> *payload, int timeoutMs);
+    bool abortCalibrationWriteStateLocked(const std::string &reason);
     ExclusiveFrameReadResult readRawDataOrStatusFrameLocked(size_t dataLength,
                                                             std::vector<uint8_t> *payload,
                                                             uint8_t *token,

@@ -147,6 +147,7 @@
 | 开始写标定参数 | Host -> HMI | `5A 5A 57 5A 72 6F XOR` | 无 | 进入 `1024-byte` 标定参数写入模式 |
 | 写标定参数分包 | Host -> HMI | `5A 5A <seq> <16-byte chunk> XOR` | `seq + 16-byte chunk` | `seq` 从 `0x00` 开始 |
 | 停止写标定参数 | Host -> HMI | `5A 5A 53 74 6F 70 5F 57 72 69 74 65 49 6E 44 61 74 61 00 XOR` | 无 | 退出写入模式 |
+| 中止写标定参数 | Host -> HMI | `5A 5A 41 62 6F 72 74 57 72 69 74 65 49 6E 44 61 74 61 00 XOR` | 无 | 当上次写标定未正常退出、后续读写返回 `F3/FE` 时可发送一次恢复固件写入状态 |
 | 读标定参数范围 | Host -> HMI | `5A 5A 52 5A 00 3F XOR` | 无 | 请求 `0x00..0x3F` 共 `64` 个 chunk |
 | 读标定参数单包 | Host -> HMI | `5A 5A 52 5A 00 <seq> XOR` | 无 | 请求指定 `seq` 的单个 chunk |
 
@@ -165,6 +166,7 @@ A5 A5 <token> <status> 00 00 A5 XOR
   - `0xF2`: 功能字错误
   - `0xF3`: 数据缺帧
   - `0xF4`: 指令无效
+  - `0xFE`: 写标定当前包零数据校验错误
   - `0xFF`: 校验码错误
 
 ### 5.2 读 SN 响应
@@ -201,4 +203,5 @@ A5 A5 <seq> <16-byte chunk> XOR
 
 - 标定 payload 固定 `1024 byte`；`header.payloadSize` 表示内部有效数据长度，但传输层写入时仍必须补满 `64 x 16B`
 - 写入完成后需要保留固件刷写时间，再进行读取或下一个命令
+- 当前 `0xFE` 视为“本次写入 chunk 的零数据校验错误”，Host 会优先重发当前 chunk；若连续出现 `0xFE`，或后续读 SN / 读标定返回 `0xF3/0xFE`，驱动会先发送一次 `AbortWriteInData` 再重试，尝试把固件从未完成的写标定状态机中拉回
 - 当前 `gripper_hmi_test --read-calib` 会打印完整 RGB / stereo / extrinsics / IMU / residuals 摘要，便于现场确认 bin 中实际写入内容

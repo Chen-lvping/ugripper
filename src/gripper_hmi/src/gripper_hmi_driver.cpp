@@ -25,6 +25,10 @@ constexpr int kCalibrationChunkRetryLimit = 8;
 constexpr int kCalibrationReadRetryLimit = 5;
 constexpr int kCalibrationRangeReadTimeoutMs = 6500;
 constexpr int kCalibrationBeginSettleMs = 50;
+constexpr int kCalibrationAbortDrainMs = 120;
+constexpr int kCalibrationAbortSettleMs = 80;
+constexpr int kCalibrationAbortRetryLimit = 2;
+constexpr int kSerialNumberCommandRetryLimit = 3;
 constexpr int kExclusiveCommandDrainIdleMs = 40;
 constexpr int kExclusiveCommandDrainMaxMs = 120;
 constexpr size_t kCalibrationChunkCount =
@@ -85,8 +89,15 @@ bool isExclusiveStatusFrame(const uint8_t *frame)
 bool isRetryableCalibrationStatus(uint8_t statusCode)
 {
     return statusCode == GripperHmiProtocol::kStatusMissingData ||
+           statusCode == GripperHmiProtocol::kStatusZeroDataChecksumError ||
            statusCode == GripperHmiProtocol::kStatusChecksumError ||
            statusCode == GripperHmiProtocol::kStatusAddressOutOfLimit;
+}
+
+bool isCalibrationAbortRecoveryStatus(uint8_t statusCode)
+{
+    return statusCode == GripperHmiProtocol::kStatusMissingData ||
+           statusCode == GripperHmiProtocol::kStatusZeroDataChecksumError;
 }
 
 bool isCalibrationWriteAckToken(size_t packetIndex, uint8_t token)
@@ -576,6 +587,33 @@ bool GripperHmiDriver::readAnyStatusFrameLocked(uint8_t *token, uint8_t *statusC
     return readExpectedStatusFrameLocked(0xFF, token, statusCode, timeoutMs);
 }
 
+bool GripperHmiDriver::abortCalibrationWriteStateLocked(const std::string &reason)
+{
+    if (serialPort_ == nullptr)
+    {
+        return false;
+    }
+
+    const auto abortCommand = GripperHmiProtocol::buildAbortCalibrationWriteCommand();
+    if (!writeFrameLocked(abortCommand.data(), abortCommand.size()))
+    {
+        lastCommandError_ = "failed to send abort calibration write command";
+        return false;
+    }
+
+    std::vector<uint8_t> drain;
+    if (!readBytesLocked(&drain, kCalibrationAbortDrainMs))
+    {
+        lastCommandError_ = "failed while draining abort calibration write response";
+        return false;
+    }
+
+    sp_flush(serialPort_, SP_BUF_INPUT);
+    std::this_thread::sleep_for(std::chrono::milliseconds(kCalibrationAbortSettleMs));
+    std::cerr << name_ << ": abort calibration write state: " << reason << std::endl;
+    return true;
+}
+
 bool GripperHmiDriver::readExpectedStatusFrameLocked(uint8_t expectedToken, uint8_t *responseToken, uint8_t *statusCode, int timeoutMs)
 {
     if (serialPort_ == nullptr)
@@ -990,64 +1028,85 @@ bool GripperHmiDriver::readSerialNumber(std::string *serialNumber)
     }
 
     return runExclusiveCommand([this, serialNumber]() {
-        sp_flush(serialPort_, SP_BUF_INPUT);
-        const auto request = GripperHmiProtocol::buildReadSerialNumberCommand();
-        if (!writeFrameLocked(request.data(), request.size()))
+        for (int attempt = 0; attempt < kSerialNumberCommandRetryLimit; ++attempt)
         {
-            lastCommandError_ = "failed to send read serial number command";
-            return false;
-        }
-
-        std::vector<uint8_t> payload;
-        uint8_t responseToken = 0;
-        uint8_t statusCode = 0;
-        const auto firstResult = readRawDataOrStatusFrameLocked(GripperHmiProtocol::kSerialNumberChunkSize,
-                                                                &payload,
-                                                                &responseToken,
-                                                                &statusCode,
-                                                                kExclusiveCommandTimeoutMs);
-        if (firstResult == ExclusiveFrameReadResult::Data)
-        {
-            gripper_hmi::GripperSerialNumber encoded{};
-            std::memcpy(encoded.data(), payload.data(), std::min(payload.size(), encoded.size()));
-            std::vector<uint8_t> tailPayload;
-            if (readRawDataOrStatusFrameLocked(GripperHmiProtocol::kSerialNumberChunkSize,
-                                              &tailPayload,
-                                              &responseToken,
-                                              &statusCode,
-                                              120) == ExclusiveFrameReadResult::Data)
+            sp_flush(serialPort_, SP_BUF_INPUT);
+            const auto request = GripperHmiProtocol::buildReadSerialNumberCommand();
+            if (!writeFrameLocked(request.data(), request.size()))
             {
-                std::memcpy(encoded.data() + GripperHmiProtocol::kSerialNumberChunkSize,
-                            tailPayload.data(),
-                            std::min(tailPayload.size(),
-                                     encoded.size() - GripperHmiProtocol::kSerialNumberChunkSize));
+                lastCommandError_ = "failed to send read serial number command";
+                return false;
             }
 
-            *serialNumber = gripper_hmi::decodeSerialNumber(encoded);
-            if (serialNumber->size() == (GripperHmiProtocol::kSerialNumberChunkSize * 2) &&
-                serialNumber->substr(0, GripperHmiProtocol::kSerialNumberChunkSize) ==
-                    serialNumber->substr(GripperHmiProtocol::kSerialNumberChunkSize))
+            std::vector<uint8_t> payload;
+            uint8_t responseToken = 0;
+            uint8_t statusCode = 0;
+            const auto firstResult = readRawDataOrStatusFrameLocked(GripperHmiProtocol::kSerialNumberChunkSize,
+                                                                    &payload,
+                                                                    &responseToken,
+                                                                    &statusCode,
+                                                                    kExclusiveCommandTimeoutMs);
+            if (firstResult == ExclusiveFrameReadResult::Data)
             {
-                *serialNumber = serialNumber->substr(0, GripperHmiProtocol::kSerialNumberChunkSize);
-            }
-            return true;
-        }
+                gripper_hmi::GripperSerialNumber encoded{};
+                std::memcpy(encoded.data(), payload.data(), std::min(payload.size(), encoded.size()));
+                std::vector<uint8_t> tailPayload;
+                if (readRawDataOrStatusFrameLocked(GripperHmiProtocol::kSerialNumberChunkSize,
+                                                  &tailPayload,
+                                                  &responseToken,
+                                                  &statusCode,
+                                                  120) == ExclusiveFrameReadResult::Data)
+                {
+                    std::memcpy(encoded.data() + GripperHmiProtocol::kSerialNumberChunkSize,
+                                tailPayload.data(),
+                                std::min(tailPayload.size(),
+                                         encoded.size() - GripperHmiProtocol::kSerialNumberChunkSize));
+                }
 
-        if (firstResult == ExclusiveFrameReadResult::Status)
-        {
-            lastCommandError_ = "serial number read failed: " + describeStatusFrame(responseToken, statusCode);
+                *serialNumber = gripper_hmi::decodeSerialNumber(encoded);
+                if (serialNumber->size() == (GripperHmiProtocol::kSerialNumberChunkSize * 2) &&
+                    serialNumber->substr(0, GripperHmiProtocol::kSerialNumberChunkSize) ==
+                        serialNumber->substr(GripperHmiProtocol::kSerialNumberChunkSize))
+                {
+                    *serialNumber = serialNumber->substr(0, GripperHmiProtocol::kSerialNumberChunkSize);
+                }
+                return true;
+            }
+
+            if (firstResult == ExclusiveFrameReadResult::Status)
+            {
+                if (attempt + 1 < kSerialNumberCommandRetryLimit &&
+                    isCalibrationAbortRecoveryStatus(statusCode) &&
+                    abortCalibrationWriteStateLocked("serial read recovery after " +
+                                                     describeStatusFrame(responseToken, statusCode)))
+                {
+                    continue;
+                }
+
+                lastCommandError_ = "serial number read failed: " + describeStatusFrame(responseToken, statusCode);
+                std::cerr << name_ << ": " << lastCommandError_ << std::endl;
+                return false;
+            }
+
+            if (!readStatusFrameLocked(GripperHmiProtocol::kIndexSerialNumber, &statusCode, kExclusiveCommandTimeoutMs))
+            {
+                lastCommandError_ = "timed out waiting for serial number response";
+                return false;
+            }
+
+            if (attempt + 1 < kSerialNumberCommandRetryLimit &&
+                isCalibrationAbortRecoveryStatus(statusCode) &&
+                abortCalibrationWriteStateLocked("serial read status recovery after " +
+                                                 GripperHmiProtocol::describeStatusCode(statusCode)))
+            {
+                continue;
+            }
+
+            lastCommandError_ = "serial number read failed: " + GripperHmiProtocol::describeStatusCode(statusCode);
             std::cerr << name_ << ": " << lastCommandError_ << std::endl;
             return false;
         }
 
-        if (!readStatusFrameLocked(GripperHmiProtocol::kIndexSerialNumber, &statusCode, kExclusiveCommandTimeoutMs))
-        {
-            lastCommandError_ = "timed out waiting for serial number response";
-            return false;
-        }
-
-        lastCommandError_ = "serial number read failed: " + GripperHmiProtocol::describeStatusCode(statusCode);
-        std::cerr << name_ << ": " << lastCommandError_ << std::endl;
         return false;
     });
 }
@@ -1299,6 +1358,14 @@ bool GripperHmiDriver::readCalibrationData(gripper_hmi::GripperCalibrationDataV1
                 break;
             }
 
+            if (isCalibrationAbortRecoveryStatus(statusCode) &&
+                attempt + 1 < kCalibrationReadRetryLimit &&
+                abortCalibrationWriteStateLocked("range read recovery after " +
+                                                 describeStatusFrame(responseToken, statusCode)))
+            {
+                continue;
+            }
+
             if (!isRetryableCalibrationStatus(statusCode))
             {
                 break;
@@ -1341,6 +1408,16 @@ bool GripperHmiDriver::readCalibrationData(gripper_hmi::GripperCalibrationDataV1
                         received[packetIndex] = true;
                         chunkReceived = true;
                         break;
+                    }
+
+                    if (result == ExclusiveFrameReadResult::Status &&
+                        isCalibrationAbortRecoveryStatus(statusCode) &&
+                        attempt + 1 < kCalibrationChunkRetryLimit &&
+                        abortCalibrationWriteStateLocked("chunk read recovery packet=" +
+                                                         std::to_string(packetIndex) + " after " +
+                                                         describeStatusFrame(responseToken, statusCode)))
+                    {
+                        continue;
                     }
 
                     if (result == ExclusiveFrameReadResult::Status &&
@@ -1493,6 +1570,7 @@ bool GripperHmiDriver::writeCalibrationData(const gripper_hmi::GripperCalibratio
         bool sawBeginStatus = false;
         uint8_t lastBeginToken = 0;
         uint8_t lastBeginStatusCode = 0;
+        int beginAbortRecoveries = 0;
         for (int attempt = 0; attempt < kCalibrationBeginRetryLimit; ++attempt)
         {
             const auto beginCommand = GripperHmiProtocol::buildBeginCalibrationWriteCommand();
@@ -1519,6 +1597,15 @@ bool GripperHmiDriver::writeCalibrationData(const gripper_hmi::GripperCalibratio
                 beginReady = true;
                 std::this_thread::sleep_for(std::chrono::milliseconds(kCalibrationBeginSettleMs));
                 break;
+            }
+
+            if (isCalibrationAbortRecoveryStatus(statusCode) &&
+                beginAbortRecoveries < kCalibrationAbortRetryLimit &&
+                abortCalibrationWriteStateLocked("begin write recovery after " +
+                                                 describeStatusFrame(responseToken, statusCode)))
+            {
+                ++beginAbortRecoveries;
+                continue;
             }
 
             if (isRetryableCalibrationStatus(statusCode))
@@ -1553,6 +1640,7 @@ bool GripperHmiDriver::writeCalibrationData(const gripper_hmi::GripperCalibratio
             bool sawStatus = false;
             uint8_t lastResponseToken = 0;
             uint8_t lastStatusCode = 0;
+            int chunkAbortRecoveries = 0;
             for (int attempt = 0; attempt < kCalibrationChunkRetryLimit; ++attempt)
             {
                 if (!writeFrameLocked(frame.data(), frame.size()))
@@ -1579,6 +1667,22 @@ bool GripperHmiDriver::writeCalibrationData(const gripper_hmi::GripperCalibratio
                 {
                     chunkSent = true;
                     break;
+                }
+
+                if (isCalibrationAbortRecoveryStatus(statusCode))
+                {
+                    const bool shouldAbortAndRecover =
+                        statusCode == GripperHmiProtocol::kStatusMissingData ||
+                        (statusCode == GripperHmiProtocol::kStatusZeroDataChecksumError && attempt > 0);
+                    if (shouldAbortAndRecover &&
+                        chunkAbortRecoveries < kCalibrationAbortRetryLimit &&
+                        abortCalibrationWriteStateLocked("chunk write recovery packet=" +
+                                                         std::to_string(packetIndex) + " after " +
+                                                         describeStatusFrame(responseToken, statusCode)))
+                    {
+                        ++chunkAbortRecoveries;
+                        continue;
+                    }
                 }
 
                 if (isRetryableCalibrationStatus(statusCode))

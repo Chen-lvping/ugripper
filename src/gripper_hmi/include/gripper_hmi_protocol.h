@@ -55,6 +55,7 @@ public:
     static constexpr size_t kSerialNumberFrameLength = 19;
     static constexpr size_t kStatusFrameLength = 8;
     static constexpr size_t kStopCalibrationWriteFrameLength = 20;
+    static constexpr size_t kAbortCalibrationWriteFrameLength = 20;
     static constexpr size_t kSerialNumberResponseFrameLength = 19;
     static constexpr uint8_t kSendHead1 = 0x5A;
     static constexpr uint8_t kSendHead2 = 0x5A;
@@ -75,6 +76,7 @@ public:
     static constexpr uint8_t kStatusFunctionError = 0xF2;
     static constexpr uint8_t kStatusMissingData = 0xF3;
     static constexpr uint8_t kStatusInvalidCommand = 0xF4;
+    static constexpr uint8_t kStatusZeroDataChecksumError = 0xFE;
     static constexpr uint8_t kStatusChecksumError = 0xFF;
 
     static uint8_t calculateXor(const uint8_t *data, size_t length);
@@ -95,6 +97,7 @@ public:
         const uint8_t *chunkData,
         size_t chunkSize);
     static std::array<uint8_t, kStopCalibrationWriteFrameLength> buildEndCalibrationWriteCommand();
+    static std::array<uint8_t, kAbortCalibrationWriteFrameLength> buildAbortCalibrationWriteCommand();
     static std::string describeStatusCode(uint8_t statusCode);
 
 private:

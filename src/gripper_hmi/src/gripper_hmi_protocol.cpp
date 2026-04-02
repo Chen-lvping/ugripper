@@ -226,6 +226,17 @@ std::array<uint8_t, GripperHmiProtocol::kStopCalibrationWriteFrameLength> Grippe
     return frame;
 }
 
+std::array<uint8_t, GripperHmiProtocol::kAbortCalibrationWriteFrameLength> GripperHmiProtocol::buildAbortCalibrationWriteCommand()
+{
+    std::array<uint8_t, kAbortCalibrationWriteFrameLength> frame = {};
+    static constexpr char kCommandText[] = "AbortWriteInData";
+    frame[0] = kSendHead1;
+    frame[1] = kSendHead2;
+    std::memcpy(frame.data() + 2, kCommandText, sizeof(kCommandText));
+    frame[kAbortCalibrationWriteFrameLength - 1] = calculateXor(frame.data(), kAbortCalibrationWriteFrameLength - 1);
+    return frame;
+}
+
 std::string GripperHmiProtocol::describeStatusCode(uint8_t statusCode)
 {
     switch (statusCode)
@@ -242,6 +253,8 @@ std::string GripperHmiProtocol::describeStatusCode(uint8_t statusCode)
         return "missing_data";
     case kStatusInvalidCommand:
         return "invalid_command";
+    case kStatusZeroDataChecksumError:
+        return "zero_data_checksum_error";
     case kStatusChecksumError:
         return "checksum_error";
     default:
