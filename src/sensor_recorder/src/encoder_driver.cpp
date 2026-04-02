@@ -5,6 +5,12 @@
 
 namespace fs = std::filesystem;
 
+namespace {
+
+constexpr size_t kMaxPendingEncoderSamples = 8192;
+
+} // namespace
+
 static std::string resolveSerialPortPath(const std::string &configuredPort)
 {
     std::error_code ec;
@@ -31,6 +37,24 @@ EncoderDriver::EncoderDriver(uint8_t serialNum, const std::string &port,
 EncoderDriver::~EncoderDriver()
 {
     disconnect();
+}
+
+void EncoderDriver::markDisconnected(const std::string &operation)
+{
+    bool wasConnected = isConnected_.exchange(false);
+    isActive_ = false;
+    isConfigMode_ = false;
+
+    {
+        std::lock_guard<std::mutex> lock(stateMutex_);
+        currentState_.linkSta.is_active = 0;
+    }
+
+    if (wasConnected)
+    {
+        std::cerr << "EncoderDriver: " << operation << " failed on " << port_
+                  << ", marking encoder disconnected until next reconnect." << std::endl;
+    }
 }
 
 ConnectStatus EncoderDriver::connect()
@@ -116,7 +140,7 @@ bool EncoderDriver::sendToEncoder(uint8_t *data, uint8_t len)
     sp_return result = sp_blocking_write(serialPort_, data, len, 100);
     if (result < 0)
     {
-        std::cerr << "EncoderDriver: Write error on " << port_ << std::endl;
+        markDisconnected("write");
         return false;
     }
 
@@ -136,7 +160,7 @@ bool EncoderDriver::sendConfigToEncoder(uint8_t *data, uint8_t len)
     sp_return result = sp_blocking_write(serialPort_, data, len, 100);
     if (result < 0)
     {
-        std::cerr << "EncoderDriver: Write error on " << port_ << std::endl;
+        markDisconnected("config write");
         isConfigMode_ = false;
         return false;
     }
@@ -170,7 +194,7 @@ int EncoderDriver::readDataNonBlocking(uint8_t *buffer, size_t bufferSize)
     else
     {
         // 读取错误
-        std::cerr << "EncoderDriver: Read error on " << port_ << std::endl;
+        markDisconnected("read");
         return -1;
     }
 }
@@ -244,6 +268,11 @@ int EncoderDriver::parseReceivedData(uint8_t *data, size_t size)
         {
             if (len == 0x02)
             {
+                const auto hostTimestampNs = static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        std::chrono::system_clock::now().time_since_epoch())
+                        .count());
+
                 // Position
                 int16_t raw_pos = (rxBuffer_[3] << 8) | rxBuffer_[4];
                 int32_t pos = (raw_pos > ENCODER_PRECISION_HALF)
@@ -254,6 +283,23 @@ int EncoderDriver::parseReceivedData(uint8_t *data, size_t size)
                 currentState_.currentPosition = pos;
                 currentState_.currentPositionRad =
                     pos * (2.0 * M_PI / ENCODER_PRECISION);
+
+                if (pendingSamples_.size() >= kMaxPendingEncoderSamples)
+                {
+                    pendingSamples_.pop_front();
+                    ++droppedSamples_;
+                    if (droppedSamples_ == 1 || (droppedSamples_ % 256) == 0)
+                    {
+                        std::cerr << "[EncoderDriver] " << port_
+                                  << " pending sample queue full, dropped oldest samples="
+                                  << droppedSamples_ << std::endl;
+                    }
+                }
+
+                EncoderQueuedSample queuedSample;
+                queuedSample.state = currentState_;
+                queuedSample.hostTimestampNs = hostTimestampNs;
+                pendingSamples_.push_back(std::move(queuedSample));
             }
             else if (len == 0x04)
             {
@@ -328,6 +374,24 @@ EncoderData EncoderDriver::getState()
 {
     std::lock_guard<std::mutex> lock(stateMutex_);
     return currentState_;
+}
+
+bool EncoderDriver::tryConsumeSample(EncoderQueuedSample *out)
+{
+    if (out == nullptr)
+    {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(stateMutex_);
+    if (pendingSamples_.empty())
+    {
+        return false;
+    }
+
+    *out = pendingSamples_.front();
+    pendingSamples_.pop_front();
+    return true;
 }
 
 bool EncoderDriver::calculateCRC16(uint8_t *data, uint8_t len, uint8_t *crcLow, uint8_t *crcHigh)

@@ -2,21 +2,27 @@
 set -euo pipefail
 
 # ================= 配置区域 =================
-# 业务主程序包前缀
-DEB_PREFIX="ugripper_*_arm64"
-# Updater 自身更新包前缀
-UPDATER_PREFIX="ugripper-usb-updater*"
-
 DATA_MOUNT_POINT="/mnt/data_disk"
 MOUNT_POINT="$DATA_MOUNT_POINT"
 LOG_FILE="/var/log/ugripper/usb_auto_update.log"
 LOCK_FILE="/run/usb_auto_update.lock"
 DATA_MOUNT_WAIT_RETRIES=30
 DATA_MOUNT_WAIT_INTERVAL_SEC="0.2"
+LOCK_BUSY_RERUN_EXIT_CODE=75
 
 # 升级保护锁：安装期间用于抑制 network monitor 的重启/二次触发
 UPGRADE_GUARD_FILE="/run/ugripper_installing_from_usb.lock"
 NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
+POSTINST_SKIP_RERUN_MARKER="/run/ugripper_usb_update_skip_postinst_rerun"
+SELF_UPDATE_PENDING_MARKER="/run/ugripper_usb_update_pending_completion"
+
+AUTO_INSTALL_PACKAGES=(
+  "ugripper-usb-updater"
+  "ugripper"
+  "bluetooth-gatt-server"
+  "databot-device-joint"
+  "device-ota-mender"
+)
 
 # ===========================================
 
@@ -30,6 +36,10 @@ mkdir -p "$(dirname "$LOG_FILE")"
 
 IN_UPGRADE_WINDOW=0
 NEED_UGRIPPER_RESTART=0
+PACKAGE_INSTALL_WINDOW_READY=0
+PACKAGES_CHANGED=0
+RERUN_AFTER_SELF_UPDATE=0
+UGRIPPER_PACKAGE_INSTALLED=0
 
 log() {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
@@ -142,6 +152,14 @@ normalize_camera_codec() {
   esac
 
   return 1
+}
+
+read_env_file_value() {
+  local env_file="$1"
+  local env_key="$2"
+
+  [ -f "$env_file" ] || return 1
+  awk -F= -v key="$env_key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$env_file"
 }
 
 parse_language_from_config() {
@@ -286,6 +304,168 @@ set_camera_codec() {
   return 0
 }
 
+get_pkg_status() {
+  local pkg_name="$1"
+
+  dpkg-query -W -f='${Status}' "$pkg_name" 2>/dev/null || true
+}
+
+get_installed_version() {
+  local pkg_name="$1"
+  local status
+
+  status="$(get_pkg_status "$pkg_name")"
+  if [ "$status" = "install ok installed" ]; then
+    dpkg-query -W -f='${Version}' "$pkg_name" 2>/dev/null || true
+  fi
+}
+
+get_deb_field() {
+  local deb_file="$1"
+  local field_name="$2"
+
+  dpkg-deb -f "$deb_file" "$field_name" 2>/dev/null || true
+}
+
+find_best_usb_deb_for_package() {
+  local pkg_name="$1"
+  local best_deb=""
+  local best_ver=""
+  local deb_file=""
+  local deb_pkg=""
+  local deb_ver=""
+
+  while IFS= read -r -d '' deb_file; do
+    deb_pkg="$(get_deb_field "$deb_file" Package)"
+    [ "$deb_pkg" = "$pkg_name" ] || continue
+
+    deb_ver="$(get_deb_field "$deb_file" Version)"
+    [ -n "$deb_ver" ] || continue
+
+    if [ -z "$best_ver" ] || dpkg --compare-versions "$deb_ver" gt "$best_ver"; then
+      best_deb="$deb_file"
+      best_ver="$deb_ver"
+    fi
+  done < <(find "$MOUNT_POINT" -maxdepth 1 -type f -name '*.deb' -print0 2>/dev/null)
+
+  printf '%s' "$best_deb"
+}
+
+select_upgrade_completed_sound() {
+  local env_lang="zh"
+  local raw_lang=""
+  local normalized_lang=""
+
+  raw_lang="$(read_env_file_value "/etc/environment" "UGRIPPER_LANG" || true)"
+  if normalized_lang="$(normalize_language "$raw_lang")"; then
+    env_lang="$normalized_lang"
+  fi
+
+  if [ "$env_lang" = "en" ] && [ -f "/opt/ugripper/audio_en/upgrade_completed.wav" ]; then
+    printf '%s' "/opt/ugripper/audio_en/upgrade_completed.wav"
+    return 0
+  fi
+
+  if [ -f "/opt/ugripper/audio/upgrade_completed.wav" ]; then
+    printf '%s' "/opt/ugripper/audio/upgrade_completed.wav"
+    return 0
+  fi
+
+  if [ -f "/opt/ugripper/audio_en/upgrade_completed.wav" ]; then
+    printf '%s' "/opt/ugripper/audio_en/upgrade_completed.wav"
+    return 0
+  fi
+
+  return 1
+}
+
+play_upgrade_completed_sound() {
+  local sound_path=""
+  local python_bin=""
+
+  sound_path="$(select_upgrade_completed_sound || true)"
+  if [ -z "$sound_path" ]; then
+    log "未找到 upgrade_completed.wav，跳过升级完成提示音。"
+    return 1
+  fi
+
+  if ! command -v paplay >/dev/null 2>&1; then
+    log "paplay 不存在，跳过升级完成提示音。"
+    return 1
+  fi
+
+  if ! command -v runuser >/dev/null 2>&1; then
+    log "runuser 不存在，跳过升级完成提示音。"
+    return 1
+  fi
+
+  if ! id "$LED_RUN_USER" >/dev/null 2>&1; then
+    log "播放提示音所需用户不存在：$LED_RUN_USER，跳过升级完成提示音。"
+    return 1
+  fi
+
+  python_bin="/opt/ugripper/.venv/bin/python3"
+  if [ ! -x "$python_bin" ]; then
+    python_bin="$(command -v python3 || true)"
+  fi
+
+  if [ -z "$python_bin" ]; then
+    log "未找到可用的 python3，跳过升级完成提示音。"
+    return 1
+  fi
+
+  log "安装流程完成，开始通过 PulseAudio 播放升级完成提示音：$sound_path"
+  if timeout 20s runuser -u "$LED_RUN_USER" -- env \
+    UPGRADE_SOUND_PATH="$sound_path" \
+    PYTHONPATH="/opt/ugripper/audio" \
+    "$python_bin" - <<'PY'
+import os
+import subprocess
+from pathlib import Path
+
+from pulse_audio_utils import configure_pulse_audio_env, pulse_audio_env
+
+sound_path = Path(os.environ["UPGRADE_SOUND_PATH"])
+if not sound_path.is_file():
+    raise FileNotFoundError(f"sound file not found: {sound_path}")
+
+target = configure_pulse_audio_env(require_source=False, disable_suspend_on_idle=True)
+env = pulse_audio_env()
+subprocess.run(["paplay", f"--device={target.sink.name}", str(sound_path)], check=True, env=env)
+PY
+  then
+    log "升级完成提示音播放成功。"
+    return 0
+  fi
+
+  log "升级完成提示音播放失败（已忽略，不影响安装结果）。"
+  return 1
+}
+
+self_update_pending_completion() {
+  [ -f "$SELF_UPDATE_PENDING_MARKER" ]
+}
+
+mark_self_update_pending_completion() {
+  printf '%s\n' "$DEV_NODE" > "$SELF_UPDATE_PENDING_MARKER"
+}
+
+clear_self_update_pending_completion() {
+  rm -f "$SELF_UPDATE_PENDING_MARKER"
+}
+
+should_play_upgrade_completed_sound() {
+  if [ "$PACKAGES_CHANGED" -gt 0 ]; then
+    return 0
+  fi
+
+  if [ "$RERUN_AFTER_SELF_UPDATE" -eq 1 ] && self_update_pending_completion; then
+    return 0
+  fi
+
+  return 1
+}
+
 stop_service_fast() {
   local service_name="$1"
   local timeout_sec="${2:-6}"
@@ -404,6 +584,85 @@ restart_ugripper_if_needed() {
   return 1
 }
 
+ensure_package_install_window() {
+  if [ "$PACKAGE_INSTALL_WINDOW_READY" -eq 1 ]; then
+    return 0
+  fi
+
+  enter_upgrade_window
+  stop_record_stack_fast
+  PACKAGE_INSTALL_WINDOW_READY=1
+}
+
+install_usb_package_if_needed() {
+  local pkg_name="$1"
+  local deb_file=""
+  local deb_version=""
+  local installed_version=""
+  local action_label=""
+
+  deb_file="$(find_best_usb_deb_for_package "$pkg_name")"
+  if [ -z "$deb_file" ]; then
+    log "未在 U 盘发现 [$pkg_name] 安装包，跳过。"
+    return 0
+  fi
+
+  deb_version="$(get_deb_field "$deb_file" Version)"
+  if [ -z "$deb_version" ]; then
+    log "无法读取 [$pkg_name] 包版本信息：$deb_file"
+    return 1
+  fi
+
+  installed_version="$(get_installed_version "$pkg_name")"
+  if [ -n "$installed_version" ] && ! dpkg --compare-versions "$deb_version" gt "$installed_version"; then
+    log "[$pkg_name] 无需安装：installed=$installed_version, usb=$deb_version, deb=$deb_file"
+    return 0
+  fi
+
+  ensure_package_install_window
+
+  if [ "$pkg_name" = "ugripper-usb-updater" ]; then
+    printf '%s\n' "skip-postinst-rerun" > "$POSTINST_SKIP_RERUN_MARKER"
+    mark_self_update_pending_completion
+  fi
+
+  if [ -n "$installed_version" ]; then
+    action_label="升级"
+  else
+    action_label="安装"
+  fi
+
+  log "发现 [$pkg_name] 包：$deb_file（usb=$deb_version, installed=${installed_version:-not-installed}），开始${action_label}..."
+  if dpkg -i --force-overwrite "$deb_file"; then
+    log "[$pkg_name] ${action_label}成功。"
+    PACKAGES_CHANGED=$((PACKAGES_CHANGED + 1))
+    if [ "$pkg_name" = "ugripper" ]; then
+      UGRIPPER_PACKAGE_INSTALLED=1
+    fi
+    return 0
+  fi
+
+  log "[$pkg_name] ${action_label}失败。"
+  return 1
+}
+
+restore_ugripper_service() {
+  restart_ugripper_if_needed || true
+
+  if systemctl is-active --quiet ugripper.service; then
+    return 0
+  fi
+
+  log "安装流程结束后 ugripper.service 未运行，尝试拉起。"
+  if systemctl start ugripper.service >/dev/null 2>&1; then
+    log "ugripper.service 启动成功。"
+    return 0
+  fi
+
+  log "ugripper.service 启动失败。"
+  return 1
+}
+
 apply_imports_with_led_feedback() {
   local cfg_lang="$1"
   local cfg_codec="$2"
@@ -447,7 +706,7 @@ apply_imports_with_led_feedback() {
   fi
 
   if [ "$do_calib_import" = "1" ]; then
-    log "检测到 ugripper_calib，开始导入 calibration.json。"
+    log "检测到 ugripper_calib，开始导入标定数据。"
     if [ ! -x "$CALIB_IMPORT_SCRIPT" ]; then
       log "标定导入脚本不存在或不可执行：$CALIB_IMPORT_SCRIPT"
       has_failure=1
@@ -505,19 +764,42 @@ apply_imports_with_led_feedback() {
 
 cleanup() {
   stop_led_helper
+  rm -f "$POSTINST_SKIP_RERUN_MARKER"
   leave_upgrade_window
 }
 trap cleanup EXIT
 
+# udev 传进来的设备节点，如 /dev/sda1
+DEV_NODE=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --rerun-after-self-update)
+      RERUN_AFTER_SELF_UPDATE=1
+      ;;
+    --*)
+      log "忽略未知参数：$1"
+      ;;
+    *)
+      if [ -z "$DEV_NODE" ]; then
+        DEV_NODE="$1"
+      else
+        log "忽略额外位置参数：$1"
+      fi
+      ;;
+  esac
+  shift
+done
+
 # 防并发：udev 可能短时间触发多次
 exec 9>"$LOCK_FILE"
 if ! flock -n 9; then
+  if [ "$RERUN_AFTER_SELF_UPDATE" -eq 1 ]; then
+    log "自更新后的重入流程等待锁仍被占用，稍后由 postinst 再试。"
+    exit "$LOCK_BUSY_RERUN_EXIT_CODE"
+  fi
   log "已有更新实例在运行，退出。"
   exit 0
 fi
-
-# udev 传进来的设备节点，如 /dev/sda1
-DEV_NODE="${1:-}"
 
 if [ -z "$DEV_NODE" ]; then
   log "未传入设备节点参数，退出。"
@@ -530,6 +812,9 @@ if [ ! -b "$DEV_NODE" ]; then
 fi
 
 log "Triggered by device: $DEV_NODE"
+if [ "$RERUN_AFTER_SELF_UPDATE" -eq 1 ]; then
+  log "当前为 usb-updater 自更新后的重入安装流程。"
+fi
 
 if prepare_scan_mountpoint; then
   :
@@ -597,55 +882,25 @@ if [ "$HAS_CALIBRATION_TRIGGER" -eq 1 ]; then
   exit 0
 fi
 
-# ========================================================
-# 1. 优先检查并更新自身 (Self-Update)
-# ========================================================
-UPDATER_DEB="$(find "$MOUNT_POINT" -maxdepth 1 -type f -name "${UPDATER_PREFIX}.deb" | head -n 1 || true)"
-
-if [ -n "${UPDATER_DEB:-}" ]; then
-  log "发现 Updater 自身更新包：$UPDATER_DEB，开始自我更新..."
-  enter_upgrade_window
-  stop_record_stack_fast
-
-  # 注意：在 Linux 中，Bash 脚本运行时文件被删除或替换（dpkg 会做原子替换），
-  # 当前运行的进程仍持有旧文件的 inode 句柄，因此会继续执行旧脚本剩下的逻辑直到结束。
-  # 这是安全的，新逻辑将在下一次触发时生效。
-  if dpkg -i --force-overwrite "$UPDATER_DEB"; then
-    log "Updater 自我更新成功。"
-  else
-    log "Updater 自我更新失败 (dpkg error)，将尝试继续后续业务更新。"
+for pkg_name in "${AUTO_INSTALL_PACKAGES[@]}"; do
+  if [ "$pkg_name" = "ugripper-usb-updater" ] && [ "$RERUN_AFTER_SELF_UPDATE" -eq 1 ]; then
+    log "当前为自更新后的重入流程，跳过重复安装 [ugripper-usb-updater]。"
+    continue
   fi
-else
-  log "未发现自身更新包 ($UPDATER_PREFIX.deb)，跳过自我更新。"
+
+  install_usb_package_if_needed "$pkg_name"
+done
+
+if [ "$PACKAGES_CHANGED" -eq 0 ]; then
+  log "未检测到需要安装或升级的目标软件包，跳过 deb 安装。"
 fi
 
-# ========================================================
-# 2. 检查并更新业务主程序 (ugripper)
-# ========================================================
-DEB_FILE="$(find "$MOUNT_POINT" -maxdepth 1 -type f -name "${DEB_PREFIX}*.deb" | head -n 1 || true)"
-if [ -z "${DEB_FILE:-}" ]; then
-  if [ "$IN_UPGRADE_WINDOW" -eq 1 ]; then
-    # 仅升级 updater 时，恢复主服务
-    systemctl start ugripper.service >/dev/null 2>&1 || true
-  fi
-  restart_ugripper_if_needed || true
-  log "未发现更新包（匹配 ${DEB_PREFIX}*.deb），跳过。"
-  exit 0
+if should_play_upgrade_completed_sound; then
+  play_upgrade_completed_sound || true
+  clear_self_update_pending_completion
 fi
 
-log "发现更新包：$DEB_FILE，开始安装..."
-enter_upgrade_window
-stop_record_stack_fast
-
-# 安装更新包
-if dpkg -i --force-overwrite "$DEB_FILE"; then
-  log "安装/更新成功。"
-else
-  log "dpkg 安装失败。"
-  exit 1
-fi
-
-restart_ugripper_if_needed || true
+restore_ugripper_service || true
 
 log "usb_auto_update done."
 exit 0

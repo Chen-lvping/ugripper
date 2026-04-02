@@ -11,6 +11,7 @@ namespace {
 
 constexpr int kConfigCommandSettleMs = 40;
 constexpr int kFinalFlushSettleMs = 60;
+constexpr size_t kMaxPendingSamples = 4096;
 
 std::string resolveSerialPortPath(const std::string &configured_port) {
     std::error_code ec;
@@ -34,7 +35,14 @@ namespace dmbot_serial {
 Im648Driver::Im648Driver(const std::string &port_name, int baudrate)
     : port_name_(port_name), baudrate_(baudrate) {
     initSerial();
-    im648_InitContext(&protocol_ctx_, &data_, &data_updated_, &data_mutex_, &Im648Driver::writeThunk, this);
+    im648_InitContext(&protocol_ctx_,
+                      &data_,
+                      &data_updated_,
+                      &data_mutex_,
+                      &Im648Driver::sampleThunk,
+                      this,
+                      &Im648Driver::writeThunk,
+                      this);
     configureDevice();
 }
 
@@ -65,13 +73,21 @@ bool Im648Driver::tryConsumeData(IM648_Data *out) {
     }
 
     std::lock_guard<std::mutex> lock(data_mutex_);
-    if (!data_updated_) {
+    if (pending_samples_.empty()) {
         return false;
     }
 
-    *out = data_;
-    data_updated_ = false;
+    *out = pending_samples_.front();
+    pending_samples_.pop_front();
+    data_updated_ = !pending_samples_.empty();
     return true;
+}
+
+void Im648Driver::sampleThunk(const IM648_Data &sample, void *user_data) {
+    if (user_data == nullptr) {
+        return;
+    }
+    static_cast<Im648Driver *>(user_data)->handleParsedSample(sample);
 }
 
 int Im648Driver::writeThunk(const U8 *buf, int len, void *user_data) {
@@ -117,6 +133,22 @@ void Im648Driver::configureDevice() {
     msleep(kFinalFlushSettleMs);
     sp_flush(port_, SP_BUF_BOTH);
     std::cout << "IM648 initialization completed" << std::endl;
+}
+
+void Im648Driver::handleParsedSample(const IM648_Data &sample) {
+    std::lock_guard<std::mutex> lock(data_mutex_);
+    data_ = sample;
+    if (pending_samples_.size() >= kMaxPendingSamples) {
+        pending_samples_.pop_front();
+        ++dropped_samples_;
+        if (dropped_samples_ == 1 || (dropped_samples_ % 256) == 0) {
+            std::cerr << "[IM648] " << port_name_
+                      << " pending sample queue full, dropped oldest samples="
+                      << dropped_samples_ << std::endl;
+        }
+    }
+    pending_samples_.push_back(sample);
+    data_updated_ = true;
 }
 
 void Im648Driver::readThread() {

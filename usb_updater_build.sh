@@ -7,7 +7,7 @@ SRC_DIR="./auto_update"
 
 # 软件包信息
 PKG_NAME="ugripper-usb-updater"
-PKG_VERSION="1.2.1"
+PKG_VERSION="1.2.2"
 ARCH="all"
 MAINTAINER="User <user@example.com>"
 DESC="Auto update ugripper via USB and Boot Check"
@@ -106,9 +106,67 @@ if [ "\$1" = "configure" ]; then
     # 这样开机时就会自动运行检查脚本
     echo "Enabling ugripper-boot-install.service..."
     systemctl enable ugripper-boot-install.service
-    
-    # 可选：立即启动一次检查（如果需要安装后立即生效，而不是等重启）
-    # systemctl start ugripper-boot-install.service || true
+
+    if [ -f /run/ugripper_usb_update_skip_postinst_rerun ]; then
+        rm -f /run/ugripper_usb_update_skip_postinst_rerun
+    else
+        USB_UPDATE_DEV=\$(ps -eo args= | awk '
+            /[u]sb_auto_update\.sh/ && \$0 !~ /--rerun-after-self-update/ {
+                for (i = 1; i <= NF; ++i) {
+                    if (\$i ~ /^\\/dev\\//) {
+                        print \$i
+                        exit
+                    }
+                }
+            }
+        ')
+
+        if [ -n "\$USB_UPDATE_DEV" ]; then
+            echo "Detected active usb_auto_update context on \$USB_UPDATE_DEV, scheduling rerun with new updater logic..."
+            mkdir -p /var/log/ugripper
+            USB_UPDATE_UNIT_SUFFIX=\$(printf '%s' "\$USB_UPDATE_DEV" | tr '/:@' '___')
+            if command -v systemd-run >/dev/null 2>&1; then
+                systemd-run --quiet --no-block --collect \
+                    --unit="ugripper-usb-update-rerun-\${USB_UPDATE_UNIT_SUFFIX}" \
+                    --property=Type=oneshot \
+                    --setenv=USB_UPDATE_DEV="\$USB_UPDATE_DEV" \
+                    /bin/sh -lc '
+                        mkdir -p /var/log/ugripper
+                        echo "[\$(date "+%Y-%m-%d %H:%M:%S")] postinst scheduled rerun for \$USB_UPDATE_DEV" >> /var/log/ugripper/usb_auto_update.log
+                        attempts=0
+                        while [ "\$attempts" -lt 90 ]; do
+                            /usr/local/bin/usb_auto_update.sh "\$USB_UPDATE_DEV" --rerun-after-self-update
+                            rc=\$?
+                            if [ "\$rc" -ne 75 ]; then
+                                exit 0
+                            fi
+                            attempts=\$((attempts + 1))
+                            sleep 2
+                        done
+                        echo "[\$(date "+%Y-%m-%d %H:%M:%S")] postinst rerun timed out waiting for lock: \$USB_UPDATE_DEV" >> /var/log/ugripper/usb_auto_update.log
+                        exit 0
+                    '
+            else
+                nohup /bin/sh -c '
+                    dev="\$1"
+                    attempts=0
+                    mkdir -p /var/log/ugripper
+                    echo "[\$(date "+%Y-%m-%d %H:%M:%S")] postinst fallback rerun for \$dev" >> /var/log/ugripper/usb_auto_update.log
+                    while [ "\$attempts" -lt 90 ]; do
+                        /usr/local/bin/usb_auto_update.sh "\$dev" --rerun-after-self-update
+                        rc=\$?
+                        if [ "\$rc" -ne 75 ]; then
+                            exit 0
+                        fi
+                        attempts=\$((attempts + 1))
+                        sleep 2
+                    done
+                    echo "[\$(date "+%Y-%m-%d %H:%M:%S")] postinst fallback rerun timed out waiting for lock: \$dev" >> /var/log/ugripper/usb_auto_update.log
+                    exit 0
+                ' postinst-rerun "\$USB_UPDATE_DEV" >/dev/null 2>&1 &
+            fi
+        fi
+    fi
 fi
 
 exit 0

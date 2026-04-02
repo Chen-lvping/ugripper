@@ -39,6 +39,7 @@ struct IM648_Data;
 }
 
 using Im648WriteCallback = int (*)(const U8 *buf, int len, void *user_data);
+using Im648SampleCallback = void (*)(const dmbot_serial::IM648_Data &sample, void *user_data);
 
 struct Im648ProtocolContext {
     U8 targetDeviceAddress = 255;
@@ -49,6 +50,8 @@ struct Im648ProtocolContext {
     dmbot_serial::IM648_Data *dataPtr = nullptr;
     bool *dataUpdatedPtr = nullptr;
     std::mutex *dataMutex = nullptr;
+    Im648SampleCallback sampleCallback = nullptr;
+    void *sampleUserData = nullptr;
     Im648WriteCallback writeCallback = nullptr;
     void *writeUserData = nullptr;
 };
@@ -57,6 +60,8 @@ void im648_InitContext(Im648ProtocolContext *ctx,
                        dmbot_serial::IM648_Data *data_ptr,
                        bool *data_updated_ptr,
                        std::mutex *data_mutex,
+                       Im648SampleCallback sample_callback,
+                       void *sample_user_data,
                        Im648WriteCallback write_callback,
                        void *write_user_data);
 

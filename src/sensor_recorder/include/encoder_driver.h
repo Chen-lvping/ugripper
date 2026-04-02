@@ -11,6 +11,8 @@
 #include <memory>
 #include <iostream>
 #include <cmath>
+#include <deque>
+#include <vector>
 #include "bsp_crc.h"
 
 // Constants
@@ -79,6 +81,12 @@ struct EncoderData
     LifeStatus linkSta;
 };
 
+struct EncoderQueuedSample
+{
+    EncoderData state;
+    uint64_t hostTimestampNs = 0;
+};
+
 enum class ConnectStatus
 {
     SUCCESS,     // 编码器成功响应
@@ -105,6 +113,7 @@ public:
 
     // State management
     EncoderData getState();
+    bool tryConsumeSample(EncoderQueuedSample *out);
     bool requestState(bool needSpeed = false);
     int8_t updateActiveStatus();
 
@@ -134,6 +143,7 @@ private:
     bool sendConfigToEncoder(uint8_t *data, uint8_t len);
     bool getEncoderPosition();
     bool getEncoderVelocity();
+    void markDisconnected(const std::string &operation);
 
     bool calculateCRC16(uint8_t *data, uint8_t len, uint8_t *crcLow, uint8_t *crcHigh);
     bool verifyCRC16(uint8_t *data, uint8_t len, uint8_t crcLow, uint8_t crcHigh);
@@ -154,6 +164,8 @@ private:
 
     int debugCounter_ = 0;
     std::vector<uint8_t> rxBuffer_;
+    std::deque<EncoderQueuedSample> pendingSamples_;
+    size_t droppedSamples_ = 0;
 };
 
 #endif // ENCODER_DRIVER_HPP

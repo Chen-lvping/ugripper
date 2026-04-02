@@ -3,19 +3,28 @@
 
 #include <mcap/writer.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cmath>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace fs = std::filesystem;
 
 std::atomic<bool> g_stopFlag(false);
+
+constexpr uint64_t kNanosecondsPerMicrosecond = 1000ULL;
+constexpr uint64_t kImuNominalPeriodNs = 5'000'000ULL;
+constexpr uint64_t kEncoderNominalPeriodNs = 1'000'000ULL;
 
 struct ImuSample {
     float qx;
@@ -49,10 +58,25 @@ struct SideWriter {
     mcap::Schema encoderSchema;
 };
 
+struct TimestampedPayloadFrame {
+    uint64_t hostTimestampNs = 0;
+    std::vector<std::byte> payload;
+};
+
+struct BatchTimestampSmoothingState {
+    std::string label;
+    uint64_t nominalPeriodNs = 0;
+    uint64_t lastAssignedTimestampNs = 0;
+    bool hasLastAssignedTimestamp = false;
+    size_t smoothedBatchCount = 0;
+    size_t smoothedFrameCount = 0;
+};
+
 struct ImuRuntime {
     SensorSideConfig config;
     std::unique_ptr<dmbot_serial::Im648Driver> driver;
     mcap::Channel channel;
+    BatchTimestampSmoothingState timestampSmoothing;
     uint32_t sequence = 0;
     bool firstSampleLogged = false;
 };
@@ -61,6 +85,7 @@ struct EncoderRuntime {
     SensorSideConfig config;
     std::unique_ptr<EncoderDriver> driver;
     mcap::Channel channel;
+    BatchTimestampSmoothingState timestampSmoothing;
     std::thread readThread;
     std::thread requestThread;
     uint32_t sequence = 0;
@@ -69,12 +94,141 @@ struct EncoderRuntime {
     bool connected = false;
 };
 
+struct QueuedMessage {
+    uint16_t channelId = 0;
+    uint32_t sequence = 0;
+    uint64_t logTime = 0;
+    uint64_t publishTime = 0;
+    std::vector<std::byte> payload;
+};
+
+struct PendingWriteQueue {
+    std::string label;
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<QueuedMessage> queue;
+    bool stopped = false;
+    size_t nextBacklogWarnSize = 4096;
+    size_t maxObservedBacklog = 0;
+
+    void push(QueuedMessage &&message) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (stopped) {
+                return;
+            }
+            queue.push_back(std::move(message));
+            if (queue.size() > maxObservedBacklog) {
+                maxObservedBacklog = queue.size();
+            }
+            if (queue.size() >= nextBacklogWarnSize) {
+                std::cerr << "[SensorWriteQueue-" << label
+                          << "] backlog grew to " << queue.size() << std::endl;
+                nextBacklogWarnSize = queue.size() + 4096;
+            }
+        }
+        cv.notify_one();
+    }
+
+    bool pop(QueuedMessage *message) {
+        if (message == nullptr) {
+            return false;
+        }
+
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [this] { return stopped || !queue.empty(); });
+        if (queue.empty()) {
+            return false;
+        }
+
+        *message = std::move(queue.front());
+        queue.pop_front();
+        return true;
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stopped = true;
+        }
+        cv.notify_all();
+    }
+};
+
 static_assert(sizeof(ImuSample) == 40, "ImuSample layout changed");
 static_assert(sizeof(EncoderSample) == 8, "EncoderSample layout changed");
 
 void signalHandler(int signum) {
     std::cout << "\nInterrupt signal (" << signum << ") received. Stopping..." << std::endl;
     g_stopFlag = true;
+}
+
+uint64_t currentSystemTimeNs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+}
+
+BatchTimestampSmoothingState createBatchTimestampSmoothingState(const std::string &label,
+                                                                uint64_t nominalPeriodNs) {
+    BatchTimestampSmoothingState state;
+    state.label = label;
+    state.nominalPeriodNs = nominalPeriodNs;
+    return state;
+}
+
+uint64_t clampMonotonicTimestamp(BatchTimestampSmoothingState *state, uint64_t timestampNs) {
+    if (state == nullptr) {
+        return timestampNs;
+    }
+    if (timestampNs == 0) {
+        timestampNs = currentSystemTimeNs();
+    }
+    if (state->hasLastAssignedTimestamp && timestampNs <= state->lastAssignedTimestampNs) {
+        timestampNs = state->lastAssignedTimestampNs + 1;
+    }
+    state->lastAssignedTimestampNs = timestampNs;
+    state->hasLastAssignedTimestamp = true;
+    return timestampNs;
+}
+
+template <typename EmitFn>
+void emitTimestampedBatch(BatchTimestampSmoothingState *state,
+                          std::vector<TimestampedPayloadFrame> *frames,
+                          EmitFn emitFn) {
+    if (state == nullptr || frames == nullptr || frames->empty()) {
+        return;
+    }
+
+    if (frames->size() == 1) {
+        auto &frame = frames->front();
+        emitFn(clampMonotonicTimestamp(state, frame.hostTimestampNs), std::move(frame.payload));
+        frames->clear();
+        return;
+    }
+
+    const auto &lastFrame = frames->back();
+    const uint64_t baseTimestampNs =
+        lastFrame.hostTimestampNs == 0 ? currentSystemTimeNs() : lastFrame.hostTimestampNs;
+    const uint64_t batchSpanNs = state->nominalPeriodNs * (frames->size() - 1);
+    const uint64_t startTimestampNs =
+        baseTimestampNs > batchSpanNs ? (baseTimestampNs - batchSpanNs) : 1;
+
+    for (size_t index = 0; index < frames->size(); ++index) {
+        auto &frame = (*frames)[index];
+        const uint64_t reconstructedTimestampNs =
+            clampMonotonicTimestamp(state, startTimestampNs + state->nominalPeriodNs * index);
+        emitFn(reconstructedTimestampNs, std::move(frame.payload));
+    }
+
+    ++state->smoothedBatchCount;
+    state->smoothedFrameCount += frames->size();
+    if (state->smoothedBatchCount <= 3 || (state->smoothedBatchCount % 20) == 0) {
+        std::cout << "[BatchTimestamp-" << state->label << "] batch_size=" << frames->size()
+                  << ", base_ts_ns=" << baseTimestampNs << std::endl;
+    }
+    frames->clear();
 }
 
 ImuSample create_imu_sample(const dmbot_serial::IM648_Data &d) {
@@ -97,6 +251,46 @@ EncoderSample create_encoder_sample(const EncoderData &d) {
     sample.raw = d.currentPosition;
     sample.rad = d.currentPositionRad;
     return sample;
+}
+
+QueuedMessage buildQueuedMessage(uint16_t channelId,
+                                 uint32_t sequence,
+                                 uint64_t timestampNs,
+                                 const std::byte *data,
+                                 size_t dataSize) {
+    QueuedMessage message;
+    message.channelId = channelId;
+    message.sequence = sequence;
+    message.logTime = timestampNs;
+    message.publishTime = timestampNs;
+    message.payload.assign(data, data + dataSize);
+    return message;
+}
+
+void sideWriterThreadFunc(SideWriter *sideWriter, PendingWriteQueue *pendingQueue) {
+    if (sideWriter == nullptr || pendingQueue == nullptr) {
+        return;
+    }
+
+    QueuedMessage queuedMessage;
+    while (pendingQueue->pop(&queuedMessage)) {
+        mcap::Message message;
+        message.channelId = queuedMessage.channelId;
+        message.sequence = queuedMessage.sequence;
+        message.logTime = queuedMessage.logTime;
+        message.publishTime = queuedMessage.publishTime;
+        message.data = queuedMessage.payload.data();
+        message.dataSize = queuedMessage.payload.size();
+
+        const auto writeStatus = sideWriter->writer.write(message);
+        if (!writeStatus.ok()) {
+            std::cerr << "Failed to write " << pendingQueue->label
+                      << " sensor frame: " << writeStatus.message << std::endl;
+            g_stopFlag = true;
+            pendingQueue->stop();
+            return;
+        }
+    }
 }
 
 void encoderReadThreadFunc(EncoderDriver *encoder, const std::string &label) {
@@ -126,6 +320,11 @@ void encoderRequestThreadFunc(EncoderDriver *encoder, const std::string &label) 
 
     while (!g_stopFlag.load()) {
         nextTime += period;
+        if (!encoder->isConnected()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            nextTime = std::chrono::steady_clock::now();
+            continue;
+        }
         encoder->requestState(false);
         std::this_thread::sleep_until(nextTime);
     }
@@ -164,8 +363,10 @@ bool openSideWriter(const fs::path &outputDir, const SensorSideConfig &config, S
     options.compression = mcap::Compression::Lz4;
     options.compressionLevel = mcap::CompressionLevel::Default;
     options.forceCompression = false;
-    options.noRepeatedSchemas = true;
-    options.noRepeatedChannels = true;
+    // Keep schema/channel metadata readable by downstream validation so topic-based
+    // checks can resolve encoder and IMU channels reliably.
+    options.noRepeatedSchemas = false;
+    options.noRepeatedChannels = false;
     options.noMessageIndex = true;
 
     auto status = sideWriter->writer.open(sideWriter->outputFile.string(), options);
@@ -245,11 +446,20 @@ int main(int argc, char *argv[]) {
     ImuRuntime leftImu{leftConfig, nullptr, mcap::Channel("imu_left", "binary", leftWriter.imuSchema.id)};
     EncoderRuntime rightEncoder{rightConfig, nullptr, mcap::Channel("encoder_right", "binary", rightWriter.encoderSchema.id)};
     EncoderRuntime leftEncoder{leftConfig, nullptr, mcap::Channel("encoder_left", "binary", leftWriter.encoderSchema.id)};
+    rightImu.timestampSmoothing = createBatchTimestampSmoothingState("imu_right", kImuNominalPeriodNs);
+    leftImu.timestampSmoothing = createBatchTimestampSmoothingState("imu_left", kImuNominalPeriodNs);
+    rightEncoder.timestampSmoothing = createBatchTimestampSmoothingState("encoder_right", kEncoderNominalPeriodNs);
+    leftEncoder.timestampSmoothing = createBatchTimestampSmoothingState("encoder_left", kEncoderNominalPeriodNs);
+    PendingWriteQueue rightPendingWrites{rightConfig.label};
+    PendingWriteQueue leftPendingWrites{leftConfig.label};
 
     rightWriter.writer.addChannel(rightImu.channel);
     rightWriter.writer.addChannel(rightEncoder.channel);
     leftWriter.writer.addChannel(leftImu.channel);
     leftWriter.writer.addChannel(leftEncoder.channel);
+
+    std::thread rightWriterThread(sideWriterThreadFunc, &rightWriter, &rightPendingWrites);
+    std::thread leftWriterThread(sideWriterThreadFunc, &leftWriter, &leftPendingWrites);
 
     std::cout << "Opening dual-arm sensors: "
               << "right(imu=" << rightConfig.imuPort << ", encoder=" << rightConfig.encoderPort << ") "
@@ -293,90 +503,93 @@ int main(int argc, char *argv[]) {
         leftEncoder.requestThread = std::thread(encoderRequestThreadFunc, leftEncoder.driver.get(), leftConfig.label);
     }
 
-    auto nextEncoderWrite = std::chrono::steady_clock::now();
-    const auto encoderPeriod = std::chrono::microseconds(1000);
-
     while (!g_stopFlag.load()) {
         bool wroteData = false;
 
-        const auto handleImu = [&](ImuRuntime &imuRuntime, mcap::McapWriter &writer) {
+        const auto handleImu = [&](ImuRuntime &imuRuntime, PendingWriteQueue &pendingWrites) {
+            bool wroteFrame = false;
+            const auto emitFrame = [&](uint64_t timestampNs, std::vector<std::byte> &&payload) {
+                auto message = buildQueuedMessage(
+                    imuRuntime.channel.id,
+                    imuRuntime.sequence++,
+                    timestampNs,
+                    payload.data(),
+                    payload.size());
+                pendingWrites.push(std::move(message));
+            };
+
+            std::vector<TimestampedPayloadFrame> batchFrames;
             dmbot_serial::IM648_Data imuData;
-            if (!imuRuntime.driver->tryConsumeData(&imuData)) {
-                return false;
+            while (imuRuntime.driver->tryConsumeData(&imuData)) {
+                const auto sample = create_imu_sample(imuData);
+                TimestampedPayloadFrame frame;
+                frame.hostTimestampNs = imuData.timestamp * kNanosecondsPerMicrosecond;
+                if (frame.hostTimestampNs == 0) {
+                    frame.hostTimestampNs = currentSystemTimeNs();
+                }
+                const auto *sampleBytes = reinterpret_cast<const std::byte *>(&sample);
+                frame.payload.assign(sampleBytes, sampleBytes + sizeof(sample));
+                batchFrames.push_back(std::move(frame));
+                wroteFrame = true;
+
+                if (!imuRuntime.firstSampleLogged) {
+                    std::cout << "[IMU-" << imuRuntime.config.label << "] First sample: "
+                              << "q=(" << sample.qx << "," << sample.qy << "," << sample.qz << "," << sample.qw << ") "
+                              << "g=(" << sample.gx << "," << sample.gy << "," << sample.gz << ") "
+                              << "a=(" << sample.ax << "," << sample.ay << "," << sample.az << ") "
+                              << "ts_ns=" << frame.hostTimestampNs
+                              << std::endl;
+                    imuRuntime.firstSampleLogged = true;
+                }
             }
-
-            const auto timestampNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                       std::chrono::system_clock::now().time_since_epoch())
-                                       .count();
-            const auto sample = create_imu_sample(imuData);
-
-            mcap::Message msg;
-            msg.channelId = imuRuntime.channel.id;
-            msg.sequence = imuRuntime.sequence++;
-            msg.logTime = timestampNs;
-            msg.publishTime = timestampNs;
-            msg.data = reinterpret_cast<const std::byte *>(&sample);
-            msg.dataSize = sizeof(sample);
-
-            const auto writeStatus = writer.write(msg);
-            if (!writeStatus.ok()) {
-                std::cerr << "Failed to write " << imuRuntime.config.label
-                          << " IMU frame: " << writeStatus.message << std::endl;
-                g_stopFlag = true;
-                return false;
-            }
-
-            if (!imuRuntime.firstSampleLogged) {
-                std::cout << "[IMU-" << imuRuntime.config.label << "] First sample: "
-                          << "q=(" << sample.qx << "," << sample.qy << "," << sample.qz << "," << sample.qw << ") "
-                          << "g=(" << sample.gx << "," << sample.gy << "," << sample.gz << ") "
-                          << "a=(" << sample.ax << "," << sample.ay << "," << sample.az << ") "
-                          << "ts_ns=" << timestampNs
-                          << std::endl;
-                imuRuntime.firstSampleLogged = true;
-            }
-            return true;
+            emitTimestampedBatch(&imuRuntime.timestampSmoothing, &batchFrames, emitFrame);
+            return wroteFrame;
         };
 
-        wroteData = handleImu(rightImu, rightWriter.writer) || wroteData;
-        wroteData = handleImu(leftImu, leftWriter.writer) || wroteData;
+        wroteData = handleImu(rightImu, rightPendingWrites) || wroteData;
+        wroteData = handleImu(leftImu, leftPendingWrites) || wroteData;
 
-        auto nowSteady = std::chrono::steady_clock::now();
-        if (nowSteady >= nextEncoderWrite) {
-            nextEncoderWrite += encoderPeriod;
+        const auto handleEncoder = [&](EncoderRuntime &encoderRuntime, PendingWriteQueue &pendingWrites) {
+            if (!encoderRuntime.connected) {
+                return false;
+            }
+            if (!encoderRuntime.driver->isConnected()) {
+                encoderRuntime.connected = false;
+                std::cerr << encoderRuntime.config.label
+                          << " encoder disconnected during recording; stopping encoder samples for this side."
+                          << std::endl;
+                return false;
+            }
 
-            const auto handleEncoder = [&](EncoderRuntime &encoderRuntime, mcap::McapWriter &writer) {
-                if (!encoderRuntime.connected) {
-                    return false;
-                }
+            bool wroteFrame = false;
+            const auto emitFrame = [&](uint64_t timestampNs, std::vector<std::byte> &&payload) {
+                auto message = buildQueuedMessage(
+                    encoderRuntime.channel.id,
+                    encoderRuntime.sequence++,
+                    timestampNs,
+                    payload.data(),
+                    payload.size());
+                pendingWrites.push(std::move(message));
+            };
 
-                EncoderData state = encoderRuntime.driver->getState();
+            std::vector<TimestampedPayloadFrame> batchFrames;
+            EncoderQueuedSample queuedSample;
+            while (encoderRuntime.driver->tryConsumeSample(&queuedSample)) {
+                const EncoderData &state = queuedSample.state;
                 if (state.currentPosition == 65535) {
                     if (encoderRuntime.warmupCounter++ < 100) {
-                        return false;
+                        continue;
                     }
                 }
 
-                const auto timestampNs = std::chrono::duration_cast<std::chrono::nanoseconds>(
-                                           std::chrono::system_clock::now().time_since_epoch())
-                                           .count();
                 const auto sample = create_encoder_sample(state);
-
-                mcap::Message msg;
-                msg.channelId = encoderRuntime.channel.id;
-                msg.sequence = encoderRuntime.sequence++;
-                msg.logTime = timestampNs;
-                msg.publishTime = timestampNs;
-                msg.data = reinterpret_cast<const std::byte *>(&sample);
-                msg.dataSize = sizeof(sample);
-
-                const auto writeStatus = writer.write(msg);
-                if (!writeStatus.ok()) {
-                    std::cerr << "Failed to write " << encoderRuntime.config.label
-                              << " encoder frame: " << writeStatus.message << std::endl;
-                    g_stopFlag = true;
-                    return false;
-                }
+                TimestampedPayloadFrame frame;
+                frame.hostTimestampNs =
+                    queuedSample.hostTimestampNs == 0 ? currentSystemTimeNs() : queuedSample.hostTimestampNs;
+                const auto *sampleBytes = reinterpret_cast<const std::byte *>(&sample);
+                frame.payload.assign(sampleBytes, sampleBytes + sizeof(sample));
+                batchFrames.push_back(std::move(frame));
+                wroteFrame = true;
 
                 if (!encoderRuntime.firstSampleLogged) {
                     std::cout << "[Encoder-" << encoderRuntime.config.label << "] First sample: "
@@ -384,16 +597,17 @@ int main(int argc, char *argv[]) {
                               << ", rad=" << state.currentPositionRad
                               << ", speed_raw=" << state.currentSpeed
                               << ", speed_rad=" << state.currentSpeedRad
-                              << ", ts_ns=" << timestampNs
+                              << ", ts_ns=" << queuedSample.hostTimestampNs
                               << std::endl;
                     encoderRuntime.firstSampleLogged = true;
                 }
-                return true;
-            };
+            }
+            emitTimestampedBatch(&encoderRuntime.timestampSmoothing, &batchFrames, emitFrame);
+            return wroteFrame;
+        };
 
-            wroteData = handleEncoder(rightEncoder, rightWriter.writer) || wroteData;
-            wroteData = handleEncoder(leftEncoder, leftWriter.writer) || wroteData;
-        }
+        wroteData = handleEncoder(rightEncoder, rightPendingWrites) || wroteData;
+        wroteData = handleEncoder(leftEncoder, leftPendingWrites) || wroteData;
 
         if (!wroteData) {
             std::this_thread::sleep_for(std::chrono::microseconds(200));
@@ -425,8 +639,89 @@ int main(int argc, char *argv[]) {
         leftEncoder.requestThread.join();
     }
 
+    const auto drainImuRuntime = [](ImuRuntime &imuRuntime, PendingWriteQueue &pendingWrites) {
+        const auto emitFrame = [&](uint64_t timestampNs, std::vector<std::byte> &&payload) {
+            auto message = buildQueuedMessage(
+                imuRuntime.channel.id,
+                imuRuntime.sequence++,
+                timestampNs,
+                payload.data(),
+                payload.size());
+            pendingWrites.push(std::move(message));
+        };
+        std::vector<TimestampedPayloadFrame> batchFrames;
+        dmbot_serial::IM648_Data imuData;
+        while (imuRuntime.driver && imuRuntime.driver->tryConsumeData(&imuData)) {
+            const auto sample = create_imu_sample(imuData);
+            TimestampedPayloadFrame frame;
+            frame.hostTimestampNs = imuData.timestamp * kNanosecondsPerMicrosecond;
+            if (frame.hostTimestampNs == 0) {
+                frame.hostTimestampNs = currentSystemTimeNs();
+            }
+            const auto *sampleBytes = reinterpret_cast<const std::byte *>(&sample);
+            frame.payload.assign(sampleBytes, sampleBytes + sizeof(sample));
+            batchFrames.push_back(std::move(frame));
+        }
+        emitTimestampedBatch(&imuRuntime.timestampSmoothing, &batchFrames, emitFrame);
+    };
+
+    const auto drainEncoderRuntime = [](EncoderRuntime &encoderRuntime, PendingWriteQueue &pendingWrites) {
+        const auto emitFrame = [&](uint64_t timestampNs, std::vector<std::byte> &&payload) {
+            auto message = buildQueuedMessage(
+                encoderRuntime.channel.id,
+                encoderRuntime.sequence++,
+                timestampNs,
+                payload.data(),
+                payload.size());
+            pendingWrites.push(std::move(message));
+        };
+        std::vector<TimestampedPayloadFrame> batchFrames;
+        EncoderQueuedSample queuedSample;
+        while (encoderRuntime.driver && encoderRuntime.driver->tryConsumeSample(&queuedSample)) {
+            const auto &state = queuedSample.state;
+            if (state.currentPosition == 65535) {
+                if (encoderRuntime.warmupCounter++ < 100) {
+                    continue;
+                }
+            }
+
+            const auto sample = create_encoder_sample(state);
+            TimestampedPayloadFrame frame;
+            frame.hostTimestampNs =
+                queuedSample.hostTimestampNs == 0 ? currentSystemTimeNs() : queuedSample.hostTimestampNs;
+            const auto *sampleBytes = reinterpret_cast<const std::byte *>(&sample);
+            frame.payload.assign(sampleBytes, sampleBytes + sizeof(sample));
+            batchFrames.push_back(std::move(frame));
+        }
+        emitTimestampedBatch(&encoderRuntime.timestampSmoothing, &batchFrames, emitFrame);
+    };
+
+    drainImuRuntime(rightImu, rightPendingWrites);
+    drainImuRuntime(leftImu, leftPendingWrites);
+    drainEncoderRuntime(rightEncoder, rightPendingWrites);
+    drainEncoderRuntime(leftEncoder, leftPendingWrites);
+
+    rightPendingWrites.stop();
+    leftPendingWrites.stop();
+    if (rightWriterThread.joinable()) {
+        rightWriterThread.join();
+    }
+    if (leftWriterThread.joinable()) {
+        leftWriterThread.join();
+    }
+
     rightWriter.writer.close();
     leftWriter.writer.close();
+    std::cout << "[BatchTimestamp-imu_right] batches=" << rightImu.timestampSmoothing.smoothedBatchCount
+              << ", frames=" << rightImu.timestampSmoothing.smoothedFrameCount << std::endl;
+    std::cout << "[BatchTimestamp-imu_left] batches=" << leftImu.timestampSmoothing.smoothedBatchCount
+              << ", frames=" << leftImu.timestampSmoothing.smoothedFrameCount << std::endl;
+    std::cout << "[BatchTimestamp-encoder_right] batches=" << rightEncoder.timestampSmoothing.smoothedBatchCount
+              << ", frames=" << rightEncoder.timestampSmoothing.smoothedFrameCount << std::endl;
+    std::cout << "[BatchTimestamp-encoder_left] batches=" << leftEncoder.timestampSmoothing.smoothedBatchCount
+              << ", frames=" << leftEncoder.timestampSmoothing.smoothedFrameCount << std::endl;
+    std::cout << "[SensorWriteQueue-right] max_backlog=" << rightPendingWrites.maxObservedBacklog << std::endl;
+    std::cout << "[SensorWriteQueue-left] max_backlog=" << leftPendingWrites.maxObservedBacklog << std::endl;
     std::cout << "Right MCAP log saved to " << rightWriter.outputFile << std::endl;
     std::cout << "Left MCAP log saved to " << leftWriter.outputFile << std::endl;
     return 0;

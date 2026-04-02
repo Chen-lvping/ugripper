@@ -8,7 +8,7 @@
 - 主控制链路已经收口到 `build/src/record_runtime/record_runtime`，`run_record.sh` 负责等待数据盘、维护 v1 风格运行日志，并拉起该二进制。
 - 默认录制产物为 **2 路主相机 + 2 路 stereo + 4 路触觉相机 + 左右两份传感器 MCAP**。
 - HMI 按键、RGB 灯效、提示音、pre/post 音频录制、停录校验和双键关机请求都已纳入当前运行时。
-- U 盘流程统一负责 `deb` 升级、`config.txt` 导入、标定数据导入和 encoder 零位校准触发。
+- U 盘流程统一负责 `deb` 升级、`config.txt` 导入、标定数据导入和 encoder 零位校准触发；当前自动安装名单已覆盖 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint` 与 `device-ota-mender`，并会在整批安装完成后通过 PulseAudio 播放 `upgrade_completed.wav`。
 
 ## 2. 安装布局与入口
 - 安装目录：`/opt/ugripper`
@@ -28,12 +28,12 @@
 | 薄壳启动脚本 | `run_record.sh` | 切到安装目录、等待 `/mnt/data_disk` 可写、维护本地 `/tmp` 到 `/mnt/data_disk/logs` 的增量日志同步，再拉起 `record_runtime` | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/umi_sys_<sn>_<date>.log` |
 | 主运行时 | `build/src/record_runtime/record_runtime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
 | 相机录制 | `build/src/camera_recorder/camera_recorder` | 普通录制模式下负责主摄/触觉会话录制；`--stereo-daemon` 模式下负责双目常驻预热、热插拔恢复与 session finalize | 8 路 `mkv`（默认） |
-| 传感器录制 | `build/src/sensor_recorder/sensor_recorder` | 录制左右 IMU/encoder，分别输出 MCAP | `sensor_data_left.mcap`、`sensor_data_right.mcap` |
+| 传感器录制 | `build/src/sensor_recorder/sensor_recorder` | 录制左右 IMU/encoder，按“采样入队 + 每侧独立 MCAP 写线程”分别输出 MCAP | `sensor_data_left.mcap`、`sensor_data_right.mcap` |
 | HMI 类库 | `src/gripper_hmi` | 读取夹爪按键，并在驱动内部以单线程 owner 线程完成状态查询、灯效生成与 RGB 指令发送；默认由状态机切灯效，必要时仍可直接下发 RGB；当前也提供 SN 与 1024-byte 标定参数读写 API | 按键快照、RGB 指令、SN/标定参数读写 |
 | 音频播放 | `audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 优先从受支持 USB 耳机麦克风录音，无耳机时回退系统默认 source，供 pre/post 处理链路使用 | 临时 wav 文件 |
 | 数据盘挂载 | `config/99-fixed-usb-map.rules` | 限定允许物理 USB 口，使用 `systemd-mount` 将数据盘挂到 `/mnt/data_disk`，并在同一 udev 事件里拉起 updater | `/mnt/data_disk`、`usb-auto-update@<dev>.service` |
-| USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级、配置导入、标定数据导入、encoder 校准触发；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload | `/etc/environment`、`calibration.json`、夹爪 HMI |
+| USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级、配置导入、标定数据导入、encoder 校准触发；当前会按固定名单自动安装 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`，全部安装完成后再通过 PulseAudio 播放 `upgrade_completed.wav`；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload | `/etc/environment`、`calibration.json`、夹爪 HMI |
 | 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、复用 `/mnt/data_disk` 触发左右编码器并行 zeroing、恢复服务 | `build/src/sensor_recorder/zeroing` |
 
 ## 4. 启动链路
@@ -137,9 +137,12 @@
   - 左手：`/dev/left_imu`、`/dev/left_encoder`
 - 启动阶段会并发初始化左右 IMU 和左右 encoder，减少首样本被串行初始化链路拉长。
 - IMU 配置阶段保留固定 settle wait，但已从旧的长等待收敛到更短窗口，优先压缩起录前空转时间。
+- IMU 与 encoder 当前都会先按“解析/读取后入本地队列 -> 主循环批量消费 -> 每侧写线程落 MCAP”的方式输出；主循环不再直接同步阻塞 `McapWriter::write`。
+- 左右 `sensor_data_*.mcap` 现各自由单独写线程落盘，降低 chunk 压缩或磁盘抖动对采样节奏的反压影响；若写队列持续堆积，日志会输出 backlog warning 便于现场判断是否存在写盘瓶颈。
 - 输出拆成两份 MCAP：
   - `sensor_data_right.mcap`
   - `sensor_data_left.mcap`
+- IMU / encoder 的 MCAP 时间戳当前默认沿用主机侧原始样本时间；若主循环一次从本地缓冲区取到多帧样本，则认为出现了缓冲区 burst，会以该批最后一帧的主机时间为锚点，按各自名义频率（IMU `200Hz`、encoder `1kHz`）向前回填这批样本的伪时间戳，尽量消除追赶帧导致的时间轴挤压。
 - encoder 连接会优先尝试 `1Mbps`，失败后回退 `115200`。
 
 ### 6.4 停止录制
@@ -264,11 +267,18 @@
 
 ### 9.3 U 盘支持内容
 - 主包升级：根目录放置 `ugripper_*_arm64*.deb`。
-- updater 自升级：根目录放置 `ugripper-usb-updater*.deb`。
+- 自动安装名单：
+  - `ugripper-usb-updater`
+  - `ugripper`
+  - `bluetooth-gatt-server`
+  - `databot-device-joint`
+  - `device-ota-mender`
+- updater 自升级：根目录放置 `ugripper-usb-updater*.deb`；若本次先装的是新版 updater，安装后的新脚本会在同一次插盘流程里继续按最新名单扫描剩余 `.deb`。
 - 配置导入：根目录 `config.txt`。
 - 标定数据导入：`ugripper_calib/<DEVICE_SN>/`，通过文件名后缀 `_left` / `_right` 区分左右主相机 `camchain`；对应夹爪侧 RGB/stereo/IMU payload 则按现场读出的 gripper SN 文本在该目录下递归匹配，优先 `.bin`，其次包含 `summary/imucam` 关键词的 `.md` 或当前 raw 目录（`rgb_video_ros-camchain.yaml + output-results-imucam.txt`），并按 `rgb_video_ros_imucam_parameter_summary.md` 口径生成 `1024-byte` 对齐数据结构；当前固件写入时固定补满 `64 x 16B` 传输窗口。
 - encoder 零位校准触发：根目录 `calibration.txt`。
 
+- 安装完成提示音：当本次 U 盘里实际需要升级的目标软件包全部处理结束后，`usb_auto_update.sh` 会直接从新安装的 `/opt/ugripper/audio*/upgrade_completed.wav` 里选取对应语言资源，并以 `paplay` + PulseAudio 播放升级完成提示音；当前不要求自动安装名单里的包必须全部同时出现在 U 盘。若现场没有可用 PulseAudio sink，则只记日志，不把安装流程判失败。
 ### 9.4 U 盘同次插入顺序
 当同一次 U 盘插入同时包含 `config.txt`、`ugripper_calib/` 和 `calibration.txt` 时，当前顺序是：
 1. 导入 `config.txt`
@@ -276,7 +286,10 @@
 3. 只有当本次目标侧都完成 gripper SN 匹配后，才开始写入对应夹爪的整套 RGB/stereo/IMU 标定；任一侧匹配失败或写入失败时，本次不会更新持久化 `calibration.json`
 4. 左右夹爪标定都写入成功后，再原子替换持久化 `calibration.json` 中本次目标侧的主相机、stereo 与 IMU payload 子集；缺失的一侧保持原值
 5. 若存在 `calibration.txt`，则跳过中间重启，直接进入左右编码器并行校准流程
-6. 校准完成后恢复 `ugripper.service`
+6. 若未触发 `calibration.txt`，则开始按固定名单依次处理 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender` 的 `.deb`；每个包都会先按 Debian 包名读取版本，U 盘内若存在多个候选文件则取最高版本，已安装版本不低于 U 盘版本时跳过
+7. 若 updater 在第 6 步先完成自升级，则安装后的新脚本会在同一次插盘流程里继续执行剩余自动安装名单，避免必须二次插盘才能让新名单生效
+8. 全部目标软件包安装完成后，若新主包已提供 `upgrade_completed.wav` 且现场存在可用 PulseAudio sink，则播放升级完成提示音
+9. 恢复 `ugripper.service`
 
 ### 9.5 安装脚本与网络行为
 `pack_script/postinst` 当前会：

@@ -24,13 +24,12 @@ void copyBytes(void *dst, const void *src, unsigned int len) {
 }
 
 void unpackReport(Im648ProtocolContext *ctx, U8 *buf, U8 data_len) {
-    if (ctx == nullptr || ctx->dataPtr == nullptr || ctx->dataUpdatedPtr == nullptr ||
-        ctx->dataMutex == nullptr || data_len < 7) {
+    if (ctx == nullptr || data_len < 7) {
         return;
     }
 
     dmbot_serial::IM648_Data next;
-    {
+    if (ctx->dataPtr != nullptr && ctx->dataMutex != nullptr) {
         std::lock_guard<std::mutex> lock(*ctx->dataMutex);
         next = *ctx->dataPtr;
     }
@@ -156,10 +155,15 @@ void unpackReport(Im648ProtocolContext *ctx, U8 *buf, U8 data_len) {
                          std::chrono::system_clock::now().time_since_epoch())
                          .count();
 
-    {
+    if (ctx->dataPtr != nullptr && ctx->dataMutex != nullptr) {
         std::lock_guard<std::mutex> lock(*ctx->dataMutex);
         *ctx->dataPtr = next;
+    }
+    if (ctx->dataUpdatedPtr != nullptr) {
         *ctx->dataUpdatedPtr = true;
+    }
+    if (ctx->sampleCallback != nullptr) {
+        ctx->sampleCallback(next, ctx->sampleUserData);
     }
 }
 
@@ -183,6 +187,8 @@ void im648_InitContext(Im648ProtocolContext *ctx,
                        dmbot_serial::IM648_Data *data_ptr,
                        bool *data_updated_ptr,
                        std::mutex *data_mutex,
+                       Im648SampleCallback sample_callback,
+                       void *sample_user_data,
                        Im648WriteCallback write_callback,
                        void *write_user_data) {
     if (ctx == nullptr) {
@@ -193,6 +199,8 @@ void im648_InitContext(Im648ProtocolContext *ctx,
     ctx->dataPtr = data_ptr;
     ctx->dataUpdatedPtr = data_updated_ptr;
     ctx->dataMutex = data_mutex;
+    ctx->sampleCallback = sample_callback;
+    ctx->sampleUserData = sample_user_data;
     ctx->writeCallback = write_callback;
     ctx->writeUserData = write_user_data;
 }

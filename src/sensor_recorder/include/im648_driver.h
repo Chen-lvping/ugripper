@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <iostream>
 #include <libserialport.h>
 #include <mutex>
@@ -39,11 +40,13 @@ public:
     bool tryConsumeData(IM648_Data *out);
 
 private:
+    static void sampleThunk(const IM648_Data &sample, void *user_data);
     static int writeThunk(const U8 *buf, int len, void *user_data);
 
     void initSerial();
     void configureDevice();
     void readThread();
+    void handleParsedSample(const IM648_Data &sample);
     int write(const U8 *buf, int len);
 
     std::string port_name_;
@@ -55,6 +58,8 @@ private:
     std::mutex data_mutex_;
     IM648_Data data_;
     bool data_updated_ = false;
+    std::deque<IM648_Data> pending_samples_;
+    size_t dropped_samples_ = 0;
     Im648ProtocolContext protocol_ctx_{};
 };
 

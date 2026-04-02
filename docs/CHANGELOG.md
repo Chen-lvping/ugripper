@@ -4,13 +4,10 @@
 >
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
-## Unreleased - 2026-03-31
-- 明确 UMI `1024-byte` 标定 payload 当前实际覆盖的字段集合：RGB 主相机、双目 `cam0/cam1`、`cam->imu` 外参、IMU 离散噪声/随机游走以及残差统计，并在结构头文件中补充固定 offset 常量与偏移校验。
-- `generate_gripper_calibration_bin.py` 现支持从 summary markdown 读取显式 `calibration_data_format_version` / `data_format_version`，便于维护带版本号的参考参数文档。
-- `gripper_hmi_test --read-calib` 的摘要输出补齐 RGB 畸变、双目焦距/主点/畸变、两组 `T_ic`、IMU 离散噪声与残差 `mean/median/stddev`，便于现场直接确认 bin 中实际写入了哪些 stereo / IMU 参数。
-- 重写 `docs/umi_calibration_protocol.md`：将 bin byte 映射表前置，明确每个 offset 存储的参数、来源字段以及当前未单独占位存储的原始标定结果；同时修正读标定数据帧的校验口径说明。
-- 重写 `ugripper_calib/rgb_video_ros_imucam_parameter_summary.md`：改成与当前 `0x00010000` payload 对齐的参考文档，明确数据格式版本，并完整列出当前实际会写入 bin 的 RGB / stereo / IMU / extrinsics / residuals 参数。
-- `import_camera_calibration.sh` 现按 `rgb_video_ros_imucam_parameter_summary.md` 的 payload 子集把每侧 stereo / board IMU 信息同步写入 host `calibration.json`：新增 `observation.images.left_stereo/right_stereo`、`observation.imu.left_imu/right_imu`，并在 `calibration_info.stereo_imu_bundles.<side>` 中保留每侧 `cam0/cam1`、`extrinsics`、`imu0` 与 `residuals` 摘要；episode 侧同步保留这些字段，不再依赖旧 `fays_*` 占位块。
+## v1.2.8 - 2026-04-02
+- U 盘自动安装名单扩展为 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`；根目录存在多个同包候选文件时会自动选择最高版本，并修复 updater 自升级后继续接力安装剩余名单的流程。当前不要求名单内包全部同时出现在 U 盘，只要本次实际需要升级的包都处理完成，就会播报升级完成提示。
+- 全部目标软件包安装完成后，USB 安装流程会直接使用新主包中的 `upgrade_completed.wav` 通过 PulseAudio 播放完成提示；若现场没有可用 sink，则只记日志，不把安装流程判失败。
+- 传感器写盘链路调整为“采样入队 + 每侧独立 MCAP 写线程”，并在出现 burst 消费时按名义频率回填局部时间戳，降低写盘抖动对 IMU / encoder 时间轴的影响。
 
 ## v1.2.7 - 2026-03-27
 - 新增 `standalone/gripper_hmi_toolkit/` 独立交付目录：提供仅包含 SN / 标定 bin 读写能力的最小 HMI 工具包，内含可独立编译的 C++ 库与 CLI、无第三方依赖的 Python 单文件脚本、README、C++/Python 例程以及 `1024-byte` 标定样例，支持通过 `--port` 指定目标串口并切换标定结束命令模式，便于脱离主仓录制链路做现场协议联调。
