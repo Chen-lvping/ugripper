@@ -1,5 +1,6 @@
 #include "im648_driver.h"
 #include "encoder_driver.h"
+#include "motion_alert_ipc.h"
 
 #include <mcap/writer.hpp>
 
@@ -12,10 +13,12 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
+#include <fcntl.h>
 #include <iostream>
 #include <memory>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -25,6 +28,12 @@ std::atomic<bool> g_stopFlag(false);
 constexpr uint64_t kNanosecondsPerMicrosecond = 1000ULL;
 constexpr uint64_t kImuNominalPeriodNs = 5'000'000ULL;
 constexpr uint64_t kEncoderNominalPeriodNs = 1'000'000ULL;
+constexpr double kGravityMps2 = 9.80665;
+constexpr double kMotionAccelThresholdMps2 = 8.0;
+constexpr double kMotionGyroThresholdRadps = 1.6;
+constexpr uint64_t kMotionDebounceMs = 50;
+constexpr uint64_t kMotionCooldownMs = 100;
+constexpr uint64_t kMotionMinAlertDurationMs = 500;
 
 struct ImuSample {
     float qx;
@@ -79,6 +88,76 @@ struct ImuRuntime {
     BatchTimestampSmoothingState timestampSmoothing;
     uint32_t sequence = 0;
     bool firstSampleLogged = false;
+};
+
+struct MotionSample {
+    uint64_t steadyTimeMs = 0;
+    double gyroMagnitude = 0.0;
+    double accelExcess = 0.0;
+    bool overGyro = false;
+    bool overAccel = false;
+};
+
+struct MotionAlertState {
+    bool alertActive = false;
+    uint64_t overThresholdSinceMs = 0;
+    uint64_t lastTransitionMs = 0;
+};
+
+struct MotionQueuedSample {
+    std::string label;
+    dmbot_serial::IM648_Data imuData;
+};
+
+struct MotionEventQueue {
+    std::mutex mutex;
+    std::condition_variable cv;
+    std::deque<MotionQueuedSample> queue;
+    bool stopped = false;
+    size_t droppedSamples = 0;
+    static constexpr size_t kMaxQueueSize = 4096;
+
+    void push(MotionQueuedSample &&sample) {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            if (stopped) {
+                return;
+            }
+            if (queue.size() >= kMaxQueueSize) {
+                queue.pop_front();
+                ++droppedSamples;
+                if (droppedSamples == 1 || (droppedSamples % 256) == 0) {
+                    std::cerr << "[MotionAlertQueue] dropped oldest samples=" << droppedSamples << std::endl;
+                }
+            }
+            queue.push_back(std::move(sample));
+        }
+        cv.notify_one();
+    }
+
+    bool pop(MotionQueuedSample *sample) {
+        if (sample == nullptr) {
+            return false;
+        }
+
+        std::unique_lock<std::mutex> lock(mutex);
+        cv.wait(lock, [this] { return stopped || !queue.empty(); });
+        if (queue.empty()) {
+            return false;
+        }
+
+        *sample = std::move(queue.front());
+        queue.pop_front();
+        return true;
+    }
+
+    void stop() {
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            stopped = true;
+        }
+        cv.notify_all();
+    }
 };
 
 struct EncoderRuntime {
@@ -168,6 +247,59 @@ uint64_t currentSystemTimeNs() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::system_clock::now().time_since_epoch())
             .count());
+}
+
+uint64_t currentSteadyMs() {
+    return static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
+ugripper::MotionAlertReasonCode motionAlertReasonCode(bool overAccel, bool overGyro) {
+    if (overAccel && overGyro) {
+        return ugripper::MotionAlertReasonCode::AccelAndGyro;
+    }
+    if (overAccel) {
+        return ugripper::MotionAlertReasonCode::Accel;
+    }
+    if (overGyro) {
+        return ugripper::MotionAlertReasonCode::Gyro;
+    }
+    return ugripper::MotionAlertReasonCode::None;
+}
+
+ugripper::MotionAlertSide motionAlertSideForLabel(const std::string &label) {
+    if (label == "left") {
+        return ugripper::MotionAlertSide::Left;
+    }
+    if (label == "right") {
+        return ugripper::MotionAlertSide::Right;
+    }
+    return ugripper::MotionAlertSide::Unknown;
+}
+
+void emitMotionAlertStateChange(int motionAlertFd,
+                                const std::string &label,
+                                const MotionSample &sample,
+                                bool active,
+                                ugripper::MotionAlertReasonCode reason) {
+    if (motionAlertFd < 0) {
+        return;
+    }
+
+    ugripper::MotionAlertMessage message;
+    message.side = static_cast<uint8_t>(motionAlertSideForLabel(label));
+    message.reason = static_cast<uint8_t>(reason);
+    message.active = active ? 1 : 0;
+    message.gyroMagnitude = static_cast<float>(sample.gyroMagnitude);
+    message.accelExcess = static_cast<float>(sample.accelExcess);
+    message.steadyTimeMs = sample.steadyTimeMs;
+
+    const ssize_t bytesWritten = write(motionAlertFd, &message, sizeof(message));
+    if (bytesWritten < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        close(motionAlertFd);
+    }
 }
 
 BatchTimestampSmoothingState createBatchTimestampSmoothingState(const std::string &label,
@@ -423,7 +555,31 @@ int main(int argc, char *argv[]) {
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
-    fs::path outputDir = (argc > 1) ? fs::path(argv[1]) : fs::path(".");
+    fs::path outputDir = ".";
+    int motionAlertFd = -1;
+    bool outputDirSet = false;
+    for (int index = 1; index < argc; ++index) {
+        const std::string argument = argv[index];
+        if (argument == "--motion-alert-fd" && index + 1 < argc) {
+            motionAlertFd = std::stoi(argv[++index]);
+            continue;
+        }
+        if (!outputDirSet && !argument.empty() && argument[0] != '-') {
+            outputDir = fs::path(argument);
+            outputDirSet = true;
+            continue;
+        }
+        std::cerr << "Unknown argument: " << argument << std::endl;
+        return -1;
+    }
+
+    if (motionAlertFd >= 0) {
+        const int flags = fcntl(motionAlertFd, F_GETFL, 0);
+        if (flags >= 0) {
+            fcntl(motionAlertFd, F_SETFL, flags | O_NONBLOCK);
+        }
+    }
+
     std::error_code ec;
     if (!fs::exists(outputDir)) {
         fs::create_directories(outputDir, ec);
@@ -446,6 +602,9 @@ int main(int argc, char *argv[]) {
     ImuRuntime leftImu{leftConfig, nullptr, mcap::Channel("imu_left", "binary", leftWriter.imuSchema.id)};
     EncoderRuntime rightEncoder{rightConfig, nullptr, mcap::Channel("encoder_right", "binary", rightWriter.encoderSchema.id)};
     EncoderRuntime leftEncoder{leftConfig, nullptr, mcap::Channel("encoder_left", "binary", leftWriter.encoderSchema.id)};
+    MotionAlertState rightMotionAlert;
+    MotionAlertState leftMotionAlert;
+    MotionEventQueue motionEventQueue;
     rightImu.timestampSmoothing = createBatchTimestampSmoothingState("imu_right", kImuNominalPeriodNs);
     leftImu.timestampSmoothing = createBatchTimestampSmoothingState("imu_left", kImuNominalPeriodNs);
     rightEncoder.timestampSmoothing = createBatchTimestampSmoothingState("encoder_right", kEncoderNominalPeriodNs);
@@ -460,6 +619,68 @@ int main(int argc, char *argv[]) {
 
     std::thread rightWriterThread(sideWriterThreadFunc, &rightWriter, &rightPendingWrites);
     std::thread leftWriterThread(sideWriterThreadFunc, &leftWriter, &leftPendingWrites);
+    std::thread motionWorkerThread([&]() {
+        const auto processMotionSample = [&](const std::string &label,
+                                             const dmbot_serial::IM648_Data &imuData,
+                                             MotionAlertState *alertState) {
+            if (alertState == nullptr) {
+                return;
+            }
+
+            MotionSample sample;
+            sample.steadyTimeMs = currentSteadyMs();
+            sample.gyroMagnitude = std::sqrt(
+                static_cast<double>(imuData.gyrox) * imuData.gyrox +
+                static_cast<double>(imuData.gyroy) * imuData.gyroy +
+                static_cast<double>(imuData.gyroz) * imuData.gyroz);
+            const double accelMagnitude = std::sqrt(
+                static_cast<double>(imuData.accx) * imuData.accx +
+                static_cast<double>(imuData.accy) * imuData.accy +
+                static_cast<double>(imuData.accz) * imuData.accz);
+            sample.accelExcess = std::fabs(accelMagnitude - kGravityMps2);
+            sample.overGyro = sample.gyroMagnitude >= kMotionGyroThresholdRadps;
+            sample.overAccel = sample.accelExcess >= kMotionAccelThresholdMps2;
+
+            const bool overThreshold = sample.overGyro || sample.overAccel;
+            const auto reason = motionAlertReasonCode(sample.overAccel, sample.overGyro);
+
+            if (overThreshold) {
+                if (alertState->overThresholdSinceMs == 0) {
+                    alertState->overThresholdSinceMs = sample.steadyTimeMs;
+                }
+                if (!alertState->alertActive &&
+                    (sample.steadyTimeMs - alertState->overThresholdSinceMs) >= kMotionDebounceMs &&
+                    (alertState->lastTransitionMs == 0 ||
+                     (sample.steadyTimeMs - alertState->lastTransitionMs) >= kMotionCooldownMs)) {
+                    alertState->alertActive = true;
+                    alertState->lastTransitionMs = sample.steadyTimeMs;
+                    emitMotionAlertStateChange(motionAlertFd, label, sample, true, reason);
+                }
+                return;
+            }
+
+            alertState->overThresholdSinceMs = 0;
+            if (alertState->alertActive &&
+                (sample.steadyTimeMs - alertState->lastTransitionMs) >= kMotionMinAlertDurationMs) {
+                alertState->alertActive = false;
+                alertState->lastTransitionMs = sample.steadyTimeMs;
+                emitMotionAlertStateChange(
+                    motionAlertFd,
+                    label,
+                    sample,
+                    false,
+                    ugripper::MotionAlertReasonCode::Recovered);
+            }
+        };
+
+        MotionQueuedSample queuedSample;
+        while (motionEventQueue.pop(&queuedSample)) {
+            processMotionSample(
+                queuedSample.label,
+                queuedSample.imuData,
+                queuedSample.label == "left" ? &leftMotionAlert : &rightMotionAlert);
+        }
+    });
 
     std::cout << "Opening dual-arm sensors: "
               << "right(imu=" << rightConfig.imuPort << ", encoder=" << rightConfig.encoderPort << ") "
@@ -522,6 +743,7 @@ int main(int argc, char *argv[]) {
             dmbot_serial::IM648_Data imuData;
             while (imuRuntime.driver->tryConsumeData(&imuData)) {
                 const auto sample = create_imu_sample(imuData);
+                motionEventQueue.push(MotionQueuedSample{imuRuntime.config.label, imuData});
                 TimestampedPayloadFrame frame;
                 frame.hostTimestampNs = imuData.timestamp * kNanosecondsPerMicrosecond;
                 if (frame.hostTimestampNs == 0) {
@@ -701,6 +923,11 @@ int main(int argc, char *argv[]) {
     drainEncoderRuntime(rightEncoder, rightPendingWrites);
     drainEncoderRuntime(leftEncoder, leftPendingWrites);
 
+    motionEventQueue.stop();
+    if (motionWorkerThread.joinable()) {
+        motionWorkerThread.join();
+    }
+
     rightPendingWrites.stop();
     leftPendingWrites.stop();
     if (rightWriterThread.joinable()) {
@@ -724,5 +951,8 @@ int main(int argc, char *argv[]) {
     std::cout << "[SensorWriteQueue-left] max_backlog=" << leftPendingWrites.maxObservedBacklog << std::endl;
     std::cout << "Right MCAP log saved to " << rightWriter.outputFile << std::endl;
     std::cout << "Left MCAP log saved to " << leftWriter.outputFile << std::endl;
+    if (motionAlertFd >= 0) {
+        close(motionAlertFd);
+    }
     return 0;
 }
