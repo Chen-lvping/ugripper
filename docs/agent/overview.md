@@ -8,7 +8,7 @@
 - 主控制链路已经收口到 `build/src/record_runtime/record_runtime`，`run_record.sh` 负责等待数据盘、维护 v1 风格运行日志，并拉起该二进制。
 - 默认录制产物为 **2 路主相机 + 2 路 stereo + 4 路触觉相机 + 左右两份传感器 MCAP**。
 - HMI 按键、RGB 灯效、提示音、pre/post 音频录制、停录校验和双键关机请求都已纳入当前运行时。
-- U 盘流程统一负责 `deb` 升级、`config.txt` 导入、标定数据导入和 encoder 零位校准触发；当前自动安装名单已覆盖 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint` 与 `device-ota-mender`，并会在整批安装完成后通过 PulseAudio 播放 `upgrade_completed.wav`。
+- U 盘流程统一负责 `deb` 升级/重装、`config.txt` 导入、标定数据导入和 encoder 零位校准触发；当前自动安装名单已覆盖 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint` 与 `device-ota-mender`，并会在整批安装完成后通过 PulseAudio 播放 `upgrade_completed.wav`。
 
 ## 2. 安装布局与入口
 - 安装目录：`/opt/ugripper`
@@ -33,7 +33,7 @@
 | 音频播放 | `audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 优先从受支持 USB 耳机麦克风录音，无耳机时回退系统默认 source，供 pre/post 处理链路使用 | 临时 wav 文件 |
 | 数据盘挂载 | `config/99-fixed-usb-map.rules` | 限定允许物理 USB 口，使用 `systemd-mount` 将数据盘挂到 `/mnt/data_disk`，并在同一 udev 事件里拉起 updater | `/mnt/data_disk`、`usb-auto-update@<dev>.service` |
-| USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级、配置导入、标定数据导入、encoder 校准触发；当前会按固定名单自动安装 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`，全部安装完成后再通过 PulseAudio 播放 `upgrade_completed.wav`；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload | `/etc/environment`、`calibration.json`、夹爪 HMI |
+| USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级/重装、配置导入、标定数据导入、encoder 校准触发；当前会按固定名单自动安装 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`，只要 U 盘根目录存在名单内包就执行安装，同版本也会强制重装；全部安装完成后再通过 PulseAudio 播放 `upgrade_completed.wav`；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload | `/etc/environment`、`calibration.json`、夹爪 HMI |
 | 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、复用 `/mnt/data_disk` 触发左右编码器并行 zeroing、恢复服务 | `build/src/sensor_recorder/zeroing` |
 
 ## 4. 启动链路
@@ -55,6 +55,7 @@
 - UMI 标定写入当前增加了异常恢复口径：若写入阶段收到 `0xFE`（当前 chunk 零数据校验错误），驱动会优先重发当前 chunk；若连续出现 `0xFE`，或后续读 SN / 读标定返回 `0xF3/0xFE`，则会发送一次 `AbortWriteInData` 清理固件残留写入状态后再重试。
 11. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
 12. `record_runtime` 初始化阶段会额外拉起一个常驻 stereo warmup daemon；其在空闲态持续维持左右双目 MJPEG 取流预热，并通过 `/tmp/umi_stereo_camera_status.json` 暴露 `ready/not-ready` 状态。
+13. `record_runtime` 当前按 recorder 进程组而不是单一父 PID 回收 `camera_recorder` / `sensor_recorder`；当停录或异常收尾时，会向整组发送退出信号，降低内部 `ffmpeg`/`gst` 子进程残留导致后续卡死的概率。
 
 ## 5. 状态机与按键行为
 ### 5.1 空闲态与阈值
@@ -246,6 +247,7 @@
 - 当前监控项包括：`/mnt/data_disk` 是否仍可写、8 路相机设备节点、左右 IMU/encoder 设备节点、stereo daemon `ready/not-ready` 状态，以及左右 HMI 串口是否仍连接、输入侧 HMI 是否持续有响应。
 - 发现磁盘异常时进入 `ERROR_1`；发现关键设备节点缺失、HMI 断连或 HMI 长时间无响应时进入 `ERROR_2`，并通过音频守护进程播报 `error`。
 - 若异常恢复：录制中仅恢复 `RECORDING` 灯效，不打断当前录制；空闲态恢复 `READY` 并补播 `ready`。
+- `camera_recorder` 仍保持“单路 recorder 失败不立即主动终止整次录制”的容错语义；本次实现只加强停录阶段的子进程组回收与 stop 日志，不把启动期短暂抖动直接升级为全量停录。
 
 ## 9. 配置、安装与 U 盘流程
 ### 9.1 当前主要配置入口
@@ -279,7 +281,7 @@
 - 配置导入：根目录 `config.txt`。
 - 标定数据导入：`ugripper_calib/<DEVICE_SN>/`，通过文件名后缀 `_left` / `_right` 区分左右主相机 `camchain`；对应夹爪侧 RGB/stereo/IMU payload 则按现场读出的 gripper SN 文本在该目录下递归匹配，优先 `.bin`，其次包含 `summary/imucam` 关键词的 `.md` 或当前 raw 目录（`rgb_video_ros-camchain.yaml + output-results-imucam.txt`），并按 `rgb_video_ros_imucam_parameter_summary.md` 口径生成 `1024-byte` 对齐数据结构；当前固件写入时固定补满 `64 x 16B` 传输窗口。
 - encoder 零位校准触发：根目录 `calibration.txt`。
-- 安装完成提示音：当本次 U 盘里实际需要升级的目标软件包全部处理结束后，`usb_auto_update.sh` 会直接从新安装的 `/opt/ugripper/audio*/upgrade_completed.wav` 里选取对应语言资源，并以 `paplay` + PulseAudio 播放升级完成提示音；当前不要求自动安装名单里的包必须全部同时出现在 U 盘。若现场没有可用 PulseAudio sink，则只记日志，不把安装流程判失败。
+- 安装完成提示音：当本次 U 盘里实际出现的目标软件包全部安装/重装完成后，`usb_auto_update.sh` 会直接从新安装的 `/opt/ugripper/audio*/upgrade_completed.wav` 里选取对应语言资源，并以 `paplay` + PulseAudio 播放升级完成提示音；当前不要求自动安装名单里的包必须全部同时出现在 U 盘。若现场没有可用 PulseAudio sink，则只记日志，不把安装流程判失败。
 
 ### 9.4 U 盘同次插入顺序
 当同一次 U 盘插入同时包含 `config.txt`、`ugripper_calib/` 和 `calibration.txt` 时，当前顺序是：
@@ -288,7 +290,7 @@
 3. 只有当本次目标侧都完成 gripper SN 匹配后，才开始写入对应夹爪的整套 RGB/stereo/IMU 标定；任一侧匹配失败或写入失败时，本次不会更新持久化 `calibration.json`
 4. 左右夹爪标定都写入成功后，再原子替换持久化 `calibration.json` 中本次目标侧的主相机、stereo 与 IMU payload 子集；缺失的一侧保持原值
 5. 若存在 `calibration.txt`，则跳过中间重启，直接进入左右编码器并行校准流程
-6. 若未触发 `calibration.txt`，则开始按固定名单依次处理 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender` 的 `.deb`；每个包都会先按 Debian 包名读取版本，U 盘内若存在多个候选文件则取最高版本，已安装版本不低于 U 盘版本时跳过
+6. 若未触发 `calibration.txt`，则开始按固定名单依次处理 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender` 的 `.deb`；每个包都会先按 Debian 包名读取版本，U 盘内若存在多个候选文件则取最高版本；只要名单内包在 U 盘根目录存在，就执行安装，同版本也会强制重装
 7. 若 updater 在第 6 步先完成自升级，则安装后的新脚本会在同一次插盘流程里继续执行剩余自动安装名单，避免必须二次插盘才能让新名单生效
 8. 全部目标软件包安装完成后，若新主包已提供 `upgrade_completed.wav` 且现场存在可用 PulseAudio sink，则播放升级完成提示音
 9. 恢复 `ugripper.service`
@@ -311,7 +313,8 @@
 数据盘挂载当前行为：
 - `config/99-fixed-usb-map.rules` 会在允许的物理 USB 口上直接调用 `systemd-mount --owner=ubuntu --options=noatime <dev> /mnt/data_disk`，固定挂载点仍然是 `/mnt/data_disk`。
 - 同一条 udev 规则会通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@<dev>.service`；`usb_auto_update.sh` 只会在确认 `/mnt/data_disk` 当前挂载源就是该设备后，才扫描 deb / config / calibration 文件。
-- 允许的 USB 分区在 `remove` 事件里会显式对 `/mnt/data_disk` 执行卸载清理，避免拔盘后残留 stale mount；`run_record.sh` 也会把“挂载点只读”或“挂载源设备节点已不存在”视为未就绪状态。
+- 允许的 USB 分区在 `remove` 事件里会显式对 `/mnt/data_disk` 执行卸载清理；此外还保留了 USB block `remove` 的兜底触发，尽量覆盖 hub 断链或热插拔时分区级事件不完整的场景，避免拔盘后残留 stale mount。
+- `mount_data_disk.sh` 当前除了匹配挂载源设备节点，还会把“挂载点只读”“挂载源设备节点已不存在”或“挂载点已不可访问”视为脏状态并优先清理；`run_record.sh` 也会把这类状态视为未就绪。
 
 ### 9.6 网线监测行为
 `auto_calibration/monitor_network.sh` 当前行为：
@@ -404,6 +407,8 @@ PY
   - `camera_crash_capture.sh`：在 `camera_test.sh` 基础上额外持续抓取内核日志、进程、中断与内存信息，适合定位 crash / hang。
   - `testVideoPipe.sh`：快速枚举指定 `/dev/video*` 节点的视频格式能力。
 - 建议从仓库根目录显式执行 `bash test/scripts/<script>.sh`；详细参数与注意事项见 `test/README.md`。
+- 若现场需要脱离主服务、单独向夹爪 HMI 写入 SN / 标定，可使用 `py_script/hmi_sn_batch_writer.py`：脚本直接读取一个或多个 `.xlsx` 的多 sheet `SN码` 列，支持操作员输入 SN 后 4 位或任意连续片段做唯一匹配，自动扫描 CH9344 相关串口确认可用 HMI 口，并在匹配到目标 SN 后写入 SN 与可选 `1024-byte` 标定 payload。
+- `py_script/hmi_sn_batch_writer.py` 默认会在启动时把自身和本次使用的 `.xlsx` 同步复制到 `/mnt/data_disk/hmi_sn_writer/`；标定源目录可通过 `--calib-root` 指向包含 `.bin`、summary `.md` 或 `rgb_video_ros-camchain.yaml + output-results-imucam.txt` 的目录。若未找到目标 SN 对应标定文件，脚本会只写 SN，并在控制台用黄色提示“未写标定”。
 
 ## 11. 当前使用注意点
 - `config/camera_recorder.yaml` 当前 8 路配置全部默认启用；若现场需要裁剪录制集合，应明确同步调整 `record_runtime` 的 `--only` 参数与 episode 校验清单。

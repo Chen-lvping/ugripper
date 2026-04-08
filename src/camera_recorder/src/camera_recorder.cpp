@@ -1238,6 +1238,10 @@ public:
             }
             std::this_thread::sleep_for(kRecorderStopPollInterval);
         }
+        if (running_) {
+            std::cerr << "[camera_recorder] recorder still not reaped after SIGKILL: "
+                      << config_.name << std::endl;
+        }
         JoinOutputReaderThread();
     }
 

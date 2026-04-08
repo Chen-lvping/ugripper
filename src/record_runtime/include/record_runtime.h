@@ -90,9 +90,11 @@ private:
 
     private:
         bool pollExit(bool blocking);
+        pid_t signalTarget() const;
 
         std::string name_;
         pid_t pid_ = -1;
+        pid_t processGroupId_ = -1;
         int lastExitCode_ = 0;
     };
 

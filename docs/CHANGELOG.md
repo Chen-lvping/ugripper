@@ -4,8 +4,19 @@
 >
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
+## Unreleased
+- 修复 recorder 停录/异常收尾时可能遗留 `ffmpeg`/`gst` 子进程的问题：`record_runtime` 现在按整个进程组回收 `camera_recorder` 与 `sensor_recorder`，降低主摄抖动或 recorder 意外退出后残留录制进程拖住后续录制的概率。
+- 补强 `camera_recorder` 的 stop 日志与输出管道清理路径；在强制 `SIGKILL` 后若子进程仍未被回收，会明确记日志，便于现场继续定位内核态阻塞或设备异常。
+
+## v1.2.9 - 2026-04-03
+- U 盘自动安装流程调整为“名单内包只要出现在 U 盘根目录就执行安装”，不再要求 U 盘版本高于已装版本；同版本会显式走重装，仍保持“同包多个候选取最高版本”和 updater 自升级后同次插盘继续接力安装的行为。
+- 新增 `py_script/hmi_sn_batch_writer.py` 独立现场脚本：可直接读取一个或多个 `.xlsx` 的多 sheet `SN码` 列，支持操作员输入 SN 后 4 位或任意连续片段做唯一匹配。
+- 新脚本会自动扫描 CH9344 相关串口并尝试用 HMI SN 协议探测可用端口，优先命中 `port0` 风格设备；写入成功、失败和“只写 SN 未写标定”都会在控制台用颜色区分。
+- 标定写入侧复用现有 `generate_gripper_calibration_bin.py`：支持按目标 SN 在给定目录中查找 `.bin`、summary `.md` 或 `rgb_video_ros-camchain.yaml + output-results-imucam.txt` 原始标定目录；标定缺失时允许连续只写 SN。
+- 脚本启动时会把自身和所用 `.xlsx` 同步复制到 `/mnt/data_disk/hmi_sn_writer/`，便于现场单独携带和运行。
+
 ## v1.2.8 - 2026-04-02
-- UMI HMI 标定写入新增 `AbortWriteInData` 恢复路径：写标定时收到 `0xFE` 会优先重发当前 chunk；若连续出现 `0xFE`，或后续读 SN / 读标定因上次未正常退出而返回 `0xF3/0xFE`，驱动会先发 abort 清理固件写入状态再重试。
+- UMI HMI 标定写入新增 `AbortWriteInData` 恢复路径：写标定时收到 `0xFE` 会优先重发当前 chunk；若连续出现 `0xFE`，或后续读 SN / 读标定因上次未正常退出而返回 `0xF3/0xFE`，驱动会先发 abort 清理固件残留写入状态再重试。
 - U 盘自动安装名单扩展为 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`；根目录存在多个同包候选文件时会自动选择最高版本，并修复 updater 自升级后继续接力安装剩余名单的流程。当前不要求名单内包全部同时出现在 U 盘，只要本次实际需要升级的包都处理完成，就会播报升级完成提示。
 - 全部目标软件包安装完成后，USB 安装流程会直接使用新主包中的 `upgrade_completed.wav` 通过 PulseAudio 播放完成提示；若现场没有可用 sink，则只记日志，不把安装流程判失败。
 - 双目录制链路调整为“后台常驻 MJPEG 预热 + 会话写最终文件”，停录阶段先冻结本次 session 再逐路 finalize，并把 `stereo_session` 时间信息收口到 `info.json` 供最终校验与对齐使用。

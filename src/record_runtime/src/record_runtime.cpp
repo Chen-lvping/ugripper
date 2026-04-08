@@ -3335,10 +3335,18 @@ bool RecordRuntime::ProcessRunner::start(const std::vector<std::string> &argumen
 
     if (pid_ == 0)
     {
+        setpgid(0, 0);
         execvp(argv[0], argv.data());
         _exit(127);
     }
 
+    if (setpgid(pid_, pid_) != 0 && errno != EACCES)
+    {
+        std::cerr << "[WARN] failed to assign process group for " << name_
+                  << ": " << std::strerror(errno) << std::endl;
+    }
+
+    processGroupId_ = pid_;
     lastExitCode_ = 0;
     return true;
 }
@@ -3377,11 +3385,12 @@ bool RecordRuntime::ProcessRunner::wait(int timeoutMs)
 
 bool RecordRuntime::ProcessRunner::sendSignal(int signalNumber)
 {
-    if (pid_ <= 0)
+    const pid_t target = signalTarget();
+    if (target == 0)
     {
         return false;
     }
-    return kill(pid_, signalNumber) == 0;
+    return kill(target, signalNumber) == 0;
 }
 
 bool RecordRuntime::ProcessRunner::stop(int timeoutMs)
@@ -3391,13 +3400,22 @@ bool RecordRuntime::ProcessRunner::stop(int timeoutMs)
         return true;
     }
 
-    kill(pid_, SIGTERM);
+    if (!sendSignal(SIGTERM) && errno != ESRCH)
+    {
+        std::cerr << "[WARN] failed to send SIGTERM to " << name_
+                  << ": " << std::strerror(errno) << std::endl;
+    }
     if (wait(timeoutMs))
     {
         return true;
     }
 
-    kill(pid_, SIGKILL);
+    std::cerr << "[WARN] " << name_ << " did not exit after SIGTERM, escalating to SIGKILL" << std::endl;
+    if (!sendSignal(SIGKILL) && errno != ESRCH)
+    {
+        std::cerr << "[WARN] failed to send SIGKILL to " << name_
+                  << ": " << std::strerror(errno) << std::endl;
+    }
     pollExit(true);
     return pid_ <= 0;
 }
@@ -3405,6 +3423,7 @@ bool RecordRuntime::ProcessRunner::stop(int timeoutMs)
 void RecordRuntime::ProcessRunner::reset()
 {
     pid_ = -1;
+    processGroupId_ = -1;
     lastExitCode_ = 0;
 }
 
@@ -3416,6 +3435,19 @@ int RecordRuntime::ProcessRunner::lastExitCode() const
 int RecordRuntime::ProcessRunner::pid() const
 {
     return pid_;
+}
+
+pid_t RecordRuntime::ProcessRunner::signalTarget() const
+{
+    if (processGroupId_ > 0)
+    {
+        return -processGroupId_;
+    }
+    if (pid_ > 0)
+    {
+        return pid_;
+    }
+    return 0;
 }
 
 bool RecordRuntime::ProcessRunner::pollExit(bool blocking)
@@ -3446,6 +3478,7 @@ bool RecordRuntime::ProcessRunner::pollExit(bool blocking)
         lastExitCode_ = 128 + WTERMSIG(status);
     }
     pid_ = -1;
+    processGroupId_ = -1;
     return true;
 }
 
