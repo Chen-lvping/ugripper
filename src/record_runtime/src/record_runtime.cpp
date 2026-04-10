@@ -1,4 +1,5 @@
 #include "record_runtime.h"
+#include "motion_alert_ipc.h"
 
 #include <mcap/reader.hpp>
 #include <nlohmann/json.hpp>
@@ -32,8 +33,8 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace {
-constexpr const char *kSessionCameraStreamsCsv = "left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r";
-constexpr const char *kStereoCameraStreamsCsv = "left_stereo,right_stereo";
+constexpr const char *kSessionCameraStreamsCsv = "left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r";
+constexpr const char *kWarmupCameraStreamsCsv = "left_cam_main,right_cam_main,left_stereo,right_stereo";
 constexpr uint64_t kActionDebounceMs = 250;
 constexpr uint64_t kLongPressThresholdMs = 800;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
@@ -1442,11 +1443,13 @@ RecordRuntime::~RecordRuntime()
 {
     requestStop();
     stopRecording(false, "shutdown");
+    stopMotionAlertPipe();
     stopAudioPlayer();
     if (ledController_)
     {
         ledController_->stop();
     }
+    panelManager_.silenceBeep();
     panelManager_.turnOff();
     panelManager_.disconnect();
 }
@@ -1545,6 +1548,7 @@ int RecordRuntime::run()
         maintainAudioPlayer();
         maintainStereoDaemon();
         monitorHardwareHealth();
+        pollMotionAlertPipe();
 
         ButtonSnapshot buttons;
         panelManager_.poll(options_.pollMs, &buttons);
@@ -1571,6 +1575,133 @@ int RecordRuntime::run()
 void RecordRuntime::requestStop()
 {
     stopRequested_.store(true);
+}
+
+bool RecordRuntime::startMotionAlertPipe(int *writeFd)
+{
+    stopMotionAlertPipe();
+    if (writeFd != nullptr)
+    {
+        *writeFd = -1;
+    }
+
+    int pipefd[2] = {-1, -1};
+#ifdef __linux__
+    if (pipe2(pipefd, O_CLOEXEC | O_NONBLOCK) != 0)
+    {
+        return false;
+    }
+#else
+    if (pipe(pipefd) != 0)
+    {
+        return false;
+    }
+    fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
+    fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
+    fcntl(pipefd[0], F_SETFL, fcntl(pipefd[0], F_GETFL, 0) | O_NONBLOCK);
+    fcntl(pipefd[1], F_SETFL, fcntl(pipefd[1], F_GETFL, 0) | O_NONBLOCK);
+#endif
+
+    motionAlertReadFd_ = pipefd[0];
+    if (writeFd != nullptr)
+    {
+        *writeFd = pipefd[1];
+    }
+    else
+    {
+        close(pipefd[1]);
+    }
+    return true;
+}
+
+void RecordRuntime::stopMotionAlertPipe()
+{
+    if (motionAlertReadFd_ >= 0)
+    {
+        close(motionAlertReadFd_);
+        motionAlertReadFd_ = -1;
+    }
+    clearMotionAlertOutputs();
+}
+
+void RecordRuntime::clearMotionAlertOutputs()
+{
+    motionAlertOutputState_ = {};
+    panelManager_.silenceBeep();
+}
+
+void RecordRuntime::applyMotionAlertState(const std::string &side, bool active)
+{
+    bool *currentState = nullptr;
+    if (side == "left")
+    {
+        currentState = &motionAlertOutputState_.leftAlertActive;
+    }
+    else if (side == "right")
+    {
+        currentState = &motionAlertOutputState_.rightAlertActive;
+    }
+    if (currentState == nullptr || *currentState == active)
+    {
+        return;
+    }
+
+    const bool applied = active ? panelManager_.setBeepEnabledForSide(side, true)
+                                : panelManager_.silenceBeepForSide(side);
+    if (applied)
+    {
+        *currentState = active;
+    }
+}
+
+void RecordRuntime::pollMotionAlertPipe()
+{
+    if (motionAlertReadFd_ < 0)
+    {
+        return;
+    }
+
+    while (true)
+    {
+        ugripper::MotionAlertMessage message{};
+        const ssize_t bytesRead = read(motionAlertReadFd_, &message, sizeof(message));
+        if (bytesRead == 0)
+        {
+            stopMotionAlertPipe();
+            return;
+        }
+        if (bytesRead < 0)
+        {
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+            {
+                return;
+            }
+            stopMotionAlertPipe();
+            return;
+        }
+        if (static_cast<size_t>(bytesRead) != sizeof(message) ||
+            message.magic != ugripper::kMotionAlertMessageMagic ||
+            message.version != ugripper::kMotionAlertMessageVersion)
+        {
+            continue;
+        }
+
+        const std::string side = motionAlertSideName(message.side);
+        if (side == "unknown")
+        {
+            continue;
+        }
+
+        applyMotionAlertState(side, message.active != 0);
+        if (message.active != 0)
+        {
+            std::cerr << "[WARN] motion overspeed detected: side=" << side
+                      << " reason=" << motionAlertReasonName(message.reason)
+                      << " gyro=" << std::fixed << std::setprecision(3) << message.gyroMagnitude
+                      << " accel_excess=" << std::fixed << std::setprecision(3) << message.accelExcess
+                      << std::endl;
+        }
+    }
 }
 
 bool RecordRuntime::startAudioPlayer()
@@ -1716,7 +1847,7 @@ bool RecordRuntime::startStereoDaemon()
         "--status-file",
         options_.stereoStatusFile,
         "--only",
-        kStereoCameraStreamsCsv,
+        kWarmupCameraStreamsCsv,
     };
 
     if (!stereoDaemon_.start(args))
@@ -1927,7 +2058,7 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
         return false;
     }
 
-    for (const char *cameraName : {"left_stereo", "right_stereo"})
+    for (const char *cameraName : {"left_cam_main", "right_cam_main", "left_stereo", "right_stereo"})
     {
         if (!stereoSession["cameras"].contains(cameraName))
         {
@@ -1948,7 +2079,14 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
         }
         baseInfo[std::string(cameraName) + "_record_time_offset_us"] = cameraInfo["record_time_offset_us"];
     }
-    baseInfo["stereo_session"] = stereoSession;
+
+    json stereoOnlySession = stereoSession;
+    stereoOnlySession["cameras"] = json::object();
+    for (const char *cameraName : {"left_stereo", "right_stereo"})
+    {
+        stereoOnlySession["cameras"][cameraName] = stereoSession["cameras"][cameraName];
+    }
+    baseInfo["stereo_session"] = stereoOnlySession;
 
     std::ofstream output(baseInfoPath, std::ios::trunc);
     if (!output.is_open())
@@ -2454,6 +2592,15 @@ bool RecordRuntime::startRecording(bool resetRecording)
         options_.sensorRecorderBin,
         currentEpisodeDir_,
     };
+    int motionAlertWriteFd = -1;
+    if (!startMotionAlertPipe(&motionAlertWriteFd))
+    {
+        std::cerr << "[ERROR] failed to create motion alert pipe" << std::endl;
+        setLedState(LedState::Error5);
+        setAudioRecoveryCommand("error");
+        sendAudioCommand("error");
+        return false;
+    }
 
     bool cameraStarted = false;
     bool sensorStarted = false;
@@ -2462,7 +2609,18 @@ bool RecordRuntime::startRecording(bool resetRecording)
         cameraStarted = cameraRecorder_.start(cameraArgs);
     });
     std::thread sensorThread([&]() {
-        sensorStarted = sensorRecorder_.start(sensorArgs);
+        std::vector<std::string> sensorArgsWithAlert = sensorArgs;
+        if (motionAlertWriteFd >= 0)
+        {
+            sensorArgsWithAlert.push_back("--motion-alert-fd");
+            sensorArgsWithAlert.push_back(std::to_string(motionAlertWriteFd));
+        }
+        sensorStarted = sensorRecorder_.start(sensorArgsWithAlert, {motionAlertWriteFd});
+        if (motionAlertWriteFd >= 0)
+        {
+            close(motionAlertWriteFd);
+            motionAlertWriteFd = -1;
+        }
     });
 
     cameraThread.join();
@@ -2487,6 +2645,12 @@ bool RecordRuntime::startRecording(bool resetRecording)
         {
             sensorRecorder_.stop(2000);
         }
+        if (motionAlertWriteFd >= 0)
+        {
+            close(motionAlertWriteFd);
+            motionAlertWriteFd = -1;
+        }
+        stopMotionAlertPipe();
 
         setLedState(LedState::Error5);
         setAudioRecoveryCommand("error");
@@ -2499,6 +2663,7 @@ bool RecordRuntime::startRecording(bool resetRecording)
         std::cerr << "[ERROR] failed to start stereo session for episode " << currentEpisodeDir_ << std::endl;
         cameraRecorder_.stop(2000);
         sensorRecorder_.stop(2000);
+        stopMotionAlertPipe();
         setLedState(LedState::Error5);
         setAudioRecoveryCommand("error");
         sendAudioCommand("error");
@@ -2545,6 +2710,7 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
 
     const int64_t sensorStopStartMs = steadyNowMs();
     const bool sensorStopOk = sensorRecorder_.stop(5000);
+    stopMotionAlertPipe();
     std::cout << "[PERF] stop sensor_recorder done: ok=" << (sensorStopOk ? "true" : "false")
               << " elapsed_ms=" << (steadyNowMs() - sensorStopStartMs) << std::endl;
 
@@ -3296,6 +3462,38 @@ bool RecordRuntime::runCommandSync(const std::vector<std::string> &arguments)
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+const char *RecordRuntime::motionAlertSideName(uint8_t side)
+{
+    switch (static_cast<ugripper::MotionAlertSide>(side))
+    {
+    case ugripper::MotionAlertSide::Left:
+        return "left";
+    case ugripper::MotionAlertSide::Right:
+        return "right";
+    case ugripper::MotionAlertSide::Unknown:
+    default:
+        return "unknown";
+    }
+}
+
+const char *RecordRuntime::motionAlertReasonName(uint8_t reason)
+{
+    switch (static_cast<ugripper::MotionAlertReasonCode>(reason))
+    {
+    case ugripper::MotionAlertReasonCode::Gyro:
+        return "gyro";
+    case ugripper::MotionAlertReasonCode::Accel:
+        return "accel";
+    case ugripper::MotionAlertReasonCode::AccelAndGyro:
+        return "accel+gyro";
+    case ugripper::MotionAlertReasonCode::Recovered:
+        return "recovered";
+    case ugripper::MotionAlertReasonCode::None:
+    default:
+        return "none";
+    }
+}
+
 RecordRuntime::ProcessRunner::ProcessRunner(std::string name)
     : name_(std::move(name))
 {
@@ -3306,7 +3504,8 @@ RecordRuntime::ProcessRunner::~ProcessRunner()
     stop(1000);
 }
 
-bool RecordRuntime::ProcessRunner::start(const std::vector<std::string> &arguments)
+bool RecordRuntime::ProcessRunner::start(const std::vector<std::string> &arguments,
+                                        const std::vector<int> &inheritedFileDescriptors)
 {
     if (arguments.empty())
     {
@@ -3336,6 +3535,18 @@ bool RecordRuntime::ProcessRunner::start(const std::vector<std::string> &argumen
     if (pid_ == 0)
     {
         setpgid(0, 0);
+        for (int fd : inheritedFileDescriptors)
+        {
+            if (fd < 0)
+            {
+                continue;
+            }
+            const int currentFlags = fcntl(fd, F_GETFD);
+            if (currentFlags >= 0)
+            {
+                fcntl(fd, F_SETFD, currentFlags & ~FD_CLOEXEC);
+            }
+        }
         execvp(argv[0], argv.data());
         _exit(127);
     }
@@ -3491,6 +3702,7 @@ bool RecordRuntime::GripperPanelManager::connect(const std::vector<std::string> 
     hasDedicatedRightInput_ = false;
     hasLedEffect_ = false;
     hasDirectLedColor_ = false;
+    hasBeepState_ = false;
 
     for (size_t index = 0; index < ports.size(); ++index)
     {
@@ -3506,6 +3718,7 @@ bool RecordRuntime::GripperPanelManager::connect(const std::vector<std::string> 
         }
         drivers_.push_back(std::move(driver));
         reconnectAttemptMs_.push_back(0);
+        currentDriverBeepStates_.push_back({});
     }
 
     return hasConnectedDevice();
@@ -3515,6 +3728,7 @@ void RecordRuntime::GripperPanelManager::disconnect()
 {
     drivers_.clear();
     reconnectAttemptMs_.clear();
+    currentDriverBeepStates_.clear();
 }
 
 bool RecordRuntime::GripperPanelManager::hasConnectedDevice() const
@@ -3575,6 +3789,78 @@ RecordRuntime::GripperPanelManager::HealthSnapshot RecordRuntime::GripperPanelMa
     return health;
 }
 
+bool RecordRuntime::GripperPanelManager::setBeepState(const GripperBeepState &state)
+{
+    currentBeepState_ = state;
+    hasBeepState_ = true;
+    bool wroteAny = false;
+    for (size_t index = 0; index < drivers_.size(); ++index)
+    {
+        currentDriverBeepStates_[index] = state;
+        auto &driver = drivers_[index];
+        if (driver != nullptr && driver->isConnected())
+        {
+            wroteAny = driver->setBeepState(state) || wroteAny;
+        }
+    }
+    return wroteAny;
+}
+
+bool RecordRuntime::GripperPanelManager::setBeepEnabled(bool enabled)
+{
+    return enabled ? setBeepState(GripperBeepState{
+                         GripperHmiDriver::kDefaultBeepDuty,
+                         GripperHmiDriver::kDefaultBeepFrequency,
+                     })
+                   : silenceBeep();
+}
+
+bool RecordRuntime::GripperPanelManager::silenceBeep()
+{
+    return setBeepState(GripperBeepState{0, 0});
+}
+
+bool RecordRuntime::GripperPanelManager::setBeepStateForSide(const std::string &side, const GripperBeepState &state)
+{
+    bool wroteAny = false;
+    for (size_t index = 0; index < drivers_.size(); ++index)
+    {
+        auto &driver = drivers_[index];
+        if (driver == nullptr)
+        {
+            continue;
+        }
+        const std::string &port = driver->getPort();
+        const bool match =
+            (side == "right" && port.find("right_gripper") != std::string::npos) ||
+            (side == "left" && port.find("left_gripper") != std::string::npos);
+        if (!match)
+        {
+            continue;
+        }
+        currentDriverBeepStates_[index] = state;
+        if (driver->isConnected())
+        {
+            wroteAny = driver->setBeepState(state) || wroteAny;
+        }
+    }
+    return wroteAny;
+}
+
+bool RecordRuntime::GripperPanelManager::setBeepEnabledForSide(const std::string &side, bool enabled)
+{
+    return enabled ? setBeepStateForSide(side, GripperBeepState{
+                                             GripperHmiDriver::kDefaultBeepDuty,
+                                             GripperHmiDriver::kDefaultBeepFrequency,
+                                         })
+                   : silenceBeepForSide(side);
+}
+
+bool RecordRuntime::GripperPanelManager::silenceBeepForSide(const std::string &side)
+{
+    return setBeepStateForSide(side, GripperBeepState{0, 0});
+}
+
 void RecordRuntime::GripperPanelManager::maybeReconnectDriver(size_t index)
 {
     if (index >= drivers_.size() || drivers_[index] == nullptr)
@@ -3605,6 +3891,14 @@ void RecordRuntime::GripperPanelManager::maybeReconnectDriver(size_t index)
     }
 
     std::cout << "[INFO] reconnected HMI port: " << drivers_[index]->getPort() << std::endl;
+    if (index < currentDriverBeepStates_.size())
+    {
+        drivers_[index]->setBeepState(currentDriverBeepStates_[index]);
+    }
+    else if (hasBeepState_)
+    {
+        drivers_[index]->setBeepState(currentBeepState_);
+    }
     if (hasDirectLedColor_)
     {
         drivers_[index]->setLedColor(currentLedColor_);

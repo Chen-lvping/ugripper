@@ -79,7 +79,8 @@ private:
         explicit ProcessRunner(std::string name);
         ~ProcessRunner();
 
-        bool start(const std::vector<std::string> &arguments);
+        bool start(const std::vector<std::string> &arguments,
+                   const std::vector<int> &inheritedFileDescriptors = {});
         bool isRunning();
         bool stop(int timeoutMs);
         bool wait(int timeoutMs);
@@ -115,6 +116,12 @@ private:
         bool hasConnectedDevice() const;
         bool poll(int timeoutMs, ButtonSnapshot *snapshot);
         HealthSnapshot getHealthSnapshot(uint64_t activeTimeoutMs) const;
+        bool setBeepState(const GripperBeepState &state);
+        bool setBeepEnabled(bool enabled);
+        bool silenceBeep();
+        bool setBeepStateForSide(const std::string &side, const GripperBeepState &state);
+        bool setBeepEnabledForSide(const std::string &side, bool enabled);
+        bool silenceBeepForSide(const std::string &side);
         void setLedEffect(const GripperLedEffect &effect);
         void setLedColor(uint8_t red, uint8_t green, uint8_t blue);
         void turnOff();
@@ -131,8 +138,11 @@ private:
         bool hasDedicatedRightInput_ = false;
         bool hasLedEffect_ = false;
         bool hasDirectLedColor_ = false;
+        bool hasBeepState_ = false;
+        std::vector<GripperBeepState> currentDriverBeepStates_;
         GripperLedEffect currentLedEffect_{};
         GripperLedColor currentLedColor_{};
+        GripperBeepState currentBeepState_{};
     };
 
     class HmiLedController
@@ -219,6 +229,12 @@ private:
         std::string detail;
     };
 
+    struct MotionAlertOutputState
+    {
+        bool leftAlertActive = false;
+        bool rightAlertActive = false;
+    };
+
     static GripperLedEffect makeLedEffect(LedState state, double progress = 0.0);
     static std::string readEnvValue(const std::string &envFile, const std::string &key);
     static std::string queryPackageVersion(const std::string &packageName);
@@ -229,7 +245,14 @@ private:
     static int64_t currentEpochUs();
     static bool fileExistsAndNotEmpty(const std::string &path);
     static bool runCommandSync(const std::vector<std::string> &arguments);
+    static const char *motionAlertSideName(uint8_t side);
+    static const char *motionAlertReasonName(uint8_t reason);
 
+    bool startMotionAlertPipe(int *writeFd);
+    void stopMotionAlertPipe();
+    void clearMotionAlertOutputs();
+    void pollMotionAlertPipe();
+    void applyMotionAlertState(const std::string &side, bool active);
     bool startRecording(bool resetRecording);
     bool stopRecording(bool dueToError, const std::string &reason);
     void handleButtons(const ButtonSnapshot &buttons);
@@ -284,6 +307,8 @@ private:
     uint64_t lastStereoDaemonStartAttemptMs_ = 0;
     uint64_t stereoCommandSeq_ = 0;
     std::unique_ptr<EpisodeManager> episodeManager_;
+    int motionAlertReadFd_ = -1;
+    MotionAlertOutputState motionAlertOutputState_{};
     GripperPanelManager panelManager_;
     std::unique_ptr<HmiLedController> ledController_;
     ProcessRunner audioPlayer_{"audio_player"};

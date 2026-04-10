@@ -29,6 +29,7 @@ target_include_directories(sensor_recorder
     PRIVATE
         ${LIBSERIALPORT_INCLUDE_DIRS}
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src/common/include
 )
 
 target_include_directories(zeroing
