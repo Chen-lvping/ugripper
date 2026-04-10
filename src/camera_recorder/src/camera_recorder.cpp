@@ -68,6 +68,7 @@ constexpr auto kStereoSessionSigintTimeoutNoOutput = std::chrono::milliseconds(3
 constexpr auto kStereoSessionSigtermTimeout = std::chrono::milliseconds(400);
 constexpr int kStereoSessionMaxRestartAttempts = 2;
 constexpr int64_t kUsPerSecond = 1'000'000;
+constexpr uint64_t kMainCameraLeakyQueueMaxTimeNs = 5ULL * 1000ULL * 1000ULL * 1000ULL;
 
 constexpr uint8_t kUvcRequestSetCur = 0x01;
 constexpr uint8_t kUvcRequestGetCur = 0x81;
@@ -1449,16 +1450,17 @@ private:
 
         std::ostringstream oss;
         oss << "GST_DEBUG=identity:7 " << options_.gst_bin << " -e "
-            << "v4l2src device=" << device << " do-timestamp=true ! "
+            << "v4l2src device=" << device << " ! "
             << ShellQuote(
                    "video/x-h265,width=" + std::to_string(config_.width) +
                    ",height=" + std::to_string(config_.height) +
                    ",framerate=" + std::to_string(config_.fps) + "/1")
             << " ! "
             << "identity silent=false ! "
-            << "queue leaky=downstream max-size-buffers=4 ! "
+            << "queue leaky=downstream max-size-buffers=0 max-size-bytes=0 max-size-time="
+            << kMainCameraLeakyQueueMaxTimeNs << " ! "
             << "h265parse config-interval=-1 ! "
-            << "matroskamux ! "
+            << "matroskamux timecodescale=1000 ! "
             << "filesink location="
             << output;
         return oss.str();

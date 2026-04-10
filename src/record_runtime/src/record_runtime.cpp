@@ -33,8 +33,9 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace {
-constexpr const char *kSessionCameraStreamsCsv = "left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r";
-constexpr const char *kWarmupCameraStreamsCsv = "left_cam_main,right_cam_main,left_stereo,right_stereo";
+constexpr const char *kSessionCameraStreamsCsv =
+    "left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r";
+constexpr const char *kWarmupCameraStreamsCsv = "left_stereo,right_stereo";
 constexpr uint64_t kActionDebounceMs = 250;
 constexpr uint64_t kLongPressThresholdMs = 800;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
@@ -2058,7 +2059,7 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
         return false;
     }
 
-    for (const char *cameraName : {"left_cam_main", "right_cam_main", "left_stereo", "right_stereo"})
+    for (const char *cameraName : {"left_stereo", "right_stereo"})
     {
         if (!stereoSession["cameras"].contains(cameraName))
         {
