@@ -12,6 +12,7 @@ add_executable(record_runtime
 target_include_directories(record_runtime
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_SOURCE_DIR}/src/common/include
 )
 
 target_link_libraries(record_runtime

@@ -42,6 +42,8 @@
 #include <libusb-1.0/libusb.h>
 #include <yaml-cpp/yaml.h>
 #include <nlohmann/json.hpp>
+#include <gst/gst.h>
+#include <gst/app/gstappsrc.h>
 
 namespace camera_recorder {
 
@@ -735,6 +737,46 @@ int64_t BootTimeOffsetUs() {
     return CurrentSystemTimeUs() - CurrentSteadyTimeUs();
 }
 
+bool EnsureGstreamerInitialized(std::string* error_message) {
+    static std::once_flag once;
+    static bool initialized = false;
+    static std::string init_error;
+    std::call_once(once, []() {
+        GError* error = nullptr;
+        initialized = gst_init_check(nullptr, nullptr, &error);
+        if (!initialized && error != nullptr) {
+            init_error = error->message;
+            g_error_free(error);
+        }
+    });
+
+    if (!initialized && error_message != nullptr) {
+        *error_message = init_error.empty() ? "gst_init_check failed" : init_error;
+    }
+    return initialized;
+}
+
+int64_t TimevalToUs(const timeval& value) {
+    return static_cast<int64_t>(value.tv_sec) * kUsPerSecond +
+           static_cast<int64_t>(value.tv_usec);
+}
+
+std::optional<int64_t> V4l2BufferSystemTimeUs(const v4l2_buffer& buffer) {
+    const int64_t raw_us = TimevalToUs(buffer.timestamp);
+    if (raw_us <= 0) {
+        return std::nullopt;
+    }
+
+    if ((buffer.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0) {
+        return BootTimeOffsetUs() + raw_us;
+    }
+    return raw_us;
+}
+
+#ifndef V4L2_PIX_FMT_HEVC
+#define V4L2_PIX_FMT_HEVC v4l2_fourcc('H', 'E', 'V', 'C')
+#endif
+
 bool WriteAll(int fd, const uint8_t* data, size_t size) {
     size_t written = 0;
     while (written < size) {
@@ -1399,15 +1441,136 @@ protected:
     std::optional<int64_t> record_time_offset_us_;
 };
 
-class MainCameraRecorder final : public ShellCameraRecorder {
+class MainCameraRecorder final : public CameraRecorder {
 public:
     MainCameraRecorder(CameraConfig config, Options options)
-        : ShellCameraRecorder(std::move(config), std::move(options)) {
-        command_ = BuildCommand();
+        : config_(std::move(config)),
+          options_(std::move(options)),
+          command_description_("internal-v4l2-appsrc-copy") {}
+
+    ~MainCameraRecorder() override {
+        Stop();
+    }
+
+    const CameraConfig& config() const override {
+        return config_;
+    }
+
+    const std::string& command() const override {
+        return command_description_;
+    }
+
+    bool Start() override {
+        if (started_) {
+            return running_;
+        }
+        std::string error_message;
+        if (!BeforeStart(&error_message) ||
+            !OpenDevice(&error_message) ||
+            !CreatePipeline(&error_message)) {
+            failure_ = true;
+            exit_code_ = -1;
+            last_error_ = error_message;
+            std::cerr << "[camera_recorder] failed to start " << config_.name
+                      << ": " << error_message << std::endl;
+            CleanupPipeline();
+            CleanupDevice();
+            return false;
+        }
+
+        started_ = true;
+        running_ = true;
+        stop_requested_.store(false, std::memory_order_release);
+        capture_thread_ = std::thread([this]() { CaptureLoop(); });
+        return true;
+    }
+
+    void Poll() override {
+        if (!started_) {
+            return;
+        }
+        HandleBusMessages();
+    }
+
+    void Stop() override {
+        stop_requested_.store(true, std::memory_order_release);
+        if (capture_thread_.joinable()) {
+            capture_thread_.join();
+        }
+
+        if (appsrc_ != nullptr) {
+            gst_app_src_end_of_stream(GST_APP_SRC(appsrc_));
+        }
+        if (bus_ != nullptr) {
+            GstMessage* message = gst_bus_timed_pop_filtered(
+                bus_,
+                static_cast<GstClockTime>(kRecorderStopSigintTimeout.count()) * GST_MSECOND,
+                static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+            if (message != nullptr) {
+                HandleBusMessage(message);
+                gst_message_unref(message);
+            }
+        }
+
+        CleanupPipeline();
+        CleanupDevice();
+        running_ = false;
+    }
+
+    bool IsRunning() const override {
+        return running_;
+    }
+
+    bool HasStarted() const override {
+        return started_;
+    }
+
+    bool HasFailure() const override {
+        return failure_;
+    }
+
+    std::optional<int> ExitCode() const override {
+        return exit_code_;
+    }
+
+    bool HasWrittenOutput() const override {
+        std::error_code error;
+        return fs::exists(output_path_, error) &&
+               fs::file_size(output_path_, error) > 0;
+    }
+
+    std::optional<int64_t> RecordTimeOffsetUs() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return record_time_offset_us_;
+    }
+
+    std::optional<int64_t> FirstFramePtsUs() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return first_frame_pts_us_;
+    }
+
+    std::optional<int64_t> FirstFrameSystemTimeUs() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return first_frame_system_time_us_;
+    }
+
+    std::optional<int64_t> LastFramePtsUs() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return last_frame_pts_us_;
+    }
+
+    std::optional<int64_t> LastFrameSystemTimeUs() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return last_frame_system_time_us_;
     }
 
 private:
-    bool BeforeStart() override {
+    struct MmapBuffer {
+        void* data = nullptr;
+        size_t length = 0;
+    };
+
+    bool BeforeStart(std::string* error_message) {
         if (!config_.uvc_roll_absolute.has_value()) {
             return true;
         }
@@ -1422,49 +1585,451 @@ private:
             }
             return true;
         } catch (const std::exception& ex) {
-            failure_ = true;
-            exit_code_ = -1;
-            std::cerr << "[camera_recorder] failed to apply UVC roll for " << config_.name
-                      << ": " << ex.what() << std::endl;
+            if (error_message != nullptr) {
+                *error_message = std::string("failed to apply UVC roll: ") + ex.what();
+            }
             return false;
         }
     }
 
-    std::string BuildCommand() const override {
-        const std::string device = ShellQuote(config_.device);
-        const std::string output = ShellQuote(OutputPath(config_.output_files.at(0)).string());
+    static bool RetryIoctl(int fd, unsigned long request, void* arg) {
+        while (true) {
+            const int rc = ioctl(fd, request, arg);
+            if (rc == 0) {
+                return true;
+            }
+            if (errno == EINTR) {
+                continue;
+            }
+            return false;
+        }
+    }
 
-        if (options_.codec == "h264") {
-            std::ostringstream oss;
-            oss << options_.ffmpeg_bin
-                << " -hide_banner -loglevel info -nostats -debug_ts -y "
-                << "-f v4l2 -input_format h264 "
-                << "-framerate " << config_.fps << ' '
-                << "-video_size " << config_.width << 'x' << config_.height << ' '
-                << "-copyts "
-                << "-i " << device << ' '
-                << "-c:v copy "
-                << output;
-            return oss.str();
+    uint32_t CapturePixelFormat() const {
+        return options_.codec == "h264" ? V4L2_PIX_FMT_H264 : V4L2_PIX_FMT_HEVC;
+    }
+
+    std::string GstCapsName() const {
+        return options_.codec == "h264" ? "video/x-h264" : "video/x-h265";
+    }
+
+    std::string GstParserName() const {
+        return options_.codec == "h264" ? "h264parse" : "h265parse";
+    }
+
+    bool OpenDevice(std::string* error_message) {
+        output_path_ = options_.output_dir / config_.output_files.at(0);
+        if (!WaitForDeviceNode(config_.device, kDeviceRebindTimeout)) {
+            if (error_message != nullptr) {
+                *error_message = "device node did not appear before open: " + config_.device;
+            }
+            return false;
+        }
+        fd_ = open(config_.device.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+        if (fd_ < 0) {
+            if (error_message != nullptr) {
+                *error_message = "failed to open device " + config_.device + ": " + std::strerror(errno);
+            }
+            return false;
         }
 
-        std::ostringstream oss;
-        oss << "GST_DEBUG=identity:7 " << options_.gst_bin << " -e "
-            << "v4l2src device=" << device << " ! "
-            << ShellQuote(
-                   "video/x-h265,width=" + std::to_string(config_.width) +
-                   ",height=" + std::to_string(config_.height) +
-                   ",framerate=" + std::to_string(config_.fps) + "/1")
-            << " ! "
-            << "identity silent=false ! "
-            << "queue leaky=downstream max-size-buffers=0 max-size-bytes=0 max-size-time="
-            << kMainCameraLeakyQueueMaxTimeNs << " ! "
-            << "h265parse config-interval=-1 ! "
-            << "matroskamux timecodescale=1000 ! "
-            << "filesink location="
-            << output;
-        return oss.str();
+        v4l2_capability capability{};
+        if (!RetryIoctl(fd_, VIDIOC_QUERYCAP, &capability)) {
+            if (error_message != nullptr) {
+                *error_message = "VIDIOC_QUERYCAP failed for " + config_.device + ": " + std::strerror(errno);
+            }
+            return false;
+        }
+        if ((capability.capabilities & V4L2_CAP_VIDEO_CAPTURE) == 0 ||
+            (capability.capabilities & V4L2_CAP_STREAMING) == 0) {
+            if (error_message != nullptr) {
+                *error_message = "device lacks capture/streaming capability: " + config_.device;
+            }
+            return false;
+        }
+
+        v4l2_format format{};
+        format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        format.fmt.pix.width = static_cast<uint32_t>(config_.width);
+        format.fmt.pix.height = static_cast<uint32_t>(config_.height);
+        format.fmt.pix.pixelformat = CapturePixelFormat();
+        format.fmt.pix.field = V4L2_FIELD_ANY;
+        if (!RetryIoctl(fd_, VIDIOC_S_FMT, &format)) {
+            if (error_message != nullptr) {
+                *error_message = "VIDIOC_S_FMT failed for " + config_.device + ": " + std::strerror(errno);
+            }
+            return false;
+        }
+        if (format.fmt.pix.pixelformat != CapturePixelFormat()) {
+            if (error_message != nullptr) {
+                *error_message = "device did not accept requested compressed format: " + config_.device;
+            }
+            return false;
+        }
+
+        v4l2_streamparm streamparm{};
+        streamparm.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        streamparm.parm.capture.timeperframe.numerator = 1;
+        streamparm.parm.capture.timeperframe.denominator = static_cast<uint32_t>(config_.fps);
+        RetryIoctl(fd_, VIDIOC_S_PARM, &streamparm);
+
+        v4l2_requestbuffers request{};
+        request.count = 8;
+        request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        request.memory = V4L2_MEMORY_MMAP;
+        if (!RetryIoctl(fd_, VIDIOC_REQBUFS, &request) || request.count < 2) {
+            if (error_message != nullptr) {
+                *error_message = "VIDIOC_REQBUFS failed for " + config_.device + ": " + std::strerror(errno);
+            }
+            return false;
+        }
+
+        buffers_.assign(request.count, {});
+        for (uint32_t index = 0; index < request.count; ++index) {
+            v4l2_buffer buffer{};
+            buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buffer.memory = V4L2_MEMORY_MMAP;
+            buffer.index = index;
+            if (!RetryIoctl(fd_, VIDIOC_QUERYBUF, &buffer)) {
+                if (error_message != nullptr) {
+                    *error_message = "VIDIOC_QUERYBUF failed for " + config_.device + ": " + std::strerror(errno);
+                }
+                return false;
+            }
+
+            void* mapped = mmap(nullptr,
+                                buffer.length,
+                                PROT_READ | PROT_WRITE,
+                                MAP_SHARED,
+                                fd_,
+                                static_cast<off_t>(buffer.m.offset));
+            if (mapped == MAP_FAILED) {
+                if (error_message != nullptr) {
+                    *error_message = "mmap failed for " + config_.device + ": " + std::strerror(errno);
+                }
+                return false;
+            }
+            buffers_[index].data = mapped;
+            buffers_[index].length = buffer.length;
+
+            if (!RetryIoctl(fd_, VIDIOC_QBUF, &buffer)) {
+                if (error_message != nullptr) {
+                    *error_message = "VIDIOC_QBUF failed for " + config_.device + ": " + std::strerror(errno);
+                }
+                return false;
+            }
+        }
+        return true;
     }
+
+    bool CreatePipeline(std::string* error_message) {
+        if (!EnsureGstreamerInitialized(error_message)) {
+            return false;
+        }
+
+        pipeline_ = gst_pipeline_new((config_.name + "_pipeline").c_str());
+        GstElement* queue = gst_element_factory_make("queue", (config_.name + "_queue").c_str());
+        GstElement* parser = gst_element_factory_make(GstParserName().c_str(), (config_.name + "_parser").c_str());
+        GstElement* mux = gst_element_factory_make("matroskamux", (config_.name + "_mux").c_str());
+        GstElement* sink = gst_element_factory_make("filesink", (config_.name + "_sink").c_str());
+        appsrc_ = gst_element_factory_make("appsrc", (config_.name + "_src").c_str());
+
+        if (pipeline_ == nullptr || appsrc_ == nullptr || queue == nullptr || parser == nullptr || mux == nullptr || sink == nullptr) {
+            if (error_message != nullptr) {
+                *error_message = "failed to create one or more main camera gstreamer elements";
+            }
+            return false;
+        }
+
+        g_object_set(G_OBJECT(appsrc_),
+                     "is-live", TRUE,
+                     "format", GST_FORMAT_TIME,
+                     "do-timestamp", FALSE,
+                     "block", FALSE,
+                     "stream-type", GST_APP_STREAM_TYPE_STREAM,
+                     nullptr);
+        g_object_set(G_OBJECT(queue),
+                     "leaky", 2,
+                     "max-size-buffers", 0,
+                     "max-size-bytes", 0,
+                     "max-size-time", kMainCameraLeakyQueueMaxTimeNs,
+                     nullptr);
+        g_object_set(G_OBJECT(parser),
+                     "config-interval", -1,
+                     "disable-passthrough", TRUE,
+                     nullptr);
+        g_object_set(G_OBJECT(mux), "timecodescale", 1000LL, nullptr);
+        g_object_set(G_OBJECT(sink), "location", output_path_.c_str(), nullptr);
+
+        gst_bin_add_many(GST_BIN(pipeline_), appsrc_, queue, parser, mux, sink, nullptr);
+        if (!gst_element_link_many(appsrc_, queue, parser, mux, sink, nullptr)) {
+            if (error_message != nullptr) {
+                *error_message = "failed to link main camera gstreamer elements";
+            }
+            return false;
+        }
+
+        GstCaps* caps = gst_caps_new_simple(
+            GstCapsName().c_str(),
+            "width", G_TYPE_INT, config_.width,
+            "height", G_TYPE_INT, config_.height,
+            "framerate", GST_TYPE_FRACTION, config_.fps, 1,
+            "stream-format", G_TYPE_STRING, "byte-stream",
+            nullptr);
+        gst_app_src_set_caps(GST_APP_SRC(appsrc_), caps);
+        gst_caps_unref(caps);
+        gst_app_src_set_stream_type(GST_APP_SRC(appsrc_), GST_APP_STREAM_TYPE_STREAM);
+        gst_app_src_set_max_bytes(GST_APP_SRC(appsrc_), 0);
+
+        bus_ = gst_element_get_bus(pipeline_);
+        const GstStateChangeReturn state_result = gst_element_set_state(pipeline_, GST_STATE_PLAYING);
+        if (state_result == GST_STATE_CHANGE_FAILURE) {
+            HandleBusMessages();
+            if (error_message != nullptr) {
+                *error_message = last_error_.empty() ? "failed to set main camera pipeline to PLAYING" : last_error_;
+            }
+            return false;
+        }
+
+        v4l2_buf_type buffer_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+        if (!RetryIoctl(fd_, VIDIOC_STREAMON, &buffer_type)) {
+            if (error_message != nullptr) {
+                *error_message = "VIDIOC_STREAMON failed for " + config_.device + ": " + std::strerror(errno);
+            }
+            return false;
+        }
+        streaming_ = true;
+        return true;
+    }
+
+    void CaptureLoop() {
+        while (!stop_requested_.load(std::memory_order_acquire)) {
+            pollfd poll_fd{};
+            poll_fd.fd = fd_;
+            poll_fd.events = POLLIN | POLLPRI;
+            const int poll_rc = poll(&poll_fd, 1, 200);
+            if (poll_rc == 0) {
+                HandleBusMessages();
+                continue;
+            }
+            if (poll_rc < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                SetFailure("main camera poll failed for " + config_.name + ": " + std::strerror(errno));
+                break;
+            }
+            if ((poll_fd.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                SetFailure("main camera device poll error for " + config_.name);
+                break;
+            }
+
+            v4l2_buffer buffer{};
+            buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            buffer.memory = V4L2_MEMORY_MMAP;
+            if (!RetryIoctl(fd_, VIDIOC_DQBUF, &buffer)) {
+                if (errno == EAGAIN) {
+                    continue;
+                }
+                SetFailure("VIDIOC_DQBUF failed for " + config_.name + ": " + std::strerror(errno));
+                break;
+            }
+            if (buffer.index >= buffers_.size()) {
+                SetFailure("VIDIOC_DQBUF returned invalid index for " + config_.name);
+                break;
+            }
+
+            const int64_t system_time_us =
+                V4l2BufferSystemTimeUs(buffer).value_or(CurrentSystemTimeUs());
+            const int64_t pts_us = UpdateFrameTimingFromCapture(system_time_us);
+
+            GstBuffer* gst_buffer = gst_buffer_new_allocate(nullptr, buffer.bytesused, nullptr);
+            if (gst_buffer == nullptr) {
+                SetFailure("gst_buffer_new_allocate failed for " + config_.name);
+                RetryIoctl(fd_, VIDIOC_QBUF, &buffer);
+                break;
+            }
+
+            GstMapInfo map_info{};
+            if (!gst_buffer_map(gst_buffer, &map_info, GST_MAP_WRITE)) {
+                gst_buffer_unref(gst_buffer);
+                SetFailure("gst_buffer_map failed for " + config_.name);
+                RetryIoctl(fd_, VIDIOC_QBUF, &buffer);
+                break;
+            }
+            std::memcpy(map_info.data, buffers_[buffer.index].data, buffer.bytesused);
+            gst_buffer_unmap(gst_buffer, &map_info);
+
+            GST_BUFFER_PTS(gst_buffer) = static_cast<GstClockTime>(pts_us) * 1000ULL;
+            GST_BUFFER_DTS(gst_buffer) = static_cast<GstClockTime>(pts_us) * 1000ULL;
+            GST_BUFFER_DURATION(gst_buffer) = static_cast<GstClockTime>(NominalFrameDurationUs()) * 1000ULL;
+
+            const GstFlowReturn push_result = gst_app_src_push_buffer(GST_APP_SRC(appsrc_), gst_buffer);
+            if (push_result != GST_FLOW_OK) {
+                SetFailure("gst_app_src_push_buffer failed for " + config_.name +
+                           " flow=" + std::to_string(push_result));
+                RetryIoctl(fd_, VIDIOC_QBUF, &buffer);
+                break;
+            }
+
+            if (!RetryIoctl(fd_, VIDIOC_QBUF, &buffer)) {
+                SetFailure("VIDIOC_QBUF failed for " + config_.name + ": " + std::strerror(errno));
+                break;
+            }
+        }
+
+        running_ = false;
+        exit_code_ = failure_ ? -1 : 0;
+    }
+
+    int64_t NominalFrameDurationUs() const {
+        return std::max<int64_t>(1, static_cast<int64_t>(std::llround(
+            static_cast<long double>(kUsPerSecond) / static_cast<long double>(std::max(1, config_.fps)))));
+    }
+
+    int64_t UpdateFrameTimingFromCapture(int64_t system_time_us) {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        if (!first_frame_system_time_us_.has_value()) {
+            first_frame_system_time_us_ = system_time_us;
+            first_frame_pts_us_ = 0;
+            last_frame_system_time_us_ = system_time_us;
+            last_frame_pts_us_ = 0;
+            record_time_offset_us_ = system_time_us;
+            frame_count_ = 1;
+            return 0;
+        }
+
+        const int64_t next_pts_us = frame_count_ * NominalFrameDurationUs();
+        last_frame_system_time_us_ = system_time_us;
+        last_frame_pts_us_ = next_pts_us;
+        ++frame_count_;
+        return next_pts_us;
+    }
+
+    void HandleBusMessages() {
+        if (bus_ == nullptr) {
+            return;
+        }
+        while (true) {
+            GstMessage* message = gst_bus_pop_filtered(
+                bus_,
+                static_cast<GstMessageType>(GST_MESSAGE_ERROR | GST_MESSAGE_WARNING | GST_MESSAGE_EOS));
+            if (message == nullptr) {
+                break;
+            }
+            HandleBusMessage(message);
+            gst_message_unref(message);
+        }
+    }
+
+    void HandleBusMessage(GstMessage* message) {
+        switch (GST_MESSAGE_TYPE(message)) {
+        case GST_MESSAGE_ERROR: {
+            GError* error = nullptr;
+            gchar* debug = nullptr;
+            gst_message_parse_error(message, &error, &debug);
+            std::string text = error != nullptr ? error->message : "unknown gstreamer error";
+            if (debug != nullptr && *debug != '\0') {
+                text += " debug=" + std::string(debug);
+            }
+            if (error != nullptr) {
+                g_error_free(error);
+            }
+            if (debug != nullptr) {
+                g_free(debug);
+            }
+            SetFailure("main camera pipeline error for " + config_.name + ": " + text);
+            break;
+        }
+        case GST_MESSAGE_WARNING: {
+            GError* warning = nullptr;
+            gchar* debug = nullptr;
+            gst_message_parse_warning(message, &warning, &debug);
+            std::cerr << "[camera_recorder] warning from main camera pipeline "
+                      << config_.name << ": "
+                      << (warning != nullptr ? warning->message : "unknown") << std::endl;
+            if (warning != nullptr) {
+                g_error_free(warning);
+            }
+            if (debug != nullptr) {
+                g_free(debug);
+            }
+            break;
+        }
+        case GST_MESSAGE_EOS:
+            break;
+        default:
+            break;
+        }
+    }
+
+    void CleanupPipeline() {
+        if (pipeline_ != nullptr) {
+            gst_element_set_state(pipeline_, GST_STATE_NULL);
+        }
+        if (bus_ != nullptr) {
+            gst_object_unref(bus_);
+            bus_ = nullptr;
+        }
+        appsrc_ = nullptr;
+        if (pipeline_ != nullptr) {
+            gst_object_unref(pipeline_);
+            pipeline_ = nullptr;
+        }
+    }
+
+    void CleanupDevice() {
+        if (fd_ >= 0 && streaming_) {
+            v4l2_buf_type buffer_type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+            RetryIoctl(fd_, VIDIOC_STREAMOFF, &buffer_type);
+            streaming_ = false;
+        }
+        for (auto& buffer : buffers_) {
+            if (buffer.data != nullptr && buffer.length > 0) {
+                munmap(buffer.data, buffer.length);
+            }
+        }
+        buffers_.clear();
+        if (fd_ >= 0) {
+            close(fd_);
+            fd_ = -1;
+        }
+    }
+
+    void SetFailure(const std::string& error_message) {
+        if (!failure_) {
+            std::cerr << "[camera_recorder] " << error_message << std::endl;
+        }
+        failure_ = true;
+        last_error_ = error_message;
+        running_ = false;
+        exit_code_ = -1;
+    }
+
+    CameraConfig config_;
+    Options options_;
+    std::string command_description_;
+    fs::path output_path_;
+    int fd_ = -1;
+    bool streaming_ = false;
+    bool started_ = false;
+    bool running_ = false;
+    bool failure_ = false;
+    std::optional<int> exit_code_;
+    std::atomic<bool> stop_requested_{false};
+    std::thread capture_thread_;
+    std::vector<MmapBuffer> buffers_;
+    GstElement* pipeline_ = nullptr;
+    GstElement* appsrc_ = nullptr;
+    GstBus* bus_ = nullptr;
+    std::string last_error_;
+    mutable std::mutex timing_mutex_;
+    std::optional<int64_t> first_frame_pts_us_;
+    std::optional<int64_t> first_frame_system_time_us_;
+    std::optional<int64_t> last_frame_pts_us_;
+    std::optional<int64_t> last_frame_system_time_us_;
+    std::optional<int64_t> record_time_offset_us_;
+    uint64_t frame_count_ = 0;
 };
 
 class HybridCameraRecorder final : public ShellCameraRecorder {
@@ -3080,11 +3645,6 @@ bool CameraRecorderManager::WriteInfoJson() const {
     bool missing_offset = false;
     for (const auto& recorder : recorders_) {
         auto offset_us = recorder->RecordTimeOffsetUs();
-        if (!offset_us.has_value() && options_.codec == "h265" && IsMainCamera(recorder->config())) {
-            offset_us = boot_time_offset_us;
-            std::cerr << "[camera_recorder] fallback to boot_time_offset_us for main camera "
-                      << recorder->config().name << " in h265 direct-stream mode" << std::endl;
-        }
         if (!offset_us.has_value()) {
             std::cerr << "[camera_recorder] missing record time offset for "
                       << recorder->config().name << std::endl;

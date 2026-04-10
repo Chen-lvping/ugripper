@@ -28,17 +28,17 @@
 | 薄壳启动脚本 | `run_record.sh` | 切到安装目录、等待 `/mnt/data_disk` 可写、维护本地 `/tmp` 到 `/mnt/data_disk/logs` 的增量日志同步，再拉起 `record_runtime` | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/umi_sys_<sn>_<date>.log` |
 | 主运行时 | `build/src/record_runtime/record_runtime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
 | 相机录制 | `build/src/camera_recorder/camera_recorder` | 普通录制模式下负责主摄/触觉会话录制；`--stereo-daemon` 模式下负责双目常驻预热、热插拔恢复与 session finalize | 8 路 `mkv`（默认） |
-| 传感器录制 | `build/src/sensor_recorder/sensor_recorder` | 录制左右 IMU/encoder，按“采样入队 + 每侧独立 MCAP 写线程”分别输出 MCAP | `sensor_data_left.mcap`、`sensor_data_right.mcap` |
+| 传感器录制 | `build/src/sensor_recorder/sensor_recorder` | 录制左右 IMU/encoder，按“采样入队 + 每侧独立 MCAP 写线程”分别输出 MCAP，并在本进程内完成 IMU 超阈值判定 | `sensor_data_left.mcap`、`sensor_data_right.mcap`、motion alert pipe |
 | HMI 类库 | `src/gripper_hmi` | 读取夹爪按键，并在驱动内部以单线程 owner 线程完成状态查询、灯效生成与 RGB 指令发送；默认由状态机切灯效，必要时仍可直接下发 RGB；当前也提供 SN 与 1024-byte 标定参数读写 API | 按键快照、RGB 指令、SN/标定参数读写 |
 | 音频播放 | `audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 优先从受支持 USB 耳机麦克风录音，无耳机时回退系统默认 source，供 pre/post 处理链路使用 | 临时 wav 文件 |
-| 数据盘挂载 | `config/99-fixed-usb-map.rules` | 限定允许物理 USB 口，使用 `systemd-mount` 将数据盘挂到 `/mnt/data_disk`，并在同一 udev 事件里拉起 updater | `/mnt/data_disk`、`usb-auto-update@<dev>.service` |
+| 数据盘挂载 | `config/99-fixed-usb-map.rules` | 限定允许物理 USB 口，按 USB 父链路而不是 `ID_BUS` 匹配数据盘，并在 `add/change` 事件里调用 helper 将数据盘挂到 `/mnt/data_disk`，再拉起 updater | `/mnt/data_disk`、`usb-auto-update@<dev>.service` |
 | USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级/重装、配置导入、标定数据导入、encoder 校准触发；当前会按固定名单自动安装 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`，只要 U 盘根目录存在名单内包就执行安装，同版本也会强制重装；全部安装完成后再通过 PulseAudio 播放 `upgrade_completed.wav`；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload | `/etc/environment`、`calibration.json`、夹爪 HMI |
 | 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、复用 `/mnt/data_disk` 触发左右编码器并行 zeroing、恢复服务 | `build/src/sensor_recorder/zeroing` |
 
 ## 4. 启动链路
 1. `pack_script/postinst` 在安装或升级 `ugripper` 时会尝试把 `/home/user/lib/exfat.ko` 复制到 `/lib/modules/<kernel>/extra/`，写入 `/etc/modules-load.d/ugripper-exfat.conf`，并在安装当次立即尝试加载 `exfat`。
-2. 后续开机时，`systemd-modules-load` 会优先加载 `exfat`；允许的 USB 数据盘分区再由 `config/99-fixed-usb-map.rules` 直接触发 `systemd-mount` 挂载到 `/mnt/data_disk`。
+2. 后续开机时，`systemd-modules-load` 会优先加载 `exfat`；允许的 USB 数据盘分区再由 `config/99-fixed-usb-map.rules` 按物理 USB 父链路匹配，在 `add/change` 事件里触发 helper 挂载到 `/mnt/data_disk`。
 3. systemd 启动 `ugripper.service`。
 4. 服务进入 `/opt/ugripper/run_record.sh`。
 5. `run_record.sh` 读取 `/etc/environment` 中的 `DEVICE_SN`，建立当天运行日志文件名 `umi_sys_<device_sn_lower>_<YYYYMMDD>.log`。
@@ -52,9 +52,9 @@
 10. 运行时连接左右夹爪 HMI、启动 LED 渲染线程、尝试拉起音频守护进程。
 - HMI 状态查询与 LED RGB 下发会在单个 gripper 串口内由驱动 owner 线程统一调度；`record_runtime` 只切换灯效模式，不再跨线程推送录制态的 500ms 亮灭边沿。当前驱动参考旧版 `driver_origin/led_manager` 的职责分离思路做了收敛：按键输入仍以 HMI 主动上报 `KeyReport` 为主，串口主动查询已降为约 `1s` 一次的低频探活/状态刷新；LED 仅在颜色变化、状态切换或低频补发时下发，避免高频状态查询与 RGB 指令互相抢占；若有专项诊断或直控需求，仍可走 direct RGB 通道覆盖当前效果。
 - `src/gripper_hmi` 当前新增了 UMI SN / 标定参数协议封装：SN 固定为 32-byte 字段（当前现场 SN 文本示例为 16-char，尾部补 `0x00`），标定参数固定为 `1024 byte` 严格对齐结构；当前 payload 已覆盖 RGB 主相机、双目 `cam0/cam1`、`cam->imu` 外参、IMU 离散噪声/随机游走与残差统计，其中 header 会保留内部有效数据长度，但当前 `V1.1` 固件写入时仍必须补满 `64 x 16B` 数据包，具体协议见 `docs/umi_calibration_protocol.md`。
-- UMI 标定写入当前增加了异常恢复口径：若写入阶段收到 `0xFE`（当前 chunk 零数据校验错误），驱动会优先重发当前 chunk；若连续出现 `0xFE`，或后续读 SN / 读标定返回 `0xF3/0xFE`，则会发送一次 `AbortWriteInData` 清理固件残留写入状态后再重试。
+- UMI 标定写入当前增加了异常恢复口径：若写入阶段收到 `0xFE`（当前 chunk 零数据校验错误），驱动会优先重发当前 chunk；若出现 `0xF3`（missing_data）或 `0xFF`（checksum_error），则会视为本轮整包写入状态已失配，先发送 `AbortWriteInData` 清理固件残留写入状态，再从头重写整份 `1024-byte` 标定 payload；整份写入当前最多尝试 `3` 次，全部失败后才报错。
 11. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
-12. `record_runtime` 初始化阶段会额外拉起一个常驻 stereo warmup daemon；其在空闲态持续维持左右双目 MJPEG 取流预热，并通过 `/tmp/umi_stereo_camera_status.json` 暴露 `ready/not-ready` 状态。
+12. `record_runtime` 初始化阶段会额外拉起一个常驻 warmup daemon；当前由 `camera_recorder --stereo-daemon` 入口维护左右双目的预热状态，并通过 `/tmp/umi_stereo_camera_status.json` 暴露 `ready/not-ready` 状态。
 13. `record_runtime` 当前按 recorder 进程组而不是单一父 PID 回收 `camera_recorder` / `sensor_recorder`；当停录或异常收尾时，会向整组发送退出信号，降低内部 `ffmpeg`/`gst` 子进程残留导致后续卡死的概率。
 
 ## 5. 状态机与按键行为
@@ -91,11 +91,25 @@
    - `ugripper_lang=<zh|en>`
    - `ugripper_version=<deb version>`
    - `ugripper_usb_updater_version=<deb version>`
-   - `data_format_version=1`
+   - `data_format_version=2`
    - `record_runtime=cpp`
    - `reset_recording=<true|false>`
-3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `config/fakeCamCalib.json`。持久化与 episode `calibration.json` 当前都会保留左右主摄、四路 tactile、`observation.images.left_stereo/right_stereo` 以及 `observation.imu.left_imu/right_imu`；每侧 stereo / IMU 的 payload 子集会额外挂到 `calibration_info.stereo_imu_bundles.<side>`。起录时仍会用 `udevadm` 从现场 `/dev/left_tcam_l`、`/dev/left_tcam_r`、`/dev/right_tcam_l`、`/dev/right_tcam_r` 分别回填 4 路真实 tactile USB serial；若持久化 calibration 里还只有旧的 `gripper_left_tactile` / `gripper_right_tactile`，运行时会按左右侧复制参数到四路独立项，但 episode 输出不再保留旧键。不回写持久化 calibration。
-4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 在每路首个 pre-mux packet 锁定 `PTS + 系统时间` 后统一生成。
+   - `gripper_left.serial_number`
+   - `gripper_left.calibration_status`
+   - `gripper_right.serial_number`
+   - `gripper_right.calibration_status`
+3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `config/fakeCamCalib.json`。`calibration.json` 的输出格式当前已锁定：
+   - `metadata.format_version=2.0`
+   - `metadata` 只保留 `format_version/generation_date/description/calibration_status`
+   - `calibration_info` 只保留 `calibration_date/calibration_status/notes`
+   - tactile 只保留 4 路 `left_tcam_l/left_tcam_r/right_tcam_l/right_tcam_r`
+   - 不再写入 gripper 连接态、SN、valid/source 等重复字段
+   - 左右主摄、左右 stereo、左右 imu 的标定参数都由 gripper payload 自动填充；即使无 SN 或未标定，也允许继续录制
+4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 统一生成，且当前只保留旧版 offset 字段：
+   - `boot_time_offset`
+   - `boot_time_offset_us`
+   - 8 路 `<camera>_record_time_offset_us`
+   - 不再输出 `stereo_session`
 5. 若已准备 pre audio，则移动到本次 episode 的 `audio_pre.wav`。
 6. 并行启动：
    - `camera_recorder --codec <codec> --output-dir <episode> --only left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
@@ -111,12 +125,16 @@
   - tactile `l/r` 的内部端口映射已按当前现场布线对调；
   - tactile 仍按左右侧固定 kernel 路径命名，不做跨侧互换。
 - 当前运行时默认录制全部 8 路：左右主摄 + 左右 stereo + 4 路触觉。
-- 普通录制阶段的 `camera_recorder` 当前只会起左右主摄 + 4 路触觉；左右 stereo 由单独的 `camera_recorder --stereo-daemon` 常驻管理。
-- stereo daemon 在空闲态持续常驻打开双目设备并消费 `MJPEG 60fps` 帧；开始录制时只新建 session writer，对会话窗口内帧做 `1/2` 抽帧并编码成 `H.265 30fps` 写入最终 `mkv`，不重启双目采集进程。
+- 普通录制阶段的 `camera_recorder` 当前会直接起左右主摄与 4 路触觉；左右 stereo 继续由单独的 warmup daemon 常驻管理。
+- warmup daemon 在空闲态持续常驻打开需要预热的相机设备；当前仅左右双目继续消费 `MJPEG 60fps` 预热流。开始录制时只为 stereo 新建 session writer，把会话窗口内帧写入最终 `mkv`；主摄则在普通录制阶段直接冷启动采集并写入最终文件。
+- warmup daemon 当前按单实例口径运行；若服务内 daemon 尚未退出又手工再起第二个 `camera_recorder --stereo-daemon` 去抢同一批双目设备，可能诱发设备忙、节点缺失或整条 USB 链路重枚举。当前实现已增加 `/tmp/umi_camera_warmup_daemon.lock` 单实例锁，第二个 warmup daemon 会直接拒绝启动。
 - `camera_recorder` 当前会并发拉起全部已选中的相机子进程，不再在管理层按 YAML 顺序逐路等待启动返回。
 - 停录阶段也会并发向各路相机子进程发 stop，并在全部 stop 返回后统一 poll 状态，降低多路顺序收尾导致 `info.json` 缺失或容器未 finalize 的风险。
-- 主相机模式是 `direct-copy-h265`：主摄始终走相机原生码流直封装，不做二次编码；实际拉流格式跟随 `CAMERA_CODEC` 选择 `h264` 或 `h265`。
-- 主摄 YAML 现支持可选 `uvc_roll_absolute`：若配置了标准 UVC `Roll Absolute` 目标值，`camera_recorder` 会在起录前先读取当前值；仅当当前值与目标值不一致时才通过 `libusb` 下发更新，并在设备节点恢复后继续走原有码流直封装，避免为翻转引入二次编解码。
+- 主相机模式是压缩码流直封装：主摄始终走相机原生 `H.264/H.265` 码流，不做二次编码；当前实现已收口为 `camera_recorder` 进程内的 `V4L2 MMAP capture -> appsrc -> h26xparse -> matroskamux -> filesink`。
+- 主相机时间戳当前优先取 `VIDIOC_DQBUF` 返回的 `v4l2_buffer.timestamp`，若驱动标记为 monotonic 则在进程内通过 `boot_time_offset_us` 转成 unix 时间；这样 `system_time_us` 的打点位置尽量前移到内核缓冲出队附近，而不是依赖后置日志解析。
+- 主相机 `PTS/DTS` 当前按“相对首帧 system time 的增量”在进程内生成，并做单调钳制；`<camera>_record_time_offset_us` 的语义保持为 `first_frame_unix_time_us - first_frame_pts_us`，不再允许额外回退值混入 `info.json`。
+- 主相机链路当前仍保留约 `5s` 的 `leaky downstream` 保护窗口，用于吸收短时 `matroskamux/filesink` 背压，减少因极小缓冲触发的编码包丢失与花屏。
+- 主摄 YAML 现支持可选 `uvc_roll_absolute`：若配置了标准 UVC `Roll Absolute` 目标值，`camera_recorder` 会在起录前先读取当前值；仅当当前值与目标值不一致时才通过 `libusb` 下发更新，并在设备节点恢复后继续走原生压缩码流录制，避免为翻转引入二次编解码。
 - 触觉 / 双目模式保留 `hybrid-decode-encode` / `stereo-hybrid-decode-encode`。
 - stereo 当前默认按设备 `1280x400@60` 常驻采集 MJPEG，session writer 按 `30fps` 抽帧后再编码成 `H.265` 写入 `mkv`；当前不再依赖后台 live encode + UDP relay。
 - 每路相机由独立子进程承载；单路失败不会由 `camera_recorder` 主动连带停掉其他相机。
@@ -128,10 +146,8 @@
   - `boot_time_offset`
   - `boot_time_offset_us`
   - 8 路 `<camera>_record_time_offset_us`
-- `info.json` 现额外包含 `stereo_session`，用于描述左右双目本次 session 的开启/停止系统时间，以及每路实际写入首尾帧的 PTS / 系统时间。
-- 当前实现参考 V1 语义：双目在后台常驻消费设备 MJPEG 帧，录制开始后只把 session 窗口内实际送入 writer 的首尾帧系统时间与 PTS 写入 `stereo_session`，用于保持 `frame_system_time_us = frame_pts_us + <camera>_record_time_offset_us` 的对齐方式。
 - 双目当前实现为“后台 MJPEG warmup + 录制时编码写最终文件”：空闲态不再保留 UDP / MPEG-TS live relay；按下录制后，session writer 只消费当前会话的 MJPEG 帧，抽帧后编码写入 `left/right_stereo.mkv`。
-- stereo 顶层 `<camera>_record_time_offset_us` 与主摄/触觉保持同一语义：都以“本次最终输出首个写入帧”的 `PTS -> 系统时间` 映射为准。若需要和其他传感器做更精确的边界对齐，可结合 `info.json.stereo_session.start_system_time_us / stop_system_time_us` 以及 `cameras.<stereo>.first_written_frame_*` 字段使用。
+- stereo 顶层 `<camera>_record_time_offset_us` 与主摄/触觉保持同一语义：都以“本次最终输出首个写入帧”的 `PTS -> 系统时间` 映射为准。
 
 ### 6.3 传感器链路
 - `sensor_recorder` 固定录制：
@@ -141,6 +157,8 @@
 - IMU 配置阶段保留固定 settle wait，但已从旧的长等待收敛到更短窗口，优先压缩起录前空转时间。
 - IMU 与 encoder 当前都会先按“解析/读取后入本地队列 -> 主循环批量消费 -> 每侧写线程落 MCAP”的方式输出；主循环不再直接同步阻塞 `McapWriter::write`。
 - 左右 `sensor_data_*.mcap` 现各自由单独写线程落盘，降低 chunk 压缩或磁盘抖动对采样节奏的反压影响；若写队列持续堆积，日志会输出 backlog warning 便于现场判断是否存在写盘瓶颈。
+- 录制态的 IMU 超阈值检测当前直接下沉在 `sensor_recorder`：复用其现有 IMU 消费路径完成左右手独立的 `gyro`/`accel` 阈值、去抖、cooldown 与最短保持时长判定，不再把原始 IMU 样本转发给 `record_runtime`。
+- `sensor_recorder` 与 `record_runtime` 当前只通过单向本地 `pipe` 交换轻量告警状态消息；`record_runtime` 不接收原始 IMU 流，只在收到“进入告警”状态变化时写一次 warning，并统一控制左右夹爪 HMI 蜂鸣。
 - 输出拆成两份 MCAP：
   - `sensor_data_right.mcap`
   - `sensor_data_left.mcap`
@@ -182,19 +200,11 @@
     - `boot_time_offset`
     - `boot_time_offset_us`
     - 8 路 `<camera>_record_time_offset_us`
-    - `stereo_session`
-      - `start_system_time_us`
-      - `stop_system_time_us`
-      - `cameras.<stereo>.first_written_frame_pts_us`
-      - `cameras.<stereo>.first_written_frame_system_time_us`
-      - `cameras.<stereo>.last_written_frame_pts_us`
-      - `cameras.<stereo>.last_written_frame_system_time_us`
 
 ### 7.2 停录强校验
 停录后当前按以下层次校验：
 - 文件存在性：八路 `mkv`、`sensor_data_left.mcap`、`sensor_data_right.mcap`、`metadata.json`、`calibration.json`、`info.json` 必须存在且非空。
 - `info.json` 字段完整性：强制包含 `boot_time_offset`、`boot_time_offset_us` 与 8 路 `<camera>_record_time_offset_us`，且 `boot_time_offset` 与 `boot_time_offset_us` 必须数值一致。
-- 若存在 `stereo_session`，其 `episode_dir`、`start_system_time_us`、`stop_system_time_us` 与左右 stereo camera entry 必须齐全；当前不再依赖额外 sidecar 文件来完成校验或时间合并。encoder 尾部校验对 stereo 不再直接使用 `ffprobe duration` 推断 episode 结束点，而是优先使用 `stereo_session.stop_system_time_us` 作为双目 session 的尾部边界，避免 warmup/session 预热缓存把双目文件时长放大后误伤传感器尾部校验。
 - 视频可读性：每路 `mkv` 都必须能被 `ffprobe` 读出首个视频流与 `start_time/duration`。
 - 时长合理性：每路视频跨度都必须大于最小阈值，且不能比本次 episode 的最长视频短超过 `5s`。
 - 条件产物：若执行了 pre/post 音频录制，对应 wav 仍需存在。
@@ -212,6 +222,7 @@
 
 ### 8.2 关键持久化与临时路径
 - 持久化标定：`/etc/ugripper/config/calibration/calibration.json`
+- USB 标定导入阶段会在 `/etc/ugripper/config/calibration/.import_stage.*` 下生成临时 `calibration.json` 与夹爪 `payload bin`；由于 HMI helper 当前会以 `ubuntu` 用户运行，stage 目录需保持可遍历、payload bin 需保持可读，否则会出现“bin 已生成但 helper 无法读取”的写入失败。
 - 运行时音频 FIFO：`/tmp/umi_audio_pipe`
 - 音频临时目录：`/tmp/umi_audio`
 - 关机触发文件：`/tmp/umi_shutdown_request`
@@ -287,8 +298,8 @@
 当同一次 U 盘插入同时包含 `config.txt`、`ugripper_calib/` 和 `calibration.txt` 时，当前顺序是：
 1. 导入 `config.txt`
 2. 按 `_left` / `_right` 文件后缀识别需要导入的左右标定目标，并逐侧读取现场 gripper SN、匹配对应夹爪标定 payload
-3. 只有当本次目标侧都完成 gripper SN 匹配后，才开始写入对应夹爪的整套 RGB/stereo/IMU 标定；任一侧匹配失败或写入失败时，本次不会更新持久化 `calibration.json`
-4. 左右夹爪标定都写入成功后，再原子替换持久化 `calibration.json` 中本次目标侧的主相机、stereo 与 IMU payload 子集；缺失的一侧保持原值
+3. 只有当本次目标侧都完成 gripper SN 匹配后，才开始写入对应夹爪的整套 RGB/stereo/IMU 标定；任一侧匹配失败或写入失败时，本次不会把旧 persist calibration 当作成功结果继续保留
+4. U 盘导入当前负责“匹配并写入夹爪标定 + 保存导入归档”；主机侧持久化 `calibration.json` 由 `record_runtime` 在 gripper 后续插入/重连时按实际读回的 SN 与 calibration payload 刷新
 5. 若存在 `calibration.txt`，则跳过中间重启，直接进入左右编码器并行校准流程
 6. 若未触发 `calibration.txt`，则开始按固定名单依次处理 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender` 的 `.deb`；每个包都会先按 Debian 包名读取版本，U 盘内若存在多个候选文件则取最高版本；只要名单内包在 U 盘根目录存在，就执行安装，同版本也会强制重装
 7. 若 updater 在第 6 步先完成自升级，则安装后的新脚本会在同一次插盘流程里继续执行剩余自动安装名单，避免必须二次插盘才能让新名单生效
@@ -311,7 +322,7 @@
 - 当前录制启动不依赖对端网络存在。
 
 数据盘挂载当前行为：
-- `config/99-fixed-usb-map.rules` 会在允许的物理 USB 口上直接调用 `systemd-mount --owner=ubuntu --options=noatime <dev> /mnt/data_disk`，固定挂载点仍然是 `/mnt/data_disk`。
+- `config/99-fixed-usb-map.rules` 会在允许的物理 USB 口上按 `SUBSYSTEMS=="usb"` + 固定 `KERNELS` 路径匹配数据盘，不再依赖易漂移的 `ID_BUS`；对经 USB-SATA/UAS bridge 暴露成 `ID_BUS=ata` 的盘，也会在 `add/change` 事件里继续调用 helper 挂到固定挂载点 `/mnt/data_disk`。
 - 同一条 udev 规则会通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@<dev>.service`；`usb_auto_update.sh` 只会在确认 `/mnt/data_disk` 当前挂载源就是该设备后，才扫描 deb / config / calibration 文件。
 - 允许的 USB 分区在 `remove` 事件里会显式对 `/mnt/data_disk` 执行卸载清理；此外还保留了 USB block `remove` 的兜底触发，尽量覆盖 hub 断链或热插拔时分区级事件不完整的场景，避免拔盘后残留 stale mount。
 - `mount_data_disk.sh` 当前除了匹配挂载源设备节点，还会把“挂载点只读”“挂载源设备节点已不存在”或“挂载点已不可访问”视为脏状态并优先清理；`run_record.sh` 也会把这类状态视为未就绪。
@@ -373,6 +384,7 @@ tail -n 200 /mnt/data_disk/logs/umi_sys_<device_sn_lower>_$(date +%Y%m%d).log
 - 不能启动：先看 `ugripper.service` 日志和 `record_runtime` 是否成功拉起。
 - 能录不能停：优先检查 HMI 按键事件、状态机和 `sensor_recorder` / `camera_recorder` 退出路径。
 - 少文件或校验失败：先核对八路视频、双 MCAP、`metadata.json`、`calibration.json` 是否完整；若已进入 `ERROR_1`，优先查看 episode 下的 `validation_error.log`。
+- warmup 一起双目就掉线：先查是否同时存在多份 `camera_recorder --stereo-daemon`。重复 warmup daemon 抢占同一批双目视频设备时，可能把双目打进 `recovering`，严重时会伴随 USB 侧重枚举；先清掉多余 daemon，再观察 `/tmp/umi_stereo_camera_status.json` 与 `journalctl -u ugripper.service -n 200`。
 - tactile serial 不对：先分别用 `udevadm info --attribute-walk --name=/dev/left_tcam_l`、`/dev/left_tcam_r`、`/dev/right_tcam_l`、`/dev/right_tcam_r` 向上核对 USB `ATTRS{serial}`，再对比 episode `calibration.json` 中 `observation.images.left_tcam_l.serial`、`left_tcam_r.serial`、`right_tcam_l.serial`、`right_tcam_r.serial`；当前口径只修正 episode，不回写 `/etc/ugripper/config/calibration/calibration.json`，且不再输出 `gripper_left_tactile` / `gripper_right_tactile` 两个旧键。
 - 进入错误灯效但录制进程还活着：优先检查 `/mnt/data_disk` 是否仍可写、关键 `/dev/*` 设备节点是否还在，以及 HMI 是否持续响应。
 - 音频异常：优先看 USB 耳机枚举、PulseAudio sink/source、`module-suspend-on-idle` 是否已在初始化阶段被卸载。
@@ -406,6 +418,7 @@ PY
   - `camera_test.sh`：直接拉起多路 `ffmpeg` 验证非主相机录制稳定性，并记录运行态信息。
   - `camera_crash_capture.sh`：在 `camera_test.sh` 基础上额外持续抓取内核日志、进程、中断与内存信息，适合定位 crash / hang。
   - `testVideoPipe.sh`：快速枚举指定 `/dev/video*` 节点的视频格式能力。
+  - `scan_main_camera_mkv_issues.py`：递归扫描 `left_cam_main.mkv` / `right_cam_main.mkv`，并发检查主摄 `mkv` 的包时间戳异常、显著时间洞与可疑解码错误，并对齐同目录左右主摄的异常时间点。
 - 建议从仓库根目录显式执行 `bash test/scripts/<script>.sh`；详细参数与注意事项见 `test/README.md`。
 - 若现场需要脱离主服务、单独向夹爪 HMI 写入 SN / 标定，可使用 `py_script/hmi_sn_batch_writer.py`：脚本直接读取一个或多个 `.xlsx` 的多 sheet `SN码` 列，支持操作员输入 SN 后 4 位或任意连续片段做唯一匹配，自动扫描 CH9344 相关串口确认可用 HMI 口，并在匹配到目标 SN 后写入 SN 与可选 `1024-byte` 标定 payload。
 - `py_script/hmi_sn_batch_writer.py` 默认会在启动时把自身和本次使用的 `.xlsx` 同步复制到 `/mnt/data_disk/hmi_sn_writer/`；标定源目录可通过 `--calib-root` 指向包含 `.bin`、summary `.md` 或 `rgb_video_ros-camchain.yaml + output-results-imucam.txt` 的目录。若未找到目标 SN 对应标定文件，脚本会只写 SN，并在控制台用黄色提示“未写标定”。

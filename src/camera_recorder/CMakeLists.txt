@@ -7,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 find_package(PkgConfig REQUIRED)
 find_package(yaml-cpp REQUIRED)
 pkg_check_modules(LIBUSB REQUIRED libusb-1.0)
+pkg_check_modules(GSTREAMER REQUIRED gstreamer-1.0 gstreamer-app-1.0 gstreamer-base-1.0)
 
 add_executable(camera_recorder
     src/camera_recorder.cpp
@@ -17,21 +18,25 @@ target_include_directories(camera_recorder
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
         ${LIBUSB_INCLUDE_DIRS}
+        ${GSTREAMER_INCLUDE_DIRS}
 )
 
 target_link_directories(camera_recorder
     PRIVATE
         ${LIBUSB_LIBRARY_DIRS}
+        ${GSTREAMER_LIBRARY_DIRS}
 )
 
 target_compile_options(camera_recorder
     PRIVATE
         ${LIBUSB_CFLAGS_OTHER}
+        ${GSTREAMER_CFLAGS_OTHER}
 )
 
 target_link_libraries(camera_recorder
     PRIVATE
         pthread
         ${LIBUSB_LIBRARIES}
+        ${GSTREAMER_LIBRARIES}
         yaml-cpp
 )

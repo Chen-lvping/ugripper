@@ -5,8 +5,26 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- 主摄 `direct-copy-h26x` 录制链路改为 `camera_recorder` 进程内 `V4L2 MMAP capture -> appsrc -> h26xparse -> matroskamux -> filesink`，`record_time_offset_us` 的 system time 打点前移到 `VIDIOC_DQBUF` / `v4l2_buffer.timestamp` 附近，减少 shell 管线日志解析带来的软件延迟。
+- 主摄容器时间轴改为在进程内显式写入单调 `PTS/DTS`，降低 `non_monotonic_dts_count` 这类由后置时间戳链路引入的异常概率。
+- 调整 UMI 标定写入重试策略：`0xFE` 仍优先在当前 chunk 内重发；若写标定过程中收到 `0xF3/0xFF`，则不再只重试当前 chunk，而是先发送 `AbortWriteInData` 结束本轮，再从头重写整份 `1024-byte` 标定 payload；整份写入最多尝试 `3` 次，全部失败后才报错退出。
+- 修复 USB 标定导入时 root 创建的 `.import_stage.*` 目录权限过严的问题：stage 目录现在会显式开放遍历权限，并把生成的夹爪 `payload bin` 设为可读，避免 `runuser -u ubuntu` 调起的 HMI helper 报 `Failed to read calibration binary`。
+- 调整 gripper 热插拔后的运行时标定刷新时序：夹爪插回后不再立刻同步读 SN/标定，而是先等待该侧相机、stereo、触觉、encoder、imu 等关键设备节点全部恢复，再在实际读 SN/标定并刷新缓存的短窗口切 `INIT` 蓝灯。
+- 修复 gripper 断连事件会在持久化阶段再次同步重读另一侧夹爪标定的问题；持久化 `calibration.json` 改为只消费最近一次成功缓存的 payload，避免热插拔窗口里的 `6500ms` range read 把主循环、红灯切换和恢复呼吸灯拖慢。
+- 继续优化主摄 warmup `pre-roll`：session 启动时改为先选取最接近录制开始的安全随机访问点片段，再桥接缓存 pre-roll 注入期间到达的 live AU，减少“等关键帧才能起播”带来的主摄首段缺失，同时避免 pre-roll 与 live 交界处产生 `gap / duplicate dts / non-monotonic dts`。
+- 新增 `test/scripts/scan_main_camera_mkv_issues.py`：支持递归扫描当前目录或指定目录下的 `left_cam_main.mkv` / `right_cam_main.mkv`，并发检查包时间戳异常、显著时间洞和可疑解码错误，并对齐同目录左右主摄的异常时间点，便于批量定位疑似花屏/坏流文件。
+- 修复 USB 数据盘在 UAS / USB-SATA bridge 场景下的自动重挂载：`config/99-fixed-usb-map.rules` 改为按 USB 父链路 `SUBSYSTEMS=="usb"` + 固定物理口匹配，并在 `add/change` 事件里触发 helper，不再依赖可能显示成 `ID_BUS=ata` 的分区属性；避免盘抖动重枚举后只有桌面 `udisks` 挂到 `/media/ubuntu/...`，而 `/mnt/data_disk` 没有被重新拉起。
 - 修复 recorder 停录/异常收尾时可能遗留 `ffmpeg`/`gst` 子进程的问题：`record_runtime` 现在按整个进程组回收 `camera_recorder` 与 `sensor_recorder`，降低主摄抖动或 recorder 意外退出后残留录制进程拖住后续录制的概率。
 - 补强 `camera_recorder` 的 stop 日志与输出管道清理路径；在强制 `SIGKILL` 后若子进程仍未被回收，会明确记日志，便于现场继续定位内核态阻塞或设备异常。
+- 录制态新增 IMU 超阈值报警：`sensor_recorder` 直接在本进程的 IMU 消费路径里完成左右手独立的阈值判定，并通过轻量本地 `pipe` 把告警状态变化发给 `record_runtime`；`record_runtime` 统一控制左右夹爪 HMI 蜂鸣，service 日志仅在进入告警时写一次 warning，不再持续刷实时运动日志。
+
+## v1.2.10 - 2026-04-09
+- 主摄 `direct-copy-h265` 录制链路把 `leaky downstream` 队列从极小帧缓冲放宽为约 `5s` 时间窗口，减少短时 `matroskamux/filesink` 背压导致的编码包丢失、参考帧断裂与花屏风险。
+- 主摄 `H.265` 直封装链路不再对 `v4l2src` 强制开启 `do-timestamp=true`，改为优先保留设备侧采集时间戳，尝试消除重复 `DTS/PTS` 告警。
+- 主摄 `direct-copy-h265` 录制改为由 `camera_recorder` 进程内直接接管 `V4L2 MMAP capture -> appsrc -> h265parse -> matroskamux -> filesink`：按完整 access unit 自行打 `PTS/DTS`，并把 `matroskamux timecodescale` 下探到微秒级，避免旧 shell 管线里的时间戳堆积与重复 `DTS`。
+- 主摄 `PTS` 生成策略改为“完整 access unit 写入序号 + 首帧系统时间 offset”：保留 `PTS + <camera>_record_time_offset_us` 的主机侧对齐语义，同时消除 burst dequeue 对容器时间轴的挤压；当前短录验证左右主摄的 `duplicate_dts / large_gap / decode_non_monotonic_dts` 已归零。
+- warmup daemon 当前扩展为统一维护左右主摄与左右 stereo；普通录制阶段的 `camera_recorder` 只保留 4 路触觉，主摄 `left/right_cam_main_record_time_offset_us` 改为从 warmup 流进入本次 session 的首帧 AU 系统时间锚定，进一步减少主摄冷启动对首帧 offset 的污染。
+- 新增 `test/scripts/scan_main_camera_mkv_issues.py`：支持递归扫描当前目录或指定目录下的 `left_cam_main.mkv` / `right_cam_main.mkv`，并发检查包时间戳异常、显著时间洞和可疑解码错误，并对齐同目录左右主摄的异常时间点，便于批量定位疑似花屏/坏流文件。
 
 ## v1.2.9 - 2026-04-03
 - U 盘自动安装流程调整为“名单内包只要出现在 U 盘根目录就执行安装”，不再要求 U 盘版本高于已装版本；同版本会显式走重装，仍保持“同包多个候选取最高版本”和 updater 自升级后同次插盘继续接力安装的行为。
@@ -22,6 +40,8 @@
 - 双目录制链路调整为“后台常驻 MJPEG 预热 + 会话写最终文件”，停录阶段先冻结本次 session 再逐路 finalize，并把 `stereo_session` 时间信息收口到 `info.json` 供最终校验与对齐使用。
 - 传感器写盘链路调整为“采样入队 + 每侧独立 MCAP 写线程”，并在出现 burst 消费时按名义频率回填局部时间戳，降低写盘抖动对 IMU / encoder 时间轴的影响。
 - 标定数据结构、协议文档和导入结果说明进一步收口到当前 `1024-byte` payload 口径，主机侧 `calibration.json` 也同步补齐 stereo / IMU 摘要字段。
+- gripper 连接/重连后会立即回读该侧 SN 与 calibration payload，刷新运行时与持久化 `calibration.json` 缓存；若当前侧读标定失败，则清掉旧侧标定子集而不是继续沿用陈旧 persist 数据。
+- episode `metadata.json` 新增左右 gripper 的连接态、SN、标定有效性、来源和错误信息；即使夹爪未标定或无 SN，也允许继续录制，但会如实落到 metadata / calibration 输出。
 
 ## v1.2.7 - 2026-03-27
 - 新增 `standalone/gripper_hmi_toolkit/` 独立工具目录，并在 `src/gripper_hmi` 中补齐 SN / 标定参数读写接口，方便现场直接做串口联调和参数读写。
