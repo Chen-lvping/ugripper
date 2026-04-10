@@ -147,6 +147,14 @@ chmod -R 777 "$APP_DIR"
 # 初始化持久化标定目录：缺失、空文件或非法 JSON 时写入默认 fake calibration
 mkdir -p "$CALIB_PERSIST_DIR"
 ensure_persist_calibration
+if id ubuntu >/dev/null 2>&1; then
+    chown ubuntu:ubuntu "$CALIB_PERSIST_DIR" >/dev/null 2>&1 || true
+    chmod 0775 "$CALIB_PERSIST_DIR" >/dev/null 2>&1 || true
+    if [ -f "$CALIB_PERSIST_FILE" ]; then
+        chown ubuntu:ubuntu "$CALIB_PERSIST_FILE" >/dev/null 2>&1 || true
+        chmod 0664 "$CALIB_PERSIST_FILE" >/dev/null 2>&1 || true
+    fi
+fi
 
 # 安装时自动配置 exfat 提前加载，兼容已生产设备通过 deb 升级修复开机挂载竞态
 ensure_exfat_autoload || true

@@ -25,6 +25,7 @@ SERIAL_NUMBER_CHUNK_SIZE = 16
 CALIBRATION_PAYLOAD_SIZE = 1024
 CALIBRATION_CHUNK_SIZE = 16
 CALIBRATION_CHUNK_COUNT = CALIBRATION_PAYLOAD_SIZE // CALIBRATION_CHUNK_SIZE
+CALIBRATION_HEADER_CHUNK_COUNT = 2
 STATUS_FRAME_LENGTH = 8
 RAW_DATA_FRAME_HEAD = b"\xA5\xA5"
 SEND_FRAME_HEAD = b"\x5A\x5A"
@@ -59,6 +60,7 @@ CALIBRATION_BEGIN_RETRY_LIMIT = 5
 CALIBRATION_CHUNK_RETRY_LIMIT = 8
 CALIBRATION_READ_RETRY_LIMIT = 5
 CALIBRATION_ABORT_RETRY_LIMIT = 2
+CALIBRATION_MISSING_CHUNK_SWEEP_LIMIT = 3
 
 
 def calculate_xor(data: bytes) -> int:
@@ -103,6 +105,24 @@ def is_retryable_calibration_status(status_code: int) -> bool:
 
 def is_calibration_abort_recovery_status(status_code: int) -> bool:
     return status_code in {STATUS_MISSING_DATA, STATUS_ZERO_DATA_CHECKSUM_ERROR}
+
+
+def required_calibration_chunk_count(payload: bytes, received: list[bool]) -> int | None:
+    if not all(received[:CALIBRATION_HEADER_CHUNK_COUNT]):
+        return None
+    magic, version, payload_size, header_size, valid_fields = struct.unpack("<4sIHHI", payload[:16])
+    del version, valid_fields
+    if magic != b"UCAL":
+        return None
+    if header_size != 32:
+        return None
+    if payload_size == 0 or payload_size > CALIBRATION_PAYLOAD_SIZE:
+        return None
+    required_bytes = max(payload_size, header_size)
+    return max(
+        CALIBRATION_HEADER_CHUNK_COUNT,
+        (required_bytes + CALIBRATION_CHUNK_SIZE - 1) // CALIBRATION_CHUNK_SIZE,
+    )
 
 
 def is_calibration_write_ack_token(packet_index: int, token: int) -> bool:
@@ -575,6 +595,7 @@ class GripperHmiClient:
         def collect_frames(timeout_s: float) -> tuple[bytearray, list[bool], int, int]:
             raw = bytearray(CALIBRATION_PAYLOAD_SIZE)
             received = [False] * CALIBRATION_CHUNK_COUNT
+            required_chunk_count = CALIBRATION_CHUNK_COUNT
             response_token = 0
             status_code = 0
             deadline = time.monotonic() + timeout_s
@@ -597,7 +618,12 @@ class GripperHmiClient:
                         if token < CALIBRATION_CHUNK_COUNT:
                             raw[token * CALIBRATION_CHUNK_SIZE:(token + 1) * CALIBRATION_CHUNK_SIZE] = frame[3:19]
                             received[token] = True
+                            required_chunk_count = (
+                                required_calibration_chunk_count(raw, received) or required_chunk_count
+                            )
                         del buffer[:20]
+                        if all(received[:required_chunk_count]):
+                            return raw, received, response_token, status_code
                         continue
                     if len(buffer) >= STATUS_FRAME_LENGTH:
                         frame = bytes(buffer[:STATUS_FRAME_LENGTH])
@@ -633,12 +659,16 @@ class GripperHmiClient:
         range_read_collected = False
         raw = bytearray(CALIBRATION_PAYLOAD_SIZE)
         received = [False] * CALIBRATION_CHUNK_COUNT
+        required_chunk_count = CALIBRATION_CHUNK_COUNT
         response_token = 0
         status_code = 0
         for attempt in range(CALIBRATION_READ_RETRY_LIMIT):
             raw, received, response_token, status_code = request_range_read()
-            if all(received):
+            required_chunk_count = required_calibration_chunk_count(raw, received) or CALIBRATION_CHUNK_COUNT
+            if all(received[:required_chunk_count]):
                 range_read_collected = True
+                break
+            if any(received):
                 break
             if (
                 not any(received)
@@ -664,55 +694,72 @@ class GripperHmiClient:
             time.sleep(CALIBRATION_CHUNK_SEND_INTERVAL_S)
 
         need_sequential_fallback = (
-            not range_read_collected and not all(received) and is_retryable_calibration_status(status_code)
+            not range_read_collected
+            and not all(received[:required_chunk_count])
+            and (status_code == 0 or is_retryable_calibration_status(status_code))
         )
         if need_sequential_fallback:
             self.flush_input()
-            raw = bytearray(CALIBRATION_PAYLOAD_SIZE)
-            received = [False] * CALIBRATION_CHUNK_COUNT
             response_token = 0
             status_code = 0
-            for packet_index in range(CALIBRATION_CHUNK_COUNT):
-                chunk_received = False
-                result_kind = "timeout"
-                result_payload: bytes | tuple[int, int] = b""
-                for attempt in range(CALIBRATION_CHUNK_RETRY_LIMIT):
-                    result_kind, result_payload = request_single_chunk_read(packet_index)
-                    if result_kind == "data":
-                        payload = result_payload  # type: ignore[assignment]
-                        if len(payload) == CALIBRATION_CHUNK_SIZE:
-                            raw[
-                                packet_index * CALIBRATION_CHUNK_SIZE:(packet_index + 1) * CALIBRATION_CHUNK_SIZE
-                            ] = payload
-                            received[packet_index] = True
-                            chunk_received = True
-                            break
-                    if result_kind == "status":
-                        token, status_code = result_payload  # type: ignore[misc]
-                        response_token = token
-                        if (
-                            is_calibration_abort_recovery_status(status_code)
-                            and attempt + 1 < CALIBRATION_CHUNK_RETRY_LIMIT
-                            and self.abort_calibration_write_state(
-                                f"chunk read recovery packet={packet_index} after {describe_status_frame(token, status_code)}"
-                            )
-                        ):
-                            continue
-                        if is_retryable_calibration_status(status_code):
+            for sweep in range(CALIBRATION_MISSING_CHUNK_SWEEP_LIMIT):
+                filled_any_chunk = False
+                all_received = True
+                for packet_index in range(CALIBRATION_CHUNK_COUNT):
+                    if received[packet_index]:
+                        continue
+                    all_received = False
+                    chunk_received = False
+                    result_kind = "timeout"
+                    result_payload: bytes | tuple[int, int] = b""
+                    for attempt in range(CALIBRATION_CHUNK_RETRY_LIMIT):
+                        result_kind, result_payload = request_single_chunk_read(packet_index)
+                        if result_kind == "data":
+                            payload = result_payload  # type: ignore[assignment]
+                            if len(payload) == CALIBRATION_CHUNK_SIZE:
+                                raw[
+                                    packet_index * CALIBRATION_CHUNK_SIZE:(packet_index + 1) * CALIBRATION_CHUNK_SIZE
+                                ] = payload
+                                received[packet_index] = True
+                                required_chunk_count = (
+                                    required_calibration_chunk_count(raw, received) or required_chunk_count
+                                )
+                                chunk_received = True
+                                filled_any_chunk = True
+                                break
+                        if result_kind == "status":
+                            token, status_code = result_payload  # type: ignore[misc]
+                            response_token = token
+                            if (
+                                is_calibration_abort_recovery_status(status_code)
+                                and attempt + 1 < CALIBRATION_CHUNK_RETRY_LIMIT
+                                and self.abort_calibration_write_state(
+                                    f"chunk read recovery packet={packet_index} after {describe_status_frame(token, status_code)}"
+                                )
+                            ):
+                                continue
+                            if is_retryable_calibration_status(status_code):
+                                time.sleep(CALIBRATION_CHUNK_SEND_INTERVAL_S)
+                                continue
+                        if result_kind == "timeout":
                             time.sleep(CALIBRATION_CHUNK_SEND_INTERVAL_S)
                             continue
+                        break
+                    if not chunk_received and sweep + 1 >= CALIBRATION_MISSING_CHUNK_SWEEP_LIMIT:
+                        if result_kind == "status":
+                            self.last_error = (
+                                f"calibration read failed at chunk {packet_index}: "
+                                f"{describe_status_frame(response_token, status_code)}"
+                            )
+                        else:
+                            self.last_error = f"timed out waiting for calibration chunk {packet_index}"
+                        raise RuntimeError(self.last_error)
+                if all_received or not filled_any_chunk:
                     break
-                if not chunk_received:
-                    if result_kind == "status":
-                        self.last_error = (
-                            f"calibration read failed at chunk {packet_index}: "
-                            f"{describe_status_frame(response_token, status_code)}"
-                        )
-                    else:
-                        self.last_error = f"timed out waiting for calibration chunk {packet_index}"
-                    raise RuntimeError(self.last_error)
+                if all(received[:required_chunk_count]):
+                    break
 
-        for packet_index, ok in enumerate(received):
+        for packet_index, ok in enumerate(received[:required_chunk_count]):
             if ok:
                 continue
             if status_code != 0:

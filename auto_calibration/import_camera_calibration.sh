@@ -372,6 +372,8 @@ fi
 
 mkdir -p "$PERSIST_CALIB_DIR"
 TMP_STAGE_DIR="$(mktemp -d "$PERSIST_CALIB_DIR/.import_stage.XXXXXX")"
+# HMI helper may run as ubuntu via runuser, so the staging directory must be traversable.
+chmod 755 "$TMP_STAGE_DIR"
 cleanup_stage_dir() {
     rm -rf "$TMP_STAGE_DIR"
 }
@@ -919,6 +921,7 @@ for side in "${IMPORT_SIDES[@]}"; do
         log "生成夹爪 payload 失败：side=$side source=$source_path"
         exit 1
     fi
+    chmod 644 "$payload_bin"
 
     SIDE_GRIPPER_SN[$side]="$gripper_sn"
     SIDE_GRIPPER_SOURCE[$side]="$source_path"
@@ -938,6 +941,11 @@ for side in "${IMPORT_SIDES[@]}"; do
 done
 
 mv -f "$TEMP_CALIB_JSON" "$PERSIST_CALIB_FILE"
+if id "$HMI_RUN_USER" >/dev/null 2>&1; then
+    chown "$HMI_RUN_USER":"$HMI_RUN_USER" "$PERSIST_CALIB_DIR" "$PERSIST_CALIB_FILE" >/dev/null 2>&1 || true
+    chmod 775 "$PERSIST_CALIB_DIR" >/dev/null 2>&1 || true
+    chmod 664 "$PERSIST_CALIB_FILE" >/dev/null 2>&1 || true
+fi
 
 IMPORT_STAMP="$(date +%Y%m%d_%H%M%S)"
 IMPORT_SAVE_DIR="$PERSIST_CALIB_DIR/imported/${DEVICE_SN}/${IMPORT_STAMP}"

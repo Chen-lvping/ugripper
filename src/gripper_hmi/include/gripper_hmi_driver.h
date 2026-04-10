@@ -11,9 +11,9 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <optional>
 #include <functional>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -50,6 +50,9 @@ public:
     bool readSerialNumber(std::string *serialNumber);
     bool writeSerialNumber(const std::string &serialNumber);
     bool readCalibrationData(gripper_hmi::GripperCalibrationDataV1 *calibrationData);
+    bool readSerialNumberAndCalibration(std::string *serialNumber,
+                                        bool *hasSerialNumber,
+                                        gripper_hmi::GripperCalibrationDataV1 *calibrationData);
     bool writeCalibrationData(const gripper_hmi::GripperCalibrationDataV1 &calibrationData);
 
     bool pollOnce(int timeoutMs = 20);
@@ -86,6 +89,8 @@ private:
     bool readRawDataFrameLocked(size_t dataLength, std::vector<uint8_t> *payload, int timeoutMs);
     bool readCalibrationFrameLocked(uint8_t expectedToken, std::vector<uint8_t> *payload, int timeoutMs);
     bool abortCalibrationWriteStateLocked(const std::string &reason);
+    bool readSerialNumberLocked(std::string *serialNumber);
+    bool readCalibrationDataLocked(gripper_hmi::GripperCalibrationDataV1 *calibrationData);
     ExclusiveFrameReadResult readRawDataOrStatusFrameLocked(size_t dataLength,
                                                             std::vector<uint8_t> *payload,
                                                             uint8_t *token,
