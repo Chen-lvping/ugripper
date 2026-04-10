@@ -614,11 +614,6 @@ install_usb_package_if_needed() {
   fi
 
   installed_version="$(get_installed_version "$pkg_name")"
-  if [ -n "$installed_version" ] && ! dpkg --compare-versions "$deb_version" gt "$installed_version"; then
-    log "[$pkg_name] 无需安装：installed=$installed_version, usb=$deb_version, deb=$deb_file"
-    return 0
-  fi
-
   ensure_package_install_window
 
   if [ "$pkg_name" = "ugripper-usb-updater" ]; then
@@ -627,7 +622,11 @@ install_usb_package_if_needed() {
   fi
 
   if [ -n "$installed_version" ]; then
-    action_label="升级"
+    if [ "$installed_version" = "$deb_version" ]; then
+      action_label="重装"
+    else
+      action_label="升级"
+    fi
   else
     action_label="安装"
   fi
