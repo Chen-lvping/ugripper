@@ -1,0 +1,4 @@
+interface:
+  display_name: "Episode Validator"
+  short_description: "深度校验单条 episode 的视频与 sensor 一致性"
+  default_prompt: "使用 $validate-episode-data 校验这条新录制的 episode；如果我说“校验最新一条数据”，默认对给定数据父目录执行 --latest，重点检查视频时间对齐、帧 gap、首帧同步误差、左右 sensor 同步，以及视频与 sensor 的同步情况。"
