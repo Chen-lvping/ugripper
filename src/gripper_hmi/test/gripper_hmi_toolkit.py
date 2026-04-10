@@ -166,11 +166,29 @@ class ClientOptions:
     log_callback: Optional[Callable[[str], None]] = None
 
 
+@dataclass
+class SerialWriteAckSummary:
+    preamble_token: int
+    preamble_status: int
+    chunk0_token: int
+    chunk0_status: int
+    chunk1_token: int
+    chunk1_status: int
+
+    def to_text(self) -> str:
+        return (
+            f"preamble={describe_status_frame(self.preamble_token, self.preamble_status)}; "
+            f"chunk0={describe_status_frame(self.chunk0_token, self.chunk0_status)}; "
+            f"chunk1={describe_status_frame(self.chunk1_token, self.chunk1_status)}"
+        )
+
+
 class GripperHmiClient:
     def __init__(self, options: ClientOptions):
         self.options = options
         self.ser: Optional[serial.Serial] = None
         self.last_error = ""
+        self.last_serial_write_ack_summary: Optional[SerialWriteAckSummary] = None
 
     def __enter__(self) -> "GripperHmiClient":
         self.open()
@@ -442,10 +460,10 @@ class GripperHmiClient:
         self.last_error = "serial number read failed after retry"
         raise RuntimeError(self.last_error)
 
-    def write_serial_number(self, serial_number: str) -> None:
+    def write_serial_number(self, serial_number: str) -> SerialWriteAckSummary:
         encoded = encode_serial_number(serial_number)
 
-        def write_chunk_with_retry(chunk_index: int, chunk_data: bytes) -> None:
+        def write_chunk_with_retry(chunk_index: int, chunk_data: bytes) -> tuple[int, int]:
             frame = build_write_sn_frame(chunk_data)
             saw_status = False
             last_token = 0
@@ -462,7 +480,7 @@ class GripperHmiClient:
                 last_token = token
                 last_status = status_code
                 if status_code == STATUS_OK:
-                    return
+                    return token, status_code
                 if is_calibration_abort_recovery_status(status_code):
                     should_abort_and_recover = status_code == STATUS_MISSING_DATA or (
                         status_code == STATUS_ZERO_DATA_CHECKSUM_ERROR and attempt > 0
@@ -538,10 +556,20 @@ class GripperHmiClient:
             )
             raise RuntimeError(self.last_error)
 
-        write_chunk_with_retry(0, encoded[:SERIAL_NUMBER_CHUNK_SIZE])
-        write_chunk_with_retry(1, encoded[SERIAL_NUMBER_CHUNK_SIZE:])
+        chunk0_token, chunk0_status = write_chunk_with_retry(0, encoded[:SERIAL_NUMBER_CHUNK_SIZE])
+        chunk1_token, chunk1_status = write_chunk_with_retry(1, encoded[SERIAL_NUMBER_CHUNK_SIZE:])
         time.sleep(0.15)
         self.last_error = ""
+        self.last_serial_write_ack_summary = SerialWriteAckSummary(
+            preamble_token=last_preamble_token,
+            preamble_status=last_preamble_status,
+            chunk0_token=chunk0_token,
+            chunk0_status=chunk0_status,
+            chunk1_token=chunk1_token,
+            chunk1_status=chunk1_status,
+        )
+        self.log(f"serial_write_ack {self.last_serial_write_ack_summary.to_text()}")
+        return self.last_serial_write_ack_summary
 
     def read_calibration(self) -> bytes:
         def collect_frames(timeout_s: float) -> tuple[bytearray, list[bool], int, int]:
@@ -941,8 +969,9 @@ def main() -> int:
                 print(client.read_serial_number())
                 return 0
             if args.write_sn is not None:
-                client.write_serial_number(args.write_sn)
+                ack_summary = client.write_serial_number(args.write_sn)
                 print("write-sn ok")
+                print(f"ack={ack_summary.to_text()}")
                 return 0
             if args.read_calib:
                 payload = client.read_calibration()

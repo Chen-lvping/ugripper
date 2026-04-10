@@ -1123,77 +1123,158 @@ bool GripperHmiDriver::writeSerialNumber(const std::string &serialNumber)
     }
 
     return runExclusiveCommand([this, &encoded]() {
-        sp_flush(serialPort_, SP_BUF_INPUT);
-        const auto request = GripperHmiProtocol::buildWriteSerialNumberCommand();
-        if (!writeFrameLocked(request.data(), request.size()))
-        {
-            lastCommandError_ = "failed to send write serial number command";
-            return false;
-        }
+        auto writeChunkWithRetry = [this](size_t chunkIndex, const uint8_t *chunkData) -> bool {
+            const auto frame = GripperHmiProtocol::buildWriteSerialNumberFrame(
+                chunkData,
+                GripperHmiProtocol::kSerialNumberChunkSize);
+            bool chunkSent = false;
+            bool sawStatus = false;
+            uint8_t lastResponseToken = 0;
+            uint8_t lastStatusCode = 0;
+            int chunkAbortRecoveries = 0;
 
-        uint8_t responseToken = 0;
-        uint8_t statusCode = 0;
-        if (!readAnyStatusFrameLocked(&responseToken, &statusCode, kExclusiveCommandTimeoutMs))
+            for (int attempt = 0; attempt < kCalibrationChunkRetryLimit; ++attempt)
+            {
+                if (!writeFrameLocked(frame.data(), frame.size()))
+                {
+                    lastCommandError_ = "failed to send serial number payload chunk " + std::to_string(chunkIndex);
+                    return false;
+                }
+
+                uint8_t responseToken = 0;
+                uint8_t statusCode = 0;
+                if (!readAnyStatusFrameLocked(&responseToken, &statusCode, kExclusiveCommandTimeoutMs))
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kCalibrationChunkSendIntervalMs));
+                    continue;
+                }
+
+                sawStatus = true;
+                lastResponseToken = responseToken;
+                lastStatusCode = statusCode;
+
+                if (statusCode == GripperHmiProtocol::kStatusOk)
+                {
+                    chunkSent = true;
+                    break;
+                }
+
+                if (isCalibrationAbortRecoveryStatus(statusCode))
+                {
+                    const bool shouldAbortAndRecover =
+                        statusCode == GripperHmiProtocol::kStatusMissingData ||
+                        (statusCode == GripperHmiProtocol::kStatusZeroDataChecksumError && attempt > 0);
+                    if (shouldAbortAndRecover &&
+                        chunkAbortRecoveries < kCalibrationAbortRetryLimit &&
+                        abortCalibrationWriteStateLocked("serial write recovery chunk=" +
+                                                         std::to_string(chunkIndex) + " after " +
+                                                         describeStatusFrame(responseToken, statusCode)))
+                    {
+                        ++chunkAbortRecoveries;
+                        continue;
+                    }
+                }
+
+                if (isRetryableCalibrationStatus(statusCode))
+                {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kCalibrationChunkSendIntervalMs));
+                    continue;
+                }
+
+                lastCommandError_ = "serial number write chunk " + std::to_string(chunkIndex) +
+                                    " failed: " + describeStatusFrame(responseToken, statusCode);
+                return false;
+            }
+
+            if (!chunkSent)
+            {
+                lastCommandError_ = "serial number write chunk " + std::to_string(chunkIndex) +
+                                    " failed after retry" +
+                                    (sawStatus ? (": " + describeStatusFrame(lastResponseToken, lastStatusCode))
+                                               : std::string());
+                return false;
+            }
+
+            return true;
+        };
+
+        bool preambleReady = false;
+        bool sawPreambleStatus = false;
+        uint8_t lastPreambleToken = 0;
+        uint8_t lastPreambleStatusCode = 0;
+        int preambleAbortRecoveries = 0;
+
+        for (int attempt = 0; attempt < kCalibrationBeginRetryLimit; ++attempt)
         {
-            lastCommandError_ = "timed out waiting for serial number write preamble acknowledgement";
-            return false;
-        }
-        if (statusCode != GripperHmiProtocol::kStatusOk &&
-            !(responseToken == GripperHmiProtocol::kIndexSerialNumber &&
-              statusCode == GripperHmiProtocol::kStatusMissingData))
-        {
-            lastCommandError_ = "serial number write preamble failed: " +
-                                GripperHmiProtocol::describeStatusCode(statusCode);
+            sp_flush(serialPort_, SP_BUF_INPUT);
+            const auto request = GripperHmiProtocol::buildWriteSerialNumberCommand();
+            if (!writeFrameLocked(request.data(), request.size()))
+            {
+                lastCommandError_ = "failed to send write serial number command";
+                return false;
+            }
+
+            uint8_t responseToken = 0;
+            uint8_t statusCode = 0;
+            if (!readAnyStatusFrameLocked(&responseToken, &statusCode, kExclusiveCommandTimeoutMs))
+            {
+                continue;
+            }
+
+            sawPreambleStatus = true;
+            lastPreambleToken = responseToken;
+            lastPreambleStatusCode = statusCode;
+
+            if (statusCode == GripperHmiProtocol::kStatusOk ||
+                (responseToken == GripperHmiProtocol::kIndexSerialNumber &&
+                 statusCode == GripperHmiProtocol::kStatusMissingData))
+            {
+                preambleReady = true;
+                break;
+            }
+
+            if (isCalibrationAbortRecoveryStatus(statusCode) &&
+                preambleAbortRecoveries < kCalibrationAbortRetryLimit &&
+                abortCalibrationWriteStateLocked("serial write preamble recovery after " +
+                                                 describeStatusFrame(responseToken, statusCode)))
+            {
+                ++preambleAbortRecoveries;
+                continue;
+            }
+
+            if (isRetryableCalibrationStatus(statusCode))
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kCalibrationBeginSettleMs));
+                continue;
+            }
+
+            lastCommandError_ = "serial number write preamble failed: " + describeStatusFrame(responseToken, statusCode);
             std::cerr << name_ << ": " << lastCommandError_ << std::endl;
             return false;
         }
 
-        const auto firstFrame = GripperHmiProtocol::buildWriteSerialNumberFrame(
-            reinterpret_cast<const uint8_t *>(encoded.data()),
-            GripperHmiProtocol::kSerialNumberChunkSize);
-        if (!writeFrameLocked(firstFrame.data(), firstFrame.size()))
+        if (!preambleReady)
         {
-            lastCommandError_ = "failed to send serial number payload chunk 0";
+            lastCommandError_ = "timed out waiting for serial number write preamble acknowledgement" +
+                                (sawPreambleStatus ? (": " + describeStatusFrame(lastPreambleToken, lastPreambleStatusCode))
+                                                   : std::string());
             return false;
         }
 
-        if (!readAnyStatusFrameLocked(&responseToken, &statusCode, kExclusiveCommandTimeoutMs))
+        if (!writeChunkWithRetry(0, reinterpret_cast<const uint8_t *>(encoded.data())))
         {
-            lastCommandError_ = "timed out waiting for serial number write acknowledgement chunk 0";
-            return false;
-        }
-
-        if (statusCode != GripperHmiProtocol::kStatusOk)
-        {
-            lastCommandError_ = "serial number write chunk 0 failed: " + GripperHmiProtocol::describeStatusCode(statusCode);
             std::cerr << name_ << ": " << lastCommandError_ << std::endl;
             return false;
         }
 
-        const auto secondFrame = GripperHmiProtocol::buildWriteSerialNumberFrame(
-            reinterpret_cast<const uint8_t *>(encoded.data()) + GripperHmiProtocol::kSerialNumberChunkSize,
-            GripperHmiProtocol::kSerialNumberChunkSize);
-        if (!writeFrameLocked(secondFrame.data(), secondFrame.size()))
+        if (!writeChunkWithRetry(1,
+                                 reinterpret_cast<const uint8_t *>(encoded.data()) +
+                                     GripperHmiProtocol::kSerialNumberChunkSize))
         {
-            lastCommandError_ = "failed to send serial number payload chunk 1";
-            return false;
-        }
-
-        if (!readAnyStatusFrameLocked(&responseToken, &statusCode, kExclusiveCommandTimeoutMs))
-        {
-            lastCommandError_ = "timed out waiting for serial number write acknowledgement chunk 1";
-            return false;
-        }
-
-        if (statusCode != GripperHmiProtocol::kStatusOk)
-        {
-            lastCommandError_ = "serial number write chunk 1 failed: " + GripperHmiProtocol::describeStatusCode(statusCode);
             std::cerr << name_ << ": " << lastCommandError_ << std::endl;
             return false;
         }
 
-        // The current V1.1 firmware needs a short settle window after the
-        // final SN chunk before it reliably answers the next command.
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
         return true;
     });

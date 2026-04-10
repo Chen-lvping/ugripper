@@ -38,6 +38,8 @@ ANSI_GREEN = "\033[32m"
 ANSI_YELLOW = "\033[33m"
 ANSI_CYAN = "\033[36m"
 CALIB_PAYLOAD_SIZE = 1024
+HMI_PROBE_ROUNDS = 4
+HMI_PROBE_ROUND_INTERVAL_S = 0.35
 
 XLSX_SN_HEADER_KEYWORDS = ("sn", "sn码", "序列号", "serial")
 CALIB_BIN_SUFFIXES = (".bin",)
@@ -67,7 +69,11 @@ def print_success(text: str) -> None:
 
 
 def normalize_sn(value: str) -> str:
-    return value.strip().upper()
+    return value.strip()
+
+
+def fold_sn(value: str) -> str:
+    return normalize_sn(value).upper()
 
 
 def is_windows() -> bool:
@@ -97,7 +103,7 @@ def natural_port_sort_key(port: str) -> tuple[int, int, str]:
 
 def guess_is_sn(value: str) -> bool:
     text = normalize_sn(value)
-    return bool(re.fullmatch(r"[A-Z0-9]{8,32}", text))
+    return bool(re.fullmatch(r"[A-Za-z0-9]{8,32}", text))
 
 
 def column_letters_to_index(ref: str) -> int:
@@ -205,7 +211,8 @@ def load_sn_records(xlsx_paths: Iterable[Path]) -> list[SnRecord]:
                 candidate = normalize_sn(normalized[index])
                 if not guess_is_sn(candidate):
                     continue
-                if candidate in seen:
+                candidate_folded = fold_sn(candidate)
+                if candidate_folded in seen:
                     continue
                 records.append(
                     SnRecord(
@@ -215,13 +222,13 @@ def load_sn_records(xlsx_paths: Iterable[Path]) -> list[SnRecord]:
                         row_index=sheet_row_index,
                     )
                 )
-                seen.add(candidate)
+                seen.add(candidate_folded)
     return sorted(records, key=lambda item: item.sn)
 
 
 def find_matches(records: list[SnRecord], fragment: str) -> list[SnRecord]:
-    key = normalize_sn(fragment)
-    return [record for record in records if key in record.sn]
+    key = fold_sn(fragment)
+    return [record for record in records if key in fold_sn(record.sn)]
 
 
 def locate_xlsx_files(paths: list[str], search_root: Path) -> list[Path]:
@@ -328,15 +335,19 @@ def build_calibration_bin(source: Path) -> bytes:
 
 def helper_read_sn(port: str) -> str:
     with GripperHmiClient(ClientOptions(port=port)) as client:
-        sn = normalize_sn(client.read_serial_number())
+        raw_sn = client.read_serial_number()
+        sn = normalize_sn(raw_sn)
     if not guess_is_sn(sn):
-        raise RuntimeError(f"驱动返回了非法 SN: {sn}")
+        raise RuntimeError(
+            f"驱动返回了非法 SN: raw={raw_sn!r} normalized={sn!r} length={len(sn)}"
+        )
     return sn
 
 
 def helper_write_sn(port: str, sn: str) -> None:
     with GripperHmiClient(ClientOptions(port=port)) as client:
-        client.write_serial_number(sn)
+        ack_summary = client.write_serial_number(sn)
+    print_info(f"SN 写入 ACK: {ack_summary.to_text()}")
 
 
 def helper_write_calibration(port: str, calib_bin_path: Path) -> None:
@@ -359,7 +370,7 @@ def overwrite_sn_with_verify(port: str, target_sn: str, max_attempts: int = 4) -
             helper_write_sn(port, target_sn)
             time.sleep(0.18)
             verify_sn = helper_read_sn(port)
-            if normalize_sn(verify_sn) != target_sn:
+            if fold_sn(verify_sn) != fold_sn(target_sn):
                 raise RuntimeError(f"SN 回读不一致，期望 {target_sn}，实际 {verify_sn}")
             return verify_sn
         except Exception as exc:
@@ -383,6 +394,20 @@ def write_calibration_with_verify(port: str, target_sn: str, calibration_payload
 class ProbeResult:
     port: str
     serial_number: str
+    sn_initialized: bool
+
+
+def probe_sn_state(port: str) -> ProbeResult:
+    with GripperHmiClient(ClientOptions(port=port)) as client:
+        raw_sn = client.read_serial_number()
+    sn = normalize_sn(raw_sn)
+    if guess_is_sn(sn):
+        return ProbeResult(port=port, serial_number=sn, sn_initialized=True)
+    if sn == "":
+        return ProbeResult(port=port, serial_number="", sn_initialized=False)
+    raise RuntimeError(
+        f"驱动返回了非法 SN: raw={raw_sn!r} normalized={sn!r} length={len(sn)}"
+    )
 
 
 def iter_candidate_ports() -> list[str]:
@@ -406,18 +431,16 @@ def probe_hmi_port(baudrate: int) -> ProbeResult:
         if is_windows():
             raise RuntimeError("未扫描到可用 HMI 端口。Windows 下仅扫描 WCH USB-SERIAL Ch 对应的 COM 口。")
         raise RuntimeError("未扫描到可用 HMI 端口。")
-    # 参考现场经验，先优先打 port0，再探其他 CH9344 口。
-    rounds = 2 if is_windows() else 4
-    for round_index in range(rounds):
+    # 两个平台保持一致的探测节奏；只在端口枚举来源上区分平台。
+    for round_index in range(HMI_PROBE_ROUNDS):
         for port in ports:
             try:
-                sn = helper_read_sn(port)
-                if guess_is_sn(sn):
-                    return ProbeResult(port=port, serial_number=sn)
+                probe = probe_sn_state(port)
+                return probe
             except Exception as exc:
                 last_errors.append(f"round={round_index + 1} {port}: {exc}")
                 continue
-        time.sleep(0.08 if is_windows() else 0.35)
+        time.sleep(HMI_PROBE_ROUND_INTERVAL_S)
     detail = "\n".join(last_errors[-12:])
     raise RuntimeError(f"未扫描到可用 HMI 端口。\n{detail}")
 
@@ -449,8 +472,8 @@ def resolve_target_record(
         return target.sn, target
 
     if forced_sn:
-        normalized_fragment = normalize_sn(fragment)
-        if normalized_fragment and normalized_fragment not in forced_sn:
+        normalized_fragment = fold_sn(fragment)
+        if normalized_fragment and normalized_fragment not in fold_sn(forced_sn):
             print_warn(
                 f"片段 [{fragment}] 未命中表格，也不匹配特殊指定 SN [{forced_sn}]。"
             )
@@ -465,7 +488,7 @@ def resolve_target_record(
 
 
 def validate_sn_fragment(fragment: str) -> bool:
-    normalized = normalize_sn(fragment)
+    normalized = fold_sn(fragment)
     if len(normalized) < 4:
         print_warn(f"输入片段 [{fragment}] 长度不足 4 位，请输入至少 4 位连续片段。")
         return False
@@ -640,7 +663,10 @@ def main() -> int:
 
         try:
             probe = probe_hmi_port(args.baudrate)
-            print_info(f"检测到 HMI 端口: {probe.port}，当前读到 SN: {probe.serial_number}")
+            if probe.sn_initialized:
+                print_info(f"检测到 HMI 端口: {probe.port}，当前读到 SN: {probe.serial_number}")
+            else:
+                print_info(f"检测到 HMI 端口: {probe.port}，当前 SN: <未初始化>")
         except Exception as exc:
             print_error(str(exc))
             continue

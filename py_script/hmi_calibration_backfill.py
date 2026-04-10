@@ -35,7 +35,7 @@ def main() -> int:
     script_dir = Path(__file__).resolve().parent
     calib_root = Path(args.calib_root).expanduser().resolve() if args.calib_root else script_dir / "ugripper_calib"
     ports = [str(Path(port).expanduser()) for port in args.ports] if args.ports else writer.iter_candidate_ports()
-    prefix = writer.normalize_sn(args.require_sn_prefix) if args.require_sn_prefix else ""
+    prefix = writer.fold_sn(args.require_sn_prefix) if args.require_sn_prefix else ""
 
     writer.print_info(f"标定搜索目录: {calib_root}")
     writer.print_info(f"待检查串口数: {len(ports)}")
@@ -55,7 +55,7 @@ def main() -> int:
             continue
 
         print(f"  当前 SN: {current_sn}")
-        if prefix and not current_sn.startswith(prefix):
+        if prefix and not writer.fold_sn(current_sn).startswith(prefix):
             writer.print_warn(f"  SN 前缀不匹配，跳过。要求前缀: {prefix}")
             skipped_count += 1
             continue
