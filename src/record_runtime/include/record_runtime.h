@@ -102,6 +102,12 @@ private:
     class GripperPanelManager
     {
     public:
+        struct ConnectionEvent
+        {
+            std::string side;
+            bool connected = false;
+        };
+
         struct HealthSnapshot
         {
             bool hasConnectedDevice = false;
@@ -119,6 +125,18 @@ private:
         bool setBeepState(const GripperBeepState &state);
         bool setBeepEnabled(bool enabled);
         bool silenceBeep();
+        bool requestStateForSide(const std::string &side);
+        bool readSerialNumberForSide(const std::string &side, std::string *serialNumber, std::string *errorMessage);
+        bool readCalibrationForSide(const std::string &side,
+                                    gripper_hmi::GripperCalibrationDataV1 *calibrationData,
+                                    std::string *errorMessage);
+        bool readRuntimeIdentityForSide(const std::string &side,
+                                        std::string *serialNumber,
+                                        bool *hasSerialNumber,
+                                        gripper_hmi::GripperCalibrationDataV1 *calibrationData,
+                                        std::string *errorMessage);
+        std::vector<ConnectionEvent> consumeConnectionEvents();
+        bool isSideReadyForRefresh(const std::string &side, uint64_t activeTimeoutMs) const;
         bool setBeepStateForSide(const std::string &side, const GripperBeepState &state);
         bool setBeepEnabledForSide(const std::string &side, bool enabled);
         bool silenceBeepForSide(const std::string &side);
@@ -131,9 +149,15 @@ private:
         static constexpr size_t kBtnDownKeyIndex = 1;
         static constexpr uint64_t kReconnectIntervalMs = 1000;
 
+        static std::string sideForPort(const std::string &port);
+        int findDriverIndexForSide(const std::string &side) const;
+        void recordConnectionEventIfChanged(size_t index, bool connected);
         void maybeReconnectDriver(size_t index);
         std::vector<std::unique_ptr<GripperHmiDriver>> drivers_;
         std::vector<uint64_t> reconnectAttemptMs_;
+        std::vector<uint64_t> delayedStateRequestDueMs_;
+        std::vector<bool> lastKnownConnectedStates_;
+        std::vector<ConnectionEvent> pendingConnectionEvents_;
         size_t inputDriverIndex_ = 0;
         bool hasDedicatedRightInput_ = false;
         bool hasLedEffect_ = false;
@@ -162,6 +186,20 @@ private:
     class EpisodeManager
     {
     public:
+        struct GripperRuntimeState
+        {
+            std::string side;
+            bool connected = false;
+            bool hasSerialNumber = false;
+            std::string serialNumber;
+            bool calibrationValid = false;
+            std::string calibrationStatus;
+            std::string calibrationSource;
+            std::string lastError;
+            bool calibrationPayloadCached = false;
+            gripper_hmi::GripperCalibrationDataV1 calibrationPayload{};
+        };
+
         EpisodeManager(std::string diskRoot,
                        std::string deviceSn,
                        std::string language,
@@ -174,6 +212,7 @@ private:
 
         bool initialize();
         std::string createNextEpisodeDir();
+        void setGripperRuntimeStates(const std::array<GripperRuntimeState, 2> &states);
         bool prepareEpisode(const std::string &episodeDir,
                             bool resetRecording,
                             const std::string &resetSourceDir,
@@ -201,6 +240,7 @@ private:
         std::string updaterVersion_;
         std::string dataRoot_;
         std::string episodeRoot_;
+        std::array<GripperRuntimeState, 2> gripperRuntimeStates_{};
     };
 
     struct ButtonStateTracker
@@ -253,6 +293,15 @@ private:
     void clearMotionAlertOutputs();
     void pollMotionAlertPipe();
     void applyMotionAlertState(const std::string &side, bool active);
+    void handleGripperConnectionEvents();
+    void processPendingGripperRefreshes();
+    void refreshGripperRuntimeStateForSide(const std::string &side);
+    void clearGripperRuntimeStateForSide(const std::string &side,
+                                         bool connected,
+                                         const std::string &status,
+                                         const std::string &errorMessage);
+    bool persistGripperCalibrationCache(std::string *errorMessage);
+    bool areSideCriticalDevicesReady(const std::string &side) const;
     bool startRecording(bool resetRecording);
     bool stopRecording(bool dueToError, const std::string &reason);
     void handleButtons(const ButtonSnapshot &buttons);
@@ -307,6 +356,8 @@ private:
     uint64_t lastStereoDaemonStartAttemptMs_ = 0;
     uint64_t stereoCommandSeq_ = 0;
     std::unique_ptr<EpisodeManager> episodeManager_;
+    std::array<EpisodeManager::GripperRuntimeState, 2> gripperRuntimeStates_{};
+    std::array<bool, 2> pendingGripperRefresh_{};
     int motionAlertReadFd_ = -1;
     MotionAlertOutputState motionAlertOutputState_{};
     GripperPanelManager panelManager_;

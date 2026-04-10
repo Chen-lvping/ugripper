@@ -46,6 +46,7 @@ constexpr uint64_t kStereoDaemonRestartIntervalMs = 2000;
 constexpr uint64_t kStereoFinalizeWaitPollMs = 100;
 constexpr uint64_t kHealthCheckIntervalMs = 1000;
 constexpr uint64_t kHmiActiveTimeoutMs = 2500;
+constexpr uint64_t kGripperRefreshActiveTimeoutMs = 1500;
 constexpr double kMinReasonableVideoSpanSec = 0.2;
 constexpr double kMaxVideoSpanGapSec = 5.0;
 constexpr int64_t kEncoderTailWindowNs = 1000LL * 1000LL * 1000LL;
@@ -84,6 +85,24 @@ constexpr std::array<const char *, 12> kCriticalDevicePaths = {{
     "/dev/left_encoder",
     "/dev/right_imu",
     "/dev/left_imu",
+}};
+
+constexpr std::array<const char *, 6> kLeftCriticalDevicePaths = {{
+    "/dev/left_cam_main",
+    "/dev/left_stereo",
+    "/dev/left_tcam_l",
+    "/dev/left_tcam_r",
+    "/dev/left_encoder",
+    "/dev/left_imu",
+}};
+
+constexpr std::array<const char *, 6> kRightCriticalDevicePaths = {{
+    "/dev/right_cam_main",
+    "/dev/right_stereo",
+    "/dev/right_tcam_l",
+    "/dev/right_tcam_r",
+    "/dev/right_encoder",
+    "/dev/right_imu",
 }};
 
 struct VideoProbeResult
@@ -302,12 +321,200 @@ void appendCalibrationNote(json *calibrationInfo, const std::string &message)
     (*calibrationInfo)["notes"] = existing + " " + message;
 }
 
+std::string currentDateString()
+{
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t nowTime = std::chrono::system_clock::to_time_t(now);
+    std::tm localTime{};
+    localtime_r(&nowTime, &localTime);
+
+    char dateBuffer[16] = {0};
+    std::strftime(dateBuffer, sizeof(dateBuffer), "%Y-%m-%d", &localTime);
+    return std::string(dateBuffer);
+}
+
 void removeIfPresent(json *root, const std::string &key)
 {
-    if (root != nullptr && root->is_object())
+    if (root == nullptr || !root->is_object() || key.empty())
+    {
+        return;
+    }
+
+    const size_t separator = key.rfind('.');
+    if (separator == std::string::npos)
+    {
+        root->erase(key);
+        return;
+    }
+
+    json *cursor = root;
+    size_t start = 0;
+    while (start < separator)
+    {
+        const size_t dot = key.find('.', start);
+        if (dot == std::string::npos)
+        {
+            break;
+        }
+        const std::string token = key.substr(start, dot - start);
+        if (!cursor->contains(token) || !(*cursor)[token].is_object())
+        {
+            return;
+        }
+        cursor = &(*cursor)[token];
+        start = dot + 1;
+    }
+
+    const std::string leaf = key.substr(separator + 1);
+    if (!leaf.empty() && cursor->is_object())
+    {
+        cursor->erase(leaf);
+    }
+}
+
+json *findJsonPath(json *root, const std::string &path, bool createMissing)
+{
+    if (root == nullptr || path.empty())
+    {
+        return nullptr;
+    }
+
+    json *cursor = root;
+    size_t start = 0;
+    while (start <= path.size())
+    {
+        const size_t dot = path.find('.', start);
+        const std::string token = path.substr(start, dot == std::string::npos ? std::string::npos : dot - start);
+        if (token.empty())
+        {
+            return nullptr;
+        }
+
+        if (dot == std::string::npos)
+        {
+            if (!cursor->is_object())
+            {
+                return nullptr;
+            }
+            if (!cursor->contains(token))
+            {
+                if (!createMissing)
+                {
+                    return nullptr;
+                }
+                (*cursor)[token] = json::object();
+            }
+            return &(*cursor)[token];
+        }
+
+        if (!cursor->is_object())
+        {
+            return nullptr;
+        }
+        if (!cursor->contains(token))
+        {
+            if (!createMissing)
+            {
+                return nullptr;
+            }
+            (*cursor)[token] = json::object();
+        }
+        if (!(*cursor)[token].is_object())
+        {
+            if (!createMissing)
+            {
+                return nullptr;
+            }
+            (*cursor)[token] = json::object();
+        }
+        cursor = &(*cursor)[token];
+        start = dot + 1;
+    }
+
+    return cursor;
+}
+
+const json *findJsonPathConst(const json *root, const std::string &path)
+{
+    if (root == nullptr || !root->is_object() || path.empty())
+    {
+        return nullptr;
+    }
+
+    const json *cursor = root;
+    size_t start = 0;
+    while (start <= path.size())
+    {
+        const size_t dot = path.find('.', start);
+        const std::string token = path.substr(start, dot == std::string::npos ? std::string::npos : dot - start);
+        if (token.empty() || !cursor->is_object() || !cursor->contains(token))
+        {
+            return nullptr;
+        }
+        cursor = &(*cursor)[token];
+        if (dot == std::string::npos)
+        {
+            return cursor;
+        }
+        start = dot + 1;
+    }
+
+    return nullptr;
+}
+
+bool hasObjectAtJsonPath(const json &root, const std::string &path)
+{
+    const json *value = findJsonPathConst(&root, path);
+    return value != nullptr && value->is_object();
+}
+
+void removeLegacyFlattenedCalibrationKeys(json *root)
+{
+    if (root == nullptr || !root->is_object())
+    {
+        return;
+    }
+
+    std::vector<std::string> keysToErase;
+    for (auto it = root->begin(); it != root->end(); ++it)
+    {
+        if (it.key().rfind("observation.", 0) == 0)
+        {
+            keysToErase.push_back(it.key());
+        }
+    }
+    for (const std::string &key : keysToErase)
     {
         root->erase(key);
     }
+}
+
+void migrateLegacyFlattenedCalibrationKeys(json *root)
+{
+    if (root == nullptr || !root->is_object())
+    {
+        return;
+    }
+
+    std::vector<std::pair<std::string, json>> flattenedEntries;
+    for (auto it = root->begin(); it != root->end(); ++it)
+    {
+        if (it.key().rfind("observation.", 0) == 0)
+        {
+            flattenedEntries.emplace_back(it.key(), it.value());
+        }
+    }
+
+    for (const auto &[path, value] : flattenedEntries)
+    {
+        json *target = findJsonPath(root, path, true);
+        if (target != nullptr && target->is_object() && value.is_object())
+        {
+            *target = value;
+        }
+    }
+
+    removeLegacyFlattenedCalibrationKeys(root);
 }
 
 void replaceJsonStringValues(json *node, const std::string &placeholder, const std::string &replacement)
@@ -432,6 +639,201 @@ bool loadCalibrationJsonFile(const std::string &path, json *output, std::string 
     }
 
     return true;
+}
+
+size_t gripperStateIndexForSide(const std::string &side)
+{
+    return side == "left" ? 0u : 1u;
+}
+
+const char *mainCameraJsonPathForSide(const std::string &side)
+{
+    return side == "left" ? "observation.images.left_cam_main"
+                          : "observation.images.right_cam_main";
+}
+
+const char *stereoJsonPathForSide(const std::string &side)
+{
+    return side == "left" ? "observation.images.left_stereo"
+                          : "observation.images.right_stereo";
+}
+
+const char *imuJsonPathForSide(const std::string &side)
+{
+    return side == "left" ? "observation.imu.left_imu"
+                          : "observation.imu.right_imu";
+}
+
+json makeRgbCalibrationEntryFromPayload(const gripper_hmi::GripperCalibrationDataV1 &payload)
+{
+    const int width = static_cast<int>(std::lround(payload.rgbCamera.resolution[0]));
+    const int height = static_cast<int>(std::lround(payload.rgbCamera.resolution[1]));
+    return json::object({
+        {"shape", json::array({height > 0 ? height : 1080, width > 0 ? width : 1920, 3})},
+        {"names", json::array({"height", "width", "channels"})},
+        {"info", nullptr},
+        {"intrinsics",
+         json::object(
+             {{std::to_string(width > 0 ? width : 1920) + "x" + std::to_string(height > 0 ? height : 1080),
+               json::object({
+                   {"fx", payload.rgbCamera.intrinsics[0]},
+                   {"fy", payload.rgbCamera.intrinsics[1]},
+                   {"ppx", payload.rgbCamera.intrinsics[2]},
+                   {"ppy", payload.rgbCamera.intrinsics[3]},
+               })}})},
+        {"camera_model", "pinhole"},
+        {"distortion_model", "equidistant"},
+        {"distortion_coeffs",
+         json::array({
+             payload.rgbCamera.distortionCoefficients[0],
+             payload.rgbCamera.distortionCoefficients[1],
+             payload.rgbCamera.distortionCoefficients[2],
+             payload.rgbCamera.distortionCoefficients[3],
+         })},
+        {"dtype", "video"},
+        {"fps", "unknown"},
+    });
+}
+
+json makeStereoCalibrationEntryFromPayload(const std::string &side,
+                                           const gripper_hmi::GripperCalibrationDataV1 &payload)
+{
+    (void)side;
+    const auto makeIntrinsics = [](float fx, float fy, float ppx, float ppy) {
+        return json::object({
+            {"640x400",
+             json::object({
+                 {"fx", fx},
+                 {"fy", fy},
+                 {"ppx", ppx},
+                 {"ppy", ppy},
+             })},
+        });
+    };
+    const auto makeDistortion = [](const float *coeffs) {
+        return json::array({coeffs[0], coeffs[1], coeffs[2], coeffs[3]});
+    };
+    const auto matrixToJson = [](const float *values) {
+        json rows = json::array();
+        for (size_t row = 0; row < 4; ++row)
+        {
+            rows.push_back(json::array({
+                values[row * 4 + 0],
+                values[row * 4 + 1],
+                values[row * 4 + 2],
+                values[row * 4 + 3],
+            }));
+        }
+        return rows;
+    };
+    const auto statsToJson = [](const gripper_hmi::GripperStatisticsBlock &stats) {
+        return json::object({
+            {"mean", stats.mean},
+            {"median", stats.median},
+            {"stddev", stats.stddev},
+        });
+    };
+
+    return json::object({
+        {"shape", json::array({400, 1280, 3})},
+        {"names", json::array({"height", "width", "channels"})},
+        {"info", nullptr},
+        {"camera_model", "pinhole"},
+        {"distortion_model", "equidistant"},
+        {"cam0",
+         json::object({
+             {"camera_model_enum", payload.stereoCam0.cameraModelEnum},
+             {"intrinsics",
+              makeIntrinsics(payload.stereoCam0.focalLength[0],
+                             payload.stereoCam0.focalLength[1],
+                             payload.stereoCam0.principalPoint[0],
+                             payload.stereoCam0.principalPoint[1])},
+             {"distortion_coeffs", makeDistortion(payload.stereoCam0.distortionCoefficients)},
+         })},
+        {"cam1",
+         json::object({
+             {"camera_model_enum", payload.stereoCam1.cameraModelEnum},
+             {"intrinsics",
+              makeIntrinsics(payload.stereoCam1.focalLength[0],
+                             payload.stereoCam1.focalLength[1],
+                             payload.stereoCam1.principalPoint[0],
+                             payload.stereoCam1.principalPoint[1])},
+             {"distortion_coeffs", makeDistortion(payload.stereoCam1.distortionCoefficients)},
+         })},
+        {"extrinsics",
+         json::object({
+             {"T_ic_cam0_to_imu0", matrixToJson(payload.extrinsics.tIcCam0ToImu0)},
+             {"timeshift_cam0_to_imu0", payload.extrinsics.timeshiftCam0ToImu0},
+             {"T_ic_cam1_to_imu0", matrixToJson(payload.extrinsics.tIcCam1ToImu0)},
+             {"timeshift_cam1_to_imu0", payload.extrinsics.timeshiftCam1ToImu0},
+             {"baseline_norm", payload.extrinsics.baselineNorm},
+         })},
+        {"residuals",
+         json::object({
+             {"reprojection_error_cam0_px", statsToJson(payload.residuals.reprojectionErrorCam0Px)},
+             {"reprojection_error_cam1_px", statsToJson(payload.residuals.reprojectionErrorCam1Px)},
+             {"gyroscope_error_imu0_rad_s", statsToJson(payload.residuals.gyroscopeErrorImu0RadS)},
+             {"accelerometer_error_imu0_m_s2", statsToJson(payload.residuals.accelerometerErrorImu0MS2)},
+         })},
+        {"dtype", "video"},
+        {"fps", 60},
+    });
+}
+
+json makeImuCalibrationEntryFromPayload(const gripper_hmi::GripperCalibrationDataV1 &payload)
+{
+    return json::object({
+        {"dtype", "imu"},
+        {"model", "calibrated"},
+        {"update_rate_hz", payload.imu0.updateRate},
+        {"accelerometer",
+         json::object({
+             {"noise_density_discrete", payload.imu0.accelerometerNoiseDensityDiscrete},
+             {"random_walk", payload.imu0.accelerometerRandomWalk},
+         })},
+        {"gyroscope",
+         json::object({
+             {"noise_density_discrete", payload.imu0.gyroscopeNoiseDensityDiscrete},
+             {"random_walk", payload.imu0.gyroscopeRandomWalk},
+         })},
+    });
+}
+
+void eraseSideCalibrationEntries(json *calibrationJson, const std::string &side)
+{
+    if (calibrationJson == nullptr || !calibrationJson->is_object())
+    {
+        return;
+    }
+
+    removeIfPresent(calibrationJson, mainCameraJsonPathForSide(side));
+    removeIfPresent(calibrationJson, stereoJsonPathForSide(side));
+    removeIfPresent(calibrationJson, imuJsonPathForSide(side));
+
+}
+
+void applySideCalibrationPayload(json *calibrationJson,
+                                 const std::string &side,
+                                 const gripper_hmi::GripperCalibrationDataV1 &payload)
+{
+    if (calibrationJson == nullptr || !calibrationJson->is_object())
+    {
+        return;
+    }
+
+    if (json *mainCamera = findJsonPath(calibrationJson, mainCameraJsonPathForSide(side), true))
+    {
+        *mainCamera = makeRgbCalibrationEntryFromPayload(payload);
+    }
+    if (json *stereo = findJsonPath(calibrationJson, stereoJsonPathForSide(side), true))
+    {
+        *stereo = makeStereoCalibrationEntryFromPayload(side, payload);
+    }
+    if (json *imu = findJsonPath(calibrationJson, imuJsonPathForSide(side), true))
+    {
+        *imu = makeImuCalibrationEntryFromPayload(payload);
+    }
+
 }
 
 std::string joinArguments(const std::vector<std::string> &arguments)
@@ -1064,7 +1466,12 @@ void injectRuntimeTactileSerial(json *calibrationJson,
         return;
     }
 
-    json &entry = (*calibrationJson)[target.jsonPath];
+    json *entryPtr = findJsonPath(calibrationJson, target.jsonPath, true);
+    if (entryPtr == nullptr)
+    {
+        return;
+    }
+    json &entry = *entryPtr;
     if (!entry.is_object())
     {
         entry = json::object();
@@ -1438,6 +1845,10 @@ GripperLedEffect RecordRuntime::makeLedEffect(LedState state, double progress)
 RecordRuntime::RecordRuntime(RecordRuntimeOptions options)
     : options_(std::move(options))
 {
+    gripperRuntimeStates_[gripperStateIndexForSide("left")].side = "left";
+    gripperRuntimeStates_[gripperStateIndexForSide("left")].calibrationStatus = "disconnected";
+    gripperRuntimeStates_[gripperStateIndexForSide("right")].side = "right";
+    gripperRuntimeStates_[gripperStateIndexForSide("right")].calibrationStatus = "disconnected";
 }
 
 RecordRuntime::~RecordRuntime()
@@ -1516,6 +1927,9 @@ bool RecordRuntime::initialize()
         return false;
     }
 
+    handleGripperConnectionEvents();
+    episodeManager_->setGripperRuntimeStates(gripperRuntimeStates_);
+
     ledController_ = std::make_unique<HmiLedController>(&panelManager_);
     ledController_->start();
     setLedState(LedState::Init);
@@ -1553,6 +1967,8 @@ int RecordRuntime::run()
 
         ButtonSnapshot buttons;
         panelManager_.poll(options_.pollMs, &buttons);
+        handleGripperConnectionEvents();
+        processPendingGripperRefreshes();
         handleButtons(buttons);
 
         if (isRecording_ && !checkRecorderProcesses())
@@ -1703,6 +2119,333 @@ void RecordRuntime::pollMotionAlertPipe()
                       << std::endl;
         }
     }
+}
+
+void RecordRuntime::handleGripperConnectionEvents()
+{
+    const std::vector<GripperPanelManager::ConnectionEvent> events = panelManager_.consumeConnectionEvents();
+    for (const auto &event : events)
+    {
+        if (event.connected)
+        {
+            auto &state = gripperRuntimeStates_[gripperStateIndexForSide(event.side)];
+            state.side = event.side;
+            state.connected = true;
+            state.hasSerialNumber = false;
+            state.serialNumber.clear();
+            state.calibrationValid = false;
+            state.calibrationStatus = "waiting_side_devices";
+            state.calibrationSource.clear();
+            state.lastError.clear();
+            state.calibrationPayloadCached = false;
+            std::cout << "[INFO] queued gripper refresh after reconnect: side=" << event.side << std::endl;
+            pendingGripperRefresh_[gripperStateIndexForSide(event.side)] = true;
+            episodeManager_->setGripperRuntimeStates(gripperRuntimeStates_);
+            continue;
+        }
+
+        pendingGripperRefresh_[gripperStateIndexForSide(event.side)] = false;
+        clearGripperRuntimeStateForSide(event.side, false, "disconnected", "gripper disconnected");
+        std::cout << "[INFO] cleared gripper runtime state after disconnect: side=" << event.side << std::endl;
+        std::string persistError;
+        if (!persistGripperCalibrationCache(&persistError))
+        {
+            std::cerr << "[WARN] failed to persist gripper calibration cache after disconnect: side="
+                      << event.side << " reason=" << persistError << std::endl;
+        }
+        episodeManager_->setGripperRuntimeStates(gripperRuntimeStates_);
+    }
+}
+
+void RecordRuntime::processPendingGripperRefreshes()
+{
+    bool updatedAny = false;
+    for (const std::string side : {"left", "right"})
+    {
+        const size_t index = gripperStateIndexForSide(side);
+        if (!pendingGripperRefresh_[index])
+        {
+            continue;
+        }
+
+        if (!areSideCriticalDevicesReady(side))
+        {
+            auto &state = gripperRuntimeStates_[index];
+            state.connected = true;
+            state.calibrationValid = false;
+            state.calibrationStatus = "waiting_side_devices";
+            state.calibrationSource.clear();
+            if (state.lastError.empty())
+            {
+                state.lastError = "waiting for side critical devices";
+            }
+            if (state.calibrationStatus != "waiting_side_devices")
+            {
+                std::cout << "[INFO] waiting side devices before gripper refresh: side=" << side << std::endl;
+            }
+            state.calibrationStatus = "waiting_side_devices";
+            updatedAny = true;
+            continue;
+        }
+
+        if (!panelManager_.isSideReadyForRefresh(side, kGripperRefreshActiveTimeoutMs))
+        {
+            auto &state = gripperRuntimeStates_[index];
+            state.connected = true;
+            state.calibrationValid = false;
+            state.calibrationStatus = "waiting_gripper_ready";
+            state.calibrationSource.clear();
+            state.lastError = "waiting for gripper reconnect to become active";
+            panelManager_.requestStateForSide(side);
+            updatedAny = true;
+            continue;
+        }
+
+        pendingGripperRefresh_[index] = false;
+        refreshGripperRuntimeStateForSide(side);
+        updatedAny = true;
+    }
+
+    if (updatedAny)
+    {
+        episodeManager_->setGripperRuntimeStates(gripperRuntimeStates_);
+    }
+}
+
+void RecordRuntime::clearGripperRuntimeStateForSide(const std::string &side,
+                                                    bool connected,
+                                                    const std::string &status,
+                                                    const std::string &errorMessage)
+{
+    auto &state = gripperRuntimeStates_[gripperStateIndexForSide(side)];
+    state.side = side;
+    state.connected = connected;
+    state.hasSerialNumber = false;
+    state.serialNumber.clear();
+    state.calibrationValid = false;
+    state.calibrationStatus = status;
+    state.calibrationSource.clear();
+    state.lastError = errorMessage;
+    state.calibrationPayloadCached = false;
+    state.calibrationPayload = {};
+}
+
+void RecordRuntime::refreshGripperRuntimeStateForSide(const std::string &side)
+{
+    const bool shouldShowInitLed = healthStatus_ != HealthStatus::Error;
+    if (shouldShowInitLed)
+    {
+        setLedState(LedState::Init);
+    }
+    const uint64_t refreshStartMs = currentSteadyMs();
+    std::cout << "[INFO] refreshing gripper runtime state: side=" << side << std::endl;
+
+    auto &state = gripperRuntimeStates_[gripperStateIndexForSide(side)];
+    state.side = side;
+    state.connected = true;
+    state.lastError.clear();
+
+    std::string serialNumber;
+    bool hasSerialNumber = false;
+    gripper_hmi::GripperCalibrationDataV1 calibrationData{};
+    std::string runtimeReadError;
+    if (panelManager_.readRuntimeIdentityForSide(side,
+                                                 &serialNumber,
+                                                 &hasSerialNumber,
+                                                 &calibrationData,
+                                                 &runtimeReadError))
+    {
+        state.hasSerialNumber = hasSerialNumber;
+        state.serialNumber = hasSerialNumber ? serialNumber : "";
+        if (hasSerialNumber)
+        {
+            std::cout << "[INFO] gripper SN read success: side=" << side
+                      << " sn=" << serialNumber << std::endl;
+        }
+        else
+        {
+            std::cerr << "[WARN] gripper SN read failed: side=" << side
+                      << " reason=" << runtimeReadError << std::endl;
+        }
+
+        state.connected = true;
+        state.calibrationValid = true;
+        state.calibrationStatus = state.hasSerialNumber ? "calibrated" : "calibrated_no_sn";
+        state.calibrationSource = "gripper_runtime_cache";
+        state.calibrationPayloadCached = true;
+        state.calibrationPayload = calibrationData;
+        state.lastError.clear();
+        std::cout << "[INFO] gripper calibration read success: side=" << side
+                  << " payload_size=" << calibrationData.header.payloadSize << std::endl;
+    }
+    else
+    {
+        state.hasSerialNumber = hasSerialNumber;
+        state.serialNumber = hasSerialNumber ? serialNumber : "";
+        state.connected = true;
+        state.calibrationValid = false;
+        state.calibrationStatus = state.hasSerialNumber ? "calibration_read_failed" : "no_sn_calibration_read_failed";
+        state.calibrationSource.clear();
+        state.lastError = runtimeReadError;
+        state.calibrationPayloadCached = false;
+        state.calibrationPayload = {};
+        if (hasSerialNumber)
+        {
+            std::cout << "[INFO] gripper SN read success: side=" << side
+                      << " sn=" << serialNumber << std::endl;
+        }
+        else
+        {
+            std::cerr << "[WARN] gripper SN read failed: side=" << side
+                      << " reason=" << runtimeReadError << std::endl;
+        }
+        std::cerr << "[WARN] gripper calibration read failed: side=" << side
+                  << " reason=" << state.lastError << std::endl;
+    }
+
+    std::string persistError;
+    if (!persistGripperCalibrationCache(&persistError))
+    {
+        std::cerr << "[WARN] failed to persist gripper calibration cache: side=" << side
+                  << " reason=" << persistError << std::endl;
+    }
+    else
+    {
+        std::cout << "[INFO] persisted gripper calibration cache: side=" << side << std::endl;
+    }
+    episodeManager_->setGripperRuntimeStates(gripperRuntimeStates_);
+    std::cout << "[INFO] gripper runtime refresh complete: side=" << side
+              << " elapsed_ms=" << (currentSteadyMs() - refreshStartMs)
+              << " calibration_valid=" << (state.calibrationValid ? "true" : "false")
+              << std::endl;
+
+    if (shouldShowInitLed && healthStatus_ == HealthStatus::Ok)
+    {
+        setLedState(isRecording_ ? LedState::Recording : LedState::Ready);
+    }
+}
+
+bool RecordRuntime::persistGripperCalibrationCache(std::string *errorMessage)
+{
+    json calibrationJson;
+    std::vector<std::string> candidateFiles;
+    if (fs::exists(options_.persistCalibrationFile))
+    {
+        candidateFiles.push_back(options_.persistCalibrationFile);
+    }
+    if (fs::exists(options_.exampleCalibrationFile) && options_.exampleCalibrationFile != options_.persistCalibrationFile)
+    {
+        candidateFiles.push_back(options_.exampleCalibrationFile);
+    }
+    if (fs::exists(options_.fallbackCalibrationFile) &&
+        options_.fallbackCalibrationFile != options_.persistCalibrationFile &&
+        options_.fallbackCalibrationFile != options_.exampleCalibrationFile)
+    {
+        candidateFiles.push_back(options_.fallbackCalibrationFile);
+    }
+
+    std::string lastError;
+    bool loaded = false;
+    for (const std::string &candidate : candidateFiles)
+    {
+        if (loadCalibrationJsonFile(candidate, &calibrationJson, &lastError))
+        {
+            loaded = true;
+            break;
+        }
+    }
+
+    if (!loaded)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = lastError.empty() ? "no usable calibration source found" : lastError;
+        }
+        return false;
+    }
+
+    migrateLegacyFlattenedCalibrationKeys(&calibrationJson);
+
+    if (!calibrationJson.contains("metadata") || !calibrationJson["metadata"].is_object())
+    {
+        calibrationJson["metadata"] = json::object();
+    }
+    if (!calibrationJson.contains("calibration_info") || !calibrationJson["calibration_info"].is_object())
+    {
+        calibrationJson["calibration_info"] = json::object();
+    }
+
+    const std::string generationDate = calibrationJson["metadata"].value("generation_date", currentDateString());
+    calibrationJson["metadata"]["format_version"] = "2.0";
+    calibrationJson["metadata"]["generation_date"] = generationDate;
+    calibrationJson["metadata"]["description"] = calibrationJson["metadata"].value("description", "Camera calibration parameters");
+
+    for (const std::string side : {"left", "right"})
+    {
+        eraseSideCalibrationEntries(&calibrationJson, side);
+    }
+
+    bool anyCalibrationValid = false;
+    for (const auto &state : gripperRuntimeStates_)
+    {
+        if (state.calibrationValid && state.calibrationPayloadCached)
+        {
+            applySideCalibrationPayload(&calibrationJson, state.side, state.calibrationPayload);
+            anyCalibrationValid = true;
+        }
+    }
+    calibrationJson["metadata"]["calibration_status"] = anyCalibrationValid ? "calibrated" : "uncalibrated";
+    calibrationJson["calibration_info"]["calibration_date"] =
+        calibrationJson["calibration_info"].value("calibration_date", generationDate);
+    calibrationJson["calibration_info"]["calibration_status"] = anyCalibrationValid ? "calibrated" : "uncalibrated";
+    calibrationJson["calibration_info"]["notes"] = calibrationJson["calibration_info"].value(
+        "notes",
+        "Main/stereo/imu calibration entries are refreshed from gripper runtime cache when available; tactile serials are resolved from runtime devices.");
+
+    const std::string outputPath = options_.persistCalibrationFile;
+    std::ofstream output(outputPath, std::ios::trunc);
+    if (!output.is_open())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "cannot open persist calibration for write: " + outputPath;
+        }
+        return false;
+    }
+    output << calibrationJson.dump(4) << "\n";
+    output.close();
+    if (!output.good())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to write persist calibration: " + outputPath;
+        }
+        return false;
+    }
+
+    std::error_code flushError;
+    if (!flushFileToDisk(outputPath, &flushError) && errorMessage != nullptr)
+    {
+        *errorMessage = "failed to flush persist calibration: " + flushError.message();
+    }
+    return true;
+}
+
+bool RecordRuntime::areSideCriticalDevicesReady(const std::string &side) const
+{
+    const auto &paths = (side == "left") ? kLeftCriticalDevicePaths : kRightCriticalDevicePaths;
+    for (const char *path : paths)
+    {
+        if (path == nullptr || *path == '\0')
+        {
+            continue;
+        }
+        if (!fs::exists(path))
+        {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool RecordRuntime::startAudioPlayer()
@@ -2080,14 +2823,6 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
         }
         baseInfo[std::string(cameraName) + "_record_time_offset_us"] = cameraInfo["record_time_offset_us"];
     }
-
-    json stereoOnlySession = stereoSession;
-    stereoOnlySession["cameras"] = json::object();
-    for (const char *cameraName : {"left_stereo", "right_stereo"})
-    {
-        stereoOnlySession["cameras"][cameraName] = stereoSession["cameras"][cameraName];
-    }
-    baseInfo["stereo_session"] = stereoOnlySession;
 
     std::ofstream output(baseInfoPath, std::ios::trunc);
     if (!output.is_open())
@@ -2548,6 +3283,7 @@ bool RecordRuntime::startRecording(bool resetRecording)
 
     std::string errorMessage;
     const std::string resetSource = resetRecording ? lastEpisodeDir_ : std::string();
+    episodeManager_->setGripperRuntimeStates(gripperRuntimeStates_);
     if (!episodeManager_->prepareEpisode(currentEpisodeDir_, resetRecording, resetSource, &errorMessage))
     {
         std::cerr << "[ERROR] prepare episode failed: " << errorMessage << std::endl;
@@ -3294,7 +4030,15 @@ void RecordRuntime::monitorHardwareHealth()
     if (healthStatus_ == HealthStatus::Error)
     {
         std::cout << "[INFO] hardware health recovered" << std::endl;
-        if (isRecording_)
+        const bool hasPendingRefresh = std::any_of(
+            pendingGripperRefresh_.begin(),
+            pendingGripperRefresh_.end(),
+            [](bool pending) { return pending; });
+        if (hasPendingRefresh)
+        {
+            setLedState(LedState::Init);
+        }
+        else if (isRecording_)
         {
             setLedState(LedState::Recording);
         }
@@ -3699,11 +4443,14 @@ bool RecordRuntime::GripperPanelManager::connect(const std::vector<std::string> 
     disconnect();
     drivers_.clear();
     reconnectAttemptMs_.clear();
+    delayedStateRequestDueMs_.clear();
     inputDriverIndex_ = 0;
     hasDedicatedRightInput_ = false;
     hasLedEffect_ = false;
     hasDirectLedColor_ = false;
     hasBeepState_ = false;
+    lastKnownConnectedStates_.clear();
+    pendingConnectionEvents_.clear();
 
     for (size_t index = 0; index < ports.size(); ++index)
     {
@@ -3719,7 +4466,10 @@ bool RecordRuntime::GripperPanelManager::connect(const std::vector<std::string> 
         }
         drivers_.push_back(std::move(driver));
         reconnectAttemptMs_.push_back(0);
+        delayedStateRequestDueMs_.push_back(0);
+        lastKnownConnectedStates_.push_back(false);
         currentDriverBeepStates_.push_back({});
+        recordConnectionEventIfChanged(index, drivers_.back() != nullptr && drivers_.back()->isConnected());
     }
 
     return hasConnectedDevice();
@@ -3729,7 +4479,219 @@ void RecordRuntime::GripperPanelManager::disconnect()
 {
     drivers_.clear();
     reconnectAttemptMs_.clear();
+    delayedStateRequestDueMs_.clear();
+    lastKnownConnectedStates_.clear();
+    pendingConnectionEvents_.clear();
     currentDriverBeepStates_.clear();
+}
+
+std::string RecordRuntime::GripperPanelManager::sideForPort(const std::string &port)
+{
+    if (port.find("right_gripper") != std::string::npos)
+    {
+        return "right";
+    }
+    if (port.find("left_gripper") != std::string::npos)
+    {
+        return "left";
+    }
+    return "";
+}
+
+int RecordRuntime::GripperPanelManager::findDriverIndexForSide(const std::string &side) const
+{
+    for (size_t index = 0; index < drivers_.size(); ++index)
+    {
+        const auto &driver = drivers_[index];
+        if (driver != nullptr && sideForPort(driver->getPort()) == side)
+        {
+            return static_cast<int>(index);
+        }
+    }
+    return -1;
+}
+
+void RecordRuntime::GripperPanelManager::recordConnectionEventIfChanged(size_t index, bool connected)
+{
+    if (index >= drivers_.size() || index >= lastKnownConnectedStates_.size() || drivers_[index] == nullptr)
+    {
+        return;
+    }
+
+    if (lastKnownConnectedStates_[index] == connected)
+    {
+        return;
+    }
+
+    lastKnownConnectedStates_[index] = connected;
+    const std::string side = sideForPort(drivers_[index]->getPort());
+    if (side.empty())
+    {
+        return;
+    }
+
+    pendingConnectionEvents_.push_back(ConnectionEvent{side, connected});
+}
+
+bool RecordRuntime::GripperPanelManager::readSerialNumberForSide(const std::string &side,
+                                                                 std::string *serialNumber,
+                                                                 std::string *errorMessage)
+{
+    const int index = findDriverIndexForSide(side);
+    if (index < 0)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "no HMI driver for side=" + side;
+        }
+        return false;
+    }
+
+    auto &driver = drivers_[static_cast<size_t>(index)];
+    if (driver == nullptr || !driver->isConnected())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "HMI driver disconnected for side=" + side;
+        }
+        return false;
+    }
+
+    if (!driver->readSerialNumber(serialNumber))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = driver->getLastCommandError();
+        }
+        return false;
+    }
+    return true;
+}
+
+bool RecordRuntime::GripperPanelManager::requestStateForSide(const std::string &side)
+{
+    const int index = findDriverIndexForSide(side);
+    if (index < 0)
+    {
+        return false;
+    }
+
+    auto &driver = drivers_[static_cast<size_t>(index)];
+    return driver != nullptr && driver->isConnected() && driver->requestState();
+}
+
+bool RecordRuntime::GripperPanelManager::readCalibrationForSide(
+    const std::string &side,
+    gripper_hmi::GripperCalibrationDataV1 *calibrationData,
+    std::string *errorMessage)
+{
+    const int index = findDriverIndexForSide(side);
+    if (index < 0)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "no HMI driver for side=" + side;
+        }
+        return false;
+    }
+
+    auto &driver = drivers_[static_cast<size_t>(index)];
+    if (driver == nullptr || !driver->isConnected())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "HMI driver disconnected for side=" + side;
+        }
+        return false;
+    }
+
+    if (!driver->readCalibrationData(calibrationData))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = driver->getLastCommandError();
+        }
+        return false;
+    }
+    return true;
+}
+
+bool RecordRuntime::GripperPanelManager::readRuntimeIdentityForSide(
+    const std::string &side,
+    std::string *serialNumber,
+    bool *hasSerialNumber,
+    gripper_hmi::GripperCalibrationDataV1 *calibrationData,
+    std::string *errorMessage)
+{
+    const int index = findDriverIndexForSide(side);
+    if (index < 0)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "no HMI driver for side=" + side;
+        }
+        return false;
+    }
+
+    auto &driver = drivers_[static_cast<size_t>(index)];
+    if (driver == nullptr || !driver->isConnected())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "HMI driver disconnected for side=" + side;
+        }
+        return false;
+    }
+
+    std::string combinedError;
+    bool serialOk = driver->readSerialNumberAndCalibration(serialNumber, hasSerialNumber, calibrationData);
+    if (!serialOk)
+    {
+        combinedError = driver->getLastCommandError();
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = combinedError;
+        }
+        return false;
+    }
+
+    if (errorMessage != nullptr)
+    {
+        if (hasSerialNumber != nullptr && !*hasSerialNumber)
+        {
+            *errorMessage = driver->getLastCommandError();
+        }
+        else
+        {
+            errorMessage->clear();
+        }
+    }
+    return true;
+}
+
+std::vector<RecordRuntime::GripperPanelManager::ConnectionEvent> RecordRuntime::GripperPanelManager::consumeConnectionEvents()
+{
+    std::vector<ConnectionEvent> events = pendingConnectionEvents_;
+    pendingConnectionEvents_.clear();
+    return events;
+}
+
+bool RecordRuntime::GripperPanelManager::isSideReadyForRefresh(const std::string &side, uint64_t activeTimeoutMs) const
+{
+    const int index = findDriverIndexForSide(side);
+    if (index < 0)
+    {
+        return false;
+    }
+
+    const auto &driver = drivers_[static_cast<size_t>(index)];
+    if (driver == nullptr || !driver->isConnected())
+    {
+        return false;
+    }
+
+    const auto snapshot = driver->getSnapshot(activeTimeoutMs);
+    return snapshot.active;
 }
 
 bool RecordRuntime::GripperPanelManager::hasConnectedDevice() const
@@ -3892,6 +4854,11 @@ void RecordRuntime::GripperPanelManager::maybeReconnectDriver(size_t index)
     }
 
     std::cout << "[INFO] reconnected HMI port: " << drivers_[index]->getPort() << std::endl;
+    recordConnectionEventIfChanged(index, true);
+    if (index < delayedStateRequestDueMs_.size())
+    {
+        delayedStateRequestDueMs_[index] = nowMs + 1000;
+    }
     if (index < currentDriverBeepStates_.size())
     {
         drivers_[index]->setBeepState(currentDriverBeepStates_[index]);
@@ -3918,9 +4885,22 @@ bool RecordRuntime::GripperPanelManager::poll(int timeoutMs, ButtonSnapshot *sna
     {
         auto &driver = drivers_[index];
         maybeReconnectDriver(index);
+        recordConnectionEventIfChanged(index, driver != nullptr && driver->isConnected());
         if (!driver->isConnected())
         {
             continue;
+        }
+        const uint64_t nowMs = RecordRuntime::currentSteadyMs();
+        if (index < delayedStateRequestDueMs_.size() &&
+            delayedStateRequestDueMs_[index] != 0 &&
+            nowMs >= delayedStateRequestDueMs_[index])
+        {
+            if (driver->requestState())
+            {
+                std::cout << "[INFO] scheduled HMI state request after reconnect: "
+                          << driver->getPort() << std::endl;
+            }
+            delayedStateRequestDueMs_[index] = 0;
         }
         if (index == inputDriverIndex_)
         {
@@ -4053,6 +5033,11 @@ bool RecordRuntime::EpisodeManager::initialize()
         return false;
     }
     return true;
+}
+
+void RecordRuntime::EpisodeManager::setGripperRuntimeStates(const std::array<GripperRuntimeState, 2> &states)
+{
+    gripperRuntimeStates_ = states;
 }
 
 std::string RecordRuntime::EpisodeManager::createNextEpisodeDir()
@@ -4429,22 +5414,33 @@ bool RecordRuntime::EpisodeManager::writeMetadata(const std::string &episodeDir,
         return false;
     }
 
-    output
-        << "{\n"
-        << "  \"device_type\": \"UMI\",\n"
-        << "  \"device_model\": \"ugripper\",\n"
-        << "  \"device_id\": \"" << RecordRuntime::jsonEscape(deviceSn_) << "\",\n"
-        << "  \"collector\": \"default_user\",\n"
-        << "  \"data_path\": \"data/episode_{date:08d}_{episode_index:04d}\",\n"
-        << "  \"camera_codec\": \"" << RecordRuntime::jsonEscape(cameraCodec_) << "\",\n"
-        << "  \"ugripper_lang\": \"" << RecordRuntime::jsonEscape(language_) << "\",\n"
-        << "  \"ugripper_version\": \"" << RecordRuntime::jsonEscape(packageVersion_) << "\",\n"
-        << "  \"ugripper_usb_updater_version\": \"" << RecordRuntime::jsonEscape(updaterVersion_) << "\",\n"
-        << "  \"data_format_version\": \"1\",\n"
-        << "  \"record_runtime\": \"cpp\",\n"
-        << "  \"reset_recording\": " << (resetRecording ? "true" : "false") << ",\n"
-        << "  \"reset_source_episode_dir\": \"" << RecordRuntime::jsonEscape(resetSourceDir) << "\"\n"
-        << "}\n";
+    const auto makeGripperMetadata = [this](const std::string &side) {
+        const auto &state = gripperRuntimeStates_[gripperStateIndexForSide(side)];
+        return json::object({
+            {"serial_number", state.serialNumber},
+            {"calibration_status", state.calibrationStatus},
+        });
+    };
+
+    const json metadata = json::object({
+        {"device_type", "UMI"},
+        {"device_model", "ugripper"},
+        {"device_id", deviceSn_},
+        {"collector", "default_user"},
+        {"data_path", "data/episode_{date:08d}_{episode_index:04d}"},
+        {"camera_codec", cameraCodec_},
+        {"ugripper_lang", language_},
+        {"ugripper_version", packageVersion_},
+        {"ugripper_usb_updater_version", updaterVersion_},
+        {"data_format_version", "2"},
+        {"record_runtime", "cpp"},
+        {"reset_recording", resetRecording},
+        {"reset_source_episode_dir", resetSourceDir},
+        {"gripper_left", makeGripperMetadata("left")},
+        {"gripper_right", makeGripperMetadata("right")},
+    });
+
+    output << metadata.dump(2) << "\n";
     return true;
 }
 
@@ -4496,6 +5492,8 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
         return false;
     }
 
+    migrateLegacyFlattenedCalibrationKeys(&calibrationJson);
+
     if (sourceFile != persistCalibrationFile_ && fs::exists(persistCalibrationFile_))
     {
         std::cerr << "[WARN] invalid persist calibration, fallback to " << sourceFile << std::endl;
@@ -4504,17 +5502,19 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
     std::map<std::string, json> sourceCalibrationEntries;
     for (const auto &target : kTactileCalibrationTargets)
     {
-        if (calibrationJson.contains(target.jsonPath) && calibrationJson[target.jsonPath].is_object())
+        if (const json *entry = findJsonPathConst(&calibrationJson, target.jsonPath);
+            entry != nullptr && entry->is_object())
         {
-            sourceCalibrationEntries.emplace(target.jsonPath, calibrationJson[target.jsonPath]);
+            sourceCalibrationEntries.emplace(target.jsonPath, *entry);
         }
     }
     for (const std::string side : {"left", "right"})
     {
         const std::string legacyJsonPath = legacyTactileJsonPathForSide(side);
-        if (calibrationJson.contains(legacyJsonPath) && calibrationJson[legacyJsonPath].is_object())
+        if (const json *entry = findJsonPathConst(&calibrationJson, legacyJsonPath);
+            entry != nullptr && entry->is_object())
         {
-            sourceCalibrationEntries.emplace(legacyJsonPath, calibrationJson[legacyJsonPath]);
+            sourceCalibrationEntries.emplace(legacyJsonPath, *entry);
         }
     }
 
@@ -4522,25 +5522,29 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
     json rightStereoTemplate;
     const json *leftStereoTemplatePtr = nullptr;
     const json *rightStereoTemplatePtr = nullptr;
-    if (calibrationJson.contains("observation.images.left_stereo") && calibrationJson["observation.images.left_stereo"].is_object())
+    if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.left_stereo");
+        entry != nullptr && entry->is_object())
     {
-        leftStereoTemplate = calibrationJson["observation.images.left_stereo"];
+        leftStereoTemplate = *entry;
         leftStereoTemplatePtr = &leftStereoTemplate;
     }
-    else if (calibrationJson.contains("observation.images.fays_cam0") && calibrationJson["observation.images.fays_cam0"].is_object())
+    else if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.fays_cam0");
+             entry != nullptr && entry->is_object())
     {
-        leftStereoTemplate = calibrationJson["observation.images.fays_cam0"];
+        leftStereoTemplate = *entry;
         leftStereoTemplatePtr = &leftStereoTemplate;
     }
 
-    if (calibrationJson.contains("observation.images.right_stereo") && calibrationJson["observation.images.right_stereo"].is_object())
+    if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.right_stereo");
+        entry != nullptr && entry->is_object())
     {
-        rightStereoTemplate = calibrationJson["observation.images.right_stereo"];
+        rightStereoTemplate = *entry;
         rightStereoTemplatePtr = &rightStereoTemplate;
     }
-    else if (calibrationJson.contains("observation.images.fays_cam1") && calibrationJson["observation.images.fays_cam1"].is_object())
+    else if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.fays_cam1");
+             entry != nullptr && entry->is_object())
     {
-        rightStereoTemplate = calibrationJson["observation.images.fays_cam1"];
+        rightStereoTemplate = *entry;
         rightStereoTemplatePtr = &rightStereoTemplate;
     }
 
@@ -4548,37 +5552,44 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
     removeIfPresent(&calibrationJson, "observation.images.fays_cam1");
     removeIfPresent(&calibrationJson, "observation.imu.fays_imu0");
 
-    calibrationJson["observation.images.left_stereo"] = makeStereoPlaceholderFromTemplate(leftStereoTemplatePtr);
-    calibrationJson["observation.images.right_stereo"] = makeStereoPlaceholderFromTemplate(rightStereoTemplatePtr);
+    if (json *leftStereo = findJsonPath(&calibrationJson, "observation.images.left_stereo", true))
+    {
+        *leftStereo = makeStereoPlaceholderFromTemplate(leftStereoTemplatePtr);
+    }
+    if (json *rightStereo = findJsonPath(&calibrationJson, "observation.images.right_stereo", true))
+    {
+        *rightStereo = makeStereoPlaceholderFromTemplate(rightStereoTemplatePtr);
+    }
 
     for (const auto &target : kTactileCalibrationTargets)
     {
         const json *templateEntry = findSourceCalibrationEntry(
             sourceCalibrationEntries,
             tactileTemplateCandidateKeys(target));
-        calibrationJson[target.jsonPath] = makeTactileCalibrationEntry(templateEntry, target.serialPlaceholder);
+        if (json *entry = findJsonPath(&calibrationJson, target.jsonPath, true))
+        {
+            *entry = makeTactileCalibrationEntry(templateEntry, target.serialPlaceholder);
+        }
     }
 
     if (!calibrationJson.contains("metadata") || !calibrationJson["metadata"].is_object())
     {
         calibrationJson["metadata"] = json::object();
     }
-    calibrationJson["metadata"]["format_version"] = calibrationJson["metadata"].value("format_version", "1.0");
-    calibrationJson["metadata"]["description"] = calibrationJson["metadata"].value("description", "Camera calibration parameters");
-
     if (!calibrationJson.contains("calibration_info") || !calibrationJson["calibration_info"].is_object())
     {
         calibrationJson["calibration_info"] = json::object();
     }
-
-    json &calibrationInfo = calibrationJson["calibration_info"];
-    calibrationInfo.erase("fays_imu_bundle");
-    appendCalibrationNote(
-        &calibrationInfo,
-        "Stereo calibration entries are placeholder values migrated from the legacy Fays template until dedicated stereo calibration is available.");
-    appendCalibrationNote(
-        &calibrationInfo,
-        "Episode tactile calibration now includes only per-camera entries for left_tcam_l, left_tcam_r, right_tcam_l and right_tcam_r; persist calibration is not rewritten.");
+    calibrationJson["metadata"]["format_version"] = "2.0";
+    calibrationJson["metadata"]["generation_date"] =
+        calibrationJson["metadata"].value("generation_date", currentDateString());
+    calibrationJson["metadata"]["description"] =
+        calibrationJson["metadata"].value("description", "Camera calibration parameters");
+    calibrationJson["calibration_info"]["calibration_date"] =
+        calibrationJson["calibration_info"].value("calibration_date", calibrationJson["metadata"]["generation_date"]);
+    calibrationJson["calibration_info"]["notes"] = calibrationJson["calibration_info"].value(
+        "notes",
+        "Main/stereo/imu entries are filled from gripper calibration payload when available; tactile serials are resolved from runtime devices.");
 
     if (!commandExists("udevadm"))
     {
@@ -4625,6 +5636,18 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
 
     removeIfPresent(&calibrationJson, "observation.images.gripper_left_tactile");
     removeIfPresent(&calibrationJson, "observation.images.gripper_right_tactile");
+
+    bool anyCalibrationValid = false;
+    for (const auto &state : gripperRuntimeStates_)
+    {
+        if (state.calibrationValid && state.calibrationPayloadCached)
+        {
+            applySideCalibrationPayload(&calibrationJson, state.side, state.calibrationPayload);
+            anyCalibrationValid = true;
+        }
+    }
+    calibrationJson["metadata"]["calibration_status"] = anyCalibrationValid ? "calibrated" : "uncalibrated";
+    calibrationJson["calibration_info"]["calibration_status"] = anyCalibrationValid ? "calibrated" : "uncalibrated";
 
     std::ofstream output(episodeDir + "/calibration.json");
     if (!output.is_open())

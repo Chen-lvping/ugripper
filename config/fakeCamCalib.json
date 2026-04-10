@@ -1,96 +1,347 @@
 {
-    "metadata": {
-        "format_version": "1.0",
-        "generation_date": "2025-01-09",
-        "description": "Camera calibration parameters",
-        "calibration_status": "uncalibrated"
-    },
-    "observation.images.{{CAM_MAIN}}": {
-        "shape": [
-            1080,
-            1920,
-            3
-        ],
-        "names": [
-            "height",
-            "width",
-            "channels"
-        ],
-        "info": null,
-        "intrinsics": {
-            "1920x1080": {
-                "fx": 1000.0,
-                "fy": 1000.0,
-                "ppx": 960.0,
-                "ppy": 540.0
-            }
-        },
-        "dtype": "video",
-        "fps": 60
-    },
-    "observation.images.left_tcam_l": {
-        "shape": [
-            480,
-            640,
-            3
-        ],
-        "names": [
-            "height",
-            "width",
-            "channels"
-        ],
-        "info": null,
-        "dtype": "video",
-        "serial": "{{LEFT_TCAM_L_SERIAL}}"
-    },
-    "observation.images.left_tcam_r": {
-        "shape": [
-            480,
-            640,
-            3
-        ],
-        "names": [
-            "height",
-            "width",
-            "channels"
-        ],
-        "info": null,
-        "dtype": "video",
-        "serial": "{{LEFT_TCAM_R_SERIAL}}"
-    },
-    "observation.images.right_tcam_l": {
-        "shape": [
-            480,
-            640,
-            3
-        ],
-        "names": [
-            "height",
-            "width",
-            "channels"
-        ],
-        "info": null,
-        "dtype": "video",
-        "serial": "{{RIGHT_TCAM_L_SERIAL}}"
-    },
-    "observation.images.right_tcam_r": {
-        "shape": [
-            480,
-            640,
-            3
-        ],
-        "names": [
-            "height",
-            "width",
-            "channels"
-        ],
-        "info": null,
-        "dtype": "video",
-        "serial": "{{RIGHT_TCAM_R_SERIAL}}"
-    },
     "calibration_info": {
         "calibration_date": "2025-01-09",
         "calibration_status": "uncalibrated",
-        "notes": "Replace {{CAM_MAIN}} with actual camera name (e.g., cam_left or cam_right); tactile placeholders are resolved at runtime for left_tcam_l/left_tcam_r/right_tcam_l/right_tcam_r."
+        "notes": "Main/stereo/imu entries are filled from gripper calibration payload when available; tactile serials are resolved from runtime devices."
+    },
+    "metadata": {
+        "calibration_status": "uncalibrated",
+        "description": "Camera calibration parameters",
+        "format_version": "2.0",
+        "generation_date": "2025-01-09"
+    },
+    "observation": {
+        "images": {
+            "left_cam_main": {
+                "camera_model": "pinhole",
+                "distortion_coeffs": [
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "distortion_model": "equidistant",
+                "dtype": "video",
+                "fps": 60,
+                "info": null,
+                "intrinsics": {
+                    "1920x1080": {
+                        "fx": 1000.0,
+                        "fy": 1000.0,
+                        "ppx": 960.0,
+                        "ppy": 540.0
+                    }
+                },
+                "names": [
+                    "height",
+                    "width",
+                    "channels"
+                ],
+                "shape": [
+                    1080,
+                    1920,
+                    3
+                ]
+            },
+            "left_stereo": {
+                "camera_model": "pinhole",
+                "cam0": {
+                    "camera_model_enum": 0,
+                    "distortion_coeffs": [
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0
+                    ],
+                    "intrinsics": {
+                        "640x400": {
+                            "fx": 640.0,
+                            "fy": 400.0,
+                            "ppx": 320.0,
+                            "ppy": 200.0
+                        }
+                    }
+                },
+                "cam1": {
+                    "camera_model_enum": 0,
+                    "distortion_coeffs": [
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0
+                    ],
+                    "intrinsics": {
+                        "640x400": {
+                            "fx": 640.0,
+                            "fy": 400.0,
+                            "ppx": 320.0,
+                            "ppy": 200.0
+                        }
+                    }
+                },
+                "distortion_model": "equidistant",
+                "dtype": "video",
+                "extrinsics": {
+                    "T_ic_cam0_to_imu0": [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0]
+                    ],
+                    "T_ic_cam1_to_imu0": [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0]
+                    ],
+                    "baseline_norm": 0.0,
+                    "timeshift_cam0_to_imu0": 0.0,
+                    "timeshift_cam1_to_imu0": 0.0
+                },
+                "fps": 60,
+                "info": null,
+                "names": [
+                    "height",
+                    "width",
+                    "channels"
+                ],
+                "residuals": {
+                    "accelerometer_error_imu0_m_s2": {
+                        "mean": 0.0,
+                        "median": 0.0,
+                        "stddev": 0.0
+                    },
+                    "gyroscope_error_imu0_rad_s": {
+                        "mean": 0.0,
+                        "median": 0.0,
+                        "stddev": 0.0
+                    },
+                    "reprojection_error_cam0_px": {
+                        "mean": 0.0,
+                        "median": 0.0,
+                        "stddev": 0.0
+                    },
+                    "reprojection_error_cam1_px": {
+                        "mean": 0.0,
+                        "median": 0.0,
+                        "stddev": 0.0
+                    }
+                },
+                "shape": [
+                    400,
+                    1280,
+                    3
+                ]
+            },
+            "left_tcam_l": {
+                "dtype": "video",
+                "info": null,
+                "names": [
+                    "height",
+                    "width",
+                    "channels"
+                ],
+                "serial": "{{LEFT_TCAM_L_SERIAL}}",
+                "shape": [
+                    480,
+                    640,
+                    3
+                ]
+            },
+            "left_tcam_r": {
+                "dtype": "video",
+                "info": null,
+                "names": [
+                    "height",
+                    "width",
+                    "channels"
+                ],
+                "serial": "{{LEFT_TCAM_R_SERIAL}}",
+                "shape": [
+                    480,
+                    640,
+                    3
+                ]
+            },
+            "right_cam_main": {
+                "camera_model": "pinhole",
+                "distortion_coeffs": [
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0
+                ],
+                "distortion_model": "equidistant",
+                "dtype": "video",
+                "fps": 60,
+                "info": null,
+                "intrinsics": {
+                    "1920x1080": {
+                        "fx": 1000.0,
+                        "fy": 1000.0,
+                        "ppx": 960.0,
+                        "ppy": 540.0
+                    }
+                },
+                "names": [
+                    "height",
+                    "width",
+                    "channels"
+                ],
+                "shape": [
+                    1080,
+                    1920,
+                    3
+                ]
+            },
+            "right_stereo": {
+                "camera_model": "pinhole",
+                "cam0": {
+                    "camera_model_enum": 0,
+                    "distortion_coeffs": [
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0
+                    ],
+                    "intrinsics": {
+                        "640x400": {
+                            "fx": 640.0,
+                            "fy": 400.0,
+                            "ppx": 320.0,
+                            "ppy": 200.0
+                        }
+                    }
+                },
+                "cam1": {
+                    "camera_model_enum": 0,
+                    "distortion_coeffs": [
+                        0.0,
+                        0.0,
+                        0.0,
+                        0.0
+                    ],
+                    "intrinsics": {
+                        "640x400": {
+                            "fx": 640.0,
+                            "fy": 400.0,
+                            "ppx": 320.0,
+                            "ppy": 200.0
+                        }
+                    }
+                },
+                "distortion_model": "equidistant",
+                "dtype": "video",
+                "extrinsics": {
+                    "T_ic_cam0_to_imu0": [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0]
+                    ],
+                    "T_ic_cam1_to_imu0": [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0]
+                    ],
+                    "baseline_norm": 0.0,
+                    "timeshift_cam0_to_imu0": 0.0,
+                    "timeshift_cam1_to_imu0": 0.0
+                },
+                "fps": 60,
+                "info": null,
+                "names": [
+                    "height",
+                    "width",
+                    "channels"
+                ],
+                "residuals": {
+                    "accelerometer_error_imu0_m_s2": {
+                        "mean": 0.0,
+                        "median": 0.0,
+                        "stddev": 0.0
+                    },
+                    "gyroscope_error_imu0_rad_s": {
+                        "mean": 0.0,
+                        "median": 0.0,
+                        "stddev": 0.0
+                    },
+                    "reprojection_error_cam0_px": {
+                        "mean": 0.0,
+                        "median": 0.0,
+                        "stddev": 0.0
+                    },
+                    "reprojection_error_cam1_px": {
+                        "mean": 0.0,
+                        "median": 0.0,
+                        "stddev": 0.0
+                    }
+                },
+                "shape": [
+                    400,
+                    1280,
+                    3
+                ]
+            },
+            "right_tcam_l": {
+                "dtype": "video",
+                "info": null,
+                "names": [
+                    "height",
+                    "width",
+                    "channels"
+                ],
+                "serial": "{{RIGHT_TCAM_L_SERIAL}}",
+                "shape": [
+                    480,
+                    640,
+                    3
+                ]
+            },
+            "right_tcam_r": {
+                "dtype": "video",
+                "info": null,
+                "names": [
+                    "height",
+                    "width",
+                    "channels"
+                ],
+                "serial": "{{RIGHT_TCAM_R_SERIAL}}",
+                "shape": [
+                    480,
+                    640,
+                    3
+                ]
+            }
+        },
+        "imu": {
+            "left_imu": {
+                "accelerometer": {
+                    "noise_density_discrete": 0.0,
+                    "random_walk": 0.0
+                },
+                "dtype": "imu",
+                "gyroscope": {
+                    "noise_density_discrete": 0.0,
+                    "random_walk": 0.0
+                },
+                "model": "calibrated",
+                "update_rate_hz": 0.0
+            },
+            "right_imu": {
+                "accelerometer": {
+                    "noise_density_discrete": 0.0,
+                    "random_walk": 0.0
+                },
+                "dtype": "imu",
+                "gyroscope": {
+                    "noise_density_discrete": 0.0,
+                    "random_walk": 0.0
+                },
+                "model": "calibrated",
+                "update_rate_hz": 0.0
+            }
+        }
     }
 }
