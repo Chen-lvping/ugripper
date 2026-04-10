@@ -1,6 +1,6 @@
 ---
 name: validate-episode-data
-description: 为 ugripper 项目执行 episode 数据深度校验。用于用户在录完一条新数据后，指定“校验 episode / 检查这条录制数据 / 验证视频和 sensor 是否同步 / 看有没有 gap 或异常 / 校验最新一条数据”等请求时：先阅读 docs/agent/overview.md 理解当前 episode 结构与时间语义，再对指定 episode 目录执行只读分析；若用户说“校验最新一条数据”，默认对用户给出的数据父目录执行 `--latest` 选择最新 `episode_*`；重点检查视频时间对齐、逐帧 gap、容器时间戳异常、首帧同步误差、左右 sensor 同步、视频与 sensor 对齐、sensor topic gap、尾部缺失与其他可疑异常，并给出结论、证据和建议。
+description: 为 ugripper 项目执行 episode 数据深度校验。用于用户在录完一条新数据后，指定“校验 episode / 检查这条录制数据 / 验证视频和 sensor 是否同步 / 看有没有 gap 或异常 / 校验最新一条数据”等请求时：先阅读 docs/agent/overview.md 理解当前 episode 结构与时间语义，再对指定 episode 目录执行只读分析；若用户说“校验最新一条数据”，默认对用户给出的数据父目录执行 `--latest` 选择最新 `episode_*`；重点检查关键文件完整性、metadata/calibration/info 结构、视频时间对齐、逐帧 gap、主摄时间戳异常、首帧同步误差、左右 sensor 同步、sensor 覆盖率、视频与 sensor 对齐与重叠比例、session 边界和其他可疑异常，并给出结论、证据和建议。
 ---
 
 # validate-episode-data
@@ -30,17 +30,26 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
 默认至少覆盖以下项目：
 
 - episode 关键文件是否存在、非空、可读。
-- `info.json` / `metadata.json` 结构与关键时间字段是否完整。
+- `info.json` / `metadata.json` 结构与关键时间字段是否完整，是否发生 schema 漂移。
+- `calibration.json` 结构是否完整，是否覆盖 8 路图像与左右 IMU 标定项。
+- `metadata.json` / `info.json` / `calibration.json` 是否出现未登记字段、缺失字段或字段类型变化，防止 JSON 格式被偷偷改动。
+- 若存在 `validation_error.log`，是否说明当前 episode 在停录时已有失败记录。
 - 八路视频容器是否可读，是否存在明显时间戳异常。
 - 八路视频的起止系统时间是否对齐，是否有异常长尾 / 短尾。
 - 各视频流是否存在明显逐帧 / 逐包 gap、重复时间戳、回退时间戳。
+- 主摄专项时间戳扫描是否提示 `backward_dts / decode_non_monotonic_dts / decode_error / ref_missing`。
+- 容器 `duration` 与包级 `span` 是否自洽。
+- 左右 main / stereo 成对视频的起止时间是否对齐。
 - 首帧同步误差是否超阈值。
 - `stereo_session` 中的首帧 / 结束时间与顶层 offset 语义是否自洽。
 - 左右 `sensor_data_*.mcap` 是否可读，topic 是否齐全。
 - IMU / encoder topic 是否存在 gap、长时间中断、样本数异常。
 - 左右 sensor 同类型 topic 是否明显不同步。
+- sensor 覆盖时长是否明显短于视频。
 - 每侧 sensor 的覆盖窗口与该侧视频窗口是否明显错位。
+- 每侧视频与 sensor 的重叠比例是否过低。
 - encoder / imu 尾部是否明显早停。
+- 是否存在明显的分组错峰起录模式，例如 `stereo -> tactile -> main`。
 
 ## 建议重点补充的异常类型
 
@@ -53,6 +62,8 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
 - 只有某一侧 encoder 或 imu 尾部缺失，说明串口或写线程可能中途掉线。
 - 触觉相机与主相机 / stereo 普遍错开，说明该类设备独立启动或 stop 边界异常。
 - 所有流都存在相近时刻的大 gap，说明可能是系统调度 / 写盘抖动，而不是单设备掉流。
+- `metadata` / `calibration` 不完整但媒体文件存在，说明这条数据可能“录到了，但不适合直接入库”。
+- 主摄只有 decode 侧 non-monotonic dts 告警，但无缺参考帧或解码错误，说明更像时间戳封装问题，不一定是坏流。
 
 ## 输出要求
 
@@ -80,4 +91,5 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
 - 阈值口径与检查项说明：读取 `references/checklist.md`
 - 默认入口脚本：执行 `scripts/validate_episode.py`
 - 默认运行方式：优先使用 `uv run python`
+- 主摄专项时间戳排查默认会复用 `test/scripts/scan_main_camera_mkv_issues.py`
 - 只在用户明确要求修复代码时，才切换到修改流程；本 skill 默认保持只读分析

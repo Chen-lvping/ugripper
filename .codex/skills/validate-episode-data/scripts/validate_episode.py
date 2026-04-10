@@ -29,10 +29,49 @@ VIDEO_FILES = [
     ("right_tcam_l", "right_tcam_l.mkv", "right"),
     ("right_tcam_r", "right_tcam_r.mkv", "right"),
 ]
+MAIN_CAMERA_NAMES = {"left_cam_main", "right_cam_main"}
+STEREO_CAMERA_NAMES = {"left_stereo", "right_stereo"}
+TACTILE_CAMERA_NAMES = {"left_tcam_l", "left_tcam_r", "right_tcam_l", "right_tcam_r"}
 SENSOR_FILES = [
     ("left", "sensor_data_left.mcap", ["imu_left", "encoder_left"]),
     ("right", "sensor_data_right.mcap", ["imu_right", "encoder_right"]),
 ]
+REQUIRED_METADATA_FIELDS = [
+    "collector",
+    "data_path",
+    "camera_codec",
+    "ugripper_version",
+    "data_format_version",
+]
+REQUIRED_GRIPPER_KEYS = ["calibration_status", "serial_number"]
+EXPECTED_METADATA_KEYS = {
+    "camera_codec",
+    "collector",
+    "data_format_version",
+    "data_path",
+    "device_id",
+    "device_model",
+    "device_type",
+    "gripper_left",
+    "gripper_right",
+    "record_runtime",
+    "reset_recording",
+    "reset_source_episode_dir",
+    "ugripper_lang",
+    "ugripper_usb_updater_version",
+    "ugripper_version",
+}
+EXPECTED_INFO_KEYS = {
+    "boot_time_offset",
+    "boot_time_offset_us",
+    *(f"{video_name}_record_time_offset_us" for video_name, _, _ in VIDEO_FILES),
+}
+OPTIONAL_INFO_KEYS = {"stereo_session"}
+EXPECTED_CALIBRATION_ROOT_KEYS = {"calibration_info", "metadata", "observation"}
+EXPECTED_CALIBRATION_OBSERVATION_KEYS = {"images", "imu"}
+REQUIRED_CALIBRATION_ROOT_KEYS = ["calibration_info", "metadata", "observation"]
+REQUIRED_CALIBRATION_IMAGE_KEYS = [video_name for video_name, _, _ in VIDEO_FILES]
+REQUIRED_CALIBRATION_IMU_KEYS = ["left_imu", "right_imu"]
 REQUIRED_FILES = [
     "metadata.json",
     "calibration.json",
@@ -108,6 +147,33 @@ def parse_rate(rate_text: str | None) -> float | None:
             return None
         return num / den
     return safe_float(text)
+
+
+def safe_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    return str(value)
+
+
+def value_type_name(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "bool"
+    if isinstance(value, int):
+        return "int"
+    if isinstance(value, float):
+        return "float"
+    if isinstance(value, str):
+        return "str"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, dict):
+        return "dict"
+    return type(value).__name__
 
 
 def percentile(sorted_values: list[float], p: float) -> float:
@@ -218,6 +284,7 @@ class Report:
     findings: list[Finding]
     videos: dict[str, VideoStats]
     sensors: dict[str, SensorTopicStats]
+    artifacts: dict[str, Any]
     summary: dict[str, Any]
 
 
@@ -266,8 +333,10 @@ class EpisodeValidator:
         self.findings: list[Finding] = []
         self.info: dict[str, Any] = {}
         self.metadata: dict[str, Any] = {}
+        self.calibration: dict[str, Any] = {}
         self.video_stats: dict[str, VideoStats] = {}
         self.sensor_stats: dict[str, SensorTopicStats] = {}
+        self.artifacts: dict[str, Any] = {}
 
     def add_finding(self, severity: str, code: str, summary: str, **details: Any) -> None:
         self.findings.append(Finding(severity=severity, code=code, summary=summary, details=details))
@@ -278,16 +347,26 @@ class EpisodeValidator:
     def validate(self) -> Report:
         self.check_episode_dir()
         self.check_required_files()
+        self.check_optional_artifacts()
         self.load_metadata()
         self.load_info()
+        self.load_calibration()
+        self.validate_metadata_fields()
         self.validate_info_fields()
+        self.validate_calibration_structure()
         self.scan_videos()
+        self.scan_main_camera_pair()
         self.scan_sensors()
+        self.check_video_span_consistency()
         self.check_video_alignment()
+        self.check_pair_alignment()
         self.check_first_frame_sync()
         self.check_stereo_session_consistency()
         self.check_sensor_alignment()
+        self.check_sensor_coverage()
         self.check_video_sensor_alignment()
+        self.check_video_sensor_overlap()
+        self.classify_patterns()
 
         status = "PASS"
         if any(f.severity == "FAIL" for f in self.findings):
@@ -304,6 +383,7 @@ class EpisodeValidator:
             },
             "video_count": len(self.video_stats),
             "sensor_topic_count": len(self.sensor_stats),
+            "artifact_count": len(self.artifacts),
         }
         return Report(
             episode_dir=str(self.episode_dir),
@@ -311,6 +391,7 @@ class EpisodeValidator:
             findings=self.findings,
             videos=self.video_stats,
             sensors=self.sensor_stats,
+            artifacts=self.artifacts,
             summary=summary,
         )
 
@@ -329,6 +410,29 @@ class EpisodeValidator:
             if path.stat().st_size <= 0:
                 self.add_finding("FAIL", "empty_file", f"关键文件为空: {name}", path=str(path))
 
+    def check_optional_artifacts(self) -> None:
+        validation_error_path = self.episode_dir / "validation_error.log"
+        if validation_error_path.exists():
+            content = validation_error_path.read_text(encoding="utf-8", errors="replace").strip()
+            self.artifacts["validation_error.log"] = {
+                "path": str(validation_error_path),
+                "size": validation_error_path.stat().st_size,
+                "nonempty": bool(content),
+            }
+            severity = "FAIL" if content else "WARN"
+            self.add_finding(
+                severity,
+                "validation_error_log",
+                "存在 validation_error.log",
+                path=str(validation_error_path),
+                nonempty=bool(content),
+                preview=content[:200] if content else "",
+            )
+        for name in ("audio_pre.wav", "audio_post.wav"):
+            path = self.episode_dir / name
+            if path.exists():
+                self.artifacts[name] = {"path": str(path), "size": path.stat().st_size}
+
     def load_json_file(self, name: str) -> dict[str, Any]:
         path = self.episode_dir / name
         try:
@@ -343,7 +447,133 @@ class EpisodeValidator:
     def load_info(self) -> None:
         self.info = self.load_json_file("info.json")
 
+    def load_calibration(self) -> None:
+        self.calibration = self.load_json_file("calibration.json")
+
+    def validate_metadata_fields(self) -> None:
+        metadata_keys = set(self.metadata.keys())
+        missing_keys = sorted(EXPECTED_METADATA_KEYS - metadata_keys)
+        unexpected_keys = sorted(metadata_keys - EXPECTED_METADATA_KEYS)
+        if missing_keys:
+            self.add_finding(
+                "FAIL",
+                "metadata_schema_missing_keys",
+                "metadata.json 缺少预期字段集合中的键",
+                missing_keys=missing_keys,
+            )
+        if unexpected_keys:
+            self.add_finding(
+                "FAIL",
+                "metadata_schema_unexpected_keys",
+                "metadata.json 出现未登记字段，疑似 schema 被改动",
+                unexpected_keys=unexpected_keys,
+            )
+        for field_name in REQUIRED_METADATA_FIELDS:
+            value = self.metadata.get(field_name)
+            if value in (None, "", []):
+                self.add_finding("FAIL", "metadata_field", f"metadata.json 缺少字段: {field_name}")
+        expected_types = {
+            "camera_codec": str,
+            "collector": str,
+            "data_format_version": str,
+            "data_path": str,
+            "device_id": str,
+            "device_model": str,
+            "device_type": str,
+            "gripper_left": dict,
+            "gripper_right": dict,
+            "record_runtime": str,
+            "reset_recording": bool,
+            "reset_source_episode_dir": str,
+            "ugripper_lang": str,
+            "ugripper_usb_updater_version": str,
+            "ugripper_version": str,
+        }
+        for field_name, expected_type in expected_types.items():
+            if field_name not in self.metadata:
+                continue
+            value = self.metadata[field_name]
+            if not isinstance(value, expected_type):
+                self.add_finding(
+                    "FAIL",
+                    "metadata_schema_type",
+                    f"metadata.json 字段类型异常: {field_name}",
+                    expected_type=expected_type.__name__,
+                    actual_type=value_type_name(value),
+                )
+        for field_name in ("gripper_left", "gripper_right"):
+            value = self.metadata.get(field_name)
+            if not isinstance(value, dict):
+                continue
+            missing_keys = [key for key in REQUIRED_GRIPPER_KEYS if key not in value]
+            unexpected_keys = sorted(set(value.keys()) - set(REQUIRED_GRIPPER_KEYS))
+            if missing_keys:
+                self.add_finding(
+                    "FAIL",
+                    "metadata_schema_missing_keys",
+                    f"metadata.json.{field_name} 缺少预期字段",
+                    missing_keys=missing_keys,
+                )
+            if unexpected_keys:
+                self.add_finding(
+                    "WARN",
+                    "metadata_schema_unexpected_keys",
+                    f"metadata.json.{field_name} 出现未登记字段",
+                    unexpected_keys=unexpected_keys,
+                )
+            for key in REQUIRED_GRIPPER_KEYS:
+                nested_value = value.get(key)
+                if nested_value is not None and not isinstance(nested_value, str):
+                    self.add_finding(
+                        "FAIL",
+                        "metadata_schema_type",
+                        f"metadata.json.{field_name}.{key} 字段类型异常",
+                        expected_type="str",
+                        actual_type=value_type_name(nested_value),
+                    )
+        data_format_version = safe_str(self.metadata.get("data_format_version"))
+        if data_format_version is not None and data_format_version != "2":
+            self.add_finding(
+                "WARN",
+                "metadata_data_format_version",
+                "metadata.json 的 data_format_version 不是预期值 2",
+                data_format_version=data_format_version,
+            )
+        camera_codec = safe_str(self.metadata.get("camera_codec"))
+        if camera_codec is not None and camera_codec not in {"h264", "h265"}:
+            self.add_finding(
+                "WARN",
+                "metadata_camera_codec",
+                "metadata.json 的 camera_codec 不是常见值",
+                camera_codec=camera_codec,
+            )
+        data_path = safe_str(self.metadata.get("data_path"))
+        if data_path is not None and data_path != "data/episode_{date:08d}_{episode_index:04d}":
+            self.add_finding(
+                "WARN",
+                "metadata_data_path_template",
+                "metadata.json 的 data_path 模板已变化",
+                data_path=data_path,
+            )
+
     def validate_info_fields(self) -> None:
+        info_keys = set(self.info.keys())
+        missing_keys = sorted(EXPECTED_INFO_KEYS - info_keys)
+        unexpected_keys = sorted(info_keys - EXPECTED_INFO_KEYS - OPTIONAL_INFO_KEYS)
+        if missing_keys:
+            self.add_finding(
+                "FAIL",
+                "info_schema_missing_keys",
+                "info.json 缺少预期字段集合中的键",
+                missing_keys=missing_keys,
+            )
+        if unexpected_keys:
+            self.add_finding(
+                "FAIL",
+                "info_schema_unexpected_keys",
+                "info.json 出现未登记字段，疑似 schema 被改动",
+                unexpected_keys=unexpected_keys,
+            )
         boot_offset = safe_float(self.info.get("boot_time_offset"))
         boot_offset_us = safe_int(self.info.get("boot_time_offset_us"))
         if boot_offset is None or boot_offset <= 0:
@@ -365,6 +595,85 @@ class EpisodeValidator:
             value = safe_int(self.info.get(field_name))
             if value is None or value <= 0:
                 self.add_finding("FAIL", "info_field", f"info.json 缺少合法字段: {field_name}")
+
+    def validate_calibration_structure(self) -> None:
+        calibration_keys = set(self.calibration.keys())
+        missing_root_keys = sorted(EXPECTED_CALIBRATION_ROOT_KEYS - calibration_keys)
+        unexpected_root_keys = sorted(calibration_keys - EXPECTED_CALIBRATION_ROOT_KEYS)
+        if missing_root_keys:
+            self.add_finding(
+                "FAIL",
+                "calibration_schema_missing_keys",
+                "calibration.json 缺少预期顶层字段",
+                missing_keys=missing_root_keys,
+            )
+        if unexpected_root_keys:
+            self.add_finding(
+                "FAIL",
+                "calibration_schema_unexpected_keys",
+                "calibration.json 出现未登记顶层字段，疑似 schema 被改动",
+                unexpected_keys=unexpected_root_keys,
+            )
+        for key in REQUIRED_CALIBRATION_ROOT_KEYS:
+            if key not in self.calibration:
+                self.add_finding("FAIL", "calibration_field", f"calibration.json 缺少字段: {key}")
+        observation = self.calibration.get("observation")
+        if not isinstance(observation, dict):
+            self.add_finding(
+                "FAIL",
+                "calibration_schema_type",
+                "calibration.json.observation 类型异常",
+                expected_type="dict",
+                actual_type=value_type_name(observation),
+            )
+            return
+        observation_keys = set(observation.keys())
+        missing_observation_keys = sorted(EXPECTED_CALIBRATION_OBSERVATION_KEYS - observation_keys)
+        unexpected_observation_keys = sorted(observation_keys - EXPECTED_CALIBRATION_OBSERVATION_KEYS)
+        if missing_observation_keys:
+            self.add_finding(
+                "FAIL",
+                "calibration_schema_missing_keys",
+                "calibration.json.observation 缺少预期字段",
+                missing_keys=missing_observation_keys,
+            )
+        if unexpected_observation_keys:
+            self.add_finding(
+                "FAIL",
+                "calibration_schema_unexpected_keys",
+                "calibration.json.observation 出现未登记字段，疑似 schema 被改动",
+                unexpected_keys=unexpected_observation_keys,
+            )
+        images = observation.get("images")
+        if not isinstance(images, dict):
+            self.add_finding("FAIL", "calibration_field", "calibration.json.observation.images 缺失或非法")
+        else:
+            unexpected_image_keys = sorted(set(images.keys()) - set(REQUIRED_CALIBRATION_IMAGE_KEYS))
+            if unexpected_image_keys:
+                self.add_finding(
+                    "FAIL",
+                    "calibration_schema_unexpected_keys",
+                    "calibration.json.observation.images 出现未登记字段，疑似 schema 被改动",
+                    unexpected_keys=unexpected_image_keys,
+                )
+            for key in REQUIRED_CALIBRATION_IMAGE_KEYS:
+                if key not in images:
+                    self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images 缺少 {key}")
+        imu = observation.get("imu")
+        if not isinstance(imu, dict):
+            self.add_finding("FAIL", "calibration_field", "calibration.json.observation.imu 缺失或非法")
+        else:
+            unexpected_imu_keys = sorted(set(imu.keys()) - set(REQUIRED_CALIBRATION_IMU_KEYS))
+            if unexpected_imu_keys:
+                self.add_finding(
+                    "FAIL",
+                    "calibration_schema_unexpected_keys",
+                    "calibration.json.observation.imu 出现未登记字段，疑似 schema 被改动",
+                    unexpected_keys=unexpected_imu_keys,
+                )
+            for key in REQUIRED_CALIBRATION_IMU_KEYS:
+                if key not in imu:
+                    self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.imu 缺少 {key}")
 
     def ffprobe_stream_info(self, path: Path) -> tuple[str | None, float | None, float | None]:
         result = run_command(
@@ -519,6 +828,67 @@ class EpisodeValidator:
                     backward_pts_count=stats.backward_pts_count,
                 )
 
+    def scan_main_camera_pair(self) -> None:
+        script_path = PROJECT_ROOT / "test" / "scripts" / "scan_main_camera_mkv_issues.py"
+        if not script_path.exists():
+            self.add_finding("WARN", "main_camera_scan_missing", "缺少主摄专项扫描脚本")
+            return
+        result = run_command(
+            [
+                sys.executable,
+                str(script_path),
+                "--decode-mode",
+                self.args.main_decode_mode,
+                "--json",
+                str(self.episode_dir),
+            ]
+        )
+        if result.returncode != 0 and not result.stdout.strip():
+            self.add_finding(
+                "WARN",
+                "main_camera_scan_failed",
+                "主摄专项扫描脚本执行失败",
+                returncode=result.returncode,
+                error=result.stderr.strip(),
+            )
+            return
+        try:
+            payload = json.loads(result.stdout or "{}")
+        except Exception as exc:
+            self.add_finding("WARN", "main_camera_scan_failed", "主摄专项扫描结果解析失败", error=str(exc))
+            return
+
+        self.artifacts["main_camera_scan"] = payload
+        for file_summary in payload.get("files") or []:
+            path = safe_str(file_summary.get("path")) or ""
+            side = safe_str(file_summary.get("side")) or "unknown"
+            decode = file_summary.get("decode") or {}
+            non_monotonic_count = safe_int(decode.get("non_monotonic_dts_count")) or 0
+            ref_missing_count = safe_int(decode.get("ref_missing_count")) or 0
+            decode_error_count = safe_int(decode.get("decode_error_count")) or 0
+            backward_dts_count = safe_int(file_summary.get("backward_dts_count")) or 0
+            duplicate_dts_count = safe_int(file_summary.get("duplicate_dts_count")) or 0
+            if ref_missing_count > 0 or decode_error_count > 0:
+                self.add_finding(
+                    "FAIL",
+                    "main_camera_decode_error",
+                    f"{side} 主摄存在解码异常",
+                    path=path,
+                    ref_missing_count=ref_missing_count,
+                    decode_error_count=decode_error_count,
+                )
+            if non_monotonic_count > 0:
+                severity = "WARN" if backward_dts_count == 0 else "FAIL"
+                self.add_finding(
+                    severity,
+                    "main_camera_non_monotonic_dts",
+                    f"{side} 主摄存在 non-monotonic dts 现象",
+                    path=path,
+                    non_monotonic_dts_count=non_monotonic_count,
+                    backward_dts_count=backward_dts_count,
+                    duplicate_dts_count=duplicate_dts_count,
+                )
+
     def iter_mcap_messages(self, mcap_path: Path):
         if StreamReader is None:
             raise RuntimeError(
@@ -606,6 +976,24 @@ class EpisodeValidator:
                     large_gap_count=stats.large_gap_count,
                 )
 
+    def check_video_span_consistency(self) -> None:
+        for stats in self.video_stats.values():
+            if stats.duration_sec is None or stats.first_pts_sec is None or stats.last_pts_sec is None:
+                continue
+            packet_span_ms = (stats.last_pts_sec - stats.first_pts_sec) * 1000.0
+            duration_span_ms = stats.duration_sec * 1000.0
+            delta_ms = abs(duration_span_ms - packet_span_ms)
+            if delta_ms > self.args.video_span_delta_warn_ms:
+                severity = "FAIL" if delta_ms >= self.args.video_span_delta_fail_ms else "WARN"
+                self.add_finding(
+                    severity,
+                    "video_span_consistency",
+                    f"{stats.name} 容器 duration 与包级 span 偏差过大",
+                    duration_sec=round(stats.duration_sec, 6),
+                    packet_span_ms=round(packet_span_ms, 3),
+                    delta_ms=round(delta_ms, 3),
+                )
+
     def check_video_alignment(self) -> None:
         starts = {
             name: stats.first_system_time_us
@@ -641,6 +1029,37 @@ class EpisodeValidator:
                     latest_end_us=max(ends.values()),
                 )
 
+    def check_pair_alignment(self) -> None:
+        pair_defs = [
+            ("main", "left_cam_main", "right_cam_main"),
+            ("stereo", "left_stereo", "right_stereo"),
+        ]
+        for label, left_name, right_name in pair_defs:
+            left = self.video_stats.get(left_name)
+            right = self.video_stats.get(right_name)
+            if left is None or right is None:
+                continue
+            if left.first_system_time_us is not None and right.first_system_time_us is not None:
+                start_diff_ms = us_to_ms(abs(left.first_system_time_us - right.first_system_time_us))
+                if start_diff_ms > self.args.video_pair_start_warn_ms:
+                    severity = "FAIL" if start_diff_ms >= self.args.video_pair_start_fail_ms else "WARN"
+                    self.add_finding(
+                        severity,
+                        "video_pair_start_alignment",
+                        f"{label} 左右起始时间偏差过大",
+                        start_diff_ms=round(start_diff_ms, 3),
+                    )
+            if left.last_system_time_us is not None and right.last_system_time_us is not None:
+                end_diff_ms = us_to_ms(abs(left.last_system_time_us - right.last_system_time_us))
+                if end_diff_ms > self.args.video_pair_end_warn_ms:
+                    severity = "FAIL" if end_diff_ms >= self.args.video_pair_end_fail_ms else "WARN"
+                    self.add_finding(
+                        severity,
+                        "video_pair_end_alignment",
+                        f"{label} 左右结束时间偏差过大",
+                        end_diff_ms=round(end_diff_ms, 3),
+                    )
+
     def check_first_frame_sync(self) -> None:
         firsts = {
             name: stats.first_system_time_us
@@ -649,20 +1068,28 @@ class EpisodeValidator:
         }
         if len(firsts) < 2:
             return
-        sync_error_ms = us_to_ms(max(firsts.values()) - min(firsts.values()))
-        if sync_error_ms > self.args.first_frame_warn_ms:
-            severity = "FAIL" if sync_error_ms >= self.args.first_frame_fail_ms else "WARN"
-            self.add_finding(
-                severity,
-                "first_frame_sync",
-                "首帧同步误差过大",
-                sync_error_ms=round(sync_error_ms, 3),
-            )
+        non_main_firsts = {
+            name: value for name, value in firsts.items() if name not in MAIN_CAMERA_NAMES
+        }
+        reference_us = min(non_main_firsts.values()) if non_main_firsts else min(firsts.values())
+
+        for name, first_system_time_us in sorted(firsts.items()):
+            error_ms = us_to_ms(abs(first_system_time_us - reference_us))
+            warn_ms = self.args.main_camera_first_frame_warn_ms if name in MAIN_CAMERA_NAMES else self.args.first_frame_warn_ms
+            fail_ms = self.args.main_camera_first_frame_fail_ms if name in MAIN_CAMERA_NAMES else self.args.first_frame_fail_ms
+            if error_ms > warn_ms:
+                severity = "FAIL" if error_ms >= fail_ms else "WARN"
+                self.add_finding(
+                    severity,
+                    "first_frame_sync",
+                    f"{name} 首帧同步误差过大",
+                    sync_error_ms=round(error_ms, 3),
+                    reference_camera_group="non_main" if non_main_firsts else "all_videos",
+                )
 
     def check_stereo_session_consistency(self) -> None:
         stereo_session = self.info.get("stereo_session")
         if not isinstance(stereo_session, dict):
-            self.add_finding("WARN", "missing_stereo_session", "info.json 缺少 stereo_session，无法做双目会话一致性校验")
             return
 
         start_us = safe_int(stereo_session.get("start_system_time_us"))
@@ -737,6 +1164,28 @@ class EpisodeValidator:
                     end_diff_ms=round(end_diff_ms, 3),
                 )
 
+    def check_sensor_coverage(self) -> None:
+        reference_video_duration_sec = max(
+            (stats.duration_sec or 0.0) for stats in self.video_stats.values()
+        )
+        if reference_video_duration_sec <= 0:
+            return
+        for topic_name, stats in self.sensor_stats.items():
+            if stats.first_log_time_ns is None or stats.last_log_time_ns is None:
+                continue
+            duration_sec = (stats.last_log_time_ns - stats.first_log_time_ns) / 1_000_000_000.0
+            coverage_ratio = duration_sec / reference_video_duration_sec if reference_video_duration_sec > 0 else 0.0
+            if coverage_ratio < self.args.sensor_coverage_warn_ratio:
+                severity = "FAIL" if coverage_ratio < self.args.sensor_coverage_fail_ratio else "WARN"
+                self.add_finding(
+                    severity,
+                    "sensor_coverage",
+                    f"{topic_name} 覆盖时长明显短于视频",
+                    duration_sec=round(duration_sec, 3),
+                    reference_video_duration_sec=round(reference_video_duration_sec, 3),
+                    coverage_ratio=round(coverage_ratio, 3),
+                )
+
     def side_video_window_us(self, side: str) -> tuple[int | None, int | None]:
         starts = [
             stats.first_system_time_us
@@ -781,6 +1230,67 @@ class EpisodeValidator:
                     end_diff_ms=round(end_diff_ms, 3),
                 )
 
+    def check_video_sensor_overlap(self) -> None:
+        for side in ("left", "right"):
+            video_start_us, video_end_us = self.side_video_window_us(side)
+            sensor_start_ns, sensor_end_ns = self.side_sensor_window_ns(side)
+            if None in (video_start_us, video_end_us, sensor_start_ns, sensor_end_ns):
+                continue
+            video_start_ns = video_start_us * 1000
+            video_end_ns = video_end_us * 1000
+            overlap_ns = min(video_end_ns, sensor_end_ns) - max(video_start_ns, sensor_start_ns)
+            if overlap_ns <= 0:
+                self.add_finding(
+                    "FAIL",
+                    "video_sensor_overlap",
+                    f"{side} 侧视频与 sensor 窗口没有重叠",
+                    video_window_ns=[video_start_ns, video_end_ns],
+                    sensor_window_ns=[sensor_start_ns, sensor_end_ns],
+                )
+                continue
+            overlap_ratio = overlap_ns / max(1, video_end_ns - video_start_ns)
+            if overlap_ratio < self.args.video_sensor_overlap_warn_ratio:
+                severity = "FAIL" if overlap_ratio < self.args.video_sensor_overlap_fail_ratio else "WARN"
+                self.add_finding(
+                    severity,
+                    "video_sensor_overlap",
+                    f"{side} 侧视频与 sensor 重叠比例偏低",
+                    overlap_ratio=round(overlap_ratio, 3),
+                )
+
+    def classify_patterns(self) -> None:
+        starts = {
+            name: stats.first_system_time_us
+            for name, stats in self.video_stats.items()
+            if stats.first_system_time_us is not None
+        }
+        if len(starts) < 3:
+            return
+
+        stereo_starts = [value for name, value in starts.items() if name in STEREO_CAMERA_NAMES]
+        tactile_starts = [value for name, value in starts.items() if name in TACTILE_CAMERA_NAMES]
+        main_starts = [value for name, value in starts.items() if name in MAIN_CAMERA_NAMES]
+        if stereo_starts and tactile_starts and main_starts:
+            stereo_median = median(stereo_starts)
+            tactile_median = median(tactile_starts)
+            main_median = median(main_starts)
+            stereo_to_tactile_ms = us_to_ms(tactile_median - stereo_median)
+            tactile_to_main_ms = us_to_ms(main_median - tactile_median)
+            if stereo_to_tactile_ms > self.args.pattern_group_stagger_warn_ms and tactile_to_main_ms > self.args.pattern_group_stagger_warn_ms:
+                severity = (
+                    "FAIL"
+                    if stereo_to_tactile_ms >= self.args.pattern_group_stagger_fail_ms
+                    or tactile_to_main_ms >= self.args.pattern_group_stagger_fail_ms
+                    else "WARN"
+                )
+                self.add_finding(
+                    severity,
+                    "video_group_staggered_start",
+                    "视频起录呈现 stereo -> tactile -> main 的分组错峰",
+                    stereo_to_tactile_ms=round(stereo_to_tactile_ms, 3),
+                    tactile_to_main_ms=round(tactile_to_main_ms, 3),
+                )
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Validate one ugripper episode directory in read-only mode.")
@@ -806,6 +1316,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-end-fail-ms", type=float, default=300.0)
     parser.add_argument("--first-frame-warn-ms", type=float, default=33.0)
     parser.add_argument("--first-frame-fail-ms", type=float, default=80.0)
+    parser.add_argument("--main-camera-first-frame-warn-ms", type=float, default=900.0)
+    parser.add_argument("--main-camera-first-frame-fail-ms", type=float, default=1200.0)
     parser.add_argument("--stereo-consistency-warn-ms", type=float, default=10.0)
     parser.add_argument("--stereo-consistency-fail-ms", type=float, default=30.0)
     parser.add_argument("--sensor-lr-start-warn-ms", type=float, default=30.0)
@@ -816,6 +1328,24 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-sensor-start-fail-ms", type=float, default=300.0)
     parser.add_argument("--video-sensor-end-warn-ms", type=float, default=150.0)
     parser.add_argument("--video-sensor-end-fail-ms", type=float, default=400.0)
+    parser.add_argument("--video-sensor-overlap-warn-ratio", type=float, default=0.9)
+    parser.add_argument("--video-sensor-overlap-fail-ratio", type=float, default=0.75)
+    parser.add_argument("--video-span-delta-warn-ms", type=float, default=80.0)
+    parser.add_argument("--video-span-delta-fail-ms", type=float, default=150.0)
+    parser.add_argument("--video-pair-start-warn-ms", type=float, default=50.0)
+    parser.add_argument("--video-pair-start-fail-ms", type=float, default=120.0)
+    parser.add_argument("--video-pair-end-warn-ms", type=float, default=80.0)
+    parser.add_argument("--video-pair-end-fail-ms", type=float, default=180.0)
+    parser.add_argument("--sensor-coverage-warn-ratio", type=float, default=0.9)
+    parser.add_argument("--sensor-coverage-fail-ratio", type=float, default=0.75)
+    parser.add_argument("--pattern-group-stagger-warn-ms", type=float, default=80.0)
+    parser.add_argument("--pattern-group-stagger-fail-ms", type=float, default=150.0)
+    parser.add_argument(
+        "--main-decode-mode",
+        choices=("auto", "full", "off"),
+        default="auto",
+        help="Decode scan policy for integrated main camera issue scan.",
+    )
     return parser
 
 
@@ -854,6 +1384,11 @@ def print_text_report(report: Report) -> None:
                 f"- {name}: count={item.count} median_gap_ms={round(item.median_gap_ms, 3)} "
                 f"max_gap_ms={round(item.max_gap_ms, 3)} large_gap_count={item.large_gap_count}"
             )
+    if report.artifacts:
+        print()
+        print("Artifacts:")
+        for name in sorted(report.artifacts):
+            print(f"- {name}: present")
 
 
 def report_to_json(report: Report) -> str:
@@ -865,6 +1400,7 @@ def report_to_json(report: Report) -> str:
             "findings": [asdict(item) for item in report.findings],
             "videos": {key: asdict(value) for key, value in report.videos.items()},
             "sensors": {key: asdict(value) for key, value in report.sensors.items()},
+            "artifacts": report.artifacts,
         },
         ensure_ascii=False,
         indent=2,

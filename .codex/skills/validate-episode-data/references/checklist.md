@@ -16,6 +16,17 @@
 - `sensor_data_left.mcap`
 - `sensor_data_right.mcap`
 
+## 1.1 推荐附加检查
+
+- `validation_error.log` 是否存在
+- `audio_pre.wav` / `audio_post.wav` 是否按预期出现
+- `metadata.json` 是否包含 `collector` / `camera_codec` / `ugripper_version` / `data_format_version`
+- `metadata.json` / `info.json` / `calibration.json` 的顶层 key 集合是否仍符合约定
+- 关键 JSON 字段类型是否仍符合约定，防止“有字段但类型偷偷变了”
+- `calibration.json.observation.images` 是否覆盖 8 路图像
+- `calibration.json.observation.imu` 是否覆盖 `left_imu` / `right_imu`
+- 主摄专项扫描是否发现 `backward_dts` / `decode_non_monotonic_dts` / `decode_error`
+
 ## 2. 默认阈值建议
 
 这些阈值是“录后体检”的默认经验值，适合作为首轮筛查；真正判责时仍要结合现场机型、录制时长和日志交叉确认。
@@ -23,13 +34,19 @@
 - 视频起始对齐 warn/fail：`80ms / 150ms`
 - 视频结束对齐 warn/fail：`150ms / 300ms`
 - 首帧同步误差 warn/fail：`33ms / 80ms`
+- 左右成对视频起始对齐 warn/fail：`50ms / 120ms`
+- 左右成对视频结束对齐 warn/fail：`80ms / 180ms`
 - 单视频 gap 告警：`max(3 x 中位帧间隔, 80ms)`
+- 容器 duration 与包级 span 偏差 warn/fail：`80ms / 150ms`
 - 单 IMU topic gap 告警：`max(3 x 中位间隔, 20ms)`
 - 单 encoder topic gap 告警：`max(3 x 中位间隔, 30ms)`
 - 左右同类 sensor 起始同步 warn/fail：`30ms / 80ms`
 - 左右同类 sensor 结束同步 warn/fail：`50ms / 120ms`
+- sensor 覆盖率相对最长视频 warn/fail：`0.90 / 0.75`
 - 单侧视频与 sensor 起始对齐 warn/fail：`120ms / 300ms`
 - 单侧视频与 sensor 结束对齐 warn/fail：`150ms / 400ms`
+- 单侧视频与 sensor 重叠比例 warn/fail：`0.90 / 0.75`
+- `stereo -> tactile -> main` 分组错峰起录 warn/fail：`80ms / 150ms`
 
 ## 3. 常见异常模式
 
@@ -47,3 +64,7 @@
   - 更像 sensor_recorder 提前停录或尾部写入失败。
 - `stereo_session 边界和实际 stereo 文件边界差很多`
   - 更像 warmup/session 合并边界异常，需要继续看 `camera_recorder` / daemon 日志。
+- `metadata / calibration 缺字段，但视频和 sensor 文件齐全`
+  - 更像 episode 元数据落盘不完整，而不是录制流本身坏掉。
+- `左右主摄都有 decode_non_monotonic_dts，但只有单侧 backward_dts`
+  - 更像主摄时间戳链路的共性 + 单侧额外容器排序抖动。
