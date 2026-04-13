@@ -1091,6 +1091,48 @@ json makeImuCalibrationEntryFromPayload(const gripper_hmi::GripperCalibrationDat
     });
 }
 
+json makeLockedCalibrationMetadata(const std::string &generationDate,
+                                   const std::string &calibrationStatus)
+{
+    return json::object({
+        {"calibration_status", calibrationStatus},
+        {"description", "Camera calibration parameters"},
+        {"format_version", "2.0"},
+        {"generation_date", generationDate},
+    });
+}
+
+json makeLockedCalibrationInfo(const std::string &generationDate,
+                               const std::string &calibrationStatus,
+                               const std::string &notes)
+{
+    return json::object({
+        {"calibration_date", generationDate},
+        {"calibration_status", calibrationStatus},
+        {"notes", notes},
+    });
+}
+
+void sanitizeCalibrationTopLevel(json *calibrationJson)
+{
+    if (calibrationJson == nullptr || !calibrationJson->is_object())
+    {
+        return;
+    }
+
+    json observation = json::object();
+    if (calibrationJson->contains("observation") && (*calibrationJson)["observation"].is_object())
+    {
+        observation = (*calibrationJson)["observation"];
+    }
+
+    *calibrationJson = json::object({
+        {"calibration_info", json::object()},
+        {"metadata", json::object()},
+        {"observation", observation},
+    });
+}
+
 void eraseSideCalibrationEntries(json *calibrationJson, const std::string &side)
 {
     if (calibrationJson == nullptr || !calibrationJson->is_object())
@@ -2731,21 +2773,19 @@ bool RecordRuntime::persistGripperCalibrationCache(std::string *errorMessage)
         return false;
     }
 
+    const std::string generationDate =
+        calibrationJson.contains("metadata") && calibrationJson["metadata"].is_object()
+            ? calibrationJson["metadata"].value("generation_date", currentDateString())
+            : currentDateString();
+    const std::string notes =
+        calibrationJson.contains("calibration_info") && calibrationJson["calibration_info"].is_object()
+            ? calibrationJson["calibration_info"].value(
+                  "notes",
+                  "Main/stereo/imu calibration entries are refreshed from gripper runtime cache when available; tactile serials are resolved from runtime devices.")
+            : "Main/stereo/imu calibration entries are refreshed from gripper runtime cache when available; tactile serials are resolved from runtime devices.";
+
     migrateLegacyFlattenedCalibrationKeys(&calibrationJson);
-
-    if (!calibrationJson.contains("metadata") || !calibrationJson["metadata"].is_object())
-    {
-        calibrationJson["metadata"] = json::object();
-    }
-    if (!calibrationJson.contains("calibration_info") || !calibrationJson["calibration_info"].is_object())
-    {
-        calibrationJson["calibration_info"] = json::object();
-    }
-
-    const std::string generationDate = calibrationJson["metadata"].value("generation_date", currentDateString());
-    calibrationJson["metadata"]["format_version"] = "2.0";
-    calibrationJson["metadata"]["generation_date"] = generationDate;
-    calibrationJson["metadata"]["description"] = calibrationJson["metadata"].value("description", "Camera calibration parameters");
+    sanitizeCalibrationTopLevel(&calibrationJson);
 
     for (const std::string side : {"left", "right"})
     {
@@ -2761,13 +2801,9 @@ bool RecordRuntime::persistGripperCalibrationCache(std::string *errorMessage)
             anyCalibrationValid = true;
         }
     }
-    calibrationJson["metadata"]["calibration_status"] = anyCalibrationValid ? "calibrated" : "uncalibrated";
-    calibrationJson["calibration_info"]["calibration_date"] =
-        calibrationJson["calibration_info"].value("calibration_date", generationDate);
-    calibrationJson["calibration_info"]["calibration_status"] = anyCalibrationValid ? "calibrated" : "uncalibrated";
-    calibrationJson["calibration_info"]["notes"] = calibrationJson["calibration_info"].value(
-        "notes",
-        "Main/stereo/imu calibration entries are refreshed from gripper runtime cache when available; tactile serials are resolved from runtime devices.");
+    const std::string calibrationStatus = anyCalibrationValid ? "calibrated" : "uncalibrated";
+    calibrationJson["metadata"] = makeLockedCalibrationMetadata(generationDate, calibrationStatus);
+    calibrationJson["calibration_info"] = makeLockedCalibrationInfo(generationDate, calibrationStatus, notes);
 
     const std::string outputPath = options_.persistCalibrationFile;
     std::ofstream output(outputPath, std::ios::trunc);
@@ -5525,11 +5561,19 @@ bool RecordRuntime::GripperPanelManager::poll(int timeoutMs, ButtonSnapshot *sna
         {
             current.downPressed = state.keyPressed[kBtnDownKeyIndex];
         }
+        if (sideForPort(driver->getPort()) == "left")
+        {
+            leftCurrent = current;
+        }
     }
 
     if (snapshot != nullptr)
     {
         *snapshot = current;
+    }
+    if (leftSnapshot != nullptr)
+    {
+        *leftSnapshot = leftCurrent;
     }
     return received;
 }
@@ -6483,31 +6527,31 @@ bool RecordRuntime::EpisodeManager::writeMetadata(const std::string &episodeDir,
 
     const auto makeGripperMetadata = [this](const std::string &side) {
         const auto &state = gripperRuntimeStates_[gripperStateIndexForSide(side)];
-        return json::object({
-            {"serial_number", state.serialNumber},
-            {"calibration_status", state.calibrationStatus},
-        });
+        std::ostringstream stream;
+        stream << "{\n"
+               << "    \"serial_number\": " << json(state.serialNumber).dump() << ",\n"
+               << "    \"calibration_status\": " << json(state.calibrationStatus).dump() << "\n"
+               << "  }";
+        return stream.str();
     };
 
-    const json metadata = json::object({
-        {"device_type", "UMI"},
-        {"device_model", "ugripper"},
-        {"device_id", deviceSn_},
-        {"collector", "default_user"},
-        {"data_path", "data/episode_{date:08d}_{episode_index:04d}"},
-        {"camera_codec", cameraCodec_},
-        {"ugripper_lang", language_},
-        {"ugripper_version", packageVersion_},
-        {"ugripper_usb_updater_version", updaterVersion_},
-        {"data_format_version", "2"},
-        {"record_runtime", "cpp"},
-        {"reset_recording", resetRecording},
-        {"reset_source_episode_dir", resetSourceDir},
-        {"gripper_left", makeGripperMetadata("left")},
-        {"gripper_right", makeGripperMetadata("right")},
-    });
-
-    output << metadata.dump(2) << "\n";
+    output << "{\n"
+           << "  \"device_type\": \"UMI\",\n"
+           << "  \"device_model\": \"ugripper\",\n"
+           << "  \"device_id\": " << json(deviceSn_).dump() << ",\n"
+           << "  \"collector\": \"default_user\",\n"
+           << "  \"data_path\": \"data/episode_{date:08d}_{episode_index:04d}\",\n"
+           << "  \"camera_codec\": " << json(cameraCodec_).dump() << ",\n"
+           << "  \"ugripper_lang\": " << json(language_).dump() << ",\n"
+           << "  \"ugripper_version\": " << json(packageVersion_).dump() << ",\n"
+           << "  \"ugripper_usb_updater_version\": " << json(updaterVersion_).dump() << ",\n"
+           << "  \"data_format_version\": \"2\",\n"
+           << "  \"record_runtime\": \"cpp\",\n"
+           << "  \"reset_recording\": " << (resetRecording ? "true" : "false") << ",\n"
+           << "  \"reset_source_episode_dir\": " << json(resetSourceDir).dump() << ",\n"
+           << "  \"gripper_left\": " << makeGripperMetadata("left") << ",\n"
+           << "  \"gripper_right\": " << makeGripperMetadata("right") << "\n"
+           << "}\n";
     return true;
 }
 
@@ -6559,12 +6603,24 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
         return false;
     }
 
-    migrateLegacyFlattenedCalibrationKeys(&calibrationJson);
-
     if (sourceFile != persistCalibrationFile_ && fs::exists(persistCalibrationFile_))
     {
         std::cerr << "[WARN] invalid persist calibration, fallback to " << sourceFile << std::endl;
     }
+
+    const std::string generationDate =
+        calibrationJson.contains("metadata") && calibrationJson["metadata"].is_object()
+            ? calibrationJson["metadata"].value("generation_date", currentDateString())
+            : currentDateString();
+    const std::string notes =
+        calibrationJson.contains("calibration_info") && calibrationJson["calibration_info"].is_object()
+            ? calibrationJson["calibration_info"].value(
+                  "notes",
+                  "Main/stereo/imu entries are filled from gripper calibration payload when available; tactile serials are resolved from runtime devices.")
+            : "Main/stereo/imu entries are filled from gripper calibration payload when available; tactile serials are resolved from runtime devices.";
+
+    migrateLegacyFlattenedCalibrationKeys(&calibrationJson);
+    sanitizeCalibrationTopLevel(&calibrationJson);
 
     std::map<std::string, json> sourceCalibrationEntries;
     for (const auto &target : kTactileCalibrationTargets)
@@ -6639,25 +6695,6 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
         }
     }
 
-    if (!calibrationJson.contains("metadata") || !calibrationJson["metadata"].is_object())
-    {
-        calibrationJson["metadata"] = json::object();
-    }
-    if (!calibrationJson.contains("calibration_info") || !calibrationJson["calibration_info"].is_object())
-    {
-        calibrationJson["calibration_info"] = json::object();
-    }
-    calibrationJson["metadata"]["format_version"] = "2.0";
-    calibrationJson["metadata"]["generation_date"] =
-        calibrationJson["metadata"].value("generation_date", currentDateString());
-    calibrationJson["metadata"]["description"] =
-        calibrationJson["metadata"].value("description", "Camera calibration parameters");
-    calibrationJson["calibration_info"]["calibration_date"] =
-        calibrationJson["calibration_info"].value("calibration_date", calibrationJson["metadata"]["generation_date"]);
-    calibrationJson["calibration_info"]["notes"] = calibrationJson["calibration_info"].value(
-        "notes",
-        "Main/stereo/imu entries are filled from gripper calibration payload when available; tactile serials are resolved from runtime devices.");
-
     if (!commandExists("udevadm"))
     {
         std::cerr << "[WARN] udevadm not found in PATH, skip runtime tactile serial injection" << std::endl;
@@ -6713,8 +6750,9 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
             anyCalibrationValid = true;
         }
     }
-    calibrationJson["metadata"]["calibration_status"] = anyCalibrationValid ? "calibrated" : "uncalibrated";
-    calibrationJson["calibration_info"]["calibration_status"] = anyCalibrationValid ? "calibrated" : "uncalibrated";
+    const std::string calibrationStatus = anyCalibrationValid ? "calibrated" : "uncalibrated";
+    calibrationJson["metadata"] = makeLockedCalibrationMetadata(generationDate, calibrationStatus);
+    calibrationJson["calibration_info"] = makeLockedCalibrationInfo(generationDate, calibrationStatus, notes);
 
     std::ofstream output(episodeDir + "/calibration.json");
     if (!output.is_open())
