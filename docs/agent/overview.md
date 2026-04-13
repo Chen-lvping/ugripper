@@ -7,7 +7,7 @@
 - 当前系统默认以**单机双手、本地控制**方式运行。
 - 主控制链路已经收口到 `build/src/record_runtime/record_runtime`，`run_record.sh` 负责等待数据盘、维护 v1 风格运行日志，并拉起该二进制。
 - 默认录制产物为 **2 路主相机 + 2 路 stereo + 4 路触觉相机 + 左右两份传感器 MCAP**。
-- HMI 按键、RGB 灯效、提示音、pre/post 音频录制、停录校验和双键关机请求都已纳入当前运行时。
+- HMI 按键、RGB 灯效、提示音、pre/post 音频录制、停录校验，以及右手双键关机/左手双键卸载数据盘请求都已纳入当前运行时。
 - U 盘流程统一负责 `deb` 升级/重装、`config.txt` 导入、标定数据导入和 encoder 零位校准触发；当前自动安装名单已覆盖 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint` 与 `device-ota-mender`，并会在整批安装完成后通过 PulseAudio 播放 `upgrade_completed.wav`。
 
 ## 2. 安装布局与入口
@@ -26,7 +26,7 @@
 | --- | --- | --- | --- |
 | systemd 主服务 | `pack_script/ugripper.service` | 以 `ubuntu` 用户拉起录制服务 | `/opt/ugripper/run_record.sh` |
 | 薄壳启动脚本 | `run_record.sh` | 切到安装目录、等待 `/mnt/data_disk` 可写、维护本地 `/tmp` 到 `/mnt/data_disk/logs` 的增量日志同步，再拉起 `record_runtime` | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/umi_sys_<sn>_<date>.log` |
-| 主运行时 | `build/src/record_runtime/record_runtime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
+| 主运行时 | `build/src/record_runtime/record_runtime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、系统动作请求（关机/卸载数据盘） | episode 目录、`/tmp/umi_system_action_request` |
 | 相机录制 | `build/src/camera_recorder/camera_recorder` | 普通录制模式下负责主摄/触觉会话录制；`--stereo-daemon` 模式下负责双目常驻预热、热插拔恢复与 session finalize | 8 路 `mkv`（默认） |
 | 传感器录制 | `build/src/sensor_recorder/sensor_recorder` | 录制左右 IMU/encoder，按“采样入队 + 每侧独立 MCAP 写线程”分别输出 MCAP，并在本进程内完成 IMU 超阈值判定 | `sensor_data_left.mcap`、`sensor_data_right.mcap`、motion alert pipe |
 | HMI 类库 | `src/gripper_hmi` | 读取夹爪按键，并在驱动内部以单线程 owner 线程完成状态查询、灯效生成与 RGB 指令发送；默认由状态机切灯效，必要时仍可直接下发 RGB；当前也提供 SN 与 1024-byte 标定参数读写 API | 按键快照、RGB 指令、SN/标定参数读写 |
@@ -62,7 +62,7 @@
 - `READY`：绿色呼吸灯，提示系统可开始录制。
 - 当前 `READY` 呼吸灯周期约 `4.5s`，LED 渲染线程约每 `20ms` 按单调时钟刷新一次；驱动只在亮度实际变化时发送 RGB，并以约 `250ms` 的低频做灯效补发、约 `1s` 的低频做串口探活，降低肉眼可见抖动和录制态丢闪。
 - 主循环轮询周期约 `20ms`。
-- 长按判定阈值 `800ms`，双键关机提示阈值 `2000ms`，双键执行阈值 `4000ms`。
+- 长按判定阈值 `800ms`，右手双键关机提示阈值 `2000ms`，双键执行阈值 `4000ms`。
 
 ### 5.2 按键动作
 - `BTN_UP` 短按释放：
@@ -74,14 +74,21 @@
   - 录制中停止当前录制。
 - `BTN_UP` 长按：空闲时录制 pre audio；录制中忽略。
 - `BTN_DOWN` 长按：空闲时录制 post audio；录制中忽略。
-- 双键长按：
+- 右手双键长按：
   - 2 秒时播放 `shutdown` 提示音。
-  - 4 秒时进入 `EXIT`，必要时先停录，然后写 `/tmp/umi_shutdown_request`。
+  - 4 秒时进入 `EXIT`，必要时先停录，然后写 `/tmp/umi_system_action_request=shutdown`。
+- 左手双键长按：
+  - 仅在停止录制状态下生效；录制中忽略并播报 `error`。
+  - 4 秒时先触发 `writing` 并刷写运行日志，然后写 `/tmp/umi_system_action_request=umount`。
+  - root helper 卸载 `/mnt/data_disk` 成功后播放 `umount`；失败播放 `error`。
 
 ## 6. 录制生命周期
 ### 6.1 开始录制
 1. 在 `/mnt/data_disk/<device_sn_lower>/data` 下创建新的 `episode_YYYYMMDD_NNNN`。
 2. 写入 `metadata.json`，当前固定包含：
+   - 这是锁定格式，字段集合与字段顺序都不得随意改动；若必须调整，必须先更新本节文档，再同步修改生成代码、校验脚本与相关测试。
+   - 顶层字段顺序固定为：
+     `device_type -> device_model -> device_id -> collector -> data_path -> camera_codec -> ugripper_lang -> ugripper_version -> ugripper_usb_updater_version -> data_format_version -> record_runtime -> reset_recording -> reset_source_episode_dir -> gripper_left -> gripper_right`
    - `device_type=UMI`
    - `device_model=ugripper`
    - `device_id=<DEVICE_SN>`
@@ -94,11 +101,16 @@
    - `data_format_version=2`
    - `record_runtime=cpp`
    - `reset_recording=<true|false>`
+   - `reset_source_episode_dir=<path-or-empty>`
    - `gripper_left.serial_number`
    - `gripper_left.calibration_status`
    - `gripper_right.serial_number`
    - `gripper_right.calibration_status`
+   - `gripper_left` / `gripper_right` 子字段顺序固定为：`serial_number -> calibration_status`
+   - 禁止重新引入 `serial_number_valid`、`calibration_valid`、`connected`、`source`、错误信息等临时或重复字段
 3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `config/fakeCamCalib.json`。`calibration.json` 的输出格式当前已锁定：
+   - 这是锁定格式，顶层字段集合不得增加，已有字段的职责不得漂移；若必须调整，必须先更新本节文档，再同步修改生成代码、持久化刷新逻辑与 episode 校验口径。
+   - 顶层只保留 `metadata/calibration_info/observation`
    - `metadata.format_version=2.0`
    - `metadata` 只保留 `format_version/generation_date/description/calibration_status`
    - `calibration_info` 只保留 `calibration_date/calibration_status/notes`
@@ -106,6 +118,7 @@
    - 不再写入 gripper 连接态、SN、valid/source 等重复字段
    - 左右主摄、左右 stereo、左右 imu 的标定参数都由 gripper payload 自动填充；即使无 SN 或未标定，也允许继续录制
 4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 统一生成，且当前只保留旧版 offset 字段：
+   - 这是锁定格式，顶层只允许保留下面这些字段；禁止再回填 `stereo_session`、`paired_master_sn` 或其他临时调试字段。
    - `boot_time_offset`
    - `boot_time_offset_us`
    - 8 路 `<camera>_record_time_offset_us`
@@ -129,13 +142,13 @@
 - 普通录制阶段的 `camera_recorder` 当前会直接起左右主摄与 4 路触觉；左右 stereo 继续由单独的 warmup daemon 常驻管理。
 - warmup daemon 在空闲态持续常驻打开需要预热的相机设备；当前仅左右双目继续消费 `MJPEG 60fps` 预热流。开始录制时只为 stereo 新建 session writer，把会话窗口内帧写入最终 `mkv`；主摄则在普通录制阶段直接冷启动采集并写入最终文件。
 - warmup daemon 当前按单实例口径运行；若服务内 daemon 尚未退出又手工再起第二个 `camera_recorder --stereo-daemon` 去抢同一批双目设备，可能诱发设备忙、节点缺失或整条 USB 链路重枚举。当前实现已增加 `/tmp/umi_camera_warmup_daemon.lock` 单实例锁，第二个 warmup daemon 会直接拒绝启动。
-- `camera_recorder` 当前会并发拉起全部已选中的相机子进程，不再在管理层按 YAML 顺序逐路等待启动返回。
 - 停录阶段也会并发向各路相机子进程发 stop，并在全部 stop 返回后统一 poll 状态，降低多路顺序收尾导致 `info.json` 缺失或容器未 finalize 的风险。
+- `camera_recorder` 当前对 ffmpeg 子进程采用统一的正确口径：录制器对象逐路启动，但每路采集/编码仍在各自子进程或内部线程里并发运行；普通触觉/主摄 shell recorder 与 stereo session ffmpeg 都会保留独立进程组，供正常 stop 路径按组发信号；同时启用父进程死亡自动终止保护，避免 `camera_recorder` 本体异常退出后遗留孤儿 `ffmpeg` 长时间占住 `/dev/left_tcam_*`、`/dev/right_tcam_*`，也避免从短生命周期启动线程里 `fork()` 导致 `PR_SET_PDEATHSIG` 被误触发。
 - 主相机模式是压缩码流直封装：主摄始终走相机原生 `H.264/H.265` 码流，不做二次编码；当前实现已收口为 `camera_recorder` 进程内的 `V4L2 MMAP capture -> appsrc -> h26xparse -> matroskamux -> filesink`。
 - 主相机时间戳当前优先取 `VIDIOC_DQBUF` 返回的 `v4l2_buffer.timestamp`，若驱动标记为 monotonic 则在进程内通过 `boot_time_offset_us` 转成 unix 时间；这样 `system_time_us` 的打点位置尽量前移到内核缓冲出队附近，而不是依赖后置日志解析。
 - 主相机 `PTS/DTS` 当前按“相对首帧 system time 的增量”在进程内生成，并做单调钳制；`<camera>_record_time_offset_us` 的语义保持为 `first_frame_unix_time_us - first_frame_pts_us`，不再允许额外回退值混入 `info.json`。
 - 主相机链路当前仍保留约 `5s` 的 `leaky downstream` 保护窗口，用于吸收短时 `matroskamux/filesink` 背压，减少因极小缓冲触发的编码包丢失与花屏。
-- 主摄 YAML 现支持可选 `uvc_roll_absolute`：若配置了标准 UVC `Roll Absolute` 目标值，`camera_recorder` 会在起录前先读取当前值；仅当当前值与目标值不一致时才通过 `libusb` 下发更新，并在设备节点恢复后继续走原生压缩码流录制，避免为翻转引入二次编解码。
+- 主摄 YAML 现支持可选 `uvc_roll_absolute`：当前已从录制启动链路解耦，改为在主摄 `video4linux` 主节点插入时由 `udev -> apply_main_camera_roll_once.sh -> camera_recorder --apply-uvc-roll-only` 执行；同一次插入仅处理一次，重新插拔后再重新检查。录制阶段不再为 roll 检测额外触发一次 `libusb` detach/reattach，避免把主摄 `/dev/video*` 节点重建和权限恢复时序压进开录路径。
 - 触觉 / 双目模式保留 `hybrid-decode-encode` / `stereo-hybrid-decode-encode`。
 - stereo 当前默认按设备 `1280x400@60` 常驻采集 MJPEG，session writer 按 `30fps` 抽帧后再编码成 `H.265` 写入 `mkv`；当前不再依赖后台 live encode + UDP relay。
 - 每路相机由独立子进程承载；单路失败不会由 `camera_recorder` 主动连带停掉其他相机。
@@ -226,7 +239,8 @@
 - USB 标定导入阶段会在 `/etc/ugripper/config/calibration/.import_stage.*` 下生成临时 `calibration.json` 与夹爪 `payload bin`；由于 HMI helper 当前会以 `ubuntu` 用户运行，stage 目录需保持可遍历、payload bin 需保持可读，否则会出现“bin 已生成但 helper 无法读取”的写入失败。
 - 运行时音频 FIFO：`/tmp/umi_audio_pipe`
 - 音频临时目录：`/tmp/umi_audio`
-- 关机触发文件：`/tmp/umi_shutdown_request`
+- 系统动作请求文件：`/tmp/umi_system_action_request`
+- 系统动作结果文件：`/tmp/umi_system_action_result`
 - 数据目录：`/mnt/data_disk/<device_sn_lower>/data`
 - 运行日志：`/tmp/umi_sys_<device_sn_lower>_<YYYYMMDD>.log`
 - 数据盘日志镜像：`/mnt/data_disk/logs/umi_sys_<device_sn_lower>_<YYYYMMDD>.log`
@@ -249,8 +263,8 @@
 - 现场 5 步回归 SOP：1）确认耳机已识别且服务正常，观察 `journalctl -u ugripper.service -n 100` 是否出现 USB 音频初始化日志；2）空闲 3~5 分钟后执行 `python3 py_script/usb_audio_play_test.py`，确认首个测试音不吞头；3）再次空闲 3~5 分钟后执行 `python3 py_script/usb_audio_mic_test.py --playback`，确认录音回放起始段不被截断；4）若需覆盖热恢复，再做一次耳机热插拔后重复步骤 2/3；5）若结果异常，记录 `pactl list short modules`、`pactl list short sinks`、`pactl list short sources` 与 `journalctl -u ugripper.service -n 200` 作为现场。
 
 ### 8.4 相关辅助单元
-- `auto_update/umi-shutdown-trigger.path`：监控 `/tmp/umi_shutdown_request`。
-- `auto_update/umi-shutdown-trigger.service`：检测到触发文件后执行 `systemctl poweroff`。
+- `auto_update/umi-shutdown-trigger.path`：监控 `/tmp/umi_system_action_request`。
+- `auto_update/umi-shutdown-trigger.service`：检测到触发文件后执行统一 helper；当前支持 `shutdown` 与 `umount` 两类动作，并把执行结果写回 `/tmp/umi_system_action_result`。
 - `auto_calibration/ugripper-network-monitor.service`：监听网线插拔，当前仅在拔线时重启 `ugripper.service`。
 - `auto_update/boot_check_install.sh`：开机时检查 `/opt/backup` 中的 `deb` 是否需要恢复或升级。
 

@@ -5,8 +5,13 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
-- 补齐左手新 hub 下 left_tcam_r 的 udev 映射：左侧 left_tcam_r 现同时接受旧 hub 的 .4.1 与新 hub 的 .3 端口，保证新旧左手 hub 规则共存。
-- 修正左手更换新 hub 后的 udev 视频映射：左侧 left_cam_main / left_tcam_l 改为“设备类型优先 + 左侧链路约束”匹配，不再只依赖 .4.2/.4.4 固定内部端口，避免左主摄与左触觉因 hub 内部端口变化而丢失 /dev/left_cam_main、/dev/left_tcam_l。
+- 主摄 `uvc_roll_absolute` 从录制启动链路解耦：改为在主摄 `video4linux` 主节点插入时由 `udev` 触发独立 helper 执行，同一次插入只处理一次，重新插拔后再重新检查。
+- `camera_recorder` 新增 `--apply-uvc-roll-only` 模式，供插入事件单独执行主摄 roll 检测/设置；普通录制阶段不再主动执行主摄 roll 检测。
+- 主摄 `video4linux` udev 规则改为显式补齐 `MODE/GROUP/TAG`，降低主摄节点在驱动重绑后的权限漂移风险。
+- 新增左手双键长按卸载数据盘：仅在停止录制时允许触发；运行时会先刷运行日志，再通过统一 system action helper 请求卸载 `/mnt/data_disk`，成功后播放 `umount.wav`，失败播放 `error.wav`；原右手双键长按关机继续沿用同一 helper 分流执行。
+- 补齐左手新 hub 下 `left_tcam_r` 的 `udev` 映射：左侧 `left_tcam_r` 现同时接受旧 hub 的 `.4.1` 与新 hub 的 `.3` 端口，保证新旧左手 hub 规则共存。
+- 修正左手更换新 hub 后的 `udev` 视频映射：左侧 `left_cam_main` / `left_tcam_l` 改为“设备类型优先 + 左侧链路约束”匹配，不再只依赖 `.4.2/.4.4` 固定内部端口，避免左主摄与左触觉因 hub 内部端口变化而丢失 `/dev/left_cam_main`、`/dev/left_tcam_l`。
+- 修复 `camera_recorder` 的 ffmpeg 子进程生命周期：统一改为“逐路启动 recorder 对象 + 子进程独立进程组 + 父死子亡保护”的正确口径，既避免 `camera_recorder` 异常退出后遗留孤儿 `ffmpeg` 持续占用 tactile 设备，也避免从短生命周期启动线程里 `fork()` 触发 `PR_SET_PDEATHSIG` 误杀子进程，现场表现为 `Device or resource busy`、触觉 recorder `exit_code=137` 或输出 mkv 缺失。
 - 主摄 `direct-copy-h26x` 录制链路改为 `camera_recorder` 进程内 `V4L2 MMAP capture -> appsrc -> h26xparse -> matroskamux -> filesink`，`record_time_offset_us` 的 system time 打点前移到 `VIDIOC_DQBUF` / `v4l2_buffer.timestamp` 附近，减少 shell 管线日志解析带来的软件延迟。
 - 主摄容器时间轴改为在进程内显式写入单调 `PTS/DTS`，降低 `non_monotonic_dts_count` 这类由后置时间戳链路引入的异常概率。
 - 调整 UMI 标定写入重试策略：`0xFE` 仍优先在当前 chunk 内重发；若写标定过程中收到 `0xF3/0xFF`，则不再只重试当前 chunk，而是先发送 `AbortWriteInData` 结束本轮，再从头重写整份 `1024-byte` 标定 payload；整份写入最多尝试 `3` 次，全部失败后才报错退出。

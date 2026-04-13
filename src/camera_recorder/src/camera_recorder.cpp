@@ -33,6 +33,7 @@
 #include <fcntl.h>
 #include <linux/videodev2.h>
 #include <poll.h>
+#include <sys/prctl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/types.h>
@@ -640,6 +641,20 @@ bool WaitForDeviceNode(const std::string& device, std::chrono::milliseconds time
     return Exists(device);
 }
 
+bool ConfigureManagedChildProcessGroup() {
+    if (setpgid(0, 0) != 0 && errno != EACCES) {
+        std::cerr << "[camera_recorder] child failed to create process group: "
+                  << std::strerror(errno) << std::endl;
+        return false;
+    }
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) {
+        std::cerr << "[camera_recorder] child failed to set parent-death signal: "
+                  << std::strerror(errno) << std::endl;
+        return false;
+    }
+    return true;
+}
+
 bool EnsureUvcRollAbsolute(const CameraConfig& config) {
     if (!config.uvc_roll_absolute.has_value()) {
         return false;
@@ -1195,7 +1210,9 @@ public:
         }
 
         if (pid == 0) {
-            setsid();
+            if (!ConfigureManagedChildProcessGroup()) {
+                _exit(126);
+            }
             close(output_pipe[0]);
             dup2(output_pipe[1], STDOUT_FILENO);
             dup2(output_pipe[1], STDERR_FILENO);
@@ -1205,6 +1222,10 @@ public:
         }
 
         close(output_pipe[1]);
+        if (setpgid(pid, pid) != 0 && errno != EACCES) {
+            std::cerr << "[camera_recorder] failed to assign recorder process group: "
+                      << config_.name << " error=" << std::strerror(errno) << std::endl;
+        }
         pid_ = pid;
         started_ = true;
         running_ = true;
@@ -1571,25 +1592,8 @@ private:
     };
 
     bool BeforeStart(std::string* error_message) {
-        if (!config_.uvc_roll_absolute.has_value()) {
-            return true;
-        }
-
-        try {
-            const bool changed = EnsureUvcRollAbsolute(config_);
-            if (!changed) {
-                return true;
-            }
-            if (!WaitForDeviceNode(config_.device, kDeviceRebindTimeout)) {
-                throw std::runtime_error("device node did not recover after UVC roll update: " + config_.device);
-            }
-            return true;
-        } catch (const std::exception& ex) {
-            if (error_message != nullptr) {
-                *error_message = std::string("failed to apply UVC roll: ") + ex.what();
-            }
-            return false;
-        }
+        (void)error_message;
+        return true;
     }
 
     static bool RetryIoctl(int fd, unsigned long request, void* arg) {
@@ -2491,7 +2495,9 @@ public:
         }
 
         if (pid == 0) {
-            setsid();
+            if (!ConfigureManagedChildProcessGroup()) {
+                _exit(126);
+            }
             dup2(input_pipe[0], STDIN_FILENO);
             dup2(output_pipe[1], STDOUT_FILENO);
             dup2(output_pipe[1], STDERR_FILENO);
@@ -2505,6 +2511,10 @@ public:
 
         close(input_pipe[0]);
         close(output_pipe[1]);
+        if (setpgid(pid, pid) != 0 && errno != EACCES) {
+            std::cerr << "[camera_recorder] failed to assign stereo session process group: "
+                      << config_.name << " error=" << std::strerror(errno) << std::endl;
+        }
         pid_ = pid;
         write_fd_ = input_pipe[1];
         started_ = true;
@@ -3534,25 +3544,9 @@ bool CameraRecorderManager::Prepare(const std::vector<CameraConfig>& configs, st
 }
 
 bool CameraRecorderManager::StartAll() {
-    std::vector<int> started(recorders_.size(), 0);
-    std::vector<std::thread> start_threads;
-    start_threads.reserve(recorders_.size());
-
-    for (size_t index = 0; index < recorders_.size(); ++index) {
-        start_threads.emplace_back([this, &started, index]() {
-            started[index] = recorders_[index]->Start() ? 1 : 0;
-        });
-    }
-
-    for (auto& thread : start_threads) {
-        if (thread.joinable()) {
-            thread.join();
-        }
-    }
-
     size_t started_count = 0;
     for (size_t index = 0; index < recorders_.size(); ++index) {
-        if (started[index]) {
+        if (recorders_[index]->Start()) {
             started_count++;
         } else {
             had_failure_ = true;
@@ -3659,6 +3653,51 @@ bool CameraRecorderManager::WriteInfoJson() const {
     return !missing_offset;
 }
 
+bool ApplyUvcRollForSelectedCameras(const Options& options, const std::vector<CameraConfig>& configs) {
+    bool selected_any = false;
+    bool processed_any = false;
+    bool ok = true;
+
+    auto selected = [&](const std::string& name) {
+        return options.only_names.empty() || options.only_names.count(name) > 0;
+    };
+
+    for (const auto& config : configs) {
+        if (!selected(config.name)) {
+            continue;
+        }
+        selected_any = true;
+        if (!config.uvc_roll_absolute.has_value()) {
+            continue;
+        }
+        processed_any = true;
+        try {
+            const bool changed = EnsureUvcRollAbsolute(config);
+            if (changed && !WaitForDeviceNode(config.device, kDeviceRebindTimeout)) {
+                throw std::runtime_error("device node did not recover after UVC roll update: " + config.device);
+            }
+            std::cout << "[camera_recorder] uvc roll "
+                      << (changed ? "applied" : "already_ok")
+                      << ": camera=" << config.name
+                      << " device=" << config.device << std::endl;
+        } catch (const std::exception& ex) {
+            ok = false;
+            std::cerr << "[camera_recorder] failed to apply UVC roll for "
+                      << config.name << ": " << ex.what() << std::endl;
+        }
+    }
+
+    if (!selected_any) {
+        std::cerr << "[camera_recorder] no camera selected for UVC roll apply" << std::endl;
+        return false;
+    }
+    if (!processed_any) {
+        std::cerr << "[camera_recorder] selected cameras do not define uvc_roll_absolute" << std::endl;
+        return false;
+    }
+    return ok;
+}
+
 Options ParseArgs(int argc, char** argv) {
     Options options;
     for (int index = 1; index < argc; ++index) {
@@ -3695,6 +3734,8 @@ Options ParseArgs(int argc, char** argv) {
             options.allow_missing = true;
         } else if (arg == "--stereo-daemon") {
             options.stereo_daemon = true;
+        } else if (arg == "--apply-uvc-roll-only") {
+            options.apply_uvc_roll_only = true;
         } else if (arg == "--control-file") {
             options.control_file = require_value(arg);
         } else if (arg == "--status-file") {
@@ -3704,6 +3745,7 @@ Options ParseArgs(int argc, char** argv) {
         } else if (arg == "-h" || arg == "--help") {
             std::cout
                 << "Usage: camera_recorder --output-dir DIR [--codec h264|h265] [--duration SEC] [--config-yaml PATH] [--allow-missing] [--only a,b] [--dry-run]\n"
+                << "   or: camera_recorder --apply-uvc-roll-only [--config-yaml PATH] [--only a,b]\n"
                 << "   or: camera_recorder --stereo-daemon [--config-yaml PATH] [--control-file PATH] [--status-file PATH]\n"
                 << "Records main/tactile/stereo streams with YAML-driven recorder classes.\n";
             std::exit(0);
@@ -3712,7 +3754,7 @@ Options ParseArgs(int argc, char** argv) {
         }
     }
 
-    if (!options.stereo_daemon && options.output_dir.empty()) {
+    if (!options.stereo_daemon && !options.apply_uvc_roll_only && options.output_dir.empty()) {
         throw std::runtime_error("--output-dir is required");
     }
 
