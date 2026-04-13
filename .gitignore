@@ -40,3 +40,6 @@ ASR/audio/
 
 py_script/set_baud_1m.py
 py_script/README_set_baud_1m_windows.md
+
+# 其他临时文件
+tmp/

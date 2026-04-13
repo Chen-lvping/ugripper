@@ -1072,6 +1072,18 @@ class EpisodeValidator:
             name: value for name, value in firsts.items() if name not in MAIN_CAMERA_NAMES
         }
         reference_us = min(non_main_firsts.values()) if non_main_firsts else min(firsts.values())
+        per_mkv_offset_ms = {
+            f"{name}.mkv": round(us_to_ms(first_system_time_us - reference_us), 3)
+            for name, first_system_time_us in sorted(firsts.items())
+        }
+        self.add_finding(
+            "INFO",
+            "first_frame_offsets",
+            "所有 mkv 首帧相对参考时刻的偏移量",
+            reference_camera_group="non_main" if non_main_firsts else "all_videos",
+            reference_system_time_us=reference_us,
+            per_mkv_offset_ms=per_mkv_offset_ms,
+        )
 
         for name, first_system_time_us in sorted(firsts.items()):
             error_ms = us_to_ms(abs(first_system_time_us - reference_us))

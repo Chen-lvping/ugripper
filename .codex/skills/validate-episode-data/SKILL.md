@@ -40,7 +40,7 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
 - 主摄专项时间戳扫描是否提示 `backward_dts / decode_non_monotonic_dts / decode_error / ref_missing`。
 - 容器 `duration` 与包级 `span` 是否自洽。
 - 左右 main / stereo 成对视频的起止时间是否对齐。
-- 首帧同步误差是否超阈值。
+- 首帧同步误差是否超阈值，并列出所有 `mkv` 相对参考时刻的首帧偏移量。
 - `stereo_session` 中的首帧 / 结束时间与顶层 offset 语义是否自洽。
 - 左右 `sensor_data_*.mcap` 是否可读，topic 是否齐全。
 - IMU / encoder topic 是否存在 gap、长时间中断、样本数异常。
