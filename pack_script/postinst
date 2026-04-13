@@ -38,7 +38,7 @@ force_cleanup_recording_processes() {
         pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
     fi
 
-    rm -f /tmp/umi_audio_pipe /tmp/umi_recording.lock || true
+    rm -f /tmp/umi_audio_pipe /tmp/umi_recording.lock /tmp/umi_system_action_request /tmp/umi_system_action_result || true
 }
 
 calibration_file_is_valid() {
@@ -173,9 +173,9 @@ udevadm trigger --subsystem-match=sound
 udevadm trigger --subsystem-match=input
 # 不主动触发 block add，存储设备规则等待后续真实插拔事件生效
 
-# 双键关机触发服务
+# 双键系统动作触发服务
 # 安装阶段若残留触发文件，会导致 Path 单元立即触发关机流程。先清理。
-rm -f /tmp/umi_shutdown_request
+rm -f /tmp/umi_system_action_request /tmp/umi_system_action_result
 systemctl enable "$SHUTDOWN_TRIGGER_SERVICE" "$SHUTDOWN_TRIGGER_PATH"
 if ! systemctl restart "$SHUTDOWN_TRIGGER_PATH"; then
     echo "Warning: failed to restart $SHUTDOWN_TRIGGER_PATH (will not block install)"

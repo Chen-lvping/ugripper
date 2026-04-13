@@ -156,6 +156,7 @@ class AudioPlayer:
             "recording_started": self.resolve_sound_path("recording_started.wav"),
             "reset_recording_start": self.resolve_sound_path("reset_recording_start.wav"),
             "recording_stop": self.resolve_sound_path("recording_stop.wav"),
+            "umount": self.resolve_sound_path("umount.wav"),
             "error": self.resolve_sound_path("error.wav"),
             "validation_failed": self.resolve_sound_path("validation_failed.wav"),
             "calib_start": self.resolve_sound_path("calib_start.wav"),

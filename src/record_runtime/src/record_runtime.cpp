@@ -40,6 +40,8 @@ constexpr uint64_t kActionDebounceMs = 250;
 constexpr uint64_t kLongPressThresholdMs = 800;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
 constexpr uint64_t kShutdownPromptThresholdMs = 2000;
+constexpr uint64_t kSystemActionResultWaitMs = 8000;
+constexpr uint64_t kPostUmountAudioDelayMs = 2000;
 constexpr uint64_t kAudioPlayerRestartIntervalMs = 2000;
 constexpr uint64_t kAudioPlayerReadyGraceMs = 3000;
 constexpr uint64_t kStereoDaemonRestartIntervalMs = 2000;
@@ -1966,10 +1968,11 @@ int RecordRuntime::run()
         pollMotionAlertPipe();
 
         ButtonSnapshot buttons;
-        panelManager_.poll(options_.pollMs, &buttons);
+        ButtonSnapshot leftButtons;
+        panelManager_.poll(options_.pollMs, &buttons, &leftButtons);
         handleGripperConnectionEvents();
         processPendingGripperRefreshes();
-        handleButtons(buttons);
+        handleButtons(buttons, leftButtons);
 
         if (isRecording_ && !checkRecorderProcesses())
         {
@@ -3219,6 +3222,81 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
     return true;
 }
 
+bool RecordRuntime::requestSystemAction(const std::string &action, std::string *errorMessage) const
+{
+    if (action.empty())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "system action is empty";
+        }
+        return false;
+    }
+
+    std::error_code error;
+    fs::remove(options_.systemActionResultFile, error);
+
+    std::ofstream requestFile(options_.systemActionRequestFile, std::ios::trunc);
+    if (!requestFile.is_open())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "cannot open request file: " + options_.systemActionRequestFile;
+        }
+        return false;
+    }
+
+    requestFile << action << '\n';
+    requestFile.flush();
+    if (!requestFile.good())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to write request file: " + options_.systemActionRequestFile;
+        }
+        return false;
+    }
+
+    requestFile.close();
+    return true;
+}
+
+bool RecordRuntime::waitForSystemActionResult(std::string *result, int timeoutMs, std::string *errorMessage) const
+{
+    const uint64_t startMs = currentSteadyMs();
+    while ((currentSteadyMs() - startMs) < static_cast<uint64_t>(std::max(timeoutMs, 0)))
+    {
+        std::ifstream input(options_.systemActionResultFile);
+        if (input.is_open())
+        {
+            std::string line;
+            if (std::getline(input, line))
+            {
+                line = toLower(line);
+                line.erase(std::remove_if(line.begin(), line.end(), [](unsigned char ch) {
+                    return std::isspace(ch) != 0;
+                }),
+                           line.end());
+                if (!line.empty())
+                {
+                    if (result != nullptr)
+                    {
+                        *result = line;
+                    }
+                    return true;
+                }
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    if (errorMessage != nullptr)
+    {
+        *errorMessage = "timed out waiting for system action result: " + options_.systemActionResultFile;
+    }
+    return false;
+}
+
 void RecordRuntime::sendAudioCommand(const std::string &command) const
 {
     if (command.empty() || !audioPlayerStarted_)
@@ -3633,16 +3711,66 @@ void RecordRuntime::handleDualShutdownAction()
     setAudioRecoveryCommand("writing");
     sendAudioCommand("writing");
 
-    std::ofstream requestFile(options_.shutdownRequestFile, std::ios::trunc);
-    if (!requestFile.is_open())
+    std::string errorMessage;
+    if (!requestSystemAction("shutdown", &errorMessage))
     {
-        std::cerr << "[ERROR] failed to create shutdown request file: " << options_.shutdownRequestFile << std::endl;
+        std::cerr << "[ERROR] failed to request shutdown: " << errorMessage << std::endl;
         setLedState(LedState::Error5);
         return;
     }
-    requestFile << "shutdown\n";
-    requestFile.close();
     stopRequested_.store(true);
+}
+
+bool RecordRuntime::handleLeftDualUmountAction()
+{
+    std::cout << "[INFO] left dual-button umount requested" << std::endl;
+    if (isRecording_)
+    {
+        std::cout << "[WARN] ignore left dual-button umount while recording" << std::endl;
+        setAudioRecoveryCommand("recording");
+        sendAudioCommand("error");
+        return false;
+    }
+
+    setLedState(LedState::Init);
+    setAudioRecoveryCommand("writing");
+    sendAudioCommand("writing");
+    syncRuntimeLogToDisk("left dual-button umount");
+
+    std::string errorMessage;
+    if (!requestSystemAction("umount", &errorMessage))
+    {
+        std::cerr << "[ERROR] failed to request umount: " << errorMessage << std::endl;
+        setAudioRecoveryCommand("ready");
+        setLedState(LedState::Ready);
+        sendAudioCommand("error");
+        return false;
+    }
+
+    std::string result;
+    if (!waitForSystemActionResult(&result, static_cast<int>(kSystemActionResultWaitMs), &errorMessage))
+    {
+        std::cerr << "[ERROR] failed to wait for umount result: " << errorMessage << std::endl;
+        setAudioRecoveryCommand("ready");
+        setLedState(LedState::Ready);
+        sendAudioCommand("error");
+        return false;
+    }
+
+    if (result == "ok")
+    {
+        setAudioRecoveryCommand("umount");
+        sendAudioCommand("umount");
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPostUmountAudioDelayMs));
+        stopRequested_.store(true);
+        return true;
+    }
+
+    std::cerr << "[ERROR] umount request failed with result: " << result << std::endl;
+    setAudioRecoveryCommand("ready");
+    setLedState(LedState::Ready);
+    sendAudioCommand("error");
+    return false;
 }
 
 bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUpButton)
@@ -3763,7 +3891,7 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
     return finishAudioRecording(true);
 }
 
-void RecordRuntime::handleButtons(const ButtonSnapshot &buttons)
+void RecordRuntime::handleButtons(const ButtonSnapshot &buttons, const ButtonSnapshot &leftButtons)
 {
     const uint64_t nowMs = currentSteadyMs();
 
@@ -3828,6 +3956,37 @@ void RecordRuntime::handleButtons(const ButtonSnapshot &buttons)
         return;
     }
 
+    if (leftButtons.upPressed && leftButtons.downPressed)
+    {
+        if (!leftButtonTracker_.dualChordActive)
+        {
+            leftButtonTracker_.dualChordActive = true;
+            leftButtonTracker_.bothPressedSinceMs = nowMs;
+            leftButtonTracker_.dualLongHandled = false;
+            std::cout << "[INFO] left dual-button chord armed" << std::endl;
+        }
+
+        const uint64_t dualHeldMs = nowMs - leftButtonTracker_.bothPressedSinceMs;
+        if (dualHeldMs >= kDualLongPressThresholdMs && !leftButtonTracker_.dualLongHandled)
+        {
+            leftButtonTracker_.dualLongHandled = true;
+            lastButtonActionMs_ = nowMs;
+            handleLeftDualUmountAction();
+        }
+
+        lastLeftButtons_ = leftButtons;
+    }
+    else if (leftButtonTracker_.dualChordActive)
+    {
+        if (!leftButtons.upPressed && !leftButtons.downPressed)
+        {
+            leftButtonTracker_.dualChordActive = false;
+            leftButtonTracker_.bothPressedSinceMs = 0;
+            leftButtonTracker_.dualLongHandled = false;
+        }
+        lastLeftButtons_ = leftButtons;
+    }
+
     if (buttons.upPressed && !buttonTracker_.upLongHandled && buttonTracker_.upPressedSinceMs > 0 &&
         (nowMs - buttonTracker_.upPressedSinceMs) >= kLongPressThresholdMs)
     {
@@ -3869,6 +4028,7 @@ void RecordRuntime::handleButtons(const ButtonSnapshot &buttons)
     }
 
     lastButtons_ = buttons;
+    lastLeftButtons_ = leftButtons;
 }
 
 bool RecordRuntime::checkRecorderProcesses()
@@ -4877,9 +5037,10 @@ void RecordRuntime::GripperPanelManager::maybeReconnectDriver(size_t index)
     }
 }
 
-bool RecordRuntime::GripperPanelManager::poll(int timeoutMs, ButtonSnapshot *snapshot)
+bool RecordRuntime::GripperPanelManager::poll(int timeoutMs, ButtonSnapshot *snapshot, ButtonSnapshot *leftSnapshot)
 {
     ButtonSnapshot current;
+    ButtonSnapshot leftCurrent;
     bool received = false;
     for (size_t index = 0; index < drivers_.size(); ++index)
     {
@@ -4909,6 +5070,18 @@ bool RecordRuntime::GripperPanelManager::poll(int timeoutMs, ButtonSnapshot *sna
         }
         if (index != inputDriverIndex_)
         {
+            const auto state = driver->getSnapshot();
+            if (sideForPort(driver->getPort()) == "left")
+            {
+                if (state.keyPressed.size() > kBtnUpKeyIndex)
+                {
+                    leftCurrent.upPressed = state.keyPressed[kBtnUpKeyIndex];
+                }
+                if (state.keyPressed.size() > kBtnDownKeyIndex)
+                {
+                    leftCurrent.downPressed = state.keyPressed[kBtnDownKeyIndex];
+                }
+            }
             continue;
         }
 

@@ -28,7 +28,8 @@ struct RecordRuntimeOptions
     std::string audioReadyFile = "/tmp/umi_audio_ready";
     std::string audioTempDir = "/tmp/umi_audio";
     std::string noiseProfile = "./audio/noise.prof";
-    std::string shutdownRequestFile = "/tmp/umi_shutdown_request";
+    std::string systemActionRequestFile = "/tmp/umi_system_action_request";
+    std::string systemActionResultFile = "/tmp/umi_system_action_result";
     std::string diskRoot = "/mnt/data_disk";
     std::string envFile = "/etc/environment";
     std::string persistCalibrationFile = "/etc/ugripper/config/calibration/calibration.json";
@@ -120,7 +121,7 @@ private:
         bool connect(const std::vector<std::string> &ports);
         void disconnect();
         bool hasConnectedDevice() const;
-        bool poll(int timeoutMs, ButtonSnapshot *snapshot);
+        bool poll(int timeoutMs, ButtonSnapshot *snapshot, ButtonSnapshot *leftSnapshot = nullptr);
         HealthSnapshot getHealthSnapshot(uint64_t activeTimeoutMs) const;
         bool setBeepState(const GripperBeepState &state);
         bool setBeepEnabled(bool enabled);
@@ -304,12 +305,13 @@ private:
     bool areSideCriticalDevicesReady(const std::string &side) const;
     bool startRecording(bool resetRecording);
     bool stopRecording(bool dueToError, const std::string &reason);
-    void handleButtons(const ButtonSnapshot &buttons);
+    void handleButtons(const ButtonSnapshot &buttons, const ButtonSnapshot &leftButtons);
     bool handleShortUpAction();
     bool handleShortDownAction();
     bool handleLongUpAction();
     bool handleLongDownAction();
     void handleDualShutdownAction();
+    bool handleLeftDualUmountAction();
     bool recordAudioClip(const std::string &audioType, bool monitorUpButton);
     bool attachPendingPreAudio(const std::string &episodeDir);
     bool checkRecorderProcesses();
@@ -328,6 +330,8 @@ private:
     bool waitForStereoFinalize(const std::string &episodeDir, int timeoutMs, std::string *errorMessage);
     bool mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const;
     bool syncRuntimeLogToDisk(const char *reason) const;
+    bool requestSystemAction(const std::string &action, std::string *errorMessage) const;
+    bool waitForSystemActionResult(std::string *result, int timeoutMs, std::string *errorMessage) const;
     void setAudioRecoveryCommand(std::string command);
     void sendAudioCommand(const std::string &command) const;
     void setLedState(LedState state, double progress = 0.0);
@@ -338,6 +342,8 @@ private:
     bool isRecording_ = false;
     ButtonSnapshot lastButtons_{};
     ButtonStateTracker buttonTracker_{};
+    ButtonSnapshot lastLeftButtons_{};
+    ButtonStateTracker leftButtonTracker_{};
     uint64_t lastButtonActionMs_ = 0;
     std::string deviceSn_;
     std::string language_;
