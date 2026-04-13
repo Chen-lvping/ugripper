@@ -5,6 +5,8 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- 补齐左手新 hub 下 left_tcam_r 的 udev 映射：左侧 left_tcam_r 现同时接受旧 hub 的 .4.1 与新 hub 的 .3 端口，保证新旧左手 hub 规则共存。
+- 修正左手更换新 hub 后的 udev 视频映射：左侧 left_cam_main / left_tcam_l 改为“设备类型优先 + 左侧链路约束”匹配，不再只依赖 .4.2/.4.4 固定内部端口，避免左主摄与左触觉因 hub 内部端口变化而丢失 /dev/left_cam_main、/dev/left_tcam_l。
 - 主摄 `direct-copy-h26x` 录制链路改为 `camera_recorder` 进程内 `V4L2 MMAP capture -> appsrc -> h26xparse -> matroskamux -> filesink`，`record_time_offset_us` 的 system time 打点前移到 `VIDIOC_DQBUF` / `v4l2_buffer.timestamp` 附近，减少 shell 管线日志解析带来的软件延迟。
 - 主摄容器时间轴改为在进程内显式写入单调 `PTS/DTS`，降低 `non_monotonic_dts_count` 这类由后置时间戳链路引入的异常概率。
 - 调整 UMI 标定写入重试策略：`0xFE` 仍优先在当前 chunk 内重发；若写标定过程中收到 `0xF3/0xFF`，则不再只重试当前 chunk，而是先发送 `AbortWriteInData` 结束本轮，再从头重写整份 `1024-byte` 标定 payload；整份写入最多尝试 `3` 次，全部失败后才报错退出。

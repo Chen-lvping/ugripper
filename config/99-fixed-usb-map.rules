@@ -4,10 +4,15 @@
 # 命名约定：
 # - 右侧 hub 可插右上 / 右下物理口：USB2=5-1|1-1，USB3=6-1|8-1
 # - 左侧 hub 可插左上 / 左下物理口：USB2=9-1|11-1，USB3=10-1|12-1
-# - hub 内部端口约定：
+# - 右侧 hub 内部端口约定：
 #   * .4.1 -> tcam_r
 #   * .4.2 -> tcam_l
 #   * .4.4 -> cam_main (YuZhuo, 27c2:0530)
+# - 左侧更换新 hub 后，主摄 / tactile 的内部端口不再与右侧保持同构：
+#   * tactile `l/r` 仍按左右侧固定节点命名，不做跨侧互换
+#   * 左侧主摄 / tactile `l` 优先按设备类型识别（27c2:0530 = main, 0bda:5846 = tactile），
+#     USB2 口位只用于限定“属于左侧链路”，不再假设固定落在 .4.2 / .4.4
+#   * 左侧 tactile `r` 同时兼容旧 hub 的 `.4.1` 和新 hub 的 `.3`
 #   * .1/.2 -> stereo (USB3 路径；允许两个内部端口互换，节点命名不绑定厂家)
 # 摄像头通常会生成两个节点 (videoN, videoN+1)，这里只取 index=0 的主节点。
 
@@ -33,20 +38,36 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.1", \
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.2", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="left_tcam_l"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.4", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="left_tcam_l"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="left_tcam_l"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="left_tcam_l"
 
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="left_tcam_r"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.3", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="left_tcam_r"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.1", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="left_tcam_r"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.3", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="left_tcam_r"
 
 # ---- Right main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
-SUBSYSTEM=="usb", KERNELS=="1-1.4.4", ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", TAG+="uaccess"
-SUBSYSTEM=="usb", KERNELS=="5-1.4.4", ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", TAG+="uaccess"
+# 主摄在起录前会通过 libusb 访问 /dev/bus/usb/* 处理 UVC Roll Absolute，
+# 因此不能只保证 /dev/video* 可读写；对应 usb_device 节点本身也必须稳定可写。
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="1-1.4.4", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="5-1.4.4", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.4", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
   SYMLINK+="right_cam_main"
@@ -55,9 +76,21 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.4", \
   SYMLINK+="right_cam_main"
 
 # ---- Left main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
-SUBSYSTEM=="usb", KERNELS=="9-1.4.4", ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", TAG+="uaccess"
-SUBSYSTEM=="usb", KERNELS=="11-1.4.4", ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="9-1.4.2", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="9-1.4.4", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="11-1.4.2", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="11-1.4.4", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.2", \
+  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
+  SYMLINK+="left_cam_main"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.4", \
+  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
+  SYMLINK+="left_cam_main"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
   SYMLINK+="left_cam_main"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", \

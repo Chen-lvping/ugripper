@@ -122,8 +122,9 @@
 - 当前 YAML 定义 8 路相机：左右主摄、左右 stereo、4 路触觉。
 - `udev` 口位策略当前口径：
   - stereo 与 CH9344 串口桥允许同侧 hub 的内部端口 `.1/.2` 互换；
-  - tactile `l/r` 的内部端口映射已按当前现场布线对调；
-  - tactile 仍按左右侧固定 kernel 路径命名，不做跨侧互换。
+  - tactile `l/r` 仍按左右侧固定 kernel 路径命名，不做跨侧互换；
+  - 左侧更换新 hub 后，左主摄与左触觉 `l` 不再只按 `.4.2/.4.4` 固定口位判断，当前优先按设备类型识别：`27c2:0530` 归 `left_cam_main`，`0bda:5846` 归 `left_tcam_l`，USB2 口位仅用于限定属于左侧链路；
+  - `left_tcam_r` 当前同时兼容旧 hub 的 `.4.1` 和新 hub 的 `.3` 口位，保证新旧左手 hub 共存。
 - 当前运行时默认录制全部 8 路：左右主摄 + 左右 stereo + 4 路触觉。
 - 普通录制阶段的 `camera_recorder` 当前会直接起左右主摄与 4 路触觉；左右 stereo 继续由单独的 warmup daemon 常驻管理。
 - warmup daemon 在空闲态持续常驻打开需要预热的相机设备；当前仅左右双目继续消费 `MJPEG 60fps` 预热流。开始录制时只为 stereo 新建 session writer，把会话窗口内帧写入最终 `mkv`；主摄则在普通录制阶段直接冷启动采集并写入最终文件。
