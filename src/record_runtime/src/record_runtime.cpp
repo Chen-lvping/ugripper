@@ -20,6 +20,7 @@
 #include <limits>
 #include <map>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <sys/file.h>
 #include <sys/stat.h>
@@ -158,6 +159,295 @@ constexpr std::array<TactileCalibrationTarget, 4> kTactileCalibrationTargets = {
     {"right_tcam_l", "right", "/dev/right_tcam_l", "observation.images.right_tcam_l", "{{RIGHT_TCAM_L_SERIAL}}"},
     {"right_tcam_r", "right", "/dev/right_tcam_r", "observation.images.right_tcam_r", "{{RIGHT_TCAM_R_SERIAL}}"},
 }};
+
+constexpr int kTactileFrameWidth = 160;
+constexpr int kTactileFrameHeight = 120;
+constexpr size_t kTactileFrameBytes = static_cast<size_t>(kTactileFrameWidth * kTactileFrameHeight);
+constexpr double kTactileEpisodeProbeSec = 0.12;
+constexpr double kTactileMeanAbsThreshold = 3.0;
+constexpr double kTactileMaskRatioThreshold = 0.05;
+constexpr double kTactileCorrelationThreshold = 0.94;
+constexpr size_t kTactileHistoryWindow = 3;
+constexpr int kTactileSnapshotTimeoutMs = 2500;
+constexpr uint64_t kTactilePersistentBaselineRefreshMs = 12ULL * 60ULL * 60ULL * 1000ULL;
+
+struct TactileFrameMetrics
+{
+    double meanAbsDiff = 0.0;
+    double maskRatio = 0.0;
+    double correlation = 1.0;
+    bool damaged = false;
+};
+
+bool writeTextFileAtomically(const fs::path &path, const std::string &content, std::string *errorMessage);
+bool commandExists(const std::string &command);
+
+std::string sanitizeFileComponent(const std::string &text)
+{
+    std::string result;
+    result.reserve(text.size());
+    for (const char ch : text)
+    {
+        if ((ch >= '0' && ch <= '9') ||
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            ch == '.' || ch == '_' || ch == '-')
+        {
+            result.push_back(ch);
+        }
+        else
+        {
+            result.push_back('_');
+        }
+    }
+    if (result.empty())
+    {
+        return "unknown";
+    }
+    return result;
+}
+
+fs::path tactileReferenceDir(const fs::path &root)
+{
+    return root / "reference";
+}
+
+fs::path tactilePersistentDir(const fs::path &root)
+{
+    return root / "persistent";
+}
+
+fs::path tactileHistoryPath(const fs::path &root)
+{
+    return root / "history.json";
+}
+
+fs::path tactilePersistentResetPath(const fs::path &root)
+{
+    return root / "persistent_reset.json";
+}
+
+fs::path tactileReferenceRawPath(const fs::path &root, const std::string &serial)
+{
+    return tactileReferenceDir(root) / (sanitizeFileComponent(serial) + ".gray");
+}
+
+fs::path tactileReferenceMetaPath(const fs::path &root, const std::string &serial)
+{
+    return tactileReferenceDir(root) / (sanitizeFileComponent(serial) + ".json");
+}
+
+fs::path tactilePersistentRawPath(const fs::path &root, const std::string &serial)
+{
+    return tactilePersistentDir(root) / (sanitizeFileComponent(serial) + ".gray");
+}
+
+std::string formatFixed(double value, int precision)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(precision) << value;
+    return stream.str();
+}
+
+std::string shellSeconds(double seconds)
+{
+    std::ostringstream stream;
+    stream << std::fixed << std::setprecision(3) << seconds;
+    return stream.str();
+}
+
+std::set<std::string> loadPersistentResetSerials(const fs::path &path)
+{
+    std::set<std::string> result;
+    std::ifstream input(path);
+    if (!input.is_open())
+    {
+        return result;
+    }
+
+    try
+    {
+        json root = json::parse(input);
+        if (root.contains("serials") && root["serials"].is_array())
+        {
+            for (const auto &entry : root["serials"])
+            {
+                if (entry.is_string() && !entry.get<std::string>().empty())
+                {
+                    result.insert(entry.get<std::string>());
+                }
+            }
+        }
+    }
+    catch (const std::exception &ex)
+    {
+        std::cerr << "[WARN] failed to parse tactile persistent reset list: " << ex.what() << std::endl;
+    }
+    return result;
+}
+
+bool storePersistentResetSerials(const fs::path &path, const std::set<std::string> &serials, std::string *errorMessage)
+{
+    json root = {
+        {"serials", json::array()},
+    };
+    for (const auto &serial : serials)
+    {
+        root["serials"].push_back(serial);
+    }
+    return writeTextFileAtomically(path, root.dump(2) + "\n", errorMessage);
+}
+
+bool writeBinaryFile(const fs::path &path, const std::vector<uint8_t> &bytes, std::string *errorMessage)
+{
+    const fs::path parent = path.parent_path();
+    std::error_code error;
+    if (!parent.empty())
+    {
+        fs::create_directories(parent, error);
+        if (error)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "create parent directory failed: " + error.message();
+            }
+            return false;
+        }
+    }
+
+    const fs::path tempPath = path.string() + ".tmp";
+    std::ofstream output(tempPath, std::ios::binary | std::ios::trunc);
+    if (!output.is_open())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "cannot open temp file for write: " + tempPath.string();
+        }
+        return false;
+    }
+    output.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+    output.flush();
+    if (!output.good())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to write temp file: " + tempPath.string();
+        }
+        output.close();
+        fs::remove(tempPath, error);
+        return false;
+    }
+    output.close();
+
+    fs::rename(tempPath, path, error);
+    if (error)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "rename temp file failed: " + error.message();
+        }
+        fs::remove(tempPath, error);
+        return false;
+    }
+    return true;
+}
+
+bool readBinaryFileExact(const fs::path &path, size_t expectedBytes, std::vector<uint8_t> *bytes, std::string *errorMessage)
+{
+    if (bytes == nullptr)
+    {
+        return false;
+    }
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "cannot open file: " + path.string();
+        }
+        return false;
+    }
+
+    std::vector<uint8_t> buffer(expectedBytes, 0);
+    input.read(reinterpret_cast<char *>(buffer.data()), static_cast<std::streamsize>(expectedBytes));
+    const std::streamsize actual = input.gcount();
+    if (actual != static_cast<std::streamsize>(expectedBytes) || input.peek() != std::ifstream::traits_type::eof())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "unexpected tactile frame size: " + path.string();
+        }
+        return false;
+    }
+    *bytes = std::move(buffer);
+    return true;
+}
+
+TactileFrameMetrics computeTactileFrameMetrics(const std::vector<uint8_t> &baseline, const std::vector<uint8_t> &current)
+{
+    TactileFrameMetrics metrics;
+    if (baseline.size() != current.size() || baseline.empty())
+    {
+        metrics.damaged = true;
+        metrics.correlation = 0.0;
+        metrics.maskRatio = 1.0;
+        return metrics;
+    }
+
+    double sumBase = 0.0;
+    double sumCurrent = 0.0;
+    for (size_t index = 0; index < baseline.size(); ++index)
+    {
+        sumBase += static_cast<double>(baseline[index]);
+        sumCurrent += static_cast<double>(current[index]);
+    }
+    const double meanBase = sumBase / static_cast<double>(baseline.size());
+    const double meanCurrent = sumCurrent / static_cast<double>(current.size());
+
+    double absDiffSum = 0.0;
+    size_t maskCount = 0;
+    double covariance = 0.0;
+    double baseVariance = 0.0;
+    double currentVariance = 0.0;
+    for (size_t index = 0; index < baseline.size(); ++index)
+    {
+        const double baseValue = static_cast<double>(baseline[index]);
+        const double currentValue = static_cast<double>(current[index]);
+        const double diff = std::fabs(baseValue - currentValue);
+        absDiffSum += diff;
+        if (diff >= 30.0)
+        {
+            ++maskCount;
+        }
+
+        const double baseCentered = baseValue - meanBase;
+        const double currentCentered = currentValue - meanCurrent;
+        covariance += baseCentered * currentCentered;
+        baseVariance += baseCentered * baseCentered;
+        currentVariance += currentCentered * currentCentered;
+    }
+
+    metrics.meanAbsDiff = absDiffSum / static_cast<double>(baseline.size());
+    metrics.maskRatio = static_cast<double>(maskCount) / static_cast<double>(baseline.size());
+    if (baseVariance > 0.0 && currentVariance > 0.0)
+    {
+        metrics.correlation = covariance / std::sqrt(baseVariance * currentVariance);
+    }
+    else
+    {
+        metrics.correlation = 1.0;
+    }
+    if (!std::isfinite(metrics.correlation))
+    {
+        metrics.correlation = 1.0;
+    }
+
+    metrics.damaged =
+        metrics.meanAbsDiff >= kTactileMeanAbsThreshold ||
+        metrics.maskRatio >= kTactileMaskRatioThreshold ||
+        metrics.correlation <= kTactileCorrelationThreshold;
+    return metrics;
+}
 
 bool writeTextFileAtomically(const fs::path &path, const std::string &content, std::string *errorMessage)
 {
@@ -1351,6 +1641,76 @@ CommandCaptureResult runCommandCapture(const std::vector<std::string> &arguments
     return result;
 }
 
+std::optional<std::vector<uint8_t>> captureTactileGrayFrame(const std::vector<std::string> &inputArguments,
+                                                            double seekSeconds,
+                                                            std::string *errorMessage)
+{
+    if (!commandExists("ffmpeg"))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ffmpeg not found in PATH";
+        }
+        return std::nullopt;
+    }
+
+    std::vector<std::string> arguments = {
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostdin",
+    };
+    arguments.insert(arguments.end(), inputArguments.begin(), inputArguments.end());
+    if (seekSeconds > 0.0)
+    {
+        arguments.push_back("-ss");
+        arguments.push_back(shellSeconds(seekSeconds));
+    }
+    arguments.push_back("-frames:v");
+    arguments.push_back("1");
+    arguments.push_back("-vf");
+    arguments.push_back("crop=iw*0.84:ih*0.84:iw*0.08:ih*0.08,boxblur=2:1,scale=160:120,format=gray");
+    arguments.push_back("-f");
+    arguments.push_back("rawvideo");
+    arguments.push_back("-");
+
+    const CommandCaptureResult capture = runCommandCapture(arguments, kTactileSnapshotTimeoutMs);
+    if (capture.timedOut)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ffmpeg timed out";
+        }
+        return std::nullopt;
+    }
+    if (!capture.success)
+    {
+        if (errorMessage != nullptr)
+        {
+            std::string detail = capture.output;
+            detail.erase(std::remove(detail.begin(), detail.end(), '\r'), detail.end());
+            while (!detail.empty() && (detail.back() == '\n' || detail.back() == ' ' || detail.back() == '\t'))
+            {
+                detail.pop_back();
+            }
+            *errorMessage = detail.empty() ? "ffmpeg failed" : detail;
+        }
+        return std::nullopt;
+    }
+
+    std::vector<uint8_t> bytes(capture.output.begin(), capture.output.end());
+    if (bytes.size() != kTactileFrameBytes)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "unexpected frame bytes=" + std::to_string(bytes.size());
+        }
+        return std::nullopt;
+    }
+    return bytes;
+}
+
 std::optional<std::string> extractUsbSerialFromUdevadmOutput(const std::string &output)
 {
     const std::regex serialPattern(R"SER(ATTRS\{serial\}=="([^"]+)")SER");
@@ -1820,6 +2180,8 @@ GripperLedEffect RecordRuntime::makeLedEffect(LedState state, double progress)
         return {GripperLedEffectState::Init, progress};
     case RecordRuntime::LedState::Ready:
         return {GripperLedEffectState::Ready, progress};
+    case RecordRuntime::LedState::Warning:
+        return {GripperLedEffectState::Warning, progress};
     case RecordRuntime::LedState::Recording:
         return {GripperLedEffectState::Recording, progress};
     case RecordRuntime::LedState::Error1:
@@ -1910,6 +2272,7 @@ bool RecordRuntime::initialize()
         deviceSn_,
         language_,
         options_.cameraCodec,
+        options_.tactileStateDir,
         options_.persistCalibrationFile,
         options_.exampleCalibrationFile,
         options_.fallbackCalibrationFile,
@@ -1940,7 +2303,7 @@ bool RecordRuntime::initialize()
     startStereoDaemon();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    setLedState(LedState::Ready);
+    applyIdleState();
     setAudioRecoveryCommand("ready");
     sendAudioCommand("ready");
 
@@ -2317,6 +2680,7 @@ void RecordRuntime::refreshGripperRuntimeStateForSide(const std::string &side)
         std::cout << "[INFO] persisted gripper calibration cache: side=" << side << std::endl;
     }
     episodeManager_->setGripperRuntimeStates(gripperRuntimeStates_);
+    refreshTactileReferenceCachesForSide(side);
     std::cout << "[INFO] gripper runtime refresh complete: side=" << side
               << " elapsed_ms=" << (currentSteadyMs() - refreshStartMs)
               << " calibration_valid=" << (state.calibrationValid ? "true" : "false")
@@ -2324,7 +2688,7 @@ void RecordRuntime::refreshGripperRuntimeStateForSide(const std::string &side)
 
     if (shouldShowInitLed && healthStatus_ == HealthStatus::Ok)
     {
-        setLedState(isRecording_ ? LedState::Recording : LedState::Ready);
+        setLedState(isRecording_ ? LedState::Recording : (tactileWarningActive_ ? LedState::Warning : LedState::Ready));
     }
 }
 
@@ -3323,6 +3687,43 @@ void RecordRuntime::sendAudioCommand(const std::string &command) const
     close(fd);
 }
 
+void RecordRuntime::refreshTactileReferenceCachesForSide(const std::string &side)
+{
+    if (episodeManager_ == nullptr)
+    {
+        return;
+    }
+    std::vector<EpisodeManager::TactileValidationFinding> findings;
+    episodeManager_->refreshTactileReferenceCacheForSide(side, &findings);
+    std::string audioCommand;
+    for (const auto &finding : findings)
+    {
+        if (audioCommand.empty() && finding.warningTriggered)
+        {
+            audioCommand = finding.audioCommand;
+        }
+        if (!finding.warningActive)
+        {
+            continue;
+        }
+        tactileWarningActive_ = true;
+    }
+    if (tactileWarningActive_ || !audioCommand.empty())
+    {
+        applyIdleState();
+        if (!audioCommand.empty())
+        {
+            setAudioRecoveryCommand(audioCommand);
+            sendAudioCommand(audioCommand);
+        }
+    }
+}
+
+void RecordRuntime::applyIdleState()
+{
+    setLedState(tactileWarningActive_ ? LedState::Warning : LedState::Ready);
+}
+
 bool RecordRuntime::attachPendingPreAudio(const std::string &episodeDir)
 {
     if (pendingPreAudioFile_.empty() || !fs::exists(pendingPreAudioFile_))
@@ -3568,7 +3969,8 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
     const int64_t validatePhaseStartMs = steadyNowMs();
     std::cout << "[PERF] validation phase begin: episode_dir=" << currentEpisodeDir_ << std::endl;
     std::string episodeValidationError;
-    const bool episodeValid = episodeManager_->validateEpisode(currentEpisodeDir_, &episodeValidationError);
+    std::vector<EpisodeManager::TactileValidationFinding> tactileFindings;
+    const bool episodeValid = episodeManager_->validateEpisode(currentEpisodeDir_, &episodeValidationError, &tactileFindings);
     if (!stereoStopOk)
     {
         if (!stereoFinalizeError.empty())
@@ -3629,9 +4031,35 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
         return false;
     }
 
-    setLedState(LedState::Ready);
-    setAudioRecoveryCommand("ready");
-    sendAudioCommand("ready");
+    tactileWarningActive_ = false;
+    std::string tactileAudioCommand;
+    for (const auto &finding : tactileFindings)
+    {
+        if (tactileAudioCommand.empty() && finding.warningTriggered)
+        {
+            tactileAudioCommand = finding.audioCommand;
+        }
+        if (!finding.warningActive)
+        {
+            continue;
+        }
+        tactileWarningActive_ = true;
+    }
+
+    applyIdleState();
+    if (!tactileAudioCommand.empty())
+    {
+        setAudioRecoveryCommand(tactileAudioCommand);
+        sendAudioCommand(tactileAudioCommand);
+    }
+    else
+    {
+        setAudioRecoveryCommand(tactileWarningActive_ ? "" : "ready");
+        if (!tactileWarningActive_)
+        {
+            sendAudioCommand("ready");
+        }
+    }
     std::cout << "[PERF] stop phase end: valid=true"
               << " total_elapsed_ms=" << (steadyNowMs() - stopStartMs) << std::endl;
     syncRuntimeLogToDisk("video stop");
@@ -3668,9 +4096,9 @@ bool RecordRuntime::handleShortDownAction()
         if (lastEpisodeDir_.empty() || !fs::exists(lastEpisodeDir_))
         {
             std::cout << "[INFO] no previous episode, BTN_DOWN reset ignored" << std::endl;
-            setAudioRecoveryCommand("ready");
+            setAudioRecoveryCommand(tactileWarningActive_ ? "" : "ready");
             sendAudioCommand("no_reset_needed");
-            setLedState(LedState::Ready);
+            applyIdleState();
             return false;
         }
         return startRecording(true);
@@ -3741,8 +4169,8 @@ bool RecordRuntime::handleLeftDualUmountAction()
     if (!requestSystemAction("umount", &errorMessage))
     {
         std::cerr << "[ERROR] failed to request umount: " << errorMessage << std::endl;
-        setAudioRecoveryCommand("ready");
-        setLedState(LedState::Ready);
+        setAudioRecoveryCommand(tactileWarningActive_ ? "" : "ready");
+        applyIdleState();
         sendAudioCommand("error");
         return false;
     }
@@ -3751,8 +4179,8 @@ bool RecordRuntime::handleLeftDualUmountAction()
     if (!waitForSystemActionResult(&result, static_cast<int>(kSystemActionResultWaitMs), &errorMessage))
     {
         std::cerr << "[ERROR] failed to wait for umount result: " << errorMessage << std::endl;
-        setAudioRecoveryCommand("ready");
-        setLedState(LedState::Ready);
+        setAudioRecoveryCommand(tactileWarningActive_ ? "" : "ready");
+        applyIdleState();
         sendAudioCommand("error");
         return false;
     }
@@ -3767,8 +4195,8 @@ bool RecordRuntime::handleLeftDualUmountAction()
     }
 
     std::cerr << "[ERROR] umount request failed with result: " << result << std::endl;
-    setAudioRecoveryCommand("ready");
-    setLedState(LedState::Ready);
+    setAudioRecoveryCommand(tactileWarningActive_ ? "" : "ready");
+    applyIdleState();
     sendAudioCommand("error");
     return false;
 }
@@ -4204,8 +4632,11 @@ void RecordRuntime::monitorHardwareHealth()
         }
         else
         {
-            setLedState(LedState::Ready);
-            sendAudioCommand("ready");
+            applyIdleState();
+            if (!tactileWarningActive_)
+            {
+                sendAudioCommand("ready");
+            }
         }
     }
 
@@ -5175,6 +5606,7 @@ RecordRuntime::EpisodeManager::EpisodeManager(std::string diskRoot,
                                               std::string deviceSn,
                                               std::string language,
                                               std::string cameraCodec,
+                                              std::string tactileStateDir,
                                               std::string persistCalibrationFile,
                                               std::string exampleCalibrationFile,
                                               std::string fallbackCalibrationFile,
@@ -5185,6 +5617,7 @@ RecordRuntime::EpisodeManager::EpisodeManager(std::string diskRoot,
       deviceSnLower_(RecordRuntime::toLower(deviceSn_)),
       language_(std::move(language)),
       cameraCodec_(std::move(cameraCodec)),
+      tactileStateDir_(std::move(tactileStateDir)),
       persistCalibrationFile_(std::move(persistCalibrationFile)),
       exampleCalibrationFile_(std::move(exampleCalibrationFile)),
       fallbackCalibrationFile_(std::move(fallbackCalibrationFile)),
@@ -5205,6 +5638,22 @@ bool RecordRuntime::EpisodeManager::initialize()
                   << ": " << error.message() << std::endl;
         return false;
     }
+    fs::create_directories(tactileReferenceDir(tactileStateDir_), error);
+    if (error)
+    {
+        std::cerr << "[ERROR] create_directories failed for tactile reference dir "
+                  << tactileReferenceDir(tactileStateDir_) << ": " << error.message() << std::endl;
+        return false;
+    }
+    fs::create_directories(tactilePersistentDir(tactileStateDir_), error);
+    if (error)
+    {
+        std::cerr << "[ERROR] create_directories failed for tactile persistent dir "
+                  << tactilePersistentDir(tactileStateDir_) << ": " << error.message() << std::endl;
+        return false;
+    }
+
+    persistentResetSerials_ = loadPersistentResetSerials(tactilePersistentResetPath(tactileStateDir_));
     return true;
 }
 
@@ -5257,6 +5706,258 @@ std::string RecordRuntime::EpisodeManager::createNextEpisodeDir()
     return episodePath.string();
 }
 
+void RecordRuntime::EpisodeManager::refreshTactileReferenceCacheForSide(const std::string &side,
+                                                                        std::vector<TactileValidationFinding> *findings)
+{
+    json tactileHistory = json::object();
+    {
+        std::ifstream historyInput(tactileHistoryPath(tactileStateDir_));
+        if (historyInput.is_open())
+        {
+            try
+            {
+                historyInput >> tactileHistory;
+            }
+            catch (const std::exception &ex)
+            {
+                std::cerr << "[WARN] failed to parse tactile history, reset in-memory state: "
+                          << ex.what() << std::endl;
+                tactileHistory = json::object();
+            }
+        }
+    }
+    if (!tactileHistory.is_object())
+    {
+        tactileHistory = json::object();
+    }
+    if (!tactileHistory.contains("cameras") || !tactileHistory["cameras"].is_object())
+    {
+        tactileHistory["cameras"] = json::object();
+    }
+
+    bool historyDirty = false;
+    bool resetListDirty = false;
+    const uint64_t nowMs = RecordRuntime::currentEpochMs();
+    for (const auto &target : kTactileCalibrationTargets)
+    {
+        if (side != target.side)
+        {
+            continue;
+        }
+
+        std::string serialDetail;
+        const auto serial = probeUsbSerialForDeviceNode(target.devicePath, &serialDetail);
+        if (!serial.has_value() || serial->empty())
+        {
+            std::cerr << "[WARN] tactile reference cache skipped: camera=" << target.cameraName
+                      << " reason=" << (serialDetail.empty() ? "missing tactile serial" : serialDetail) << std::endl;
+            continue;
+        }
+
+        std::string captureError;
+        const auto frame = captureTactileGrayFrame(
+            {
+                "-f",
+                "video4linux2",
+                "-input_format",
+                "mjpeg",
+                "-video_size",
+                "640x480",
+                "-framerate",
+                "120",
+                "-i",
+                target.devicePath,
+            },
+            0.0,
+            &captureError);
+        if (!frame.has_value())
+        {
+            std::cerr << "[WARN] tactile reference capture failed: camera=" << target.cameraName
+                      << " serial=" << *serial
+                      << " reason=" << captureError << std::endl;
+            continue;
+        }
+
+        std::string writeError;
+        if (!writeBinaryFile(tactileReferenceRawPath(tactileStateDir_, *serial), *frame, &writeError))
+        {
+            std::cerr << "[WARN] tactile reference write failed: camera=" << target.cameraName
+                      << " serial=" << *serial
+                      << " reason=" << writeError << std::endl;
+            continue;
+        }
+
+        json meta = {
+            {"serial", *serial},
+            {"camera_name", target.cameraName},
+            {"device_path", target.devicePath},
+            {"updated_at_ms", RecordRuntime::currentEpochMs()},
+        };
+        if (!writeTextFileAtomically(tactileReferenceMetaPath(tactileStateDir_, *serial), meta.dump(2) + "\n", &writeError))
+        {
+            std::cerr << "[WARN] tactile reference meta write failed: camera=" << target.cameraName
+                      << " serial=" << *serial
+                      << " reason=" << writeError << std::endl;
+        }
+        else
+        {
+            std::cout << "[INFO] tactile reference cache refreshed: camera=" << target.cameraName
+                      << " serial=" << *serial << std::endl;
+        }
+
+        json &cameraHistory = tactileHistory["cameras"][*serial];
+        if (!cameraHistory.is_object())
+        {
+            cameraHistory = json::object();
+        }
+        cameraHistory["camera_name"] = target.cameraName;
+
+        const bool allowPersistentReset = persistentResetSerials_.find(*serial) != persistentResetSerials_.end();
+        if (allowPersistentReset)
+        {
+            if (writeBinaryFile(tactilePersistentRawPath(tactileStateDir_, *serial), *frame, &writeError))
+            {
+                cameraHistory["persistent_baseline_updated_at_ms"] = nowMs;
+                cameraHistory["persistent_fault_active"] = false;
+                cameraHistory["persistent_fault_detail"] = "";
+                historyDirty = true;
+                persistentResetSerials_.erase(*serial);
+                resetListDirty = true;
+                std::cout << "[INFO] tactile persistent baseline reset after restart: camera="
+                          << target.cameraName << " serial=" << *serial << std::endl;
+            }
+            else
+            {
+                std::cerr << "[WARN] tactile persistent baseline reset failed: camera=" << target.cameraName
+                          << " serial=" << *serial
+                          << " reason=" << writeError << std::endl;
+            }
+            continue;
+        }
+
+        const bool persistentFaultActive = cameraHistory.value("persistent_fault_active", false);
+        if (persistentFaultActive)
+        {
+            if (findings != nullptr)
+            {
+                TactileValidationFinding finding;
+                finding.cameraName = target.cameraName;
+                finding.serialNumber = *serial;
+                finding.warningActive = false;
+                finding.warningTriggered = false;
+                finding.audioCommand = std::string(target.cameraName) + "_damaged";
+                finding.detail = cameraHistory.value("persistent_fault_detail", std::string("persistent baseline mismatch"));
+                findings->push_back(std::move(finding));
+            }
+            continue;
+        }
+
+        std::vector<uint8_t> persistentBaseline;
+        std::string persistentBaselineError;
+        const bool hasPersistentBaseline = readBinaryFileExact(
+            tactilePersistentRawPath(tactileStateDir_, *serial),
+            kTactileFrameBytes,
+            &persistentBaseline,
+            &persistentBaselineError);
+        const uint64_t persistentBaselineUpdatedAtMs =
+            cameraHistory.value("persistent_baseline_updated_at_ms", static_cast<uint64_t>(0));
+
+        if (!hasPersistentBaseline || persistentBaselineUpdatedAtMs == 0)
+        {
+            if (writeBinaryFile(tactilePersistentRawPath(tactileStateDir_, *serial), *frame, &writeError))
+            {
+                cameraHistory["persistent_baseline_updated_at_ms"] = nowMs;
+                cameraHistory["persistent_fault_active"] = false;
+                cameraHistory["persistent_fault_detail"] = "";
+                historyDirty = true;
+                std::cout << "[INFO] tactile persistent baseline initialized: camera=" << target.cameraName
+                          << " serial=" << *serial << std::endl;
+            }
+            else
+            {
+                std::cerr << "[WARN] tactile persistent baseline init failed: camera=" << target.cameraName
+                          << " serial=" << *serial
+                          << " reason=" << writeError << std::endl;
+            }
+            continue;
+        }
+
+        const TactileFrameMetrics persistentMetrics = computeTactileFrameMetrics(persistentBaseline, *frame);
+        if (persistentMetrics.damaged)
+        {
+            const std::string persistentDetail =
+                "persistent_insert mean_abs=" + formatFixed(persistentMetrics.meanAbsDiff, 2) +
+                " mask_ratio=" + formatFixed(persistentMetrics.maskRatio, 4) +
+                " corr=" + formatFixed(persistentMetrics.correlation, 4);
+            cameraHistory["persistent_fault_active"] = true;
+            cameraHistory["persistent_fault_detail"] = persistentDetail;
+            historyDirty = true;
+
+            std::set<std::string> resetSerials = loadPersistentResetSerials(tactilePersistentResetPath(tactileStateDir_));
+            resetSerials.insert(*serial);
+            if (storePersistentResetSerials(tactilePersistentResetPath(tactileStateDir_), resetSerials, &writeError))
+            {
+                std::cout << "[INFO] tactile persistent reset scheduled after restart: serial=" << *serial << std::endl;
+            }
+            else
+            {
+                std::cerr << "[WARN] failed to persist tactile reset schedule: serial=" << *serial
+                          << " reason=" << writeError << std::endl;
+            }
+
+            if (findings != nullptr)
+            {
+                TactileValidationFinding finding;
+                finding.cameraName = target.cameraName;
+                finding.serialNumber = *serial;
+                finding.damaged = true;
+                finding.warningActive = false;
+                finding.warningTriggered = true;
+                finding.audioCommand = std::string(target.cameraName) + "_damaged";
+                finding.detail = persistentDetail;
+                findings->push_back(std::move(finding));
+            }
+            continue;
+        }
+
+        if ((nowMs - persistentBaselineUpdatedAtMs) >= kTactilePersistentBaselineRefreshMs)
+        {
+            if (writeBinaryFile(tactilePersistentRawPath(tactileStateDir_, *serial), *frame, &writeError))
+            {
+                cameraHistory["persistent_baseline_updated_at_ms"] = nowMs;
+                cameraHistory["persistent_fault_active"] = false;
+                cameraHistory["persistent_fault_detail"] = "";
+                historyDirty = true;
+                std::cout << "[INFO] tactile persistent baseline refreshed: camera=" << target.cameraName
+                          << " serial=" << *serial << std::endl;
+            }
+            else
+            {
+                std::cerr << "[WARN] tactile persistent baseline refresh failed: camera=" << target.cameraName
+                          << " serial=" << *serial
+                          << " reason=" << writeError << std::endl;
+            }
+        }
+    }
+
+    if (historyDirty)
+    {
+        std::string writeError;
+        if (!writeTextFileAtomically(tactileHistoryPath(tactileStateDir_), tactileHistory.dump(2) + "\n", &writeError))
+        {
+            std::cerr << "[WARN] failed to persist tactile history: " << writeError << std::endl;
+        }
+    }
+    if (resetListDirty)
+    {
+        std::string writeError;
+        if (!storePersistentResetSerials(tactilePersistentResetPath(tactileStateDir_), persistentResetSerials_, &writeError))
+        {
+            std::cerr << "[WARN] failed to persist tactile reset list: " << writeError << std::endl;
+        }
+    }
+}
+
 bool RecordRuntime::EpisodeManager::prepareEpisode(const std::string &episodeDir,
                                                    bool resetRecording,
                                                    const std::string &resetSourceDir,
@@ -5277,7 +5978,9 @@ bool RecordRuntime::EpisodeManager::prepareEpisode(const std::string &episodeDir
     return true;
 }
 
-bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDir, std::string *errorMessage) const
+bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDir,
+                                                    std::string *errorMessage,
+                                                    std::vector<TactileValidationFinding> *tactileFindings) const
 {
     const int64_t validateStartMs = steadyNowMs();
     std::cout << "[PERF] validateEpisode begin: episode_dir=" << episodeDir << std::endl;
@@ -5559,6 +6262,197 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                   << " tail_video_end_ns=" << tailVideoEndNs
                   << " last_encoder_ns=" << lastEncoderLogTimeNs
                   << " lag_ms=" << (lagNs / 1000000.0) << std::endl;
+    }
+
+    json tactileHistory = json::object();
+    {
+        std::ifstream historyInput(tactileHistoryPath(tactileStateDir_));
+        if (historyInput.is_open())
+        {
+            try
+            {
+                historyInput >> tactileHistory;
+            }
+            catch (const std::exception &ex)
+            {
+                std::cerr << "[WARN] failed to parse tactile history, reset in-memory state: "
+                          << ex.what() << std::endl;
+                tactileHistory = json::object();
+            }
+        }
+    }
+    if (!tactileHistory.is_object())
+    {
+        tactileHistory = json::object();
+    }
+    if (!tactileHistory.contains("cameras") || !tactileHistory["cameras"].is_object())
+    {
+        tactileHistory["cameras"] = json::object();
+    }
+
+    bool historyDirty = false;
+    if (tactileFindings != nullptr)
+    {
+        tactileFindings->clear();
+    }
+    for (const auto &target : kTactileCalibrationTargets)
+    {
+        const int64_t tactileCheckStartMs = steadyNowMs();
+        const auto offsetIt = recordTimeOffsetUsByCamera.find(target.cameraName);
+        if (offsetIt == recordTimeOffsetUsByCamera.end() || offsetIt->second <= 0)
+        {
+            continue;
+        }
+
+        std::string serialDetail;
+        const auto serial = probeUsbSerialForDeviceNode(target.devicePath, &serialDetail);
+        if (!serial.has_value() || serial->empty())
+        {
+            std::cerr << "[WARN] tactile validate skipped: camera=" << target.cameraName
+                      << " reason=" << (serialDetail.empty() ? "missing tactile serial" : serialDetail) << std::endl;
+            continue;
+        }
+
+        std::vector<uint8_t> baselineFrame;
+        std::string baselineError;
+        if (!readBinaryFileExact(tactileReferenceRawPath(tactileStateDir_, *serial),
+                                 kTactileFrameBytes,
+                                 &baselineFrame,
+                                 &baselineError))
+        {
+            std::cerr << "[WARN] tactile validate skipped: camera=" << target.cameraName
+                      << " serial=" << *serial
+                      << " reason=" << baselineError << std::endl;
+            continue;
+        }
+
+        std::string frameError;
+        const auto currentFrame = captureTactileGrayFrame(
+            {"-i", episodeDir + "/" + std::string(target.cameraName) + ".mkv"},
+            kTactileEpisodeProbeSec,
+            &frameError);
+        if (!currentFrame.has_value())
+        {
+            std::cerr << "[WARN] tactile validate skipped: camera=" << target.cameraName
+                      << " serial=" << *serial
+                      << " reason=" << frameError << std::endl;
+            continue;
+        }
+
+        const TactileFrameMetrics metrics = computeTactileFrameMetrics(baselineFrame, *currentFrame);
+        json &cameraHistory = tactileHistory["cameras"][*serial];
+        if (!cameraHistory.is_object())
+        {
+            cameraHistory = json::object();
+        }
+        if (!cameraHistory.contains("recent") || !cameraHistory["recent"].is_array())
+        {
+            cameraHistory["recent"] = json::array();
+        }
+        const bool persistentWarningActiveBefore = cameraHistory.value("persistent_fault_active", false);
+        std::string persistentDetail = cameraHistory.value("persistent_fault_detail", std::string());
+
+        bool warningActiveBefore = false;
+        const json &recentBefore = cameraHistory["recent"];
+        if (recentBefore.size() >= kTactileHistoryWindow)
+        {
+            warningActiveBefore = std::all_of(
+                recentBefore.begin(),
+                recentBefore.end(),
+                [](const json &entry) { return entry.is_boolean() && entry.get<bool>(); });
+        }
+
+        json &recent = cameraHistory["recent"];
+        recent.push_back(metrics.damaged);
+        while (recent.size() > kTactileHistoryWindow)
+        {
+            recent.erase(recent.begin());
+        }
+        cameraHistory["camera_name"] = target.cameraName;
+        cameraHistory["updated_at_ms"] = RecordRuntime::currentEpochMs();
+        historyDirty = true;
+
+        bool warningActive = false;
+        if (recent.size() >= kTactileHistoryWindow)
+        {
+            warningActive = std::all_of(
+                recent.begin(),
+                recent.end(),
+                [](const json &entry) { return entry.is_boolean() && entry.get<bool>(); });
+        }
+
+        bool persistentWarningTriggered = false;
+        bool persistentCompared = false;
+        std::vector<uint8_t> persistentBaseline;
+        std::string persistentBaselineError;
+        if (readBinaryFileExact(tactilePersistentRawPath(tactileStateDir_, *serial),
+                                kTactileFrameBytes,
+                                &persistentBaseline,
+                                &persistentBaselineError))
+        {
+            persistentCompared = true;
+            if (!persistentWarningActiveBefore)
+            {
+                const TactileFrameMetrics persistentMetrics = computeTactileFrameMetrics(persistentBaseline, *currentFrame);
+                if (persistentMetrics.damaged)
+                {
+                    persistentWarningTriggered = true;
+                    persistentDetail =
+                        "persistent_record mean_abs=" + formatFixed(persistentMetrics.meanAbsDiff, 2) +
+                        " mask_ratio=" + formatFixed(persistentMetrics.maskRatio, 4) +
+                        " corr=" + formatFixed(persistentMetrics.correlation, 4);
+                    cameraHistory["persistent_fault_active"] = true;
+                    cameraHistory["persistent_fault_detail"] = persistentDetail;
+                    historyDirty = true;
+
+                    std::set<std::string> resetSerials = loadPersistentResetSerials(tactilePersistentResetPath(tactileStateDir_));
+                    resetSerials.insert(*serial);
+                    std::string writeError;
+                    if (!storePersistentResetSerials(tactilePersistentResetPath(tactileStateDir_), resetSerials, &writeError))
+                    {
+                        std::cerr << "[WARN] failed to persist tactile reset schedule: serial=" << *serial
+                                  << " reason=" << writeError << std::endl;
+                    }
+                }
+            }
+        }
+
+        TactileValidationFinding finding;
+        finding.cameraName = target.cameraName;
+        finding.serialNumber = *serial;
+        finding.damaged = metrics.damaged;
+        finding.warningActive = warningActive;
+        finding.warningTriggered = (warningActive && !warningActiveBefore) || persistentWarningTriggered;
+        finding.audioCommand = std::string(target.cameraName) + "_damaged";
+        finding.detail =
+            "mean_abs=" + formatFixed(metrics.meanAbsDiff, 2) +
+            " mask_ratio=" + formatFixed(metrics.maskRatio, 4) +
+            " corr=" + formatFixed(metrics.correlation, 4);
+        if (!persistentDetail.empty())
+        {
+            finding.detail += " | " + persistentDetail;
+        }
+        if (tactileFindings != nullptr)
+        {
+            tactileFindings->push_back(finding);
+        }
+        std::cout << "[INFO] tactile quick check: camera=" << target.cameraName
+                  << " serial=" << *serial
+                  << " damaged=" << (metrics.damaged ? "true" : "false")
+                  << " warning_active=" << (finding.warningActive ? "true" : "false")
+                  << " " << finding.detail
+                  << " persistent_compared=" << (persistentCompared ? "true" : "false")
+                  << " elapsed_ms=" << (steadyNowMs() - tactileCheckStartMs)
+                  << std::endl;
+    }
+
+    if (historyDirty)
+    {
+        std::string writeError;
+        if (!writeTextFileAtomically(tactileHistoryPath(tactileStateDir_), tactileHistory.dump(2) + "\n", &writeError))
+        {
+            std::cerr << "[WARN] failed to persist tactile history: " << writeError << std::endl;
+        }
     }
 
     std::cout << "[PERF] validateEpisode end: episode_dir=" << episodeDir

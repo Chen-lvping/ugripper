@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -38,6 +39,7 @@ struct RecordRuntimeOptions
     std::string cameraCodec = "h264";
     std::string stereoControlFile = "/tmp/umi_stereo_camera_control.json";
     std::string stereoStatusFile = "/tmp/umi_stereo_camera_status.json";
+    std::string tactileStateDir = "/tmp/umi_tactile_state";
     int pollMs = 20;
 };
 
@@ -62,6 +64,7 @@ private:
     {
         Init,
         Ready,
+        Warning,
         Recording,
         Error1,
         Error2,
@@ -201,10 +204,22 @@ private:
             gripper_hmi::GripperCalibrationDataV1 calibrationPayload{};
         };
 
+        struct TactileValidationFinding
+        {
+            std::string cameraName;
+            std::string serialNumber;
+            bool damaged = false;
+            bool warningActive = false;
+            bool warningTriggered = false;
+            std::string detail;
+            std::string audioCommand;
+        };
+
         EpisodeManager(std::string diskRoot,
                        std::string deviceSn,
                        std::string language,
                        std::string cameraCodec,
+                       std::string tactileStateDir,
                        std::string persistCalibrationFile,
                        std::string exampleCalibrationFile,
                        std::string fallbackCalibrationFile,
@@ -214,11 +229,15 @@ private:
         bool initialize();
         std::string createNextEpisodeDir();
         void setGripperRuntimeStates(const std::array<GripperRuntimeState, 2> &states);
+        void refreshTactileReferenceCacheForSide(const std::string &side,
+                                                std::vector<TactileValidationFinding> *findings = nullptr);
         bool prepareEpisode(const std::string &episodeDir,
                             bool resetRecording,
                             const std::string &resetSourceDir,
                             std::string *errorMessage) const;
-        bool validateEpisode(const std::string &episodeDir, std::string *errorMessage) const;
+        bool validateEpisode(const std::string &episodeDir,
+                             std::string *errorMessage,
+                             std::vector<TactileValidationFinding> *tactileFindings = nullptr) const;
         const std::string &dataRoot() const;
 
     private:
@@ -234,6 +253,7 @@ private:
         std::string deviceSnLower_;
         std::string language_;
         std::string cameraCodec_;
+        std::string tactileStateDir_;
         std::string persistCalibrationFile_;
         std::string exampleCalibrationFile_;
         std::string fallbackCalibrationFile_;
@@ -242,6 +262,7 @@ private:
         std::string dataRoot_;
         std::string episodeRoot_;
         std::array<GripperRuntimeState, 2> gripperRuntimeStates_{};
+        std::set<std::string> persistentResetSerials_;
     };
 
     struct ButtonStateTracker
@@ -335,6 +356,8 @@ private:
     void setAudioRecoveryCommand(std::string command);
     void sendAudioCommand(const std::string &command) const;
     void setLedState(LedState state, double progress = 0.0);
+    void refreshTactileReferenceCachesForSide(const std::string &side);
+    void applyIdleState();
 
     RecordRuntimeOptions options_;
     std::atomic<bool> stopRequested_{false};
@@ -353,6 +376,7 @@ private:
     std::string lastEpisodeDir_;
     std::string pendingPreAudioFile_;
     std::string audioRecoveryCommand_;
+    bool tactileWarningActive_ = false;
     HealthStatus healthStatus_ = HealthStatus::Unknown;
     std::string lastHealthErrorKey_;
     uint64_t lastHealthCheckMs_ = 0;

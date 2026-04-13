@@ -5,6 +5,10 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- 新增运行时触觉损坏轻量抽检：夹爪插回并完成该侧 refresh 后，会按 tactile 相机 USB `serial` 刷新参考灰度帧缓存；停录阶段只抽取起录附近单帧做快速比对，不扫描整段视频，也不重新读取 MCAP 做 encoder 对齐。
+- 同一 tactile `serial` 最近 `3` 个 episode 都异常时，空闲态改为黄灯闪烁 `WARNING`，并播放对应的 `left/right_tcam_*_damaged.wav` 提示音；该能力属于软告警，不会把当前 episode 升级为 `validation_failed`。
+- 运行时触觉轻量阈值进一步收紧为 `mean_abs_diff >= 3.0`、`mask_ratio >= 0.05`、`correlation <= 0.94`，降低明显异常被漏报的概率。
+- 新增按 tactile `serial` 绑定的 `12h` 持久化 baseline：插爪阶段和停录阶段都会与上一份持久化 baseline 比较；若超阈值则同样触发 damaged 软告警，并冻结该 `serial` 的持久化 baseline，只有服务重启后下一次插爪才允许刷新。
 - 主摄 `uvc_roll_absolute` 从录制启动链路解耦：改为在主摄 `video4linux` 主节点插入时由 `udev` 触发独立 helper 执行，同一次插入只处理一次，重新插拔后再重新检查。
 - `camera_recorder` 新增 `--apply-uvc-roll-only` 模式，供插入事件单独执行主摄 roll 检测/设置；普通录制阶段不再主动执行主摄 roll 检测。
 - 主摄 `video4linux` udev 规则改为显式补齐 `MODE/GROUP/TAG`，降低主摄节点在驱动重绑后的权限漂移风险。

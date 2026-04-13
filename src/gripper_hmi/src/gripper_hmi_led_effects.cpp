@@ -48,6 +48,10 @@ bool GripperLedEffectRenderer::parseStateText(const std::string &text, GripperLe
     {
         parsed.state = GripperLedEffectState::Ready;
     }
+    else if (stateText == "WARNING")
+    {
+        parsed.state = GripperLedEffectState::Warning;
+    }
     else if (stateText == "RECORDING")
     {
         parsed.state = GripperLedEffectState::Recording;
@@ -117,6 +121,8 @@ std::string GripperLedEffectRenderer::stateText(const GripperLedEffect &effect)
         return "INIT";
     case GripperLedEffectState::Ready:
         return "READY";
+    case GripperLedEffectState::Warning:
+        return "WARNING";
     case GripperLedEffectState::Recording:
         return "RECORDING";
     case GripperLedEffectState::Error1:
@@ -157,6 +163,11 @@ GripperLedColor GripperLedEffectRenderer::render(const GripperLedEffect &effect,
         const double shaped = pulse * pulse * pulse;
         const int level = static_cast<int>(std::lround(120.0 * shaped));
         return GripperLedColor{0, clampToU8(level), clampToU8((12 * level) / 150)};
+    }
+    case GripperLedEffectState::Warning:
+    {
+        const bool on = (steadyMs % kCalibBlinkPeriodMs) < (kCalibBlinkPeriodMs / 2);
+        return on ? GripperLedColor{255, 160, 0} : GripperLedColor{0, 0, 0};
     }
     case GripperLedEffectState::Recording:
     {

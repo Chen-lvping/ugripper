@@ -140,6 +140,7 @@
   - `left_tcam_r` 当前同时兼容旧 hub 的 `.4.1` 和新 hub 的 `.3` 口位，保证新旧左手 hub 共存。
 - 当前运行时默认录制全部 8 路：左右主摄 + 左右 stereo + 4 路触觉。
 - 普通录制阶段的 `camera_recorder` 当前会直接起左右主摄与 4 路触觉；左右 stereo 继续由单独的 warmup daemon 常驻管理。
+- 夹爪热插拔恢复完成后，`record_runtime` 当前会在该侧关键设备全部 ready、并完成 gripper runtime refresh 之后，按 tactile 相机 USB `serial` 抓取并刷新一份轻量参考灰度帧缓存；同时还会维护一份按 `serial` 绑定的持久化 baseline。二者都只用于后续触觉状态抽检，不参与 episode 产物落盘。
 - warmup daemon 在空闲态持续常驻打开需要预热的相机设备；当前仅左右双目继续消费 `MJPEG 60fps` 预热流。开始录制时只为 stereo 新建 session writer，把会话窗口内帧写入最终 `mkv`；主摄则在普通录制阶段直接冷启动采集并写入最终文件。
 - warmup daemon 当前按单实例口径运行；若服务内 daemon 尚未退出又手工再起第二个 `camera_recorder --stereo-daemon` 去抢同一批双目设备，可能诱发设备忙、节点缺失或整条 USB 链路重枚举。当前实现已增加 `/tmp/umi_camera_warmup_daemon.lock` 单实例锁，第二个 warmup daemon 会直接拒绝启动。
 - 停录阶段也会并发向各路相机子进程发 stop，并在全部 stop 返回后统一 poll 状态，降低多路顺序收尾导致 `info.json` 缺失或容器未 finalize 的风险。
@@ -187,7 +188,10 @@
 5. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行 `sync`；停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
 6. `record_runtime` 等待 daemon 在状态文件中写出本次 `last_session`，再将其并入最终 `info.json`。
 7. 执行稳定校验：强校验合并后的 `info.json` 时间字段，并用轻量 `ffprobe` 检查 8 路视频可读性与时长合理性。
-8. 成功则回到 `READY` 并播放 `ready`；完整性失败则进入 `ERROR_1` 并播放 `validation_failed`；运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
+8. 停录校验阶段当前额外执行两轮轻量 tactile 状态抽检：其一是“本次起录附近单帧 vs 插爪参考帧”的实时比较；其二是“本次起录附近单帧 vs 同 `serial` 的持久化 baseline”的慢变量比较。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
+9. 实时触觉抽检当前属于软告警而不是完整性失败：单次异常只更新该 tactile `serial` 的近期历史；当同一 `serial` 最近 `3` 个 episode 都判为异常时，空闲态切到黄灯闪烁，并播放对应 `left/right_tcam_*_damaged` 提示音。
+10. 持久化 baseline 当前按 `12h` 窗口维护：插爪阶段和停录阶段都会与上一份持久化 baseline 做比较；若超过阈值，则立即触发同一套 damaged 软告警并锁住该 `serial` 的持久化 baseline，不再自动刷新。只有服务重启一次后，下一次插爪才允许用当前图像重建该 `serial` 的持久化 baseline。
+11. 完整性成功且无触觉软告警则回到 `READY` 并播放 `ready`；完整性失败进入 `ERROR_1` 并播放 `validation_failed`；运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
 
 ## 7. Episode 产物与检查
 ### 7.1 默认产物
@@ -222,13 +226,21 @@
 - 视频可读性：每路 `mkv` 都必须能被 `ffprobe` 读出首个视频流与 `start_time/duration`。
 - 时长合理性：每路视频跨度都必须大于最小阈值，且不能比本次 episode 的最长视频短超过 `5s`。
 - 条件产物：若执行了 pre/post 音频录制，对应 wav 仍需存在。
+- 触觉软校验：
+  - 每路 tactile 只取起录附近单帧，与插爪阶段缓存的同 `serial` 参考灰度帧比较 `mean_abs_diff / mask_ratio / correlation`；单次异常不让当前 episode 失败，仅用于连续 `3` 个 episode 的损坏提示。
+  - 同时还会与上一份 `12h` 持久化 baseline 比较；若超过阈值，则播放对应 damaged 语音并冻结该 `serial` 的持久化 baseline，避免把坏状态自动刷新成新基线；黄灯仍只由最近 `3` 次 runtime 抽检窗口控制。
+- 当前运行时轻量阈值口径：
+  - `mean_abs_diff >= 3.0`
+  - `mask_ratio >= 0.05`
+  - `correlation <= 0.94`
 
-说明：当前不会为视频做全量逐帧扫描；校验只读取容器元信息并消费已有 `info.json`，优先保证现场稳定性与停录耗时可控。
+说明：当前不会为视频做全量逐帧扫描；强校验只读取容器元信息并消费已有 `info.json`，触觉软校验也只做单帧快速比较，优先保证现场稳定性与停录耗时可控。
 
 ## 8. 灯效、音频与关键路径
 ### 8.1 当前状态灯语义
 - `INIT`：初始化或落盘阶段，蓝灯。
 - `READY`：可录制，绿色呼吸灯；当前基于单调时钟渲染，避免系统校时导致相位突变。
+- `WARNING`：触觉软告警，黄灯闪烁；当前只用于“同一 tactile serial 最近 3 个 episode 都异常”的 runtime 损坏提示。若后续一次录制把最近 `3` 次窗口刷回非全异常，黄灯会自动清除。持久化 baseline 超阈值仍会播放 damaged 语音并冻结 baseline，但不会单独把黄灯锁住。
 - `RECORDING`：录制中，绿色闪烁；当前只在亮灭边沿和低频补发时下发 RGB，避免高频重复写串口造成丢闪。
 - `CALIB_PRE` / `CALIB_RUN` / `CALIB_DONE`：供 USB 导入与校准脚本复用。
 - `ERROR_1` ~ `ERROR_5`：红灯长短码，分别用于完整性失败到运行时错误。

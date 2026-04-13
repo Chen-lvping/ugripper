@@ -10,6 +10,7 @@ enum class GripperLedEffectState
 {
     Init,
     Ready,
+    Warning,
     Recording,
     Error1,
     Error2,

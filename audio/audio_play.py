@@ -162,6 +162,10 @@ class AudioPlayer:
             "calib_start": self.resolve_sound_path("calib_start.wav"),
             "calibrating": self.resolve_sound_path("calibrating.wav"),
             "calib_done": self.resolve_sound_path("calib_done.wav"),
+            "left_tcam_l_damaged": self.resolve_sound_path("left_tcam_l_damaged.wav"),
+            "left_tcam_r_damaged": self.resolve_sound_path("left_tcam_r_damaged.wav"),
+            "right_tcam_l_damaged": self.resolve_sound_path("right_tcam_l_damaged.wav"),
+            "right_tcam_r_damaged": self.resolve_sound_path("right_tcam_r_damaged.wav"),
         }
         self.sounds = {
             sound_name: None for sound_name in self.sound_paths
