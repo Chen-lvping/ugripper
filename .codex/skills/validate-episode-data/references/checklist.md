@@ -26,6 +26,7 @@
 - `calibration.json.observation.images` 是否覆盖 8 路图像
 - `calibration.json.observation.imu` 是否覆盖 `left_imu` / `right_imu`
 - 主摄专项扫描是否发现 `backward_dts` / `decode_non_monotonic_dts` / `decode_error`
+- 是否输出统一的首帧对齐表，覆盖 8 路 `mkv` 和 4 个 sensor topic
 
 ## 2. 默认阈值建议
 
@@ -34,6 +35,7 @@
 - 视频起始对齐 warn/fail：`80ms / 150ms`
 - 视频结束对齐 warn/fail：`150ms / 300ms`
 - 首帧同步误差 warn/fail：`33ms / 80ms`
+- 全 12 路流首帧范围 warn/fail：`80ms / 150ms`
 - 左右成对视频起始对齐 warn/fail：`50ms / 120ms`
 - 左右成对视频结束对齐 warn/fail：`80ms / 180ms`
 - 单视频 gap 告警：`max(3 x 中位帧间隔, 80ms)`
@@ -58,6 +60,8 @@
   - 更像 sensor 进程或串口链路提前结束。
 - `视频首帧范围很大，但后续 gap 正常`
   - 更像起录边界没对齐，而不是中途掉流。
+- `四个 sensor topic 内部首帧对齐正常，但统一首帧表里 sensor 整体相对视频偏移很大`
+  - 更像视频与 sensor 使用了不同时间基准，或某一侧时间戳换算错误。
 - `sensor 起始时间整体晚于视频`
   - 更像 sensor_recorder 启动滞后。
 - `sensor 结束时间整体早于视频`

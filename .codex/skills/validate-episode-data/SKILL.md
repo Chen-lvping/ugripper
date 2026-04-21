@@ -1,6 +1,6 @@
 ---
 name: validate-episode-data
-description: 为 ugripper 项目执行 episode 数据深度校验。用于用户在录完一条新数据后，指定“校验 episode / 检查这条录制数据 / 验证视频和 sensor 是否同步 / 看有没有 gap 或异常 / 校验最新一条数据”等请求时：先阅读 docs/agent/overview.md 理解当前 episode 结构与时间语义，再对指定 episode 目录执行只读分析；若用户说“校验最新一条数据”，默认对用户给出的数据父目录执行 `--latest` 选择最新 `episode_*`；重点检查关键文件完整性、metadata/calibration/info 结构、视频时间对齐、逐帧 gap、主摄时间戳异常、首帧同步误差、左右 sensor 同步、sensor 覆盖率、视频与 sensor 对齐与重叠比例、session 边界和其他可疑异常，并给出结论、证据和建议。
+description: 为 ugripper 项目执行 episode 数据深度校验。用于用户在录完一条新数据后，指定“校验 episode / 检查这条录制数据 / 验证视频和 sensor 是否同步 / 看有没有 gap 或异常 / 校验最新一条数据”等请求时：先阅读 docs/agent/overview.md 理解当前 episode 结构与时间语义，再对指定 episode 目录执行只读分析；若用户说“校验最新一条数据”，默认对用户给出的数据父目录执行 `--latest` 选择最新 `episode_*`；重点检查关键文件完整性、metadata/calibration/info 结构、视频时间对齐、逐帧 gap、主摄时间戳异常、8 路视频与 4 个 sensor topic 的首帧同步误差、左右 sensor 同步、sensor 覆盖率、视频与 sensor 对齐与重叠比例、session 边界和其他可疑异常，并给出结论、证据和建议。
 ---
 
 # validate-episode-data
@@ -41,6 +41,8 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
 - 容器 `duration` 与包级 `span` 是否自洽。
 - 左右 main / stereo 成对视频的起止时间是否对齐。
 - 首帧同步误差是否超阈值，并列出所有 `mkv` 相对参考时刻的首帧偏移量。
+- 四个 sensor topic 的首样本是否彼此对齐，并列出 `imu_left` / `imu_right` / `encoder_left` / `encoder_right` 相对同一参考时刻的首帧偏移量。
+- 八路 `mkv` 与四个 sensor topic 是否应放到同一张首帧对齐表里统一比较；若视频与 sensor 整体错位，必须显式给出全部 12 路流的首帧偏移量、最大范围和高概率归因。
 - `stereo_session` 中的首帧 / 结束时间与顶层 offset 语义是否自洽。
 - 左右 `sensor_data_*.mcap` 是否可读，topic 是否齐全。
 - IMU / encoder topic 是否存在 gap、长时间中断、样本数异常。
@@ -59,6 +61,7 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
 - 单路视频能播但时间轴回退，说明 mux 或时间戳可能异常。
 - 双目 `stereo_session` 与实际文件首尾不一致，说明 warmup/session 边界可能失配。
 - 左右同类 sensor 都正常，但视频与 sensor 整体错位，说明跨进程起录边界可能异常。
+- 四个 sensor topic 内部对齐正常，但整体相对视频偏移很大，说明更像跨链路时间基准不一致，而不是 sensor 自身起录抖动。
 - 只有某一侧 encoder 或 imu 尾部缺失，说明串口或写线程可能中途掉线。
 - 触觉相机与主相机 / stereo 普遍错开，说明该类设备独立启动或 stop 边界异常。
 - 所有流都存在相近时刻的大 gap，说明可能是系统调度 / 写盘抖动，而不是单设备掉流。
@@ -75,6 +78,7 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
    - 文件或 topic
    - 时间点
    - gap / 偏差 / 时长差
+   - 若涉及首帧对齐，默认同时给出 8 路 `mkv` + 4 个 sensor topic 的首帧偏移列表，而不是只列视频
 4. 若能判断模式，明确写出高概率归因：
    - 单路掉流
    - 多路同时卡顿
