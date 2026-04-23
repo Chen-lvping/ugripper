@@ -3,15 +3,19 @@
 当前仓库对应 **Ugripper V2**，默认部署形态为单机双手、本地控制的数据采集系统。
 
 ## 文档入口
+- 当前维护状态：`docs/agent/current-status.md`
 - 唯一总览文档：`docs/agent/overview.md`
+- 当前架构说明：`docs/ugripper-refactor-architecture.md`
+- 当前测试摘要：`docs/ppmain-ugripper-test-summary.md`
 - 历史变更记录：`docs/CHANGELOG.md`
 - 仓库内测试脚本说明：`test/README.md`
 
-推荐先读 `docs/agent/overview.md`；`docs/CHANGELOG.md` 只用于追溯阶段性变更，不作为当前功能口径。
+推荐先读 `docs/agent/current-status.md`，再读 `docs/agent/overview.md`；`docs/CHANGELOG.md` 只用于追溯阶段性变更，不作为当前功能口径。
 
 ## 系统摘要
 - systemd 入口：`pack_script/ugripper.service`
-- 主运行时：`build/src/record_runtime/record_runtime`
+- 主入口：`run_record.sh`
+- 主运行时：优先 `bin/UgripperRuntime/UgripperRuntime`，兼容 fallback `build/src/record_runtime/record_runtime`
 - 默认录制集合：`left_cam_main`、`right_cam_main`、4 路 tactile、左右传感器 MCAP
 - 数据目录：`/mnt/data_disk/<device_sn_lower>/data/episode_YYYYMMDD_NNNN`
 - 持久化标定：`/etc/ugripper/config/calibration/calibration.json`
@@ -37,52 +41,127 @@ bash test/scripts/testVideoPipe.sh
 
 更具体的脚本说明、环境变量和注意事项见 `test/README.md`。
 
-## Python 环境初始化
-首次部署时，手动用 `uv` 按依赖表重建项目内可打包的 `.venv`。
-目标结构是把 CPython 运行时收进 `.venv/.python-runtime/`，避免 `.venv/bin/python3` 链到机器外部路径。
+## 推荐出包路径
+当前推荐直接走容器内 ARM 一键出包：
 
 ```bash
-cd /path/to/ugripper_v2
-
-PY_VER="$(sed -n 's/^requires-python = "==\([^"]*\)"$/\1/p' pyproject.toml | head -n 1)"
-PY_MM="$(printf '%s' "$PY_VER" | cut -d. -f1,2)"
-TMP_PY_DIR="$(mktemp -d)"
-
-rm -rf .venv
-uv python install --install-dir "$TMP_PY_DIR" "$PY_VER"
-
-PY_BIN="$(find "$TMP_PY_DIR" -path "*/bin/python${PY_MM}" -type f | head -n 1)"
-UV_LINK_MODE=copy uv venv --relocatable --python "$PY_BIN" .venv
-VIRTUAL_ENV="$PWD/.venv" UV_LINK_MODE=copy uv sync --active --frozen --no-editable --no-install-project --python "$PY_BIN"
-
-mkdir -p .venv/.python-runtime
-mv "$(dirname "$(dirname "$PY_BIN")")" .venv/.python-runtime/
-
-REL_PY="$(realpath --relative-to="$PWD/.venv/bin" "$PWD/.venv/.python-runtime/$(basename "$(dirname "$(dirname "$PY_BIN")")")/bin/python${PY_MM}")"
-ln -snf "$REL_PY" .venv/bin/python
-ln -snf python .venv/bin/python3
-ln -snf python .venv/bin/python${PY_MM}
-
-rm -rf "$TMP_PY_DIR"
-./.venv/bin/python3 -c "import sys, pygame; print(sys.executable); print(sys.base_prefix)"
+./scripts/build_arm_deb_in_pp_arm_dev.sh
 ```
 
-验证通过后，再执行 `./build_deb.sh` 或 `./build_deb.sh -q` 打包；包内会直接携带这套 `.venv`。
+默认会在 `pp-arm-dev` 容器里自动完成：
+- 设置 `PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig`
+- 编译主包必需目标
+- 调用 `build_deb.sh -q` 产出 `arm64 deb`
+- 把 `build/`、`temp_build_deb*` 和生成的 `.deb` 所有权回收给宿主机当前用户
 
-当前 `build_deb.sh` 的打包 staging 默认按 `rsync` 增量复用：
-- 项目主体与 `.venv` 分两次同步，避免每次都先删掉再重拷 `.venv`。
-- 默认 `dpkg-deb` 压缩口径改为 `xz -1`，在当前包体和构建速度之间取更平衡的默认值。
-- `-q/--quick` 默认继续跳过 C++ 编译，并沿用 `xz -1` 的较快压缩口径，优先缩短出包时间。
-- 如需手动覆盖压缩参数，可在打包前设置 `DPKG_DEB_COMPRESSOR`、`DPKG_DEB_LEVEL`、`DPKG_DEB_STRATEGY`、`DPKG_DEB_UNIFORM_COMPRESSION`。
-- 如需直接复用仓库外或主目录已有的 `.venv` / `build` 产物，可设置 `PACKAGED_VENV_SOURCE`、`PACKAGED_BUILD_DIR`。
-
-示例：
+如果需要手动补齐容器环境，可单独执行：
 
 ```bash
-./build_deb.sh
-./build_deb.sh -q
+bash ./scripts/setup_arm_build_env.sh
+```
+
+如果 ARM 构建目录已经存在，只想重新组包，直接执行：
+
+```bash
+PACKAGED_BUILD_DIR=build/arm_container_release ./build_deb.sh -q
+```
+
+## 已验证前提
+- `build_deb.sh` 默认优先从 Nexus raw 下载归档好的 `.venv`，再完成打包。
+- 当前默认 `.venv` 归档 URL 已内置在 `build_deb.sh`，用于 `ugripper-v2-uv-venv/py311-v1`。
+- 标准模式只编主包必需目标：`CameraRecorder`、`SensorRecorder`、`zeroing`、`GripperHmiTool`、`UgripperRuntime`。
+- 打包前会校验 `.venv/bin/python3` 和以上 5 个核心二进制的 ELF 架构，避免把 `x86_64` 产物误打进 `arm64` 包。
+- 顶层默认不再强制构建 `src/third_party/mcap_builder`，普通主包出包不会再被这个可选目标阻塞。
+- 顶层当前直接依赖系统 `yaml-cpp` 和 `nlohmann_json`；仓库内不再保留 `.local-deps/nlohmann` fallback。
+
+## 当前版本口径
+- 当前主包文件名模式：`ugripper_<version>_arm64.deb`
+- 当前脚本默认值仍是：
+  - `BASE_VERSION=1.2.8`
+  - `VERSION_SUFFIX=''`
+  - 因此默认产物名会是 `ugripper_1.2.8_arm64.deb`
+- 这里的 `1.2.8` 只是当前脚本里的默认基线值，方便本地构建验证；它不是从代码、tag、changelog 或发布系统自动推导出来的正式版本源。
+- 如果本次出包需要可识别的版本，请显式传：
+  - `VERSION_SUFFIX=+<tag>`
+  - 或 `VERSION=<full-version>`
+- 实际发布时，不要默认沿用脚本里的 `1.2.8`，应按当次发布口径显式覆盖。
+
+## 常用覆盖项
+只在默认路径不适用时再覆盖：
+
+```bash
+CONTAINER_NAME=pp-arm-dev PARALLEL=12 ./scripts/build_arm_deb_in_pp_arm_dev.sh
+VERSION_SUFFIX=+merge1 ./scripts/build_arm_deb_in_pp_arm_dev.sh
+HOST_UID=$(id -u) HOST_GID=$(id -g) ./scripts/build_arm_deb_in_pp_arm_dev.sh
+PACKAGED_BUILD_DIR=/home/ubuntu/proj/ugripper_v2/build ./build_deb.sh -q
+PACKAGED_VENV_URL='' PACKAGED_VENV_SOURCE=/home/ubuntu/proj/ugripper_v2/.venv ./build_deb.sh -q
+VERSION_SUFFIX=+merge1 ./build_deb.sh -q
 DPKG_DEB_COMPRESSOR=xz DPKG_DEB_LEVEL=3 ./build_deb.sh
-PACKAGED_VENV_SOURCE=/home/ubuntu/proj/ugripper_v2/.venv \
-PACKAGED_BUILD_DIR=/home/ubuntu/proj/ugripper_v2/build \
-./build_deb.sh -q
 ```
+
+变量说明：
+- `CONTAINER_NAME`：ARM 构建容器名，默认 `pp-arm-dev`
+- `PARALLEL`：容器内编译并行度
+- `BASE_VERSION` / `VERSION_SUFFIX` / `VERSION`：透传给 `build_deb.sh`，决定最终 `.deb` 文件名；当前默认 `BASE_VERSION=1.2.8` 只是脚本占位值
+- `HOST_UID` / `HOST_GID`：容器出包后回收文件所有权时使用的宿主机用户 / 组
+- `PACKAGED_BUILD_DIR`：已有 ARM 构建产物目录
+- `PACKAGED_VENV_URL`：归档 `.venv` 下载地址；设为空则不下载
+- `PACKAGED_VENV_SOURCE`：本地 `.venv` 来源目录
+- `VERSION_SUFFIX`：临时附加包版本后缀
+
+## Python 环境初始化
+只有在需要更新或重建可打包 `.venv` 时，才需要执行这一步。
+
+这套 `.venv` 必须和目标包架构一致。给 `arm64` 板出包时，`.venv` 也必须来自 `aarch64/arm64` 环境，不能直接复用开发机或 `x86_64` 容器里的 Python 运行时。
+
+推荐命令：
+
+```bash
+./scripts/build_runtime_venv.sh
+VENV_VERSION_TAG=1.2.8+merge1-arm64 ./scripts/build_runtime_venv.sh
+```
+
+常见覆盖：
+
+```bash
+./scripts/build_runtime_venv.sh --target-dir /tmp/ugripper-arm64-venv
+./scripts/build_runtime_venv.sh --python-version 3.11.15 --version-tag 1.2.8+merge1
+```
+
+脚本会自动：
+- 从 `pyproject.toml` 读取固定 Python 版本
+- 用 `uv.lock` 重建 relocatable `.venv`
+- 验证 `pygame` 可导入
+- 写入 `.venv/.ugripper-venv-manifest.json`
+
+维护约定：
+- 仓库保留 `pyproject.toml`、`uv.lock` 和当前工作 `.venv`
+- 服务器按版本号归档 `.venv` 成品和 `.deb`
+- 恢复时优先回取服务器归档；只剩仓库时再按锁文件重建
+
+## 可选 updater 包打包
+`ugripper-usb-updater` 现在是独立可选包，不属于主 `ugripper` 包安装主线。
+
+默认打包命令：
+
+```bash
+./usb_updater_build.sh
+```
+
+如需为现场验证包加可识别后缀：
+
+```bash
+PKG_VERSION_SUFFIX=+merge1 ./usb_updater_build.sh
+```
+
+默认产物位置：
+
+```bash
+build/package/updater/ugripper-usb-updater_1.2.2_all.deb
+```
+
+和主包一样，可通过 `DPKG_DEB_COMPRESSOR`、`DPKG_DEB_LEVEL`、`DPKG_DEB_STRATEGY`、`DPKG_DEB_UNIFORM_COMPRESSION` 覆盖 `dpkg-deb` 压缩参数。
+
+补充：
+- `pp_main/package_ugripper_stage.sh` 当前也会尝试把 `UGRIPPER_ROOT/.venv` 收进主包
+- 如需覆盖来源，可显式设置 `PACKAGED_VENV_SOURCE`

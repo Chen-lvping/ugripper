@@ -21,13 +21,23 @@ stop_service_fast() {
 }
 
 force_cleanup_recording_processes() {
+    local hmi_patterns=(
+        'GripperHmiTool.*--state'
+        'gripper_hmi_test.*--state'
+    )
+    local pattern=""
+
     if command -v pkill >/dev/null 2>&1; then
         pkill -TERM -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
-        pkill -TERM -f 'gripper_hmi_test.*--state' >/dev/null 2>&1 || true
+        for pattern in "${hmi_patterns[@]}"; do
+            pkill -TERM -f "$pattern" >/dev/null 2>&1 || true
+        done
         pkill -TERM -f 'audio/audio_play.py' >/dev/null 2>&1 || true
         sleep 0.3
         pkill -KILL -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
-        pkill -KILL -f 'gripper_hmi_test.*--state' >/dev/null 2>&1 || true
+        for pattern in "${hmi_patterns[@]}"; do
+            pkill -KILL -f "$pattern" >/dev/null 2>&1 || true
+        done
         pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
     fi
 

@@ -1,0 +1,9 @@
+cameras:
+  - name: left_main_with_roll
+    device: /dev/null
+    mode: direct-copy-h265
+    uvc_roll_absolute: 4
+    width: 1920
+    height: 1080
+    fps: 30
+    output_files: [left_main_with_roll.mkv]

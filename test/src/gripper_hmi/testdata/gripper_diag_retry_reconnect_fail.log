@@ -1,0 +1,2 @@
+[GRIPPER_DIAG] category=command_summary port=/dev/right_gripper name=RecordRuntimeHmi0 command=read_serial_number command_id=8 sends=2 acks=1 timeouts=0 retries=1 recoveries=0 status=success reason=ok
+[GRIPPER_DIAG] category=io_summary port=/dev/right_gripper name=RecordRuntimeHmi0 reason=periodic tx_led=3 tx_beep=1 tx_state_req=2 rx_frames=4 rx_key_reports=1 rx_beep_states=2 io_failures=0 connect_success=1 reconnect_success=0 exclusive_commands=1 exclusive_acks=1 exclusive_timeouts=0 exclusive_retries=1 exclusive_failures=0 exclusive_recoveries=0

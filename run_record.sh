@@ -2,62 +2,34 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$script_dir" || exit 1
+project_root="$script_dir"
+shell_common="$project_root/scripts/lib/ugripper_shell_common.sh"
 
-RUNTIME_BIN="./build/src/record_runtime/record_runtime"
+if [ ! -f "$shell_common" ]; then
+    echo "[run-record][ERROR] missing shell helper: $shell_common"
+    exit 1
+fi
+
+# shellcheck source=/dev/null
+. "$shell_common"
+
+log_info() {
+    ugripper_log "run-record" "INFO" "$*"
+}
+
+log_error() {
+    ugripper_log "run-record" "ERROR" "$*"
+}
+
+DEFAULT_RUNTIME_BIN="$project_root/bin/UgripperRuntime/UgripperRuntime"
+RUNTIME_BIN="${RUNTIME_BIN_OVERRIDE:-$DEFAULT_RUNTIME_BIN}"
 ENV_FILE="/etc/environment"
 DISK_ROOT="/mnt/data_disk"
 LOG_DIR_LOCAL="/tmp"
 LOG_DIR_DISK="$DISK_ROOT/logs"
 WAIT_INTERVAL_SEC=2
 
-trim_text() {
-    local text="${1:-}"
-    text="${text#"${text%%[![:space:]]*}"}"
-    text="${text%"${text##*[![:space:]]}"}"
-    printf '%s' "$text"
-}
-
-read_env_value() {
-    local key="$1"
-    local line=""
-    local current_key=""
-    local value=""
-
-    [ -f "$ENV_FILE" ] || return 1
-
-    while IFS= read -r line || [ -n "$line" ]; do
-        line="$(trim_text "$line")"
-        [ -n "$line" ] || continue
-
-        case "$line" in
-            \#*)
-                continue
-                ;;
-        esac
-
-        if [ "${line#*=}" = "$line" ]; then
-            continue
-        fi
-
-        current_key="$(trim_text "${line%%=*}")"
-        value="$(trim_text "${line#*=}")"
-        if [ "$current_key" != "$key" ]; then
-            continue
-        fi
-
-        value="${value#\"}"
-        value="${value%\"}"
-        value="${value#\'}"
-        value="${value%\'}"
-        printf '%s' "$(trim_text "$value")"
-        return 0
-    done < "$ENV_FILE"
-
-    return 0
-}
-
-DEVICE_SN="$(read_env_value "DEVICE_SN" || true)"
+DEVICE_SN="$(ugripper_read_env_value "$ENV_FILE" "DEVICE_SN" || true)"
 DEVICE_SN_LOWER="${DEVICE_SN,,}"
 DEVICE_SN_LOWER="${DEVICE_SN_LOWER:-unknown_device}"
 TODAY="$(date +%Y%m%d)"
@@ -77,7 +49,7 @@ cleanup_old_logs() {
         shopt -s nullglob
         for file in "$dir"/umi_sys_"${DEVICE_SN_LOWER}"_*.log; do
             if [[ "$file" != *"${TODAY}.log" ]]; then
-                echo "[INFO] deleting old log: $file"
+                log_info "deleting old log: $file"
                 rm -f "$file"
             fi
         done
@@ -86,8 +58,8 @@ cleanup_old_logs() {
 }
 
 if [ ! -x "$RUNTIME_BIN" ]; then
-    echo "[ERROR] record_runtime binary not found: $RUNTIME_BIN"
-    echo "[INFO] build it first: cmake -S . -B build && cmake --build build --target record_runtime -j\$(nproc)"
+    log_error "record_runtime binary not found: $RUNTIME_BIN"
+    log_info "expected runtime path: $DEFAULT_RUNTIME_BIN"
     exit 1
 fi
 
@@ -171,7 +143,8 @@ cleanup() {
 mkdir -p "$LOG_DIR_LOCAL"
 cleanup_old_logs
 
-echo "[INFO] logging locally to: $LOG_FILE_LOCAL"
+log_info "project_root=$project_root"
+log_info "logging locally to: $LOG_FILE_LOCAL"
 exec > >(tee -a "$LOG_FILE_LOCAL") 2>&1
 
 trap cleanup EXIT
@@ -179,14 +152,14 @@ trap cleanup EXIT
 wait_logged=false
 while ! is_storage_ready; do
     if [ "$wait_logged" = false ]; then
-        echo "[INFO] waiting for writable data storage on $DISK_ROOT"
+        log_info "waiting for writable data storage on $DISK_ROOT"
         wait_logged=true
     fi
     sleep "$WAIT_INTERVAL_SEC"
 done
 
 if [ "$wait_logged" = true ]; then
-    echo "[INFO] writable data storage ready on $DISK_ROOT"
+    log_info "writable data storage ready on $DISK_ROOT"
 fi
 
 cleanup_old_logs

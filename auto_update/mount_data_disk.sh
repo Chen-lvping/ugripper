@@ -6,7 +6,6 @@ DEVNODE="${2:-}"
 FS_TYPE="${3:-}"
 MOUNT_POINT="/mnt/data_disk"
 LOCK_FILE="/run/ugripper_data_disk_mount.lock"
-USB_UPDATE_UNIT_PREFIX="usb-auto-update@"
 TARGET_USER="ubuntu"
 TARGET_UID="$(id -u "$TARGET_USER" 2>/dev/null || echo 1000)"
 TARGET_GID="$(id -g "$TARGET_USER" 2>/dev/null || echo 1000)"
@@ -33,15 +32,6 @@ run_unmount_with_timeout() {
 run_mount_command() {
     # Do not leak the lock fd into long-lived mount helpers.
     "$@" 9>&-
-}
-
-trigger_usb_update() {
-    local devnode="$1"
-    local unit_name=""
-
-    [ -n "$devnode" ] || return 0
-    unit_name="${USB_UPDATE_UNIT_PREFIX}${devnode##*/}.service"
-    systemctl start --no-block "$unit_name" >/dev/null 2>&1 || true
 }
 
 ensure_mountpoint_dir() {
@@ -109,7 +99,6 @@ fi
 
 CURRENT_SOURCE="$(current_source)"
 if [ "$CURRENT_SOURCE" = "$DEVNODE" ] && source_exists "$CURRENT_SOURCE"; then
-    trigger_usb_update "$DEVNODE"
     exit 0
 fi
 
@@ -121,12 +110,10 @@ ensure_mountpoint_dir
 
 if [ "$FS_TYPE" = "exfat" ]; then
     if run_mount_command mount -t exfat -o "$MOUNT_OPTS" "$DEVNODE" "$MOUNT_POINT"; then
-        trigger_usb_update "$DEVNODE"
         exit 0
     fi
 else
     if run_mount_command /usr/bin/systemd-mount --collect -o "$MOUNT_OPTS" "$DEVNODE" "$MOUNT_POINT"; then
-        trigger_usb_update "$DEVNODE"
         exit 0
     fi
 fi

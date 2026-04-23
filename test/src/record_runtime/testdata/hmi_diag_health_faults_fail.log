@@ -1,0 +1,4 @@
+[HMI_DIAG] category=health_fault key=hmi_all_disconnected led_state=Error2
+[HMI_DIAG] category=led_target state=Error2 progress=0.000
+[HMI_DIAG] category=health_fault key=hmi_ports_inactive led_state=Error1
+[HMI_DIAG] category=led_target state=Error1 progress=0.000

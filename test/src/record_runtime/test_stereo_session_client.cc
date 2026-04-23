@@ -1,0 +1,237 @@
+#include "record_runtime/stereo_session_client.h"
+#include "record_runtime/stereo_session_port.h"
+
+#include "utils/time_utils.h"
+
+#include <gtest/gtest.h>
+
+#include <filesystem>
+#include <fstream>
+#include <memory>
+
+#include <nlohmann/json.hpp>
+
+namespace fs = std::filesystem;
+using json = nlohmann::json;
+
+namespace {
+
+class TempDir
+{
+public:
+    TempDir()
+        : path_(fs::temp_directory_path() / ("ugripper_stereo_test_" + std::to_string(utils::CurrentEpochMs())))
+    {
+        fs::create_directories(path_);
+    }
+
+    ~TempDir()
+    {
+        std::error_code error;
+        fs::remove_all(path_, error);
+    }
+
+    const fs::path& path() const { return path_; }
+
+private:
+    fs::path path_;
+};
+
+struct FakeStereoWrite
+{
+    bool recording = false;
+    std::string episode_dir;
+    int64_t start_system_time_us = 0;
+    int64_t stop_system_time_us = 0;
+    uint64_t command_seq = 0;
+};
+
+class FakeStereoSessionPort : public ugripper::runtime::StereoSessionPort
+{
+public:
+    void ResetSessionState() override
+    {
+        ++reset_count;
+    }
+
+    bool WriteControl(bool recording,
+                      const std::string& episode_dir,
+                      int64_t start_system_time_us,
+                      int64_t stop_system_time_us,
+                      uint64_t command_seq,
+                      std::string* error_message) const override
+    {
+        writes.push_back({
+            .recording = recording,
+            .episode_dir = episode_dir,
+            .start_system_time_us = start_system_time_us,
+            .stop_system_time_us = stop_system_time_us,
+            .command_seq = command_seq,
+        });
+        if (error_message != nullptr)
+        {
+            error_message->clear();
+        }
+        return true;
+    }
+
+    bool LoadStatus(ugripper::runtime::StereoSessionStatusSnapshot* status,
+                    std::string* error_message) const override
+    {
+        if (statuses.empty())
+        {
+            if (error_message != nullptr)
+            {
+                error_message->clear();
+            }
+            return false;
+        }
+
+        *status = statuses.front();
+        statuses.erase(statuses.begin());
+        if (error_message != nullptr)
+        {
+            error_message->clear();
+        }
+        return true;
+    }
+
+    mutable std::vector<FakeStereoWrite> writes;
+    mutable std::vector<ugripper::runtime::StereoSessionStatusSnapshot> statuses;
+    int reset_count = 0;
+};
+
+TEST(StereoSessionClientTest, WritesControlAndReadsFinalizeStatus)
+{
+    TempDir temp_dir;
+    const fs::path control_file = temp_dir.path() / "stereo_control.json";
+    const fs::path status_file = temp_dir.path() / "stereo_status.json";
+
+    ugripper::runtime::ProcessSupervisor supervisor;
+    ugripper::runtime::StereoSessionClient client(
+        &supervisor,
+        {
+            .daemon_arguments = {"/bin/sh", "-c", "sleep 5"},
+            .control_file = control_file.string(),
+            .status_file = status_file.string(),
+            .daemon_stop_timeout_ms = 500,
+            .restart_interval_ms = 50,
+            .finalize_wait_poll_ms = 10,
+        },
+        &utils::CurrentSteadyMs);
+
+    std::string error;
+    ASSERT_TRUE(client.StartDaemon(&error)) << error;
+    ASSERT_TRUE(client.StartSession("/tmp/episode-1", 123, &error)) << error;
+
+    std::ifstream control_input(control_file);
+    ASSERT_TRUE(control_input.is_open());
+    json control = json::parse(control_input);
+    EXPECT_TRUE(control.at("recording").get<bool>());
+    EXPECT_EQ(control.at("episode_dir").get<std::string>(), "/tmp/episode-1");
+    EXPECT_EQ(control.at("start_system_time_us").get<int64_t>(), 123);
+
+    ASSERT_TRUE(client.StopSession("/tmp/episode-1", 456, &error)) << error;
+    {
+        std::ofstream status_output(status_file, std::ios::trunc);
+        status_output << json{
+            {"finalize_pending", false},
+            {"last_finalize_error", ""},
+            {"active_episode_dir", ""},
+            {"last_finalized_episode_dir", "/tmp/episode-1"},
+            {"last_session", json{{"episode_dir", "/tmp/episode-1"}}},
+        }
+                               .dump(2);
+    }
+
+    EXPECT_TRUE(client.WaitForFinalize("/tmp/episode-1", 200, &error)) << error;
+    client.StopDaemon();
+}
+
+TEST(StereoSessionClientTest, ReportsFinalizeErrorFromStatusFile)
+{
+    TempDir temp_dir;
+    const fs::path control_file = temp_dir.path() / "stereo_control.json";
+    const fs::path status_file = temp_dir.path() / "stereo_status.json";
+
+    ugripper::runtime::ProcessSupervisor supervisor;
+    ugripper::runtime::StereoSessionClient client(
+        &supervisor,
+        {
+            .daemon_arguments = {"/bin/sh", "-c", "sleep 5"},
+            .control_file = control_file.string(),
+            .status_file = status_file.string(),
+            .daemon_stop_timeout_ms = 500,
+            .restart_interval_ms = 50,
+            .finalize_wait_poll_ms = 10,
+        },
+        &utils::CurrentSteadyMs);
+
+    std::ofstream status_output(status_file, std::ios::trunc);
+    status_output << json{
+        {"finalize_pending", false},
+        {"last_finalize_error", "stereo finalize failed"},
+        {"active_episode_dir", ""},
+        {"last_finalized_episode_dir", ""},
+        {"last_session", json::object()},
+    }
+                           .dump(2);
+    status_output.close();
+
+    std::string error;
+    EXPECT_FALSE(client.WaitForFinalize("/tmp/episode-2", 100, &error));
+    EXPECT_EQ(error, "stereo finalize failed");
+}
+
+TEST(StereoSessionClientTest, UsesInjectedSessionPortForCommandsAndStatus)
+{
+    auto fake_port = std::make_unique<FakeStereoSessionPort>();
+    FakeStereoSessionPort* fake_port_ptr = fake_port.get();
+    fake_port->statuses.push_back({
+        .finalize_pending = false,
+        .last_finalize_error = "",
+        .active_episode_dir = "",
+        .last_finalized_episode_dir = "",
+        .has_last_session = true,
+        .last_session_episode_dir = "/tmp/episode-3",
+    });
+
+    ugripper::runtime::ProcessSupervisor supervisor;
+    ugripper::runtime::StereoSessionClient client(
+        &supervisor,
+        {
+            .daemon_arguments = {"/bin/sh", "-c", "sleep 5"},
+            .control_file = "/tmp/unused-control.json",
+            .status_file = "/tmp/unused-status.json",
+            .daemon_stop_timeout_ms = 500,
+            .restart_interval_ms = 50,
+            .finalize_wait_poll_ms = 10,
+        },
+        &utils::CurrentSteadyMs,
+        std::move(fake_port));
+
+    std::string error;
+    ASSERT_TRUE(client.StartDaemon(&error)) << error;
+    ASSERT_EQ(fake_port_ptr->reset_count, 1);
+    ASSERT_EQ(fake_port_ptr->writes.size(), 1u);
+    EXPECT_FALSE(fake_port_ptr->writes[0].recording);
+    EXPECT_EQ(fake_port_ptr->writes[0].command_seq, 1u);
+
+    ASSERT_TRUE(client.StartSession("/tmp/episode-3", 789, &error)) << error;
+    ASSERT_TRUE(client.StopSession("/tmp/episode-3", 987, &error)) << error;
+    EXPECT_EQ(fake_port_ptr->writes.size(), 3u);
+    EXPECT_TRUE(fake_port_ptr->writes[1].recording);
+    EXPECT_EQ(fake_port_ptr->writes[1].episode_dir, "/tmp/episode-3");
+    EXPECT_EQ(fake_port_ptr->writes[1].start_system_time_us, 789);
+    EXPECT_EQ(fake_port_ptr->writes[1].command_seq, 2u);
+    EXPECT_FALSE(fake_port_ptr->writes[2].recording);
+    EXPECT_EQ(fake_port_ptr->writes[2].stop_system_time_us, 987);
+    EXPECT_EQ(fake_port_ptr->writes[2].command_seq, 3u);
+
+    EXPECT_TRUE(client.WaitForFinalize("/tmp/episode-3", 100, &error)) << error;
+    client.StopDaemon();
+    ASSERT_EQ(fake_port_ptr->writes.size(), 4u);
+    EXPECT_EQ(fake_port_ptr->writes[3].command_seq, 4u);
+}
+
+}  // namespace

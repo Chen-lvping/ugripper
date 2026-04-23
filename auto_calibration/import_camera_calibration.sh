@@ -4,8 +4,8 @@ set -euo pipefail
 USB_ROOT="${1:-}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-DEFAULT_INSTALL_ROOT="/opt/ugripper"
-HMI_HELPER_BIN="${HMI_HELPER_BIN_OVERRIDE:-$PROJECT_ROOT/build/src/gripper_hmi/gripper_hmi_test}"
+DEFAULT_HMI_HELPER_BIN="$PROJECT_ROOT/bin/GripperHmiTool/GripperHmiTool"
+HMI_HELPER_BIN="${HMI_HELPER_BIN_OVERRIDE:-$DEFAULT_HMI_HELPER_BIN}"
 GRIPPER_CALIB_GENERATOR="${GRIPPER_CALIB_GENERATOR_OVERRIDE:-$PROJECT_ROOT/auto_calibration/generate_gripper_calibration_bin.py}"
 HMI_RUN_USER="${HMI_RUN_USER_OVERRIDE:-ubuntu}"
 
@@ -76,27 +76,6 @@ read_env_value() {
         | tr -d '"' \
         | xargs
 }
-
-resolve_existing_path() {
-    local candidate="$1"
-    local fallback="$2"
-
-    if [ -x "$candidate" ] || [ -f "$candidate" ]; then
-        printf '%s' "$candidate"
-        return 0
-    fi
-
-    if [ -x "$fallback" ] || [ -f "$fallback" ]; then
-        printf '%s' "$fallback"
-        return 0
-    fi
-
-    printf '%s' "$candidate"
-    return 0
-}
-
-HMI_HELPER_BIN="$(resolve_existing_path "$HMI_HELPER_BIN" "$DEFAULT_INSTALL_ROOT/build/src/gripper_hmi/gripper_hmi_test")"
-GRIPPER_CALIB_GENERATOR="$(resolve_existing_path "$GRIPPER_CALIB_GENERATOR" "$DEFAULT_INSTALL_ROOT/auto_calibration/generate_gripper_calibration_bin.py")"
 
 run_hmi_helper() {
     if [ ! -x "$HMI_HELPER_BIN" ]; then
@@ -363,7 +342,7 @@ done
 
 PERSIST_CALIB_DIR="${CALIB_PERSIST_DIR_OVERRIDE:-/etc/ugripper/config/calibration}"
 PERSIST_CALIB_FILE="$PERSIST_CALIB_DIR/calibration.json"
-FALLBACK_CAM_JSON="$PROJECT_ROOT/config/fakeCamCalib.json"
+FALLBACK_CAM_JSON="$PROJECT_ROOT/bin/UgripperRuntime/config/fakeCamCalib.json"
 
 if [ ! -f "$PERSIST_CALIB_FILE" ] && [ ! -f "$FALLBACK_CAM_JSON" ]; then
     log "Base calibration.json missing (persist + fallback)"

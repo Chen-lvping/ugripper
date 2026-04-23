@@ -57,9 +57,9 @@ if [ ! -e "$device_path" ]; then
     exit 1
 fi
 
-if /opt/ugripper/build/src/camera_recorder/camera_recorder \
+if /opt/ugripper/bin/CameraRecorder/CameraRecorder \
     --apply-uvc-roll-only \
-    --config-yaml /opt/ugripper/config/camera_recorder.yaml \
+    --config-yaml /opt/ugripper/bin/CameraRecorder/config/camera_recorder.yaml \
     --only "$camera_name"; then
     printf '%s\n' "$devnum" > "$stamp_file"
     echo "[main_camera_roll] roll processed: camera=$camera_name usb=$usb_kernel devnum=$devnum"

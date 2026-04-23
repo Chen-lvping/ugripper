@@ -1,0 +1,23 @@
+CameraRecorder:
+  schema_version: 1
+  cameras:
+    - id: left_main_with_roll
+      role: main
+      side: left
+      kind: direct_h265
+      groups: [session, critical]
+
+      device:
+        path: /dev/null
+        backend: v4l2
+        fps: 30
+        width: 1920
+        height: 1080
+        uvc:
+          roll_absolute: 7
+
+      record:
+        pipeline: direct_copy_h265
+
+      output:
+        file_name: left_main_with_roll.mkv

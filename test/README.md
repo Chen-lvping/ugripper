@@ -1,4 +1,27 @@
-# Test Utilities
+# Test Layout
+
+`ugripper` 当前测试入口分成 3 层：
+
+- `test/src/*`
+  - 正式 host-only 单元测试目录。
+  - 默认使用 `GoogleTest`。
+  - 只放无硬件依赖、可稳定回归的模块测试。
+  - 当前已覆盖 `utils`、`gripper_hmi`、`sensor`、`camera`、`record_runtime` 五类模块。
+  - `record_runtime` 当前已覆盖 process boundary、button state machine、health monitor 和 recording orchestrator 这四类控制面逻辑。
+- `src/utils/src/utils_smoke_test.cc`
+  - 仍保留为最小 smoke 程序。
+  - 它用于快速验证 `utils` 基础接线，不替代正式单元测试。
+- `test/src/gripper_hmi/`
+  - 当前更接近串口调试/工具程序。
+  - 它不属于正式 host-only 单元测试集合。
+- `test/scripts/*`
+  - 现场验证或 field test 脚本。
+  - 这些脚本不进入正式 host-only 单测集合。
+- `run_record.sh` / `auto_update/usb_auto_update.sh` / `auto_calibration/run_calibration.sh` / `audio/*.py`
+  - 这些属于主链 shell/python 编排层，不属于 `test/src/*` 正式单元测试集合。
+  - 当前默认门禁是语法检查、定向 `--help` / `py_compile` 和文档化入口，不在仓库阶段要求硬件级回归。
+
+## Field Scripts
 
 `test/scripts/` 用于收纳仓库侧的现场验证脚本，方便在开发机或问题机器上直接做定向检查。
 
@@ -23,7 +46,9 @@
 bash test/scripts/camera_test.sh
 bash test/scripts/camera_crash_capture.sh
 bash test/scripts/testVideoPipe.sh
-python3 test/scripts/scan_main_camera_mkv_issues.py
+bash -n run_record.sh auto_update/usb_auto_update.sh auto_calibration/run_calibration.sh
+python3 -m py_compile audio/*.py
+python3 audio/record_usb_audio.py --help
 ```
 
 可按需通过环境变量覆盖输出目录和测试参数，例如：

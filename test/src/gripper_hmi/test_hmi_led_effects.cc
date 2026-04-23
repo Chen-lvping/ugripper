@@ -1,0 +1,61 @@
+#include "gripper_hmi_led_effects.h"
+
+#include <gtest/gtest.h>
+
+#include <string>
+
+namespace {
+
+TEST(GripperLedEffectRendererTest, ParseStateTextAcceptsKnownStateAndClampsProgress)
+{
+    GripperLedEffect effect;
+
+    ASSERT_TRUE(GripperLedEffectRenderer::parseStateText("CALIB_RUN:1.5", &effect));
+    EXPECT_EQ(effect.state, GripperLedEffectState::CalibRun);
+    EXPECT_DOUBLE_EQ(effect.progress, 1.0);
+}
+
+TEST(GripperLedEffectRendererTest, ParseStateTextRejectsUnknownState)
+{
+    GripperLedEffect effect;
+
+    EXPECT_FALSE(GripperLedEffectRenderer::parseStateText("UNKNOWN", &effect));
+}
+
+TEST(GripperLedEffectRendererTest, ParseStateTextAcceptsWarning)
+{
+    GripperLedEffect effect;
+
+    ASSERT_TRUE(GripperLedEffectRenderer::parseStateText("WARNING", &effect));
+    EXPECT_EQ(effect.state, GripperLedEffectState::Warning);
+}
+
+TEST(GripperLedEffectRendererTest, RenderProducesStableColorsForSimpleStates)
+{
+    GripperLedEffectRenderer renderer;
+
+    const auto initColor = renderer.render(GripperLedEffect{GripperLedEffectState::Init, 0.0}, 0, 0);
+    EXPECT_EQ(initColor.red, 0);
+    EXPECT_EQ(initColor.green, 122);
+    EXPECT_EQ(initColor.blue, 255);
+
+    const auto recordingOn = renderer.render(GripperLedEffect{GripperLedEffectState::Recording, 0.0}, 100, 0);
+    EXPECT_EQ(recordingOn.red, 0);
+    EXPECT_EQ(recordingOn.green, 255);
+    EXPECT_EQ(recordingOn.blue, 0);
+
+    const auto recordingOff = renderer.render(GripperLedEffect{GripperLedEffectState::Recording, 0.0}, 700, 0);
+    EXPECT_EQ(recordingOff.red, 0);
+    EXPECT_EQ(recordingOff.green, 0);
+    EXPECT_EQ(recordingOff.blue, 0);
+}
+
+TEST(GripperLedEffectRendererTest, StateTextKeepsCalibRunPrefix)
+{
+    const auto text = GripperLedEffectRenderer::stateText(
+        GripperLedEffect{GripperLedEffectState::CalibRun, 0.25});
+
+    EXPECT_EQ(text.rfind("CALIB_RUN:", 0), 0U);
+}
+
+}  // namespace

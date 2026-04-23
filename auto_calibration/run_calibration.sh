@@ -10,17 +10,37 @@ if [ "$EUID" -ne 0 ]; then
 fi
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-cd "$script_dir/../" || exit 1
+project_root="$(cd "$script_dir/../" && pwd)"
+shell_common="$project_root/scripts/lib/ugripper_shell_common.sh"
+
+if [ ! -f "$shell_common" ]; then
+  echo "[calibration][ERROR] missing shell helper: $shell_common"
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+. "$shell_common"
+
+log_info() {
+  ugripper_log "calibration" "INFO" "$*"
+}
+
+log_error() {
+  ugripper_log "calibration" "ERROR" "$*"
+}
 
 # ================= 配置部分 =================
-ENCODER_CALIB_BIN="${ENCODER_CALIB_BIN_OVERRIDE:-./build/src/sensor_recorder/zeroing}"
+DEFAULT_ENCODER_CALIB_BIN="$project_root/bin/SensorRecorder/zeroing"
+ENCODER_CALIB_BIN="${ENCODER_CALIB_BIN_OVERRIDE:-$DEFAULT_ENCODER_CALIB_BIN}"
 
 # --- HMI 灯效配置 ---
-HMI_HELPER_BIN="./build/src/gripper_hmi/gripper_hmi_test"
+DEFAULT_HMI_HELPER_BIN="$project_root/bin/GripperHmiTool/GripperHmiTool"
+HMI_HELPER_BIN="${HMI_HELPER_BIN_OVERRIDE:-$DEFAULT_HMI_HELPER_BIN}"
 HMI_PORT_ARGS=(--port /dev/right_gripper --port /dev/left_gripper)
 
 # --- 音频配置 ---
-AUDIO_PLAY_SCRIPT="./audio/audio_play.py"
+DEFAULT_AUDIO_PLAY_SCRIPT="$project_root/bin/UgripperRuntime/audio/audio_play.py"
+AUDIO_PLAY_SCRIPT="${AUDIO_PLAY_SCRIPT_OVERRIDE:-$DEFAULT_AUDIO_PLAY_SCRIPT}"
 AUDIO_PIPE="/tmp/umi_audio_pipe"
 AUDIO_PYTHON=""
 
@@ -33,27 +53,28 @@ MOUNT_POINT="${MOUNT_POINT_OVERRIDE:-/mnt/data_disk}"
 ZEROING_TIMEOUT_SEC="${ZEROING_TIMEOUT_SEC_OVERRIDE:-120}"
 
 # 停止业务服务，防止占用
-echo "Stopping ugripper.service..."
+log_info "project_root=$project_root"
+log_info "Stopping ugripper.service..."
 systemctl stop ugripper.service
 sleep 3
 
 
 # ================= 升级硬盘及文件检测 =================
-echo "Checking calibration trigger conditions..."
+log_info "Checking calibration trigger conditions..."
 
 if [ ! -d "$MOUNT_POINT" ]; then
-    echo "Error: calibration mount point not found: $MOUNT_POINT"
+    log_error "calibration mount point not found: $MOUNT_POINT"
     systemctl start ugripper.service
     exit 1
 fi
 
 if [ ! -f "$MOUNT_POINT/calibration.txt" ]; then
-    echo "Error: calibration.txt not found in $MOUNT_POINT. Exiting."
+    log_error "calibration.txt not found in $MOUNT_POINT. Exiting."
     systemctl start ugripper.service
     exit 1
 fi
 
-echo "Calibration trigger check passed: calibration.txt detected in $MOUNT_POINT."
+log_info "Calibration trigger check passed: calibration.txt detected in $MOUNT_POINT."
 
 # ================= 辅助函数 =================
 
@@ -64,7 +85,7 @@ run_as_user() {
 run_encoder_zeroing() {
     local side="$1"
 
-    echo "Running encoder zeroing for side=$side..."
+    log_info "Running encoder zeroing for side=$side..."
     if id "$TARGET_USER" >/dev/null 2>&1; then
         timeout --foreground "${ZEROING_TIMEOUT_SEC}s" runuser -u "$TARGET_USER" -- "$ENCODER_CALIB_BIN" "$side"
     else
@@ -98,13 +119,7 @@ describe_zeroing_failure() {
 }
 
 resolve_audio_python() {
-    if [ -x "./.venv/bin/python3" ]; then
-        AUDIO_PYTHON="./.venv/bin/python3"
-    elif command -v uv >/dev/null 2>&1; then
-        AUDIO_PYTHON="uv run python3"
-    else
-        AUDIO_PYTHON="python3"
-    fi
+    AUDIO_PYTHON="$(ugripper_resolve_python "$project_root")"
 }
 
 stop_led_helper() {
@@ -120,7 +135,7 @@ set_state() {
     stop_led_helper
 
     if [ ! -x "$HMI_HELPER_BIN" ]; then
-        echo "HMI helper not found: $HMI_HELPER_BIN"
+        log_error "HMI helper not found: $HMI_HELPER_BIN"
         return 1
     fi
 
@@ -157,13 +172,13 @@ kill_tree() {
     # 最后杀当前进程
     # 检查进程是否存在以避免报错
     if kill -0 "$_pid" 2>/dev/null; then
-        echo "Killing PID: $_pid"
+        log_info "Killing PID: $_pid"
         kill -9 "$_pid" 2>/dev/null
     fi
 }
 
 start_helpers() {
-    echo "Starting helper processes..."
+    log_info "Starting helper processes..."
     
     rm -f "$AUDIO_PIPE"
     mkfifo "$AUDIO_PIPE"
@@ -171,14 +186,14 @@ start_helpers() {
 
     if [ -x "$HMI_HELPER_BIN" ]; then
         set_state "INIT"
-        echo "HMI LED helper started (PID: $PID_LED_SHELL)"
+        log_info "HMI LED helper started (PID: $PID_LED_SHELL)"
     fi
 
     if [ -f "$AUDIO_PLAY_SCRIPT" ]; then
         resolve_audio_python
         run_as_user "$AUDIO_PYTHON $AUDIO_PLAY_SCRIPT" &
         PID_AUDIO_SHELL=$!
-        echo "Audio Manager shell started (PID: $PID_AUDIO_SHELL)"
+        log_info "Audio Manager shell started (PID: $PID_AUDIO_SHELL)"
     fi
 
     sleep 1.5
@@ -186,15 +201,15 @@ start_helpers() {
 }
 
 stop_helpers() {
-    echo "Stopping helper processes..."
+    log_info "Stopping helper processes..."
     # 使用 PID 递归清理进程
     if [ -n "$PID_LED_SHELL" ]; then
-        echo "Stopping LED process tree..."
+        log_info "Stopping LED process tree..."
         stop_led_helper
     fi
     
     if [ -n "$PID_AUDIO_SHELL" ]; then
-        echo "Stopping Audio process tree..."
+        log_info "Stopping Audio process tree..."
         kill_tree "$PID_AUDIO_SHELL"
     fi
 }
@@ -203,39 +218,39 @@ stop_helpers() {
 
 on_exit_cleanup() {
     trap '' EXIT SIGINT SIGTERM
-    echo ""
-    echo ">>> Trapped signal or exit. Cleaning up..."
+    printf '\n'
+    log_info "Trapped signal or exit. Cleaning up..."
     
     stop_helpers
     
     if ! systemctl is-active --quiet ugripper.service; then
-        echo "Restoring ugripper.service..."
+        log_info "Restoring ugripper.service..."
         systemctl start ugripper.service
     fi
     
-    echo ">>> Cleanup Finished."
+    log_info "Cleanup Finished."
 }
 
 trap on_exit_cleanup EXIT SIGINT SIGTERM
 
 # ================= 主逻辑 =================
 
-echo ">>> Calibration Triggered."
+log_info "Calibration Triggered."
 
-echo "Stopping ugripper.service..."
+log_info "Stopping ugripper.service..."
 systemctl stop ugripper.service
 sleep 1
 
 start_helpers
 
 # --- 阶段 1: 准备 ---
-echo "Phase 1: Preparation (Yellow Slow Flash)"
+log_info "Phase 1: Preparation (Yellow Slow Flash)"
 set_state "CALIB_PRE"       
 notify_audio "calib_start"  
 sleep 3                     
 
 # --- 阶段 2: 执行校准 ---
-echo "Phase 2: Calibrating (Yellow Fast Flash)"
+log_info "Phase 2: Calibrating (Yellow Fast Flash)"
 set_state "CALIB_RUN"
 notify_audio "calibrating"  
 
@@ -250,7 +265,7 @@ notify_audio "calibrating"
 
 # 2.2 Encoder
 if [ ! -x "$ENCODER_CALIB_BIN" ]; then
-    echo "Error: Encoder binary not found at $ENCODER_CALIB_BIN"
+    log_error "Encoder binary not found at $ENCODER_CALIB_BIN"
     set_state "ERROR_1"
     exit 1
 fi
@@ -267,7 +282,7 @@ for side in left right; do
         run_encoder_zeroing "$side"
     ) >"${ZEROING_LOGS[$side]}" 2>&1 &
     ZEROING_PIDS["$side"]=$!
-    echo "Started encoder zeroing for side=$side (pid=${ZEROING_PIDS[$side]})."
+    log_info "Started encoder zeroing for side=$side (pid=${ZEROING_PIDS[$side]})."
 done
 
 for side in left right; do
@@ -282,25 +297,25 @@ for side in left right; do
         echo
         FAILED_SIDES+=("${side}:${side_rc}")
     else
-        echo "Encoder zeroing succeeded for side=$side."
+        log_info "Encoder zeroing succeeded for side=$side."
     fi
 done
 
 sleep 2
 
 if [ "${#FAILED_SIDES[@]}" -eq 0 ]; then
-    echo "Phase 3: Done (Green Flash)"
+    log_info "Phase 3: Done (Green Flash)"
     set_state "CALIB_DONE"
     notify_audio "calib_done"
     sleep 3
 else
-    echo "Encoder zeroing completed with failures: ${FAILED_SIDES[*]}"
+    log_error "Encoder zeroing completed with failures: ${FAILED_SIDES[*]}"
     set_state "ERROR_1"
     sleep 3
     exit 1
 fi
 
-echo ">>> Calibration Sequence Finished."
-echo "Restoring ugripper.service..."
+log_info "Calibration Sequence Finished."
+log_info "Restoring ugripper.service..."
 systemctl start ugripper.service
 exit 0

@@ -103,7 +103,7 @@ write_manifest() {
   "$list_func" | while IFS= read -r rel_path; do
     [[ -n "$rel_path" ]] || continue
     [[ -f "$rel_path" ]] || continue
-    printf '%s\t%s\n' "$(sha256sum "$rel_path" | awk '{print $1}')" "$rel_path"
+    printf '%s\t%s\n' "$(sha256sum -- "$rel_path" | awk '{print $1}')" "$rel_path"
   done > "$tmp_file"
 
   mkdir -p "$(dirname "$output_path")"

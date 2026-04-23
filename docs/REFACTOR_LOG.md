@@ -1,0 +1,4312 @@
+# Refactor Log
+
+本文档记录 `ugripper` 仓库的内部重构过程。
+它与 `docs/CHANGELOG.md` 分工不同：
+
+- `docs/CHANGELOG.md`：记录对外可感知的软件功能变化、行为变化、修复与发布内容
+- `docs/REFACTOR_LOG.md`：记录内部结构调整、阶段推进、helper 收口、日志统一、路径治理、脚本拆分等重构事项
+
+## 使用规则
+
+1. 每次重构类改动完成后，都应按需更新本文件。
+2. 若本次改动没有引入对外可感知的软件行为变化，可以只更新本文件，不更新 `docs/CHANGELOG.md`。
+3. 若本次改动既有内部重构，也有对外行为变化：
+   - 在本文件记录重构内容
+   - 在 `docs/CHANGELOG.md` 记录对外行为变化
+4. 条目应尽量简洁、可追踪、可回看，不写流水账。
+
+## 条目模板
+
+### YYYY-MM-DD - <short-title>
+
+- 阶段：`Phase N`
+- 范围：`模块 / 脚本 / 文档`
+- 类型：`日志统一 / helper 收口 / 路径治理 / 脚本拆层 / 打包边界 / 目录收口 / 基线冻结`
+- 主要改动：
+  - `<改动点 1>`
+  - `<改动点 2>`
+- 风险与行为等价说明：
+  - `<是否仅内部重构，或可能影响哪些行为>`
+- 已执行验证：
+  - `<本地编译 / shell 语法检查 / py_compile / 最小 smoke ...>`
+- 后续待验证：
+  - `<主仓库编译 / Docker ARM / ARM 板 smoke ...>`
+
+## Entries
+
+### 2026-04-22 - architecture-doc-realigned-to-post-merge-reality
+
+- 阶段：`pp_main ugripper rollout / architecture alignment`
+- 范围：`docs/repo-architecture.md`
+- 类型：`文档对齐 / 架构口径收敛`
+- 主要改动：
+  - 重写 `docs/repo-architecture.md`，不再按“尚未并仓”的预备状态描述当前系统
+  - 明确当前实现真源已拆成两组：
+    - `pp_main/standalone + pp_main/src + pp_main/test`
+    - `ugripper` 仓库内的部署、打包、文档和结果归档
+  - 把“当前只是需要临时上传到 `ugripper` 分支”与“重新做架构迁移”两件事区分开
+- 风险与行为等价说明：
+  - 本轮只更新架构说明文档，不修改 `pp_main` 或 `ugripper` 的任何运行时代码、打包入口或测试脚本
+  - 风险主要在于旧文档仍以“并仓前阶段”描述当前状态，容易误导后续判断代码真源；这轮更新用于关闭该口径偏差
+- 已执行验证：
+  - 对照以下文档与实现完成人工核对：
+    - `docs/agent/overview.md`
+    - `docs/reference-aligned-refactor-next-steps.md`
+    - `docs/standalone-merge-plan.md`
+    - `/home/songwl/swl_ws/pp_main/standalone/*`
+    - `/home/songwl/swl_ws/pp_main/src/utils/*`
+    - `/home/songwl/swl_ws/pp_main/test/src/*`
+    - `/home/songwl/swl_ws/pp_main/test/scripts/*`
+- 后续待验证：
+  - 若后续真的要把当前 `pp_main` 已合并代码回填到 `ugripper` 分支，应单独再产出一份“路径映射清单”，不要直接把这份架构文档当成同步脚本
+
+### 2026-04-23 - service-1h-host-check-video-windows-rerun
+
+- 阶段：`pp_main ugripper rollout / L4 service soak`
+- 范围：`board results`、`测试文档`
+- 类型：`宿主机离线复核 / 结果口径收紧 / 文档回填`
+- 主要改动：
+  - 在已拉回本机的 `service` `1h` 样本上，直接复用 `pp_main/test/scripts/check_video_windows.py` 做整段窗口复核：
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis/media/left_cam_main.mkv`
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis/media/right_cam_main.mkv`
+  - 新增宿主机脚本复核结果资产：
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis/video_report_left_cam_main_host_script_full.json`
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis/video_report_right_cam_main_host_script_full.json`
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis/video_report_left_cam_main_host_script_full.log.gz`
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis/video_report_right_cam_main_host_script_full.log.gz`
+  - 回填更新：
+    - `tmp/board_results/service_soak1h_merge16_20260422_analysis/test_summary.json`
+    - `tmp/board_results/service_soak1h_merge16_20260422_analysis/notes.txt`
+    - `docs/ppmain-ugripper-test-plan.md`
+    - `docs/ppmain-ugripper-test-summary.md`
+- 风险与行为等价说明：
+  - 本轮不修改 `pp_main` 运行时代码、analyzer 规则或板端脚本
+  - 只是把 `service 1h` 样本的视频窗口检查口径从“仅有宿主机自定义全扫结果”进一步收紧为“宿主机直接复用板端默认 `check_video_windows.py`”
+  - 运行位置仍然是宿主机，不等于板端原地对 `1h` 样本跑满逐窗口检查
+- 已执行验证：
+  - 宿主机执行：
+    - `python3 /home/songwl/swl_ws/pp_main/test/scripts/check_video_windows.py --input /home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis/media/left_cam_main.mkv --window-sec 2 --min-frame-ratio 0.5 --json-out /home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis/video_report_left_cam_main_host_script_full.json`
+    - `python3 /home/songwl/swl_ws/pp_main/test/scripts/check_video_windows.py --input /home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis/media/right_cam_main.mkv --window-sec 2 --min-frame-ratio 0.5 --json-out /home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis/video_report_right_cam_main_host_script_full.json`
+  - 结果：
+    - `video_report_left_cam_main_host_script_full.json -> ok=true, validation_reason=ok, windows=1987`
+    - `video_report_right_cam_main_host_script_full.json -> ok=true, validation_reason=ok, windows=1987`
+    - `left_cam_main min/max/avg frame_count = 100 / 123 / 121.270`
+    - `right_cam_main min/max/avg frame_count = 102 / 123 / 121.344`
+    - `left elapsed=11m14.81s`
+    - `right elapsed=11m57.25s`
+- 后续待验证：
+  - 若后续要继续增强 release gate，可考虑把当前宿主机 `check_video_windows.py` 结果纳入统一汇总报告，而不是只停留在 `service 1h` 子目录
+  - 若后续仍想进一步逼近板端最终口径，可补“板端短样本直接跑同脚本”和“宿主机长样本全扫”之间的映射说明，但当前证据已经足够关闭“未直接复用板端窗口脚本”的缺口
+
+### 2026-04-23 - refactor-architecture-doc-realigned-to-post-merge-reality
+
+- 阶段：`pp_main ugripper rollout / architecture alignment`
+- 范围：`docs/ugripper-refactor-architecture.md`
+- 类型：`文档对齐 / 汇报口径修正`
+- 主要改动：
+  - 重写 `docs/ugripper-refactor-architecture.md`，不再把当前状态描述成“仓内重构、并仓准备阶段”
+  - 改为直接按 `pp_main` 已落地实现汇报：
+    - `UgripperRuntime`
+    - `CameraRecorder`
+    - `SensorRecorder`
+    - `GripperHmiTool`
+    - `pp_main/test`
+  - 同时保留 `ugripper` 仓库当前仍承担的部署、打包、资源、文档、结果归档职责说明
+- 风险与行为等价说明：
+  - 本轮只更新架构汇报文档，不修改 `pp_main` 或 `ugripper` 中任何运行时代码、打包逻辑或测试脚本
+  - 这轮修正的是“汇报口径与现实实现不一致”的问题，不是新的架构迁移动作
+- 已执行验证：
+  - 对照以下实现完成人工核对：
+    - `/home/songwl/swl_ws/pp_main/standalone/UgripperRuntime/*`
+    - `/home/songwl/swl_ws/pp_main/standalone/CameraRecorder/*`
+    - `/home/songwl/swl_ws/pp_main/standalone/SensorRecorder/*`
+    - `/home/songwl/swl_ws/pp_main/standalone/GripperHmiTool/*`
+    - `/home/songwl/swl_ws/pp_main/src/utils/*`
+    - `/home/songwl/swl_ws/pp_main/test/src/*`
+    - `/home/songwl/swl_ws/pp_main/test/scripts/*`
+  - 对照以下文档完成人工核对：
+    - `docs/agent/overview.md`
+    - `docs/reference-aligned-refactor-next-steps.md`
+    - `docs/standalone-merge-plan.md`
+- 后续待验证：
+  - 若后续要把当前 `pp_main` 已合并代码临时回填到 `ugripper` 分支，应单独产出“路径映射清单”或“同步清单”，不要把这份汇报文档直接当操作说明
+
+### 2026-04-22 - merge16-motion-alert-reprobe-and-stability-writeback
+
+- 阶段：`pp_main ugripper rollout / L4 intermittent issue audit`
+- 范围：`board results`、`测试文档`
+- 类型：`偶发现象复测 / 证据回填 / 文档追溯`
+- 主要改动：
+  - 新增 `merge16` 板端 `motion alert` 偶发现象复测结果目录：
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/motion_alert_reprobe_merge16_20260422`
+  - 将 `5` 轮静止短录复测结论回填到：
+    - `docs/ppmain-ugripper-test-plan.md`
+    - `docs/REFACTOR_LOG.md`
+- 风险与行为等价说明：
+  - 本轮不修改 `pp_main` 运行时代码、IMU 阈值或 motion alert 逻辑
+  - 只是把“已观察到一次的启动早期 overspeed 异常”与“后续 `5` 轮静止短录未复现”这两组事实同时固化，避免后续口径漂移
+- 已执行验证：
+  - 板端 `ugripper.service` 重启后，连续 `5` 轮静止短录：
+    - `episode_20260422_0043`
+    - `episode_20260422_0044`
+    - `episode_20260422_0045`
+    - `episode_20260422_0046`
+    - `episode_20260422_0047`
+  - 结果：
+    - `5/5` 轮 `validation phase end ... valid=true`
+    - 这 `5` 轮对应 service journal 中未出现 `motion overspeed detected`
+    - 本轮人工观察未再听到 gripper 蜂鸣
+  - 追溯保留的先前异常证据：
+    - `2026-04-22 16:12:37 CST`
+    - `motion overspeed detected: side=right reason=accel gyro=0.000 accel_excess=9.807`
+    - `motion overspeed detected: side=left reason=accel gyro=0.000 accel_excess=9.807`
+- 后续待验证：
+  - 若后续还要继续收根因，优先方向应是“录制启动期 IMU 样本稳定性 / 首批样本过滤窗口”，而不是继续按常规静止短录堆轮次
+  - 在不改逻辑的前提下，可继续做“录制中 CPU 实测 + 更长时长录制”验证，确认该偶发现象是否与长录压力场景相关
+
+### 2026-04-22 - merge16-service-1h-soak-under-cpu-pressure
+
+- 阶段：`pp_main ugripper rollout / L4 service soak`
+- 范围：`board results`、`测试文档`
+- 类型：`板端长录回归 / CPU 压力验证 / 文档回填`
+- 主要改动：
+  - 新增 `merge16` 板端 `1h` `service` 压力长录结果目录：
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422`
+  - 新增 `episode_20260422_0050` 离线归档目录：
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis`
+  - 新增简明测试结构/结果索引文档：
+    - `/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-summary.md`
+  - 将本轮 `1h / service / CPU 90%+` 长录结论回填到：
+    - `docs/ppmain-ugripper-test-plan.md`
+    - `docs/REFACTOR_LOG.md`
+- 风险与行为等价说明：
+  - 本轮不修改 `pp_main` 运行时代码、analyzer 规则或板端脚本
+  - 只是把已有 `merge16` service 长录口径进一步拉长，并把“录制过程确实处于高 CPU 压力下”补成结构化证据
+  - 本轮离线归档最终已补到主摄 host full sweep，但视频窗口统计实现仍是宿主机线性全扫版本，不是板端逐窗口脚本原样跑满 `1h`
+- 已执行验证：
+  - 板端拉起 `7` 个 busy-loop worker，并在录制前用 `top` 确认整机 busy 约 `90%+`
+  - 板端 `ugripper.service` 入口长录：
+    - 样本：`episode_20260422_0050`
+    - `recording started: 2026-04-22 16:52:33 CST`
+    - `stopping recording: 2026-04-22 17:58:47 CST`
+    - `validation phase end ... valid=true elapsed_ms=1621`
+  - 板端长录 CPU 监控：
+    - 目录：`/tmp/service_long_pressure_1h_20260422_165216`
+    - 汇总：
+      - `samples=3184`
+      - `avg_busy=95.2%`
+      - `min_busy=81.7%`
+      - `max_busy=100.0%`
+  - service journal 追溯：
+    - 本轮未出现：
+      - `motion overspeed detected`
+      - `health fault`
+      - `camera recorder exited`
+      - `sensor recorder exited`
+      - `episode validation failed`
+  - `episode_20260422_0050` 离线归档：
+    - 板端执行：
+      - `board_service_integration_check.sh --skip-video-check`
+    - 结果：
+      - `episode_summary.json -> ok=true, validation_reason=ok`
+      - `sensor_report_left/right.json -> ok=true`
+      - `gripper_report.json -> ok=true`
+      - `hmi_button_report.json -> ok=true`
+      - 左右主摄 `ffprobe`：
+        - `left_cam_main duration=3973.643885s fps=60/1`
+        - `right_cam_main duration=3973.691914s fps=60/1`
+  - `episode_20260422_0050` 宿主机主摄 full sweep：
+    - 结果目录：
+      - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak1h_merge16_20260422_analysis`
+    - 结果：
+      - `video_report_left_cam_main_host_full.json -> ok=true, validation_reason=ok, windows=1987`
+      - `video_report_right_cam_main_host_full.json -> ok=true, validation_reason=ok, windows=1987`
+      - `left_cam_main min/max/avg frame_count = 97 / 123 / 119.995`
+      - `right_cam_main min/max/avg frame_count = 102 / 122 / 119.977`
+- 后续待验证：
+  - 若要把这轮长录进一步纳入更正式 release gate，下一步应把当前 `merge16` 的 `camera / service / gripper_hmi / motion_alert reprobe` 收成统一总结
+  - 若后续需要继续压边界，可考虑在同样 CPU 压力下补更长时长或 overnight soak，但当前 `merge16` 已经具备一轮较强的 `1h / service / CPU 90%+ / host full sweep` 正样本
+
+### 2026-04-22 - merge16-service-soak-and-board-script-env-fixes
+
+- 阶段：`pp_main ugripper rollout / L4 service soak`
+- 范围：`pp_main/test/scripts`、`board results`、`测试文档`
+- 类型：`板端 soak 回归 / 脚本环境修正 / 文档回填`
+- 主要改动：
+  - 修正板端脚本默认环境，避免多数据盘与板端 checker 路径导致的误判：
+    - `board_test_common.sh`
+      - `find_default_episode_root()` 从“字典序第一个 data root”改为优先选择“包含最近 episode 的 root”
+      - `default_check_sensor_mcap_bin()` 新增板端 `test/scripts/check_sensor_mcap` fallback
+    - `board_service_integration_check.sh`
+      - 改为复用 `default_check_sensor_mcap_bin()`，不再硬编码 `build/x86/test/...`
+    - `board_sensor_smoke.sh`
+      - 改为复用 `default_check_sensor_mcap_bin()`
+    - `board_service_episode_loop_check.sh`
+      - 新增 `--checker-bin`，可把板端 checker 路径透传给 validator
+  - 在 `merge16` 板端执行 `service` 入口 `4-cycle soak`，并把结果回传到：
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak_merge16_20260422_144920`
+    - 汇总：`/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak_merge16_20260422_144920/service_soak_summary.json`
+- 风险与行为等价说明：
+  - 本轮对脚本的修改只影响“默认环境探测与参数透传”，不修改 analyzer 判定逻辑或 `UgripperRuntime` 行为
+  - 这轮 `service soak` 的样本结论有效，但执行过程中用来驱动板端的仍是“修正前的已安装脚本”；因此“脚本默认环境已修”需要通过后续重新下发脚本或新包验证
+- 已执行验证：
+  - 脚本语法检查：
+    - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_test_common.sh`
+    - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_service_integration_check.sh`
+    - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_service_episode_loop_check.sh`
+    - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_sensor_smoke.sh`
+  - 板端 `merge16` `service soak`：
+    - 条件：`6` 个 CPU busy-loop worker、连续 `4` 轮 `ShortUp -> wait 3-5s -> ShortDown`
+    - 样本：
+      - `episode_20260422_0034`
+      - `episode_20260422_0035`
+      - `episode_20260422_0036`
+      - `episode_20260422_0037`
+    - 结果：
+      - 四轮 `episode_summary.json` 均为 `ok=true, validation_reason=ok`
+      - `service_soak_summary.json -> all_ok=true`
+  - 额外观察：
+    - `hmi_button_report` 出现 `LongDownPressed count=1` 的累计现象，但没有阻塞 `ShortUpPressed / ShortDownPressed` 主路径，也未造成任何一轮失败
+- 后续待验证：
+  - 需要把修正后的 `board_service_episode_loop_check.sh` / `board_service_integration_check.sh` / `board_test_common.sh` 重新下发到板子，再按“无需人工补 checker-bin / episode-root”的默认路径补跑一轮，确认环境问题真正关闭
+  - 若继续推进 release gate，下一步应把这轮 `service soak` 与现有 `camera long stress`、`gripper_hmi active`、`service enhanced` 一起汇总
+- 板端补充验证：
+  - 修正后的脚本已重新下发到板子 `/home/ubuntu/pp_main/test/scripts`
+  - 使用默认参数直接执行 `board_service_integration_check.sh`：
+    - 未显式传 `--episode-root`
+    - 未显式传 `--checker-bin`
+  - 板端输出已确认：
+    - `find_default_episode_root()` 自动选中 `/mnt/data_disk/dap912263b000689/data`
+    - `board_service_integration_check.sh` 自动解析板端 `test/scripts/check_sensor_mcap`
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/service_env_fix_verify_merge16_20260422_152000`
+    - 汇总：`/home/songwl/swl_ws/ugripper/tmp/board_results/service_env_fix_verify_merge16_20260422_152000/episode_summary.json`
+    - 结果：`ok=true, validation_reason=ok`
+  - 继续使用默认参数直接执行修正后的 `board_service_episode_loop_check.sh`：
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/service_loop_readyfix_verify_merge16_20260422_151736`
+    - 汇总：
+      - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_loop_readyfix_verify_merge16_20260422_151736/cycle_01/episode_summary.json`
+      - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_loop_readyfix_verify_merge16_20260422_151736/loop_summary.txt`
+    - 结果：
+      - 新样本：`episode_20260422_0039`
+      - `ok=true, validation_reason=ok`
+    - 说明：
+      - 日志中已出现 `Wait For Episode 1 Artifacts`
+      - 说明 loop 脚本已经不再在“刚发现 episode 目录”时抢跑校验，而是会等待必要产物落齐后再调用 validator
+  - `merge16` `service` `20min` soak：
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak20_merge16_20260422_152341`
+    - 汇总：`/home/songwl/swl_ws/ugripper/tmp/board_results/service_soak20_merge16_20260422_152341/test_summary.json`
+    - 条件：
+      - `ugripper.service` 入口
+      - `6` 个 CPU busy-loop worker
+      - 单轮长录约 `20` 分钟
+      - 样本：`episode_20260422_0040`
+    - 结果：
+      - `ok=true, validation_reason=ok`
+      - `runtime_validation_ok=true`
+      - `runtime_stop_elapsed_ms=2267`
+      - `left_video_ok=true`
+      - `right_video_ok=true`
+      - `sensor_left_ok=true`
+      - `sensor_right_ok=true`
+      - 主摄宿主机 `10s` 窗口检查全部通过：
+        - `left_windows=126`
+        - `right_windows=126`
+    - 说明：
+      - 这轮确认 `merge16` 在 `20min / service / CPU pressure` 条件下没有复现主摄坏段、`validation_failed` 或 blocking HMI/gripper failure
+      - 同时也确认了另一个脚本边界：
+        - `board_service_episode_loop_check.sh` 适合短循环录制，不适合“长录开始后立即等待产物齐”的场景
+        - 长录更合理的执行口径应是“先长录，stop 后再对目标 episode 单独做集成校验”
+
+### 2026-04-22 - merge16-long-camera-stress-host-verify
+
+- 阶段：`pp_main ugripper rollout / L4 camera stress`
+- 范围：`board results`、`host ffmpeg toolchain`、`测试文档`
+- 类型：`长时压力复核 / 证据补强 / 文档回填`
+- 主要改动：
+  - 在宿主机用户目录安装 `ffmpeg/ffprobe` 静态包，避免继续受板端解码性能限制
+  - 对已回传的 `merge16` 长时压力样本目录执行主摄整段 `2s window + decode-check` 复核：
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/camera_stress_long_merge16_20260422_135009/video_report_left_cam_main_host_full.json`
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/camera_stress_long_merge16_20260422_135009/video_report_right_cam_main_host_full.json`
+  - 同步把“板端长录 + 宿主机整段解码复核”的边界写回 `docs/ppmain-ugripper-test-plan.md`
+- 风险与行为等价说明：
+  - 本轮不修改 `pp_main` 运行时代码、录制逻辑或板端脚本行为
+  - 只是补强现有 `merge16` 样本的分析证据，把之前板端 spot-check 提升为宿主机 full decode
+- 已执行验证：
+  - 宿主机代理链路恢复后，下载并安装用户态静态工具：
+    - `ffmpeg version n7.1.3-45-g2d6ee37238-20260421`
+    - `ffprobe version n7.1.3-45-g2d6ee37238-20260421`
+  - 使用宿主机工具执行：
+    - `python3 /home/songwl/swl_ws/pp_main/test/scripts/check_video_windows.py --input /home/songwl/swl_ws/ugripper/tmp/board_results/camera_stress_long_merge16_20260422_135009/left_cam_main.mkv --window-sec 2 --min-frame-ratio 0.5 --decode-check --json-out /home/songwl/swl_ws/ugripper/tmp/board_results/camera_stress_long_merge16_20260422_135009/video_report_left_cam_main_host_full.json`
+    - `python3 /home/songwl/swl_ws/pp_main/test/scripts/check_video_windows.py --input /home/songwl/swl_ws/ugripper/tmp/board_results/camera_stress_long_merge16_20260422_135009/right_cam_main.mkv --window-sec 2 --min-frame-ratio 0.5 --decode-check --json-out /home/songwl/swl_ws/ugripper/tmp/board_results/camera_stress_long_merge16_20260422_135009/video_report_right_cam_main_host_full.json`
+  - 结果：
+    - `left_cam_main_host_full -> ok=true, validation_reason=ok, duration_sec=119.429741, windows=60`
+    - `right_cam_main_host_full -> ok=true, validation_reason=ok, duration_sec=119.429922, windows=60`
+- 后续待验证：
+  - 若要继续收敛相机稳定性边界，下一步应优先补更长时长 `service` 入口压力，而不是只重复 direct camera path
+  - 若后续板端 `ffmpeg` 仍偏慢，可继续默认采用“板端录制 + 宿主机 full decode 复核”的组合口径
+
+### 2026-04-22 - gripper-periodic-io-threshold-gates
+
+- 阶段：`pp_main ugripper rollout / enhanced regression`
+- 范围：`pp_main/test/scripts`、`pp_main/test/src/gripper_hmi`、`测试文档`
+- 类型：`测试资产增强 / 板端门禁收口`
+- 主要改动：
+  - 扩展 `check_gripper_ack_log.py` 的 `io_summary` 聚合口径，新增统计：
+    - `tx_led`
+    - `tx_beep`
+    - `tx_state_req`
+    - `rx_frames`
+    - `rx_key_reports`
+    - `rx_beep_states`
+  - 在 `test/src/gripper_hmi/CMakeLists.txt` 新增 host-only 通过/失败用例，固定上述周期控制流量门禁
+  - 为板端脚本补参数透传：
+    - `board_gripper_hmi_log_check.sh -> --require-io-total-at-least`
+    - `board_gripper_hmi_active_check.sh -> --require-io-total-at-least`
+    - `board_service_integration_check.sh -> --require-gripper-io-total-at-least`
+  - 同步更新 `docs/ppmain-ugripper-test-plan.md`，把这轮能力和“不是新板端重跑”的边界写清楚
+- 风险与行为等价说明：
+  - 本轮只增强 analyzer 与板端测试入口，不修改 `UgripperRuntime`、`GripperHmiTool` 或协议实现本身
+  - 目的不是改变运行时行为，而是把“gripper 控制帧是否持续在发、是否持续有接收帧”纳入正式结构化门禁
+- 已执行验证：
+  - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_gripper_hmi_log_check.sh`
+  - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_gripper_hmi_active_check.sh`
+  - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_service_integration_check.sh`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_hmi_driver_logic -j8`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'test_check_gripper_ack_log_(pass|fail|io_fail|retry_reconnect_pass|retry_reconnect_fail|periodic_io_totals_pass|periodic_io_totals_fail)'`
+  - 使用现有板端日志重放：
+    - `board_service_integration_merge15_20260422/ugripper_service.log`
+    - `gripper_hmi_active_merge15_manual/ugripper_service.log`
+  - 结果：
+    - `7/7` gripper analyzer 相关 host-only 测试通过
+    - 增强后 JSON 已能从真实板端日志提取 `tx_led / tx_beep / tx_state_req / rx_frames` 等统计
+- 后续待验证：
+  - 用新的 `--require-io-total-at-least` / `--require-gripper-io-total-at-least` 参数，在板端正式补跑一轮 `service` 与 `gripper_hmi` 增强回归
+  - 再决定是否需要单独新增 “gripper control stability soak” 标准入口
+- 板端补充验证：
+  - `merge16` / `service` 增强回归：
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/service_enhanced_merge16_20260422_133510`
+    - 汇总：`/home/songwl/swl_ws/ugripper/tmp/board_results/service_enhanced_merge16_20260422_133510/service_enhanced_summary.json`
+    - 结果：
+      - `episode_20260422_0032`
+      - `validation_error.log` 不存在
+      - `ShortUpPressed`、`ShortDownPressed`、`Ready`、`Recording` 均命中
+      - 增强后的 `gripper io totals` 门禁通过
+  - `merge16` / `gripper_hmi` 人工交互增强回归：
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/gripper_hmi_active_merge16_manual_20260422_134215`
+    - 汇总：
+      - `/home/songwl/swl_ws/ugripper/tmp/board_results/gripper_hmi_active_merge16_manual_20260422_134215/log_check_full/gripper_report.json`
+      - `/home/songwl/swl_ws/ugripper/tmp/board_results/gripper_hmi_active_merge16_manual_20260422_134215/log_check_full/hmi_button_report.json`
+    - direct HMI 观察：
+      - `READY` 可见，但亮灯时长体感不足 `1s`
+      - `RECORDING` 看到绿色闪烁约 `3` 次
+      - `ERROR_1` 红灯闪烁正常
+      - `beep` 已听到
+    - button/analyzer：
+      - `episode_20260422_0033`
+      - `validation phase end ... valid=true`
+      - `ShortUpPressed`、`ShortDownPressed`、`ShutdownPromptRequested`、`Ready`、`Recording` 全部命中
+    - 追溯修正：
+      - 首次收集的短日志因截取过早，一度误报缺少 `ShutdownPromptRequested`
+      - 补抓完整日志 `ugripper_service_full.log` 后，已确认：
+        - `left dual-button chord armed`
+        - `ShutdownPromptRequested`
+        - `playing: shutdown`
+      - 因此该误差来自采集窗口，而非用户未完成动作或运行时未触发 prompt
+
+### 2026-04-22 - merge9-runtime-rollback-to-test-boundary
+
+- 阶段：`pp_main ugripper rollout / merge9 regression audit`
+- 范围：`pp_main standalone/CameraRecorder`、`pp_main standalone/UgripperRuntime`、`host-only tests`
+- 类型：`运行时语义最小回退 / 测试边界收口`
+- 主要改动：
+  - 在重新对照 `standalone-merge-plan.md`、`reference-aligned-refactor-next-steps.md` 与当前 `merge9+` 落地代码后，确认有一批改动已经越过“为了统一测试行为而补测试资产”的边界，直接改到了 runtime / recorder 停机语义
+  - 按“只保留测试资产、先回退可疑运行时改动”的最小方案，先把以下实现收回到更接近仓内基线的口径：
+    - `pp_main/standalone/CameraRecorder/camera_recorder.cc`
+      - shell recorder child 恢复 `setsid()`
+      - shell recorder stop 从 `kill(pid_, sig)` 改回 `kill(-pid_, sig)`
+      - stereo session child 也补回 `setsid()`
+    - `pp_main/standalone/CameraRecorder/camera_domain.cc`
+      - `BuildHybridCameraCommand()` 与 `BuildStereoSessionCommand()` 不再额外包 `exec ...`
+    - `pp_main/standalone/UgripperRuntime/runtime_domain.cc`
+      - `camera_recorder` worker stop mode 从 `SigIntThenTermThenKill` 改回 `SigTermThenKill`
+    - `pp_main/standalone/UgripperRuntime/runtime_process.cc`
+      - 删除“`SIGINT` 第一跳只发父 PID”的特化逻辑，恢复 `SigIntThenTermThenKill` 走既有 `SendSignal()` 路径
+  - 同步修正 host-only 断言，移除依赖 shell trap 细节、稳定性较差的 `SIGINT parent-first` 测试口径
+- 风险与行为等价说明：
+  - 本轮保留了板端测试脚本、离线 analyzer、`HMI_DIAG / GRIPPER_DIAG` 诊断日志等测试与可观测性资产，不回退这部分
+  - 本轮只回退“明显触及运行时停机语义”的改动，目标是先恢复到更接近 `merge8` / 仓内基线的行为，再上板验证是否仍复现当前 `camera` suite 问题
+  - 这不是最终根因确认结论；它只是把“测试收口”和“运行时语义改动”重新拆开，方便后续 A/B 验证
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_process_policy test_recording_orchestrator -j8`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_verify --target CameraRecorder UgripperRuntime -j8`
+  - `/home/songwl/swl_ws/pp_main/build/x86/test/src/record_runtime/test_process_policy`
+  - `/home/songwl/swl_ws/pp_main/build/x86/test/src/record_runtime/test_recording_orchestrator`
+  - 结果：
+    - `test_process_policy` `3/3` 通过
+    - `test_recording_orchestrator` `11/11` 通过
+- 板端补充验证：
+  - ARM 打包与安装：
+    - 容器内补装 `rsync` 后成功生成 `ugripper_1.2.8+merge14_arm64.deb`
+    - 但随后核对发现：
+      - `package_ugripper_deb.sh` 打包来源仍是 `install/arm`
+      - 当时 `install/arm/bin/CameraRecorder/CameraRecorder` 与 `build/arm/standalone/CameraRecorder/CameraRecorder` SHA256 不一致
+      - 板端 `merge14` 安装后的 `/opt/ugripper/bin/CameraRecorder/CameraRecorder` 哈希与旧 `install/arm` 一致，而不等于本轮回退后刚编出的新二进制
+    - 因此：
+      - `merge14` 只能用于“最短 service 动作恢复”的参考证据
+      - 不能把它当作“已安装正式包确实包含本轮回退修复”的最终证据
+  - direct `CameraRecorder` 最小对照：
+    - 回退版临时二进制：`/tmp/CameraRecorder_merge9rollback`
+    - 安装版二进制：`/opt/ugripper/bin/CameraRecorder/CameraRecorder`
+    - 同板、同配置、同命令：
+      - `timeout -s INT 8s ... --only left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
+    - 结果：
+      - 回退版可生成 `info.json + 6` 路常规视频
+      - 安装版仍只生成 `info.json`
+    - 结论：
+      - 当前 `6` 路常规视频失败至少有一部分收敛在 `CameraRecorder` 当前实现差异，而不只是 `UgripperRuntime` 外层 stop policy
+  - `merge14` 板端最短 service 路径：
+    - 人工动作：短按 `UP` 开始录制，短按 `DOWN` 停止
+    - episode：`/mnt/data_disk/dap912263b000689/data/episode_20260422_0001`
+    - `journalctl` 关键结果：
+      - `recording started`
+      - `stop camera_recorder done: ok=true elapsed_ms=250`
+      - `stop sensor_recorder done: ok=true elapsed_ms=50`
+      - `validation phase end: ... valid=true elapsed_ms=988`
+    - episode 抽样：
+      - `validation_error.log` 不存在
+      - `left_cam_main.mkv start_time=0.502 duration=3.720598 nb_read_packets=224`
+      - `right_cam_main.mkv start_time=0.521 duration=3.720560`
+      - `left_tcam_l.mkv start_time=0.000 duration=4.008000 nb_read_packets=480`
+    - 结论：
+      - 当前 `merge14` 板端最短 service 录制已恢复通过
+- `merge15` 重新安装有效包后的正式板端验证：
+  - 在容器内重新执行：
+    - `cmake --build build/arm/standalone --target CameraRecorder UgripperRuntime install -j8`
+    - `TARGET_PLATFORM=arm APP_VERSION_SUFFIX=+merge15 bash ./package_ugripper_deb.sh`
+  - 重新核对 SHA256：
+    - `merge15` 安装后板端：
+      - `/opt/ugripper/bin/CameraRecorder/CameraRecorder -> 51526f8b...`
+      - `/opt/ugripper/bin/UgripperRuntime/UgripperRuntime -> fba88759...`
+    - 说明：
+      - 这轮 finally 换成了更新后的 `install/arm` 产物
+  - `board_camera_stress.sh`：
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/board_camera_stress_merge15_20260422`
+    - 汇总：`/home/songwl/swl_ws/ugripper/tmp/board_results/board_camera_stress_merge15_20260422/test_summary.json`
+    - 结论：
+      - `ok=true`
+      - `validation_reason=ok`
+      - `left_cam_main duration_sec=29.339781`
+      - `right_cam_main duration_sec=29.399918`
+      - `max span gap ≈ 0.06s`
+    - 说明：
+      - `30s`、`7` 个 CPU busy-loop、开启 `decode-check` 条件下左右主摄窗口级帧数和解码检查均通过
+      - 这轮结果和先前 `merge13` 的“只生成 info.json”失败形态相比已经恢复
+  - `board_service_integration_check.sh`：
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/board_service_integration_merge15_20260422`
+    - 汇总：`/home/songwl/swl_ws/ugripper/tmp/board_results/board_service_integration_merge15_20260422/episode_summary.json`
+    - episode：`/mnt/data_disk/dap912263b000689/data/episode_20260422_0002`
+    - 结论：
+      - `ok=true`
+      - `validation_reason=ok`
+      - `sensor/video/gripper/hmi` 全部通过
+      - `left_cam_main duration_sec=3.38462`
+      - `right_cam_main duration_sec=3.420601`
+    - 说明：
+      - 本轮是当前正确安装的 `merge15` 包在板端的正式 service 集成验证，而不只是人工观察日志
+  - `board_sensor_smoke.sh`：
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/board_sensor_smoke_merge15_20260422`
+    - 汇总：`/home/songwl/swl_ws/ugripper/tmp/board_results/board_sensor_smoke_merge15_20260422/test_summary.json`
+    - 结论：
+      - `ok=true`
+      - `validation_reason=ok`
+    - 说明：
+      - 左右 `MCAP` 都通过 analyzer，`encoder/imu` 消息计数正常，未观察到 gap/regression
+  - `board_gripper_hmi_active_check.sh`：
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/gripper_hmi_active_merge15_manual`
+    - 汇总：
+      - `test_summary.json`
+      - `gripper_report.json`
+      - `hmi_button_report.json`
+    - direct HMI 人工观察：
+      - `READY` 看到绿色
+      - `RECORDING` 看到绿灯闪烁
+      - `ERROR_1` 看到红灯闪烁
+      - `beep` 已听到
+    - button phase / analyzer：
+      - `ShortUpPressed`、`ShortDownPressed`、`ShutdownPromptRequested`、`Ready`、`Recording` 全部命中
+      - `episode_20260422_0004` 无 `validation_error.log`
+      - `validation phase end ... valid=true`
+      - `test_summary.json -> ok=true`
+    - 中断样本边界：
+      - `episode_20260422_0003` 是一次测试中途人为 `restart service` 导致的中断样本，最终报 `stereo session metadata` 缺失
+      - 该样本只保留为“录制中观测到一次瞬时 hmi_ports_inactive”证据，不计入正式通过/失败口径
+  - `T16` merge15 release-gate 汇总：
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/release_gate_merge15_20260422`
+    - 汇总：`/home/songwl/swl_ws/ugripper/tmp/board_results/release_gate_merge15_20260422/test_summary.json`
+    - 结论：
+      - `ok=true`
+      - `release_gate_ready=true`
+      - `validation_reason=ok`
+      - `package_versions=["1.2.8+merge15"]`
+    - 说明：
+      - `camera / sensor / service / gripper_hmi` 四个 suite 已全部在同一安装包版本 `1.2.8+merge15` 上收口通过
+      - 当前 `pp_main` 合并后 `ugripper` 的第一版正式板端回归已经完成
+  - 瞬时 `hmi_ports_inactive` 增强回归补充：
+    - 背景：
+      - 板端 button-phase 首次尝试中保留过一次录制中 `hmi_ports_inactive -> health_recovered` 瞬时样本
+      - 代码复核后确认：
+        - `HealthMonitor` 的 `hmi_ports_inactive` 不是“串口已断开”
+        - 而是某个已连接 HMI 端口在 `2500ms` 超时窗口内没有新的接收帧，`driver->getSnapshot(activeTimeoutMs).active == false`
+    - 本轮补充：
+      - 在 `pp_main/test/src/record_runtime/test_runtime_health.cc` 新增两条 host-only 单测：
+        - `ReportsRecoveryAfterAuxiliaryHmiPortBecomesActiveAgain`
+        - `ReportsAuxiliaryHmiPortInactivityAgainAfterRecovery`
+      - 目的：
+        - 固定“辅助侧 HMI 瞬时 inactive -> recovery -> 再次 inactive”的状态机行为
+        - 避免后续只能依赖板端日志判断 `should_notify_fault / recovered` 是否回归
+    - 已执行验证：
+      - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_runtime_health -j8`
+      - `/home/songwl/swl_ws/pp_main/build/x86/test/src/record_runtime/test_runtime_health`
+      - 结果：`14/14` 通过
+  - `merge15` 板端 3-cycle probe soak：
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/gripper_hmi_fault_soak_merge15_probe_3cycles_20260422`
+    - 汇总：`/home/songwl/swl_ws/ugripper/tmp/board_results/gripper_hmi_fault_soak_merge15_probe_3cycles_20260422/health_soak_summary.json`
+    - 覆盖：
+      - 连续 `3` 轮人工 `UP -> DOWN` 录制循环
+      - `episode_20260422_0005`、`0006`、`0007`
+    - 结果：
+      - `recording_started_count=3`
+      - `validation true count=3`
+      - `total_health_faults=0`
+      - `hmi_ports_inactive=0`
+    - 结论：
+      - 当前瞬时 `hmi_ports_inactive` 还不能通过短轮次人工循环稳定复现
+      - 问题更像低频/间歇性故障，而不是“每次录制都会触发”的确定性回归
+  - `merge15` 板端 10-cycle soak：
+    - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/gripper_hmi_fault_soak_merge15_10cycles_20260422`
+    - 汇总：`/home/songwl/swl_ws/ugripper/tmp/board_results/gripper_hmi_fault_soak_merge15_10cycles_20260422/health_soak_summary.json`
+    - 覆盖：
+      - 连续 `10` 轮人工 `UP -> DOWN` 录制循环
+      - `episode_20260422_0008` 到 `0017`
+    - 结果：
+      - `recording_started_count=10`
+      - `validation true count=10`
+      - `ShortUpPressed=10`
+      - `ShortDownPressed=10`
+      - `total_health_faults=0`
+      - `hmi_ports_inactive=0`
+    - 结论：
+      - 即使把同条件人工循环扩大到 `10` 轮，当前仍未复现瞬时 `hmi_ports_inactive`
+      - 当前更合理的判断是：问题属于低频、间歇性、可能受额外负载或时序影响的故障，而不是基础功能链路上的稳定回归
+  - `merge16` 观测增强 + CPU 压力循环：
+    - 代码改动：
+      - `hmi_input_inactive / hmi_ports_inactive` fault detail 增加：
+        - `input_age_ms`
+        - `port_activity=<port>(age_ms=...,active=...)`
+      - `test_runtime_health` 增加 detail 断言，锁住新的日志口径
+    - 已执行验证：
+      - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_runtime_health -j8`
+      - `/home/songwl/swl_ws/pp_main/build/x86/test/src/record_runtime/test_runtime_health`
+      - `test_runtime_health -> 14/14`
+      - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_verify --target UgripperRuntime -j8`
+    - ARM 打包与安装：
+      - 容器内重新执行 `cmake --build build/arm/standalone --target UgripperRuntime install -j8`
+      - 生成并安装 `1.2.8+merge16`
+      - 板端 `strings /opt/ugripper/bin/UgripperRuntime/UgripperRuntime` 已确认包含：
+        - `input_age_ms`
+        - `port_activity`
+    - 板端压力循环：
+      - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/gripper_hmi_cpu_stress_merge16_20260422`
+      - 汇总：`stress_summary.json`
+      - 条件：
+        - `7` 个 CPU busy-loop worker
+        - 人工 `UP -> DOWN` 连续循环
+        - 样本 `episode_20260422_0018` 到 `0031`
+      - 结果：
+        - `recording_started_count=14`
+        - `validation_true_count=12`
+        - `validation_false_count=2`
+        - `health_fault_count=0`
+        - `hmi_ports_inactive_count=0`
+      - 失败样本：
+        - `episode_20260422_0026 -> left_cam_main span=0.046s`
+        - `episode_20260422_0028 -> left_cam_main span=0.097s`
+      - 结论：
+        - 压力条件下仍未复现 `hmi_ports_inactive`
+        - 但复现了新的“极短录制导致主摄 span 过短”失败形态
+        - 当前问题焦点已经从 `HMI health fault` 转到 `camera start/stop` 在高负载和极短时长条件下的边界稳定性
+- 后续待验证：
+  - 若要继续做 release gate 之后的增强回归，应重点拉长 `camera` 高压时长、补强 gripper 控制帧稳定性与长时 button/HMI 稳定性
+  - 继续细分究竟是 `camera_recorder` shell child 语义、`exec` 包装，还是 `runtime stop policy` 中的哪一处变更造成了 `merge13` 回归
+
+### 2026-04-21 - merge13-camera-recorder-parent-first-sigint-stop
+
+- 阶段：`pp_main ugripper rollout / service stop-path regression`
+- 范围：`pp_main standalone/UgripperRuntime`、`host-only tests`、`board repro evidence`
+- 类型：`运行时 stop signal 语义修复 / merge9 回归继续收敛`
+- 主要改动：
+  - 在 `merge12` 板端继续复查后确认：
+    - `episode_20260421_0017` 中 `left/right_cam_main.mkv` 已恢复正常 `start_time/duration`
+    - 但 4 路 tactile `mkv` 全为 `0` 字节，validation 失败切换为 `left_tcam_l.mkv missing or empty`
+  - 补做板端最小复现，把问题进一步压缩到 stop-path：
+    - `CameraRecorder --duration 3 --only left_tcam_* , right_tcam_*` 可正常生成 4 路 tactile `mkv`
+    - `timeout -s INT 6s CameraRecorder --only left_tcam_* , right_tcam_*` 则会留下空/缺失输出
+  - 结合 `merge9` 文档回溯，确认高概率根因不是 recorder 命令本身，而是 `ProcessSupervisor -> SubprocessHandle` 的整组 `SIGINT` 语义：
+    - `merge9` 起 worker 停机默认向整个 process group 发信号
+    - `camera_recorder` 本身又负责二级管理其内部 `ffmpeg/gst-launch` 子 recorder
+    - 对 `camera_recorder` 这类 controller-style worker，第一跳就向整组发 `SIGINT` 会把 tactile `ffmpeg` 直接打断，绕开其父进程的有序停机
+  - 在 `pp_main/standalone/UgripperRuntime/runtime_process.cc` 中调整 `SubprocessHandle::Stop()`：
+    - 对 `ProcessStopMode::SigIntThenTermThenKill`
+    - 第一跳 `SIGINT` 改为只发给父 PID
+    - 若父进程未在超时内自行收口，再继续沿用现有整组 `SIGTERM -> SIGKILL` 升级清理
+  - 保持：
+    - `SigTermThenKill` 的整组停机语义不变
+    - `camera_recorder` 仍使用 `SigIntThenTermThenKill`
+    - `sensor_recorder` 仍使用 `SigTermThenKill`
+- 风险与行为等价说明：
+  - 这轮没有回退 `merge9` 引入的整套 process-group cleanup；只把 `SIGINT` 第一跳改成“先让父进程自己处理”
+  - 这样既保留了超时后的整组兜底清理，又避免了 `camera_recorder` 的内部 recorder 被外层抢先打断
+  - 当前修复面只覆盖使用 `SigIntThenTermThenKill` 的 worker；现阶段实际命中的是 `camera_recorder`
+- 已执行验证：
+  - 板端证据链：
+    - `merge12` 安装包版本：`1.2.8+merge12`
+    - `episode_20260421_0017`：
+      - `left_cam_main.mkv`、`right_cam_main.mkv` `ffprobe` 正常
+      - 4 路 tactile `mkv` 为 `0` 字节
+    - direct repro：
+      - `--duration 3` tactile-only 通过
+      - `timeout -s INT 6s` tactile-only 失败
+  - host-only：
+    - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_process_policy test_recording_orchestrator -j8`
+    - `/home/songwl/swl_ws/pp_main/build/x86/test/src/record_runtime/test_process_policy`
+    - `/home/songwl/swl_ws/pp_main/build/x86/test/src/record_runtime/test_recording_orchestrator`
+    - 结果：
+      - `test_process_policy` `4/4` 通过
+      - `test_recording_orchestrator` `11/11` 通过
+    - 新增断言：
+      - `SigIntThenTermThenKill` 模式下第一跳不会把 `SIGINT` 直接打到整组子进程
+  - standalone x86：
+    - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_verify --target UgripperRuntime -j8`
+- 板端复测结果：
+  - 安装包版本：`1.2.8+merge13`
+  - 最短 button-driven service 录制通过：
+    - `episode_20260421_0018`
+    - `validation_error.log` 不存在
+    - `journalctl` 显示：
+      - `recording started`
+      - `stop camera_recorder done: ok=true elapsed_ms=300`
+      - `validation phase end: ... valid=true elapsed_ms=1045`
+  - 抽样 `ffprobe`：
+    - `left_cam_main.mkv`
+      - `start_time=0.536`
+      - `duration=4.897`
+      - `nb_read_packets=294`
+    - `left_tcam_l.mkv`
+      - `start_time=0.000`
+      - `duration=5.325`
+      - `nb_read_packets=638`
+  - 结论：
+    - `merge12` 修复的主摄 metadata 回归仍然成立
+    - `merge13` 进一步修复了 tactile 路径在外层 stop 信号下被提前打断的问题
+- `T15` 板端主动刺激补充结果：
+  - 结果目录：`/home/songwl/swl_ws/ugripper/tmp/board_results/gripper_hmi_active_merge13_manual`
+  - 产物：
+    - `direct_hmi_visual.txt`
+    - `ugripper_service.log`
+    - `gripper_report.json`
+    - `hmi_button_report.json`
+    - `test_summary.json`
+  - direct HMI 人工观察：
+    - `READY`：看到绿色
+    - `RECORDING`：看到亮灭交替
+    - `ERROR_1`：看到红灯闪烁
+    - `beep`：已听到
+  - button phase / analyzer：
+    - `ShortUpPressed`、`ShortDownPressed`、`ShutdownPromptRequested`、`Ready`、`Recording` 均已命中
+    - `episode_20260421_0019` `validation phase end ... valid=true`
+    - `gripper_report.json -> ok=true`
+    - `hmi_button_report.json -> ok=true`
+  - 边界说明：
+    - 本轮可把当前 `merge13` 安装包下的 `T15` direct HMI + button phase + analyzer 收口视为通过
+    - 但日志中仍观测到一次短暂 `stereo_status_missing -> Error2 -> health_recovered`，当前未阻塞 `T15`，后续若要做 release gate 仍建议继续观察
+- `T16` 第一版统一汇总入口：
+  - 新增脚本：
+    - `pp_main/test/scripts/summarize_ugripper_rollout.py`
+    - `pp_main/test/scripts/test_summarize_ugripper_rollout.py`
+  - 作用：
+    - 把 `camera / sensor / service / gripper_hmi` suite 级 summary 收成单一 release-gate 风格 JSON
+    - 区分：
+      - `ok`：已纳入 suite 是否都通过
+      - `release_gate_ready`：是否已满足“所需 suite 齐全 + 同一包版本”这类真正发版门禁
+  - 本轮已生成：
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/release_gate_merge13_20260421/test_summary.json`
+  - 当前汇总结论：
+    - `ok=true`
+    - `release_gate_ready=false`
+    - `validation_reason=mixed_package_versions`
+  - 原因：
+    - `camera/sensor/service` 当前纳入的是 `merge8` 板端结果
+    - `gripper_hmi` 当前纳入的是 `merge13` 板端结果
+    - 因而这轮可以证明“当前各条链路已有通过证据”，但还不能单独证明“`merge13` 这一单包版本已完整通过全部板端标准回归”
+- `T16` 同包重跑补充：
+  - 已把 `merge13` 板端重跑结果拉回本地：
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/sensor_smoke_merge13_20260421`
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/service_integration_merge13_20260421`
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/camera_stress_merge13_20260421`
+  - `sensor` 与 `service` 结果：
+    - `sensor_smoke_merge13_20260421/test_summary.json -> ok=true`
+    - `service_integration_merge13_20260421/episode_summary.json -> ok=true`
+  - `camera` 结果：
+    - 当前板端 `board_camera_stress.sh` 重跑失败
+    - 板端输出目录只留下 `camera_stress_run.log(0 bytes) + info.json`
+    - 缺失 `left_cam_main.mkv`、`right_cam_main.mkv`
+    - 已补生成本地失败汇总：
+      - `/home/songwl/swl_ws/ugripper/tmp/board_results/camera_stress_merge13_20260421/test_summary.json`
+      - `ok=false`
+      - `validation_reason=missing_main_videos`
+  - 板端最小复现进一步收敛：
+    - `main-only` 双路直录：
+      - 无压力通过
+      - `7` 个 CPU busy-loop 压力下也通过
+    - `6` 路常规视频组合：
+      - 无压力失败，只生成 `info.json`
+      - `7` 个 CPU busy-loop 压力下同样失败，只生成 `info.json`
+      - 先停掉 `ugripper.service` 后再直录，仍然只生成 `info.json`
+    - 说明当前阻塞点已经从“混合包版本导致无法收口”转成“`merge13` 下 `6` 路常规视频组合路径真实失败”
+  - 新统一汇总：
+    - `/home/songwl/swl_ws/ugripper/tmp/board_results/release_gate_merge13_rerun_20260421/test_summary.json`
+    - 结论：
+      - `ok=false`
+      - `release_gate_ready=false`
+      - `validation_reason=suite_failed`
+      - `uniform_package_version=true`
+      - `package_versions=["1.2.8+merge13"]`
+- 后续待验证：
+  - 继续回看 `merge8 -> merge9` 的 `CameraRecorder` 组合录制路径差异，定位为何 `6` 路常规视频在 `merge13` 仍只留下 `info.json`
+  - 当前无需再为 `T16` 补“同包版本”证据；下一步要解决的是 `camera` suite 本身的真实失败
+
+### 2026-04-21 - merge12-runtime-camera-stop-signal-fix
+
+- 阶段：`pp_main ugripper rollout / service stop-path regression`
+- 范围：`pp_main standalone/UgripperRuntime`、`host-only tests`、`ARM packaging`
+- 类型：`运行时 stop policy 修复 / 板端回归准备`
+- 主要改动：
+  - 结合板端最新失败样本继续排查 `merge11` 后的 service 短录制回归：
+    - `episode_20260421_0009` ~ `episode_20260421_0016` 均显示 `left_cam_main.mkv` 存在，但 validation 仍反复报 `ffprobe returned invalid start_time/duration`
+    - 与此同时，同板同包下 direct `CameraRecorder` 短录制已能稳定生成带 `duration` 的主摄 `mkv`
+  - 继续回读 `docs/agent/overview.md`、`docs/baseline/deploy-script-boundaries.md`、`driver_origin/led_manager` 相关说明后确认：
+    - 当前 gripper/HMI 原始设计主要影响按键输入与 LED/RGB 调度，不是本轮主摄 metadata 缺失的主根因
+    - 真正差异收敛到 `UgripperRuntime -> RecordingOrchestrator -> ProcessSupervisor` 的 worker 停机策略
+  - 在 `pp_main/standalone/UgripperRuntime/runtime_domain.cc` 中把 `camera_recorder` worker 的 stop mode 从 `SigTermThenKill` 改为 `SigIntThenTermThenKill`
+    - 目的：让 `CameraRecorder` 先收到 `SIGINT`，沿用其内部已有的 graceful stop 流程去回收主摄 `gst-launch` / tactile `ffmpeg`
+    - 保留 `ProcessSupervisor -> SubprocessHandle` 的进程组管理语义，不回退整套 process-group 清理能力
+  - 在 `pp_main/test/src/record_runtime/test_recording_orchestrator.cc` 补充断言：
+    - `camera_recorder` worker 必须使用 `SigIntThenTermThenKill`
+    - `sensor_recorder` worker 继续保持 `SigTermThenKill`
+- 风险与行为等价说明：
+  - 这轮是定向修 runtime stop policy，不改 gripper/HMI 协议、按钮状态机或 LED owner-thread 调度
+  - 当前判断是：
+    - `merge11` 已修复 `CameraRecorder` shell recorder 自身的 finalize 问题
+    - 但 service 路径仍用 `SIGTERM` 停 `camera_recorder` 进程组，导致主摄短录制 metadata 仍可能缺失
+  - 该修复保持 `sensor_recorder` 与其他 worker 的现有 stop 策略不变，避免把更广的 process policy 一并改动
+- 已执行验证：
+  - 只读证据链补充：
+    - 板端 `episode_20260421_0016/validation_error.log`
+    - `journalctl` 确认多轮 button-triggered recording 均失败在 `left_cam_main.mkv (ffprobe returned invalid start_time/duration)`
+    - direct `CameraRecorder` 短录制在 `merge11` 下主摄已有正常 `duration`
+    - `runtime_process.cc` / `test_process_policy.cc` 确认当前 `ProcessSupervisor` 默认向整组发送 stop signal
+    - `runtime_domain.cc` 确认 `camera_recorder` worker 先前确实使用 `SigTermThenKill`
+  - 本地 host-only：
+    - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_recording_orchestrator -j8`
+    - `/home/songwl/swl_ws/pp_main/build/x86/test/src/record_runtime/test_recording_orchestrator`
+    - 结果：`11/11` 通过
+  - 本地 standalone：
+    - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_verify --target UgripperRuntime -j8`
+  - ARM：
+    - `docker exec pp-arm-dev ... cmake --build build/arm/standalone --target UgripperRuntime install -j8`
+    - `APP_VERSION_SUFFIX=+merge12 TARGET_PLATFORM=arm bash ./package_ugripper_deb.sh`
+    - 板端安装确认：
+      - `dpkg -s ugripper -> Version: 1.2.8+merge12`
+      - `/opt/ugripper/bin/UgripperRuntime/UgripperRuntime` SHA256:
+        - `883a25c03fdbb8623ca43af50a6db24411329966adf5d9a8f61d0248533b7ec0`
+      - `ugripper.service = active`
+- 后续待验证：
+  - 在 `merge12` 板端包上重跑最短 button-driven service 录制，确认 `left_cam_main.mkv` 的 `start_time/duration` 是否恢复
+  - 若 `merge12` 仍失败，再继续比较：
+    - `camera_recorder` worker 是否还应按单 PID 而不是整组 stop
+    - 以及 `CameraRecorder` 在收到外层 `SIGINT` 时对子 recorder 的停止顺序是否仍存在竞态
+
+### 2026-04-21 - merge9-camera-recorder-shell-process-group-hotfix
+
+- 阶段：`pp_main ugripper rollout / T15`
+- 范围：`pp_main standalone/CameraRecorder`、`board validation`、`docs`
+- 类型：`最小修复尝试 / ARM 定向编译 / 板端 A-B 验证`
+- 主要改动：
+  - 在 `pp_main/standalone/CameraRecorder/camera_recorder.cc` 里继续撤回 shell recorder 的 process-group 管理：
+    - child 侧不再 `setpgid(0, 0)`
+    - parent 侧不再 `setpgid(pid, pid)`
+    - shell recorder / stereo session 停录从 `kill(-pid_, sig)` 改回 `kill(pid_, sig)`
+  - 基于现有 `build/arm/standalone` 做 ARM 增量编译，并把修复版二进制临时拷到板端 `/tmp/CameraRecorder_fix_shell_pg`
+- 风险与行为等价说明：
+  - 本轮仍是单二进制 hotfix 验证，不是完整 deb 安装验证
+  - 当前改动把 shell child 生命周期管理收口回更接近 `merge8` 的形态；这样能避免交互 shell / job-control 对 `ffmpeg` 的额外影响，但也意味着“按整个 child process-group 回收”这条 `merge9` 行为被撤回
+- 已执行验证：
+  - 本地 `x86` 定向编译：
+    - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_verify --target CameraRecorder -j8`
+  - ARM 容器定向编译：
+    - `docker exec pp-arm-dev ... cmake --build build/arm/standalone --target CameraRecorder -j8`
+  - 板端单项验证：
+    - `timeout -s INT 6s /tmp/CameraRecorder_fix_shell_pg ... --only left_tcam_l`
+    - 结果：生成 `info.json + left_tcam_l.mkv`
+    - `timeout -s INT 6s /tmp/CameraRecorder_fix_shell_pg ... --only left_cam_main,right_cam_main`
+    - 结果：生成 `info.json + left_cam_main.mkv + right_cam_main.mkv`
+  - 板端 6 路常规视频合并验证：
+    - `timeout -s INT 6s /tmp/CameraRecorder_fix_shell_pg ... --only left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
+    - 结果：生成全部 6 路常规视频与 `info.json`
+  - 排查证据补充：
+    - `merge8` / `merge9` 二进制对照表明：`merge9` 新增了 shell child process-group 相关路径与 `failed to assign recorder process group` 文案，`merge8` 不包含这批符号/字符串
+    - `strace` 对照显示：`merge8` 的 tactile 路径能进入 `VIDIOC_QBUF / VIDIOC_DQBUF`，而当前 `merge9` 路径在 shell child process-group 介入前后存在明显行为分叉
+  - 当前结论：
+    - `merge9` 的 `CameraRecorder` 回归至少包含两段：
+      - `PR_SET_PDEATHSIG` 导致主摄 shell recorder 提前退出
+      - shell child process-group 管理导致 direct shell 场景下的 hybrid/tactile 路径异常
+    - 在同时撤回这两段后，板端 direct `CameraRecorder` 6 路常规视频 smoke 已恢复
+  - 板端状态恢复：
+    - 验证完成后已重新确认 `ugripper.service = active`
+- 后续待验证：
+  - 把这两处修复真正打进新 ARM 包，再回归 `T15` 手动按键链路
+  - 新包上板后重跑 `board_camera_stress.sh`、`board_service_integration_check.sh` 与 `board_gripper_hmi_active_check.sh`
+
+### 2026-04-21 - merge9-camera-recorder-pdeathsig-hotfix-attempt
+
+- 阶段：`pp_main ugripper rollout / T15`
+- 范围：`pp_main standalone/CameraRecorder`、`board validation`、`docs`
+- 类型：`最小修复尝试 / ARM 定向编译 / 板端 A-B 验证`
+- 主要改动：
+  - 在 `pp_main/standalone/CameraRecorder/camera_recorder.cc` 里撤掉 shell child 的 `prctl(PR_SET_PDEATHSIG, SIGKILL)`，保留父侧已有的 `setpgid(pid, pid)` 管理
+  - 不改 `udev + apply_main_camera_roll_once.sh` 与打包脚本，先只验证 `CameraRecorder` 二进制本体
+  - 基于现有 `build/arm/standalone` 做 ARM 增量编译，并把修复版二进制临时拷到板端 `/tmp/CameraRecorder_fix_pdeathsig`
+- 风险与行为等价说明：
+  - 本轮属于定向 hotfix 验证，不是完整 release 包验证；板端没有安装新 deb，只做单二进制替换式 A/B
+  - 当前只能说明“去掉 `PDEATHSIG` 后主摄链路恢复”，还不能说明 `merge9` 的 `CameraRecorder` 已整体恢复到 `merge8` 水平
+- 已执行验证：
+  - 本地 `x86` 定向编译：
+    - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_verify --target CameraRecorder -j8`
+  - ARM 容器定向编译：
+    - `docker exec pp-arm-dev ... cmake --build build/arm/standalone --target CameraRecorder -j8`
+  - 板端 `CameraRecorder` A/B：
+    - 原始 `merge9` 二进制：
+      - `timeout -s INT 8s /opt/ugripper/bin/CameraRecorder/CameraRecorder ... --only left_cam_main,right_cam_main,left_tcam_*`
+      - 结果：`exit=124`，仅生成 `info.json`
+    - 修复后二进制：
+      - `timeout -s INT 8s /tmp/CameraRecorder_fix_pdeathsig ... --only left_cam_main,right_cam_main,left_tcam_*`
+      - 结果：`exit=124`，生成 `info.json + left_cam_main.mkv + right_cam_main.mkv`
+    - 单路 tactile 对照：
+      - 修复后二进制：`--only left_tcam_l` 时仅生成 `info.json`
+      - `merge8` 二进制：`--only left_tcam_l` 时可生成 `left_tcam_l.mkv`
+  - 当前结论：
+    - `PDEATHSIG` 路径确实是 `merge9` 里影响主摄 shell recorder 启动的一条真实回归点
+    - 但它不是全部问题；当前 `merge9` 相对 `merge8` 仍至少保留一条影响 hybrid/tactile 录制的回归
+  - 板端状态恢复：
+    - A/B 完成后已重新确认 `ugripper.service = active`
+- 后续待验证：
+  - 继续比较 `merge8` 与 `merge9` 在 `ShellCameraRecorder` / hybrid recorder 相关路径上的差异
+  - 在修复 tactile/hybrid 回归后，再决定是否重打 `merge10` 包并回归 `T15`
+
+### 2026-04-21 - t15-merge9-main-camera-roll-investigation
+
+- 阶段：`pp_main ugripper rollout / T15`
+- 范围：`board validation`、`docs`
+- 类型：`板端故障留档 / 只读定位 / 追溯补充`
+- 主要改动：
+  - 补记 `merge9` 第 3 次按键重跑的最新失败样本：`/mnt/data_disk/dap912263b000689/data/episode_20260421_0006`
+  - 记录“短按 `up` 后约 `220ms` 即 `camera recorder exited, last_exit=1`，runtime 立即回滚停录，最终 `Error5`”这一最新现象
+  - 回填当前定位边界：`ShortUpPressed` 已命中、主阻塞点已从 `HMI/button` 转到 `camera recorder` 启动早退，但引入点仍需按 `merge8 -> merge9` 产物差异继续确认
+- 风险与行为等价说明：
+  - 本轮不修改运行时代码、不重启服务、不追加主动录制，只补当前板端现场证据与诊断边界
+  - 当前结论只到“症状和观察已收敛”，不把某条旧代码路径直接当作 `merge9` 引入点
+- 已执行验证：
+  - 板端最新样本确认：
+    - `episode_20260421_0006/validation_error.log -> missing or empty video file: .../left_cam_main.mkv`
+    - `journalctl` 显示：
+      - `ShortUpPressed`
+      - `recording started`
+      - `camera recorder exited, last_exit=1`
+      - `stopping recording: camera or sensor recorder exited unexpectedly`
+      - `episode validation failed`
+      - `led_target state=Error5`
+  - 产物分布确认：
+    - 当前 episode 仅保留 `left/right_stereo.mkv`、左右 `sensor_data_*.mcap` 与元数据
+    - `left/right_cam_main.mkv` 与全部常规 tactile `mkv` 缺失
+  - 板端只读状态确认：
+    - `/dev/left_cam_main`、`/dev/right_cam_main` 存在，`camera_recorder.yaml` 主摄配置仍为 `direct-copy-h265`
+    - 当前 `CameraRecorder` 二进制未链接 `gstreamer`，主摄实际走 shell `gst-launch-1.0`
+    - 当前无残留常规 `CameraRecorder/gst-launch/ffmpeg` 占用主摄或 tactile 设备，只有 stereo daemon 占用 stereo 设备
+  - 主摄 roll 与底层命令链验证：
+    - 手动执行：
+      - `/opt/ugripper/config/apply_main_camera_roll_once.sh right_cam_main 1-1.4.4`
+      - `/opt/ugripper/config/apply_main_camera_roll_once.sh left_cam_main 11-1.4.4`
+    - `/run/ugripper/uvc_roll/` 成功生成左右 stamp 文件
+    - 直接执行 shell 主摄命令可录出产物：
+      - `/tmp/direct_left.mkv`，`ffprobe duration ~= 16.0s`
+      - `/tmp/direct_right.mkv`，`ffprobe duration ~= 2.4s`
+    - 结论：主摄设备与底层 `gst-launch` 命令链本身可工作
+  - `strace` 验证：
+    - `strace -ff ./bin/CameraRecorder/CameraRecorder --only left_cam_main ...`
+    - 观察到：
+      - `StartAll()` 启动线程内 `fork()` 出 shell child
+      - child `execve("/bin/bash", ["bash", "-lc", "GST_DEBUG=identity:7 gst-launch-1.0 ..."])`
+      - 父侧紧接着 `wait4(..., WIFSIGNALED && WTERMSIG == SIGKILL, WNOHANG, ...)`
+    - 结合源码：
+      - child 路径会执行 `ConfigureManagedChildProcessGroup()`
+      - 其中显式设置 `prctl(PR_SET_PDEATHSIG, SIGKILL)`
+    - 当前只读观察边界：
+      - shell-based recorder 的确存在“启动线程内 `fork()` + child 设置 `PDEATHSIG`”这条现象链
+      - 但这条实现本身早于 `merge8`，不能单独作为本次 `merge9` 回归的引入点结论
+      - 下一步需要回到 `merge8` 与 `merge9` 的安装包、脚本与二进制差异继续核对
+- 后续待验证：
+  - 比对 `merge8` / `merge9` 的 `CameraRecorder`、`UgripperRuntime`、`GripperHmiTool`、`99-fixed-usb-map.rules`、`postinst` 与新增脚本差异
+  - 在引入点明确后，再决定是否需要代码修复并回归 `board_camera_stress.sh`、`board_service_integration_check.sh` 与 `T15` 手动按键链路
+
+### 2026-04-21 - t15-board-interactive-first-pass
+
+- 阶段：`pp_main ugripper rollout / T15`
+- 范围：`board validation`、`tmp/board_results`、`docs`
+- 类型：`板端交互验证 / 结果回填 / 边界澄清`
+- 主要改动：
+  - 完成 `board_gripper_hmi_active_check.sh` 第一轮真实人工交互验证，并将结果整理到 `tmp/board_results/gripper_hmi_active_20260421_144024`
+  - 回填 direct HMI `READY` 人工观察失败、button phase raw runtime 关键事件存在、analyzer 因缺少诊断日志无法闭环的分层结论
+  - 同步更新 `docs/ppmain-ugripper-test-plan.md`，明确当前 `T15` 已证明与尚未证明边界
+- 风险与行为等价说明：
+  - 本轮不改运行时代码，只补板端实测追溯与当前包能力边界说明
+  - 这轮不能把 `T15` 记为通过，因为 direct HMI 灯效人工观察失败，且当前板端包的 `journalctl` 未提供 `[HMI_DIAG] / [GRIPPER_DIAG]` 供 analyzer 收口
+- 已执行验证：
+  - 板端 direct HMI `READY` 观察：
+    - `direct_ready.log` 记录 `Connected 2 gripper HMI device(s)` 与 `LED state mode: READY`
+    - 人工观察结果：`direct_hmi_visual.txt -> step=ready status=failed`
+  - 板端 button phase raw log 检查：
+    - `BTN_UP short press`
+    - `recording started`
+    - `BTN_DOWN short press`
+    - `validation phase end ... valid=true`
+    - `dual-button chord armed`
+    - `playing: shutdown`
+  - 板端 analyzer 重跑：
+    - 修复板端损坏的 `check_gripper_ack_log.py` / `check_hmi_event_log.py`
+    - `board_gripper_hmi_log_check.sh` 基于本轮 `ugripper_service.log` 输出：
+      - `gripper_report.json -> ok=true`
+      - `hmi_button_report.json -> ok=false`
+      - 失败原因为缺少 `ShutdownPromptRequested` 与 `Recording`
+  - 板端包本体与本地当前代码对照：
+    - `strings /opt/ugripper/bin/UgripperRuntime/UgripperRuntime | grep 'HMI_DIAG'` 无结果
+    - `strings /opt/ugripper/bin/GripperHmiTool/GripperHmiTool | grep 'GRIPPER_DIAG'` 无结果
+    - 本地当前 `pp_main/build/arm/standalone/*` 与 `build/package/arm/ugripper_stage/*` 对应二进制均包含 `HMI_DIAG / GRIPPER_DIAG`
+    - 结论：板端 `1.2.8+merge8` 安装包落后于本地当前代码，当前 `T15` analyzer 未闭环不是脚本采集问题，而是板端包本体不含这批诊断日志实现
+  - 新包重打与重跑补充：
+    - 已基于当前 `pp_main/install/arm` 与 ARM `.venv` 打出 `ugripper_1.2.8+merge9_arm64.deb`
+    - 新包上板后确认：
+      - `dpkg -s ugripper -> Version: 1.2.8+merge9`
+      - `strings /opt/ugripper/bin/UgripperRuntime/UgripperRuntime | grep 'HMI_DIAG'` 有结果
+      - `strings /opt/ugripper/bin/GripperHmiTool/GripperHmiTool | grep 'GRIPPER_DIAG'` 有结果
+    - `merge9` 下 direct HMI `READY` 视觉确认仍失败，但日志链路已恢复
+    - `merge9` 第 1 次手动按键重跑：
+      - `ShortUpPressed -> Recording`
+      - 随后 `camera recorder exited unexpectedly`
+      - 后续 `stereo finalize failed`、`episode validation failed`，并进入 `Error5`
+    - `merge9` 第 2 次手动按键重跑：
+      - 已进入 `Recording`
+      - 随后触发 `hardware health fault (hmi_ports_inactive): HMI ports inactive: /dev/left_gripper`
+      - 之后出现 `health recovered recording=1`
+- 后续待验证：
+  - 重新打包并安装包含当前诊断日志实现的 ARM 包后，重跑 `board_gripper_hmi_active_check.sh`
+  - 在带诊断日志的板端包上重跑 `board_gripper_hmi_active_check.sh`，让 analyzer 真正闭环 `ShortUpPressed / ShortDownPressed / ShutdownPromptRequested / led_target`
+  - 单独定位 LED 不亮问题，区分 `HMI firmware/hardware path` 与 `runtime/driver command path`
+
+### 2026-04-21 - t15-gripper-hmi-active-script-first-cut
+
+- 阶段：`pp_main ugripper rollout / T15`
+- 范围：`pp_main/test/scripts`、`docs`
+- 类型：`board active stimulus script / 文档回填`
+- 主要改动：
+  - 新增 `test/scripts/board_gripper_hmi_active_check.sh`
+  - 第一版脚本把 `T15` 的 `gripper/hmi/button` 主动刺激收成固定入口：
+    - 停止 `ugripper.service`，调用 `GripperHmiTool` 依次执行 direct HMI `READY / RECORDING / ERROR_1 / beep`
+    - 记录人工确认结果到 `direct_hmi_visual.txt`
+    - 自动串接 `board_service_restart_check.sh` 恢复服务
+    - 提示人工执行 `ShortUpPressed / ShortDownPressed / ShutdownPromptRequested` 按键序列
+    - 自动串接 `board_gripper_hmi_log_check.sh`，产出 `gripper_report.json` 与 `hmi_button_report.json`
+  - 回填 `docs/ppmain-ugripper-test-plan.md`，把 `board_gripper_hmi_active_check.sh` 纳入 `T15` 已落地入口与标准用法
+- 风险与行为等价说明：
+  - 本轮只新增板端测试脚本和文档，不改运行时代码行为
+  - 当前脚本仍是“交互式主动刺激入口”，direct HMI 灯效/蜂鸣器以及 button 序列仍依赖人工确认，不等同于已经完成无人值守自动化
+- 已执行验证：
+  - `chmod +x /home/songwl/swl_ws/pp_main/test/scripts/board_gripper_hmi_active_check.sh`
+  - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_gripper_hmi_active_check.sh`
+  - `bash /home/songwl/swl_ws/pp_main/test/scripts/board_gripper_hmi_active_check.sh --help`
+- 后续补充改动：
+  - 修正 `board_gripper_hmi_active_check.sh` 在 `--skip-button-phase` 下仍提前解析 restart/log-check 依赖的问题
+  - 增加 direct HMI 阶段后的 service 恢复兜底，避免脚本在 direct-only 场景或中途失败后把 `ugripper.service` 停在非活动状态
+- 补充实跑验证：
+  - 已将以下脚本同步到板端 `/home/ubuntu/pp_main/test/scripts/`：
+    - `board_gripper_hmi_active_check.sh`
+    - `board_service_restart_check.sh`
+    - `board_gripper_hmi_log_check.sh`
+    - `board_test_common.sh`
+    - `check_gripper_ack_log.py`
+    - `check_hmi_event_log.py`
+  - 板端执行：
+    - `sudo bash /home/ubuntu/pp_main/test/scripts/board_gripper_hmi_active_check.sh --output-dir /tmp/pp_board_gripper_hmi_active_check_smoke --non-interactive --skip-button-phase`
+  - 结果：
+    - direct HMI `READY / RECORDING / ERROR_1 / beep` 链路执行完成
+    - 产出 `/tmp/pp_board_gripper_hmi_active_check_smoke/direct_hmi_visual.txt`
+    - 脚本结束后 `systemctl is-active ugripper.service` 返回 `active`
+- 未执行测试与原因：
+  - 尚未完成包含人工 button 序列与视觉确认的完整板端实跑，因此不能把 `gripper_report.json` / `hmi_button_report.json` 视为已在 `T15` 下最新重跑通过
+- 后续待验证：
+  - 在板端实际跑一轮不带 `--skip-button-phase` 的 `board_gripper_hmi_active_check.sh`
+  - 若第一轮实跑稳定，再继续补更自动化的 start/stop 驱动、button 循环和结果 summary 收口
+
+### 2026-04-21 - t12-gripper-calibration-read-gates
+
+- 阶段：`pp_main ugripper rollout / T12`
+- 范围：`pp_main/standalone/GripperHmiTool`、`pp_main/test/src/gripper_hmi`、`docs`
+- 类型：`host-only test coverage / calibration read logic / 文档回填`
+- 主要改动：
+  - 继续扩展 `standalone/GripperHmiTool/include/gripper_hmi_driver_logic.h`，新增：
+    - `DecideCalibrationRangeRetryAction`
+    - `DecideCalibrationChunkReadAction`
+    - `ScanExpectedCalibrationFrame`
+  - 将以下 calibration 读链路规则收口到 header-only 纯逻辑，并复用到运行时代码：
+    - range read 的 retry / abort-recovery / stop-failure 决策
+    - missing chunk 单包读取的 accept / retry / abort-recovery / stop-failure 决策
+    - `readCalibrationFrameLocked` 的 wrong-token skip 与 garbage resync 规则
+  - 扩展 `test/src/gripper_hmi/test_hmi_driver_logic.cc`，新增覆盖：
+    - calibration range retry decision
+    - chunk read retry-recovery decision
+    - `readCalibrationFrameLocked` 对应的 target-token scan/resync 规则
+- 风险与行为等价说明：
+  - 本轮仍不引入串口 fake / PTY，也不改协议、命令格式或 runtime 对外行为
+  - 当前补到的是 calibration 读链路判断层，不等同于 `requestSingleChunkRead` / `readDataOrStatusFrameLocked` 组合路径已经做成更近一层的 I/O host-only 模拟
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_hmi_driver_logic -j8`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'GripperHmiDriverLogicTest|GripperHmiProtocolTest|GripperHmiTransportResyncTest|test_check_gripper_ack_log_(pass|fail|io_fail|retry_reconnect_pass|retry_reconnect_fail)'`
+    - 结果：`31/31` 通过
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_verify --target GripperHmiTool UgripperRuntime -j8`
+- 未执行测试与原因：
+  - 未补更重的串口 I/O mock 或板端重跑，因为本轮没有新增外部行为，只是继续下沉 calibration 读链路纯逻辑测试
+- 后续待验证：
+  - 如需把 T12 再收一刀，可继续补 `requestSingleChunkRead` / `readDataOrStatusFrameLocked` 组合路径的 very-near-I/O host-only 测试
+  - 或按优先级转入 `T15`，把 gripper/hmi/button 主动刺激脚本标准化
+
+### 2026-04-21 - t12-gripper-readbytes-range-collect-gates
+
+- 阶段：`pp_main ugripper rollout / T12`
+- 范围：`pp_main/standalone/GripperHmiTool`、`pp_main/test/src/gripper_hmi`、`docs`
+- 类型：`host-only test coverage / driver near-I/O logic / 文档回填`
+- 主要改动：
+  - 继续扩展 `standalone/GripperHmiTool/include/gripper_hmi_driver_logic.h`，新增：
+    - `EvaluateReadBytesStep`
+    - `CollectCalibrationRangeFrame`
+  - 将以下近 I/O 规则收口到 header-only 纯逻辑，并复用到运行时代码：
+    - `readBytesLocked` 的 poll / timeout / no-data contract
+    - calibration range collect loop 的 chunk / status / garbage 推进规则
+  - 扩展 `test/src/gripper_hmi/test_hmi_driver_logic.cc`，新增覆盖：
+    - `readBytesLocked` 的 data / timeout-no-data / io-failure 三类返回
+    - calibration header 收齐后 `required_chunk_count` 解析与 complete 判定
+    - calibration range collect 中 status frame 继续扫描
+    - oversized garbage 按字节丢弃继续 resync
+- 风险与行为等价说明：
+  - 本轮仍不引入串口 fake / PTY，也不改协议、命令格式或 runtime 对外行为
+  - 当前补到的是 `readBytesLocked` contract 和 calibration range collect loop 的扫描推进，不等同于 calibration range retry decision、chunk read retry-recovery 或 `readCalibrationFrameLocked` 已全部 host-only 化
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_hmi_driver_logic -j8`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'GripperHmiDriverLogicTest|GripperHmiProtocolTest|GripperHmiTransportResyncTest|test_check_gripper_ack_log_(pass|fail|io_fail|retry_reconnect_pass|retry_reconnect_fail)'`
+    - 结果：`28/28` 通过
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_verify --target GripperHmiTool UgripperRuntime -j8`
+- 未执行测试与原因：
+  - 未补更重的串口 I/O mock 或板端重跑，因为本轮没有新增外部行为，只是继续下沉纯逻辑测试
+- 后续待验证：
+  - 继续补 calibration range retry decision / chunk read retry-recovery / `readCalibrationFrameLocked` 的 host-only 规则
+  - 再视优先级转入 `T15` 的 gripper/hmi/button 主动刺激脚本化
+
+### 2026-04-21 - t12-gripper-driver-io-edge-gates
+
+- 阶段：`pp_main ugripper rollout / T12`
+- 范围：`pp_main/standalone/GripperHmiTool`、`pp_main/test/src/gripper_hmi`、`docs`
+- 类型：`host-only test coverage / driver near-I/O logic / 文档回填`
+- 主要改动：
+  - 继续扩展 `standalone/GripperHmiTool/include/gripper_hmi_driver_logic.h`，新增：
+    - `ScanSizedRecvFrame`
+    - `EvaluateExclusiveDrainStep`
+  - 将以下近 I/O 判断收口到 header-only 纯逻辑，并复用到运行时代码：
+    - `readSizedFrameLocked` 的 fixed-size recv frame scan
+    - `pauseIoThreadForExclusiveCommand` 的 exclusive drain idle/max cutoff 判定
+  - 扩展 `test/src/gripper_hmi/test_hmi_driver_logic.cc`，新增覆盖：
+    - bad checksum 帧后继续 resync 到后续有效 fixed-size frame
+    - header 缺失时 trailing byte 保留
+    - exclusive drain 的 idle deadline 延长
+    - exclusive drain 的 max deadline 截止
+    - negative read -> I/O failure 映射
+- 风险与行为等价说明：
+  - 本轮仍不引入串口 fake / PTY，也不改协议、命令格式或 runtime 对外行为
+  - 当前补到的是 driver 更近一层的 scan/drain 判断，不等同于 `readBytesLocked` 超时 contract、calibration range collect loop 或真实串口调度本体都已完成 host-only 化
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_hmi_driver_logic -j8`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'GripperHmiDriverLogicTest|GripperHmiProtocolTest|GripperHmiTransportResyncTest|test_check_gripper_ack_log_(pass|fail|io_fail|retry_reconnect_pass|retry_reconnect_fail)'`
+    - 结果：`25/25` 通过
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_verify --target GripperHmiTool UgripperRuntime -j8`
+- 未执行测试与原因：
+  - 未引入更重的串口 I/O mock 或板端重跑，因为本轮没有新增外部行为，只是在现有实现上继续下沉纯逻辑测试
+- 后续待验证：
+  - 继续补 `readBytesLocked` timeout / no-data 合约与 calibration range collect loop 的 host-only 规则
+  - 再视优先级转入 `T15` 的 gripper/hmi/button 主动刺激脚本化
+
+### 2026-04-21 - t12-host-only-second-pass
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test / docs`
+- 类型：`host-only 测试补齐 / T12 推进 / 文档回填`
+- 主要改动：
+  - 在 `pp_main/test` 新增三组 `T12` 相关 `host-only` 测试：
+    - `test/src/gripper_hmi/test_hmi_transport_resync.cc`
+    - `test/src/record_runtime/test_button_event_timing.cc`
+    - `test/src/record_runtime/test_led_state_bridge.cc`
+  - `gripper_hmi` 新增 transport resync 覆盖：
+    - 坏 checksum 帧后跳过并同步到后续有效帧
+    - 半包场景下等待完整帧再解析
+  - `record_runtime` 新增：
+    - 自定义 debounce / long press / shutdown prompt 阈值的 button timing 覆盖
+    - `recording / ready / error1 / error5` 到 LED 输出链路的显式桥接覆盖
+  - 回填 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 的 `T12` 当前进展与剩余缺口
+- 风险与行为等价说明：
+  - 本轮只修改 `pp_main/test` 与测试文档，不改运行时代码行为
+  - 属于测试覆盖补齐；主要价值是把已存在的解析/时序/LED 桥接行为正式锁进 `host-only`
+- 已执行验证：
+  - `cmake -S /home/songwl/swl_ws/pp_main/test -B /home/songwl/swl_ws/pp_main/build/x86/test -DCMAKE_BUILD_TYPE=Release`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_hmi_transport_resync test_button_event_timing test_led_state_bridge -j8`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'GripperHmiTransportResyncTest|HmiControllerTimingTest|LedStateBridgeTest'`
+- 后续待验证：
+  - 继续补更贴近 driver 层的 retry / reconnect 纯逻辑测试
+  - 继续推进 `T15`，把 `gripper/hmi/button` 的板端主动刺激检查脚本化
+
+### 2026-04-21 - t12-gripper-retry-reconnect-gates
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test / docs`
+- 类型：`analyzer 门禁增强 / T12 推进 / 文档回填`
+- 主要改动：
+  - 扩展 `test/scripts/check_gripper_ack_log.py`，新增：
+    - `--require-command-retries-at-least`
+    - `--require-command-recoveries-at-least`
+    - `--require-io-total-at-least`
+  - `io_summary` 汇总中补纳 `connect_success` 与 `reconnect_success`
+  - 新增 `gripper_diag_retry_reconnect_pass.log` / `gripper_diag_retry_reconnect_fail.log`
+  - 在 `pp_main/test/src/gripper_hmi/CMakeLists.txt` 接入通过/失败两条 `host-only` 用例，把 `retry / recovery / reconnect` 统计阈值正式收进 `T12`
+- 风险与行为等价说明：
+  - 本轮只修改 analyzer、fixture 和测试接线，不改运行时代码行为
+  - 属于测试门禁增强：后续若日志中重试/恢复/重连统计回退，会在开发机先暴露
+- 已执行验证：
+  - `cmake -S /home/songwl/swl_ws/pp_main/test -B /home/songwl/swl_ws/pp_main/build/x86/test -DCMAKE_BUILD_TYPE=Release`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'test_check_gripper_ack_log_retry_reconnect_(pass|fail)'`
+- 后续待验证：
+  - 若后续继续拆 driver，可再把更贴近实现的 retry / reconnect 状态机直接下沉成 C++ 纯逻辑单测
+  - 继续推进 `T15`，在板端主动刺激里复用这批统计门禁
+
+### 2026-04-21 - merge8-board-results-documented
+
+- 阶段：`Stage B board validation`
+- 范围：`docs`
+- 类型：`测试结论回填 / 追溯补记`
+- 主要改动：
+  - 在 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 新增“`0.1 最近一次板端重跑结果`”小节
+  - 回填当前板端安装包版本 `1.2.8+merge8` 以及三条已确认通过的板端脚本结果：
+    - `board_camera_stress.sh`
+    - `board_sensor_smoke.sh`
+    - `board_service_integration_check.sh`
+  - 在测试计划中补充结果目录、JSON 汇总路径，以及“本轮结果已证明 / 尚不能单独证明”的边界说明，避免后续把“已验证项”和“仍待专项补测项”混淆
+- 风险与行为等价说明：
+  - 本轮仅更新文档，不改运行时代码、测试脚本或打包产物
+  - 属于测试追溯信息补录，不影响既有行为
+- 已执行验证：
+  - 核对本地回传结果目录与 JSON 汇总文件存在：
+    - [tmp/board_results/camera_stress_20260421_110053](/home/songwl/swl_ws/ugripper/tmp/board_results/camera_stress_20260421_110053)
+    - [tmp/board_results/sensor_smoke_20260421_111554](/home/songwl/swl_ws/ugripper/tmp/board_results/sensor_smoke_20260421_111554)
+    - [tmp/board_results/service_integration_20260421_111733](/home/songwl/swl_ws/ugripper/tmp/board_results/service_integration_20260421_111733)
+  - 核对三份汇总文件结论：
+    - `camera stress` -> `test_summary.json: ok=true, validation_reason=ok`
+    - `sensor smoke` -> `test_summary.json: ok=true, validation_reason=ok`
+    - `service integration` -> `episode_summary.json: ok=true, validation_reason=ok`
+- 后续待验证：
+  - 后续继续补 `Gripper/HMI` 真机主动刺激专项与更高压力、更长时长的 `L4 stress`
+  - 若再执行新一轮板端重跑，应继续按相同口径把结果回填到测试计划文档
+
+### 2026-04-21 - merge8-board-validation-first-pass
+
+- 阶段：`Stage B board validation`
+- 范围：`ARM board / pp_main test scripts / docs`
+- 类型：`上板验证 / ARM 测试工具补齐 / 结果回传 / 追溯补记`
+- 主要改动：
+  - 将 `ugripper_1.2.8+merge8_arm64.deb` 传到板子 `192.168.2.240` 并覆盖安装，确认版本从 `1.2.8+merge7` 升级到 `1.2.8+merge8`
+  - 升级后立即检查 `ugripper.service` 与 `journalctl`，确认只有启动瞬态 `stereo_not_ready: warming`，随后 `hardware health recovered`
+  - 在板子上实际执行并通过：
+    - `board_camera_stress.sh --ugripper-root /opt/ugripper --duration-sec 30 --decode-check`
+    - `board_sensor_smoke.sh --ugripper-root /opt/ugripper --checker-bin /home/ubuntu/pp_main/test/scripts/check_sensor_mcap --duration-sec 6`
+    - `board_service_integration_check.sh --checker-bin /home/ubuntu/pp_main/test/scripts/check_sensor_mcap --episode-root /mnt/data_disk/dap912263b000689/data --journal-since '20 min ago'`
+  - 为了补齐板端 `sensor` / `service` 分析链路，在 `pp-arm-dev` 容器中单独交叉构建 ARM 版 `check_sensor_mcap`，再与脚本 bundle 一起下发到板子 `/home/ubuntu/pp_main/test/scripts`
+  - 将板端结果回传到本地：
+    - [tmp/board_results/camera_stress_20260421_110053](/home/songwl/swl_ws/ugripper/tmp/board_results/camera_stress_20260421_110053)
+    - [tmp/board_results/sensor_smoke_20260421_111554](/home/songwl/swl_ws/ugripper/tmp/board_results/sensor_smoke_20260421_111554)
+    - [tmp/board_results/service_integration_20260421_111733](/home/songwl/swl_ws/ugripper/tmp/board_results/service_integration_20260421_111733)
+- 风险与行为等价说明：
+  - 本轮主要是板端实测，不改运行时代码逻辑
+  - 暴露出一个测试入口层面的环境要求：`board_sensor_smoke.sh` / `board_service_integration_check.sh` 目前仍需要显式提供 ARM 版 `check_sensor_mcap`，否则默认会去找 `build/x86/test/...`
+  - 另一个可观察问题是 `board_service_integration_check.sh` 的默认 `find_default_episode_root()` 在多数据盘场景下可能挑错根目录，板端实测时更稳妥的做法是显式给 `--episode-root`
+- 已执行验证：
+  - 板子版本核对：`dpkg -s ugripper | grep -E '^(Package|Version|Status):'`
+  - 服务状态核对：`systemctl status ugripper.service --no-pager -l`
+  - 启动日志核对：`journalctl -u ugripper.service --since '5 min ago' --no-pager -o short-precise -l`
+  - 容器内 ARM 测试构建：`cmake -S test -B build/arm/test -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=$PWD/cmake/arm-linux-toolchain.cmake && cmake --build build/arm/test --target check_sensor_mcap -j8`
+  - 板端 summary 结果：
+    - `camera stress` -> `test_summary.json: ok=true, validation_reason=ok`
+    - `sensor smoke` -> `test_summary.json: ok=true, validation_reason=ok`
+    - `service integration` -> `episode_summary.json: ok=true, validation_reason=ok`
+- 后续待验证：
+  - 把 ARM 版 `check_sensor_mcap` 的下发纳入正式板端测试准备步骤，避免每次临时手工覆盖 `--checker-bin`
+  - 继续推进 `board_service_integration_check.sh` 的默认 episode-root 选择逻辑，避免多数据盘时选错目录
+  - 如需更强结论，可在板子上增加更长时长 `camera stress` 和多轮 `service episode loop` 重跑
+
+### 2026-04-20 - ppmain-board-summary-rollout
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test scripts / docs`
+- 类型：`板端标准脚本收口 / 统一 summary 输出 / 文档回填`
+- 主要改动：
+  - `board_sensor_smoke.sh` 接入 `summarize_episode_reports.py`，在左右 `sensor_report_*.json` 基础上输出 `test_summary.json`
+  - `board_camera_stress.sh` 接入 `summarize_episode_reports.py`，在左右 `video_report_*.json` 基础上输出 `test_summary.json`
+  - 两个脚本分别新增：
+    - `--summary-script`
+    - `board_sensor_smoke.sh --max-sensor-span-gap-ns`
+    - `board_camera_stress.sh --max-video-span-gap-sec`
+  - 板端三条主入口现在的 summary 出口状态：
+    - `board_sensor_smoke.sh` -> `test_summary.json`
+    - `board_camera_stress.sh` -> `test_summary.json`
+    - `board_service_integration_check.sh` -> `episode_summary.json`
+  - 回填 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 的 `T13-T16` 当前进展
+- 风险与行为等价说明：
+  - 本轮只修改板端测试脚本和文档，不改运行时代码行为
+  - 属于测试资产出口统一；脚本原有明细检查仍保留，只是在成功/失败之外新增结构化 summary 产物
+- 已执行验证：
+  - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_sensor_smoke.sh /home/songwl/swl_ws/pp_main/test/scripts/board_camera_stress.sh /home/songwl/swl_ws/pp_main/test/scripts/board_service_integration_check.sh`
+  - `python3 /home/songwl/swl_ws/pp_main/test/scripts/test_summarize_episode_reports.py`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'test_summarize_episode_reports'`
+- 后续待验证：
+  - 让 `board_service_integration_check.sh` 也进一步收口到统一 `test_summary.json` 命名
+  - 继续把 summary reason 与运行时 `validation_failed` 文案做精确对齐
+  - 后续在最新板端包上实际跑一轮 `sensor/camera/service` 三条脚本，确认 summary 输出内容符合预期
+
+### 2026-04-20 - ppmain-service-summary-first-cut
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test scripts / docs`
+- 类型：`service 级结构化汇总 / 板端脚本接线 / 文档回填`
+- 主要改动：
+  - 新增 `test/scripts/summarize_episode_reports.py`，把 `sensor/video/gripper/hmi` 的 analyzer JSON 汇总成统一 `episode_summary.json`
+  - 汇总逻辑支持：
+    - `sensor` 左右报告的 cross-alignment 计算
+    - `video` 左右报告的 cross-alignment 计算
+    - `video` 的 `validation_reason` / `primary_failure` 向上汇总
+    - `gripper` / `hmi` 日志 analyzer 失败映射
+  - `board_service_integration_check.sh` 接入汇总脚本，并新增：
+    - `--summary-script`
+    - `--max-sensor-span-gap-ns`
+    - `--max-video-span-gap-sec`
+  - 新增 `test_summarize_episode_reports.py` host-only 用例，覆盖成功、sensor span gap、video reason、video span gap、gripper/hmi failure 映射
+  - 回填 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 的 `T13-T16` 当前进展
+- 风险与行为等价说明：
+  - 本轮只修改 `pp_main/test/scripts` 和测试文档，不改板端运行时代码行为
+  - 属于测试资产收口；`board_service_integration_check.sh` 在原有明细检查基础上新增 summary 输出与额外可配置对齐判断
+- 已执行验证：
+  - `cmake -S /home/songwl/swl_ws/pp_main/test -B /home/songwl/swl_ws/pp_main/build/x86/test -DCMAKE_BUILD_TYPE=Release`
+  - `python3 -m py_compile /home/songwl/swl_ws/pp_main/test/scripts/summarize_episode_reports.py /home/songwl/swl_ws/pp_main/test/scripts/test_summarize_episode_reports.py`
+  - `python3 /home/songwl/swl_ws/pp_main/test/scripts/test_summarize_episode_reports.py`
+  - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_service_integration_check.sh`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'test_summarize_episode_reports|test_check_video_windows_rules|SensorMcapCheckerTest'`
+- 后续待验证：
+  - 把 `episode_summary.json` 进一步收口成统一 `test_summary.json`
+  - 让 board sensor/camera stress 也接入统一汇总出口
+  - 将 summary reason 与运行时 `validation_failed` 文案做更精确映射
+
+### 2026-04-20 - ppmain-host-only-rules-fourth-cut
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test / docs`
+- 类型：`host-only 规则下沉 / validation reason 摘要 / 文档回填`
+- 主要改动：
+  - 继续推进 `T10/T11`：
+    - `sensor_mcap_checker` / `check_sensor_mcap` 新增 `max_span_gap_ns`，把“同一侧 `MCAP` 内 expected topics 之一提前停流”的跨 topic span 对齐问题收入口径
+    - `check_video_windows.py` 新增 `primary_failure` / `validation_reason` 摘要，按固定优先级把窗口级失败聚合成更稳定的主因分类
+    - `test_sensor_mcap_checker`、`test_check_video_windows_rules.py` 分别增加对应的通过/失败用例
+  - 回填 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 的 `T10/T11` 当前进展
+- 风险与行为等价说明：
+  - 本轮只修改 `pp_main/test` 下的 checker / analyzer / unit test，不改板端运行时代码行为
+  - 属于测试门禁增强与结果归因收口：会更早暴露跨 topic 截断，并为视频坏段提供更稳定的摘要分类
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_sensor_mcap_checker check_sensor_mcap -j8`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'SensorMcapCheckerTest|test_check_video_windows_rules'`
+  - `python3 -m py_compile /home/songwl/swl_ws/pp_main/test/scripts/check_video_windows.py /home/songwl/swl_ws/pp_main/test/scripts/test_check_video_windows_rules.py`
+  - `python3 /home/songwl/swl_ws/pp_main/test/scripts/test_check_video_windows_rules.py`
+- 后续待验证：
+  - 继续做 `T10/T11` 剩余高价值项：跨文件对齐、窗口坏段聚类、service 级结构化汇总和与运行时 validation message 的一一映射
+
+### 2026-04-20 - ppmain-host-only-rules-third-cut
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test / board scripts / docs`
+- 类型：`host-only 规则下沉 / checker 口径修正 / 板端脚本接线 / 文档回填`
+- 主要改动：
+  - 继续推进 `T10/T11`，补第二批更贴近真实故障的 host-only 规则：
+    - `sensor_mcap_checker` / `check_sensor_mcap` 新增 `min_message_count` 与 `min_span_ns`，把“topic 只写出极少消息”与“topic 出现但整体跨度过短”的 stop/flush 截断类问题收入口径
+    - `check_video_windows.py` 修正 partial tail window 的最小帧数阈值，按实际尾段窗口时长缩放，不再把正常短尾段误报成低帧
+    - `check_video_windows.py` 对 expected fps 已知但 frame count 缺失的窗口显式失败，并新增 `failure_types` 汇总，便于后续 validation reason mapping / test summary 汇总
+  - 板端脚本同步收紧：
+    - `board_sensor_smoke.sh`
+    - `board_service_integration_check.sh`
+    - 两者默认对左右 `MCAP` 增加 `--min-message-count 2`
+  - 回填 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 的 `T10/T11` 当前进展
+- 风险与行为等价说明：
+  - 本轮只修改 `pp_main/test` 下的 checker / analyzer / board test script，不改板端运行时代码行为
+  - 属于测试门禁增强与误报修正：partial-tail 正常场景误报会减少；缺帧/截断类问题会更早暴露
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_sensor_mcap_checker check_sensor_mcap -j8`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'SensorMcapCheckerTest|test_check_video_windows_rules'`
+  - `python3 -m py_compile /home/songwl/swl_ws/pp_main/test/scripts/check_video_windows.py /home/songwl/swl_ws/pp_main/test/scripts/test_check_video_windows_rules.py`
+  - `python3 /home/songwl/swl_ws/pp_main/test/scripts/test_check_video_windows_rules.py`
+  - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_sensor_smoke.sh /home/songwl/swl_ws/pp_main/test/scripts/board_service_integration_check.sh`
+- 后续待验证：
+  - 继续做 `T10/T11` 剩余高价值项：窗口坏段聚类、结构化 validation reason 汇总
+  - 后续把 `failure_types` 和 `sensor/video` checker 输出统一收口到 `test_summary.json`
+
+### 2026-04-20 - ppmain-host-only-rules-second-cut
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test / docs`
+- 类型：`host-only 规则下沉 / analyzer 门禁收紧 / 文档回填`
+- 主要改动：
+  - 继续推进 `T10/T11/T12`，补一批不依赖大规模运行时代码拆分、但能直接提升门禁价值的 host-only 规则：
+    - `sensor_mcap_checker` / `check_sensor_mcap` 新增 `max_allowed_gap_ns`，把“时间洞超阈值”收入口径，并补 synthetic `MCAP` 用例
+    - `camera_recorder` 配置测试新增 `uvc_roll_absolute` 契约覆盖，分别覆盖 legacy / schema v1 正常解析和越界拒绝
+    - `check_gripper_ack_log.py` 新增 `io_summary` 规则，`io_failures / exclusive_timeouts / exclusive_failures` 现在也会触发 host-only 失败
+    - `check_hmi_event_log.py` 新增 `health_fault -> led_state -> led_target` 精确对齐规则，避免“记录了 Error 灯但不是期望 Error 状态”漏检
+  - 新增对应 fixture：
+    - `gripper_diag_io_fail_only.log`
+    - `hmi_diag_led_mismatch.log`
+  - 回填 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 的 `T10/T11/T12` 当前进展
+- 风险与行为等价说明：
+  - 本轮主要修改 `pp_main/test` 下的 checker / analyzer / fixture / CTest 接线，不改板端运行时代码行为
+  - 属于测试门禁增强；现有通过路径不应受影响，失败路径会比之前更早暴露
+- 已执行验证：
+  - `cmake -S /home/songwl/swl_ws/pp_main/test -B /home/songwl/swl_ws/pp_main/build/x86/test -DCMAKE_BUILD_TYPE=Release`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_camera_config test_sensor_mcap_checker check_sensor_mcap test_hmi_protocol test_hmi_led_effects test_button_logic test_recording_orchestrator test_runtime_health -j8`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'CameraConfigTest|SensorMcapCheckerTest|test_check_gripper_ack_log|test_check_hmi_event_log|HmiControllerTest|RecordingOrchestratorTest|HealthMonitorTest'`
+- 后续待验证：
+  - 继续做 `T10/T11/T12` 剩余高价值项：`SensorRecorder` stop 尾段/flush、`CameraRecorder` validation mapping、`GripperHmiTool` retry/resync 更贴近实现的单测
+  - 后续把这批 analyzer 规则进一步收口到统一 `test_summary.json` 汇总
+
+### 2026-04-20 - ppmain-test-plan-inventory-realign
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`docs`
+- 类型：`测试资产盘点 / 文档收口 / 规范化规划`
+- 主要改动：
+  - 重新按本地 `pp_main/test`、`pp_main/test/scripts`、`pp_main/standalone` 实际状态校正 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md)，不再把“当前已有测试”只写成最早一批 `gtest`
+  - 在测试方案中补齐当前已落地的 analyzer / synthetic fixture / board script 资产，包括：
+    - `test_sensor_mcap_checker`
+    - `check_sensor_mcap`
+    - `test_check_video_windows_rules.py`
+    - `check_video_windows.py`
+    - `check_gripper_ack_log.py`
+    - `check_hmi_event_log.py`
+    - `board_sensor_smoke.sh`
+    - `board_camera_stress.sh`
+    - `board_gripper_hmi_log_check.sh`
+    - `board_service_integration_check.sh`
+    - `board_service_restart_check.sh`
+    - `board_service_episode_loop_check.sh`
+  - 在测试方案中明确区分“已落地 / 已接线 / 已重跑验证”3 种状态，避免把库存存在误写成最新版本已完整重跑
+  - 新增测试规范化建设目标，补充统一标签、统一报告结构、feature-to-test 映射、标准入口脚本和 release gate 收口建议
+- 风险与行为等价说明：
+  - 本轮只修改文档与追溯记录，不改运行时代码、打包逻辑或测试执行逻辑
+  - 属于测试资产盘点与规划收口，不引入对外软件行为变化
+- 已执行验证：
+  - 只读核对 `pp_main/test/src`、`pp_main/test/scripts`、`pp_main/standalone` 当前测试入口与文档描述是否一致
+- 后续待验证：
+  - 基于更新后的测试方案继续推进 `T10-T16`
+  - 后续在最新板端包上补齐板端脚本重跑记录与统一汇总报告
+
+### 2026-04-20 - ppmain-runtime-hmi-reconnect-sync
+
+- 阶段：`Stage B merge follow-up`
+- 范围：`pp_main standalone / docs`
+- 类型：`上游修复回灌 / runtime-HMI 补同步 / 双架构验证 / 追溯补记`
+- 主要改动：
+  - 继续对照 `ugripper origin/feature/zhouwu/v2@2065752`，确认 `pp_main` 中仍缺一段 gripper reconnect 相关修复后，补齐到 merged 代码：
+    - `standalone/GripperHmiTool` 增加 `readSerialNumberAndCalibration()`，把 SN + calibration 读取收成一次独占事务
+    - `standalone/GripperHmiTool` 连接阶段补 `TIOCEXCL`，减少多进程/后台轮询并发占用串口
+    - `standalone/GripperHmiTool` 标定读取补齐 header 驱动的 chunk 完整性判断与 missing-chunk sweep fallback
+    - `standalone/UgripperRuntime` 补 `GripperPanelManager` 连接事件、延迟 `requestState`、重连后 beep 状态恢复
+    - `standalone/UgripperRuntime` 补 `pendingGripperRefresh_` 链路：gripper 断开后清空 runtime 状态，重连后等待本侧关键设备与 HMI active，再重新刷新 SN / calibration runtime cache
+  - 重新确认打包边界：`pp_main/package_ugripper_stage.sh` 与 `package_ugripper_deb.sh` 当前仍是仓库根目录下的辅助打包脚本，不是主仓库既有受控默认打包入口；本轮未再改其默认行为
+- 风险与行为等价说明：
+  - 本轮属于功能性回灌，不是纯内部整理；行为变化已同步写入 `CHANGELOG`
+  - 当前没有再改 `pp_main` 默认 install root 或整仓打包逻辑，避免影响其他 standalone 目标
+  - ARM 安装阶段仍会出现 `Puppetry` 侧既有 `libtbbmalloc.so.2` unresolved warning；这次未新增，也不属于本轮 `ugripper` 回灌失败
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_ros2 --target GripperHmiTool UgripperRuntime -j4`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'RecordingOrchestratorTest|HealthMonitorTest|GripperLedEffectRendererTest'`
+  - `docker exec pp-arm-dev bash -lc 'cd /home/songwl/swl_ws/pp_main && export CMAKE_PREFIX_PATH=/opt/openrobots:${CMAKE_PREFIX_PATH:-} && export PKG_CONFIG_PATH=/opt/openrobots/lib/pkgconfig:${PKG_CONFIG_PATH:-} && export LD_LIBRARY_PATH=/opt/openrobots/lib:/usr/lib/aarch64-linux-gnu:${LD_LIBRARY_PATH:-} && cmake --build build/arm/standalone --target GripperHmiTool UgripperRuntime --parallel 8'`
+  - `docker exec pp-arm-dev bash -lc 'cd /home/songwl/swl_ws/pp_main && cmake --install build/arm/standalone'`
+- 后续待验证：
+  - 基于最新 `install/arm` 重新打正式 `deb`，版本号继续按 `1.2.8+merge*`
+  - SSH 上板安装后执行 service smoke / integration / stress
+  - 如需进一步收口，再把 `GripperHmiTool` 的写标定 full-rewrite recovery 与更多 runtime reconnect 场景补成 host-only 专项测试
+
+### 2026-04-20 - v2-latest-sync-arm-verify
+
+- 阶段：`Stage B merge follow-up`
+- 范围：`pp_main standalone / ugripper package-time sources / docs`
+- 类型：`上游修复回灌 / 打包边界收口 / ARM 容器验证 / 追溯补记`
+- 主要改动：
+  - 继续对照 `origin/feature/zhouwu/v2` 最新提交 `2065752`，把已确认高影响修复回灌到合并后代码与打包真源：
+    - `CameraRecorder` 补 `--apply-uvc-roll-only`、主摄 UVC roll 独立 helper 支撑、子进程组清理加固
+    - `GripperHmiTool` 补强 SN 写入重试/abort recovery 逻辑
+    - `UgripperRuntime/audio_play.py` 与 `ugripper/audio/audio_play.py` 补 `umount`、`*_damaged` 音频命令
+    - `auto_update/trigger_shutdown.sh` 切换为 system action 模型，支持 `shutdown` / `umount`
+    - `usb_auto_update.sh` 支持同版本 `deb` 重装
+    - `import_camera_calibration.sh` 补 staging 目录权限、payload 权限和持久化 calibration 文件属主/权限收口
+    - `99-fixed-usb-map.rules` 补左侧新 hub 映射、主摄 `udev` roll helper 触发、UAS/exfat 数据盘 remove fallback
+    - `pack_script/postinst/prerm` 补 system action 临时文件清理
+  - 在 `pp_main/package_ugripper_stage.sh` 增加 `apply_main_camera_roll_once.sh` 打包投递；同时确认“优先使用 `install/x86/standalone`”这种默认行为会扩大影响面，因此已回退，改为后续打包时显式使用 `INSTALL_ROOT_OVERRIDE`
+  - 补齐之前未入日志的这一轮同步与验证过程，保证 `v2` 回灌动作可追溯
+- 风险与行为等价说明：
+  - `system action`、同版本重装、主摄 `udev roll helper` 和新增提示音属于对外可感知行为变化，已同步写入 `CHANGELOG`
+  - `package_ugripper_stage.sh` 的默认 install root 行为已恢复，避免误伤 `pp_main` 其他功能或既有打包习惯
+  - 当时审计发现的 runtime reconnect / gripper calibration refresh 缺口，已在同日后续条目 `ppmain-runtime-hmi-reconnect-sync` 中继续补齐
+- 已执行验证：
+  - `git fetch origin feature/zhouwu/v2`
+  - `python3 -m py_compile /home/songwl/swl_ws/ugripper/audio/audio_play.py /home/songwl/swl_ws/pp_main/standalone/UgripperRuntime/audio/audio_play.py`
+  - `bash -n /home/songwl/swl_ws/ugripper/auto_update/trigger_shutdown.sh /home/songwl/swl_ws/ugripper/auto_update/usb_auto_update.sh /home/songwl/swl_ws/ugripper/auto_calibration/import_camera_calibration.sh /home/songwl/swl_ws/ugripper/config/apply_main_camera_roll_once.sh /home/songwl/swl_ws/ugripper/pack_script/postinst /home/songwl/swl_ws/ugripper/pack_script/prerm /home/songwl/swl_ws/pp_main/package_ugripper_stage.sh`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_ros2 --target CameraRecorder GripperHmiTool UgripperRuntime -j4`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_shutdown_request_port test_hmi_protocol test_hmi_led_effects -j4`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'ShutdownRequestPortTest'`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -L 'gripper_hmi'`
+  - Docker ARM 容器 `pp-arm-dev` 内执行：
+    - `bash ./arm_build.sh`
+    - `cmake --install build/arm/standalone`
+  - ARM package stage：
+    - `TARGET_PLATFORM=arm bash ./package_ugripper_stage.sh`
+    - manifest 确认包含 `umount.wav`、`*_damaged.wav`、`config/apply_main_camera_roll_once.sh`
+- 后续待验证：
+  - 基于 ARM install tree 构建正式 `deb`，版本号按 `1.2.8+merge*`
+  - SSH 上板安装后执行一轮 service smoke / integration / stress
+
+### 2026-04-17 - stage-b-board-script-first-cut
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test scripts / docs`
+- 类型：`板端标准脚本化 / analyzer 串接 / 文档回填`
+- 主要改动：
+  - 在 `pp_main/test/scripts` 新增共用 helper：
+    - `board_test_common.sh`
+  - 新增第一版板端入口脚本：
+    - `board_sensor_smoke.sh`
+    - `board_camera_stress.sh`
+    - `board_gripper_hmi_log_check.sh`
+  - 第一版脚本能力：
+    - 优先兼容 `/opt/ugripper` 安装树，同时可回退到本地 `build/x86/...`
+    - `board_sensor_smoke.sh` 可独立拉起 `SensorRecorder` 并自动调用 `check_sensor_mcap`
+    - `board_camera_stress.sh` 可独立拉起 `CameraRecorder`、可选启动 CPU busy-loop，并自动调用 `check_video_windows.py`
+    - `board_gripper_hmi_log_check.sh` 可收集或复用 `ugripper.service` 日志，并串接 `check_gripper_ack_log.py` 与 `check_hmi_event_log.py`
+  - 在 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 回填 `T13/T14/T15` 第一版落地状态和脚本入口用法
+- 风险与行为等价说明：
+  - 本轮只新增板端测试脚本，不改板端服务逻辑或设备访问逻辑
+  - 当前脚本仍是第一版：
+    - `Sensor`、`Camera` 脚本主要覆盖独立二进制 smoke / stress
+    - `Gripper/HMI` 脚本当前主要覆盖 service 日志采集与 analyzer 串接，还未覆盖交互式 button 场景驱动
+- 已执行验证：
+  - `chmod +x /home/songwl/swl_ws/pp_main/test/scripts/board_test_common.sh /home/songwl/swl_ws/pp_main/test/scripts/board_sensor_smoke.sh /home/songwl/swl_ws/pp_main/test/scripts/board_camera_stress.sh /home/songwl/swl_ws/pp_main/test/scripts/board_gripper_hmi_log_check.sh`
+  - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_test_common.sh /home/songwl/swl_ws/pp_main/test/scripts/board_sensor_smoke.sh /home/songwl/swl_ws/pp_main/test/scripts/board_camera_stress.sh /home/songwl/swl_ws/pp_main/test/scripts/board_gripper_hmi_log_check.sh`
+  - `board_sensor_smoke.sh --help`
+  - `board_camera_stress.sh --help`
+  - `board_gripper_hmi_log_check.sh --help`
+  - 使用 synthetic log 端到端执行：
+    - `board_gripper_hmi_log_check.sh --log-file /tmp/pp_board_gripper_hmi_combined.log --output-dir /tmp/pp_board_gripper_hmi_log_check_test --require-event ShortUpPressed --require-led-state Error2`
+    - 成功生成 `gripper_report.json` 与 `hmi_button_report.json`
+- 后续待验证：
+  - 在真实板端执行 `board_sensor_smoke.sh` 和 `board_camera_stress.sh`
+  - 继续补 service start/stop 和高频启停循环脚本
+  - 为 `Gripper/HMI/Button` 增加更明确的交互式场景驱动与验收口径
+
+### 2026-04-17 - stage-b-service-integration-script-first-cut
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test scripts / docs`
+- 类型：`service 集成脚本化 / analyzer 串接 / 文档回填`
+- 主要改动：
+  - 在 `pp_main/test/scripts` 新增：
+    - `board_service_integration_check.sh`
+  - 在 `board_test_common.sh` 新增 episode root / latest episode 自动定位 helper
+  - `board_service_integration_check.sh` 第一版能力：
+    - 可自动收集 `systemctl status`、`journalctl`、stereo status
+    - 可自动定位最新 `episode_*`
+    - 检查 episode 文件齐套性
+    - 自动调用 `check_sensor_mcap`
+    - 自动调用 `check_video_windows.py`
+    - 自动调用 `check_gripper_ack_log.py` 与 `check_hmi_event_log.py`
+    - 支持 `--skip-systemctl`、`--skip-sensor-check`、`--skip-video-check` 等离线验证模式
+  - 在 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 补充 `board_service_integration_check.sh` 到第一版板端脚本入口
+- 风险与行为等价说明：
+  - 本轮只新增 service 集成检查脚本，不修改 `ugripper.service` 或运行时逻辑
+  - 当前脚本仍属于第一版检查入口，不包含自动按键驱动和完整 start/stop 循环控制
+- 已执行验证：
+  - `chmod +x /home/songwl/swl_ws/pp_main/test/scripts/board_service_integration_check.sh`
+  - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_service_integration_check.sh`
+  - `board_service_integration_check.sh --help`
+  - 使用 fake episode + synthetic log 执行离线模式：
+    - `board_service_integration_check.sh --episode-dir /tmp/pp_fake_episode_service_check --log-file /tmp/pp_fake_service_log.log --output-dir /tmp/pp_board_service_integration_test --skip-systemctl --skip-sensor-check --skip-video-check`
+    - 成功生成 `episode_files.txt`、`gripper_report.json`、`hmi_button_report.json`
+- 后续待验证：
+  - 在真实板端运行完整模式，不跳过 `systemctl` / `sensor` / `video`
+  - 继续补 service restart / start-stop loop 脚本
+  - 将板端多脚本结果汇总到后续 `test_summary.json`
+
+### 2026-04-17 - stage-b-service-restart-and-loop-scripts
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test scripts / docs`
+- 类型：`service 恢复脚本化 / episode loop 观察脚本化 / 文档回填`
+- 主要改动：
+  - 在 `pp_main/test/scripts` 新增：
+    - `board_service_restart_check.sh`
+    - `board_service_episode_loop_check.sh`
+  - 在 `board_test_common.sh` 补 `wait_for_path()` helper
+  - `board_service_restart_check.sh` 第一版能力：
+    - 支持 `service restart -> active -> stereo ready` 恢复检查
+    - 自动收集 `systemctl`、`journalctl`、stereo status
+    - 检查最近日志里是否出现 `audio player recovered and is ready`
+  - `board_service_episode_loop_check.sh` 第一版能力：
+    - 观察 `episode_root` 下新出现的 `episode_*`
+    - 适配人工按键的多轮 start/stop 循环
+    - 可对每轮新 episode 调用 `board_service_integration_check.sh`
+  - 在 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 回填这两个脚本到第一版板端入口
+- 风险与行为等价说明：
+  - 本轮只新增测试脚本，不修改 service/runtime 行为
+  - `board_service_restart_check.sh` 这轮只做了脚本壳层验证，真正恢复链验证仍需真实板端执行
+  - `board_service_episode_loop_check.sh` 当前仍是“人工动作 + 自动观察/校验”模式，不是全自动按钮注入
+- 已执行验证：
+  - `chmod +x /home/songwl/swl_ws/pp_main/test/scripts/board_service_restart_check.sh /home/songwl/swl_ws/pp_main/test/scripts/board_service_episode_loop_check.sh`
+  - `bash -n /home/songwl/swl_ws/pp_main/test/scripts/board_service_restart_check.sh /home/songwl/swl_ws/pp_main/test/scripts/board_service_episode_loop_check.sh`
+  - `board_service_restart_check.sh --help`
+  - `board_service_episode_loop_check.sh --help`
+  - 使用 fake episode root 离线执行：
+    - `board_service_episode_loop_check.sh --episode-root /tmp/pp_fake_episode_loop_root --cycles 2 --timeout-sec 10 --skip-validate --output-dir /tmp/pp_board_service_loop_test`
+    - 成功生成 `loop_summary.txt`
+- 后续待验证：
+  - 在真实板端执行 `board_service_restart_check.sh`
+  - 在真实板端配合人工按键执行 `board_service_episode_loop_check.sh`
+  - 后续继续考虑是否需要引入更自动化的 start/stop 驱动入口
+
+### 2026-04-17 - stage-b-sensor-camera-host-only-first-cut
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test sensor_recorder / pp_main test camera_recorder / docs`
+- 类型：`host-only 规则下沉 / analyzer 规则固化 / 文档回填`
+- 主要改动：
+  - 在 `pp_main/test/src/sensor_recorder` 新增 `sensor_mcap_checker.h/.cc`，把 `check_sensor_mcap` 的核心分析逻辑抽成可复用库
+  - 在 `pp_main/test/src/sensor_recorder/test_sensor_mcap_checker.cc` 新增 synthetic `MCAP` 用例，固定第一批 `Sensor` analyzer 规则：
+    - contiguous expected topics pass
+    - `sequence gap` fail
+    - timestamp regression fail
+    - expected topic missing fail
+  - 在 `pp_main/test/scripts/check_video_windows.py` 抽出 `evaluate_windows()` 纯规则入口
+  - 在 `pp_main/test/scripts/test_check_video_windows_rules.py` 新增 `Camera` analyzer 规则测试：
+    - 低帧窗口判定
+    - decode failure 判定
+    - partial tail window 切分
+  - 在 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 回填 `T10/T11` 第一批已落地状态
+- 风险与行为等价说明：
+  - 本轮只整理测试工具和 `host-only` 自动化，不改板端录制/校验运行时行为
+  - `Sensor` 侧现在已经能用 synthetic `MCAP` 把最核心的 analyzer 口径锁住；`Camera` 侧先锁窗口判定规则，还没有接入真实 `ffprobe/ffmpeg` 运行环境
+- 已执行验证：
+  - `cmake -S /home/songwl/swl_ws/pp_main/test -B /home/songwl/swl_ws/pp_main/build/x86/test -DCMAKE_BUILD_TYPE=Release`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_sensor_mcap_checker check_sensor_mcap -j4`
+  - `python3 -m py_compile /home/songwl/swl_ws/pp_main/test/scripts/check_video_windows.py /home/songwl/swl_ws/pp_main/test/scripts/test_check_video_windows_rules.py`
+  - `python3 /home/songwl/swl_ws/pp_main/test/scripts/test_check_video_windows_rules.py`
+  - `/home/songwl/swl_ws/pp_main/build/x86/test/src/sensor_recorder/test_sensor_mcap_checker`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'SensorMcapCheckerTest|test_check_video_windows_rules'`
+- 后续待验证：
+  - 继续补 `Sensor` 的 stop 尾段/flush 相关规则
+  - 继续补 `Camera` 的 validation mapping 与窗口汇总报告规则
+  - 开始整理 `T13-T15` 板端标准脚本，把已验证过的命令行链路收敛成固定入口
+
+### 2026-04-17 - stage-b-runtime-host-only-gap-fill
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test record_runtime / docs`
+- 类型：`host-only 规则下沉 / 文档回填 / 日志回填`
+- 主要改动：
+  - 在 `pp_main/test/src/record_runtime/test_button_logic.cc` 继续补按钮时序边界：
+    - `ShutdownPromptOnlyEmitsOncePerHold`
+    - `ResetClearsPendingChordAndAllowsFreshShortPress`
+  - 在 `pp_main/test/src/record_runtime/test_recording_orchestrator.cc` 补 3 条启动/停录错误路径：
+    - `StartRecordingWorkerStartupFailureRollsBackStartedWorker`
+    - `StartRecordingStereoStartFailureStopsWorkersAndSignalsError`
+    - `StopRecordingMergeFailureMapsToValidationFailed`
+  - 在 `pp_main/test/src/record_runtime/test_runtime_health.cc` 补 3 条 health fault 覆盖：
+    - `ReportsAllHmiDisconnected`
+    - `ReportsInactiveAuxiliaryHmiPorts`
+    - `ReportsStereoDaemonNotRunning`
+  - 在 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 回填“当前已落地进展”和“下一步执行顺序”，把 `T1-T16` 当前推进状态收口到正式文档
+- 风险与行为等价说明：
+  - 本轮仍只补 `host-only` 测试和文档，不修改板端运行时逻辑
+  - 目标是把现场最容易回归的按钮边界、启动回滚、stereo 启动失败和 HMI health fault 继续固定住，减少只能靠板端复测发现问题的概率
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_button_logic test_runtime_health test_recording_orchestrator -j4`
+  - `./src/record_runtime/test_button_logic --gtest_filter='HmiControllerTest.ShutdownPromptOnlyEmitsOncePerHold:HmiControllerTest.ResetClearsPendingChordAndAllowsFreshShortPress'`
+  - `./src/record_runtime/test_runtime_health --gtest_filter='HealthMonitorTest.ReportsAllHmiDisconnected:HealthMonitorTest.ReportsInactiveAuxiliaryHmiPorts:HealthMonitorTest.ReportsStereoDaemonNotRunning'`
+  - `./src/record_runtime/test_recording_orchestrator --gtest_filter='RecordingOrchestratorTest.StartRecordingWorkerStartupFailureRollsBackStartedWorker:RecordingOrchestratorTest.StartRecordingStereoStartFailureStopsWorkersAndSignalsError:RecordingOrchestratorTest.StopRecordingMergeFailureMapsToValidationFailed'`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'ShutdownPromptOnlyEmitsOncePerHold|ResetClearsPendingChordAndAllowsFreshShortPress|ReportsAllHmiDisconnected|ReportsInactiveAuxiliaryHmiPorts|ReportsStereoDaemonNotRunning|StartRecordingWorkerStartupFailureRollsBackStartedWorker|StartRecordingStereoStartFailureStopsWorkersAndSignalsError|StopRecordingMergeFailureMapsToValidationFailed'`
+- 后续待验证：
+  - 继续把 `Sensor`、`Camera` 的分析规则下沉为 `host-only`
+  - 开始把现有板端命令整理为标准脚本，进入 `T13-T15`
+  - 最终统一做 `host-only + ARM container + board smoke/stress`
+
+### 2026-04-17 - stage-b-health-and-error-path-host-only-coverage
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test record_runtime / docs`
+- 类型：`host-only 规则下沉 / health fault 覆盖补齐 / 日志回填`
+- 主要改动：
+  - 在 `pp_main/test/src/record_runtime/test_runtime_health.cc` 补充 4 条核心 fault key 用例：
+    - `ReportsDiskNotWritableBeforeDeviceChecks`
+    - `ReportsStereoStatusMissing`
+    - `ReportsStereoStatusInvalid`
+    - `ReportsStereoNotReady`
+  - 在 `pp_main/test/src/record_runtime/test_recording_orchestrator.cc` 补充 2 条错误路径用例：
+    - `StartRecordingMissingSensorBinaryMapsToError`
+    - `StopRecordingDueToErrorMapsToErrorOutput`
+  - 进一步固定 `record_runtime` 的关键策略：
+    - `disk_not_writable -> Error1`
+    - `stereo_*` 相关 fault -> `Error2`
+    - 启动前缺 `sensor_recorder_bin` -> `error / Error5`
+    - `due_to_error=true` 停录 -> `error / Error5`
+- 风险与行为等价说明：
+  - 这一步只新增 `host-only` 单测，不改 runtime 逻辑
+  - 目标是把最关键的 health fault 分流和错误停录行为固定住，减少后续只能靠板端日志才能发现映射回归的问题
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_runtime_health test_recording_orchestrator -j4`
+  - `test_runtime_health --gtest_filter='HealthMonitorTest.ReportsDiskNotWritableBeforeDeviceChecks:HealthMonitorTest.ReportsStereoStatusMissing:HealthMonitorTest.ReportsStereoStatusInvalid:HealthMonitorTest.ReportsStereoNotReady'`
+  - `test_recording_orchestrator --gtest_filter='RecordingOrchestratorTest.StartRecordingMissingSensorBinaryMapsToError:RecordingOrchestratorTest.StopRecordingDueToErrorMapsToErrorOutput'`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'HealthMonitorTest.ReportsDiskNotWritableBeforeDeviceChecks|HealthMonitorTest.ReportsStereoStatusMissing|HealthMonitorTest.ReportsStereoStatusInvalid|HealthMonitorTest.ReportsStereoNotReady|RecordingOrchestratorTest.StartRecordingMissingSensorBinaryMapsToError|RecordingOrchestratorTest.StopRecordingDueToErrorMapsToErrorOutput'`
+- 后续待验证：
+  - 继续补 `record_runtime` 中更多 `health fault -> led/audio` 的 deterministic 单测
+  - 用板端真实 `journalctl` 对照当前 `host-only` 覆盖的 fault key 和音频/灯效映射
+  - 最终统一跑一轮 `host-only + ARM container + board smoke`
+
+### 2026-04-17 - stage-b-recording-orchestrator-host-only-coverage
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test record_runtime / docs`
+- 类型：`host-only 规则下沉 / stop-validate 策略回归 / 日志回填`
+- 主要改动：
+  - 在 `pp_main/test/src/record_runtime/test_recording_orchestrator.cc` 补充 3 条更贴近真实录制链的 `host-only` 用例：
+    - `StopRecordingSuccessSignalsWritingThenReady`
+    - `StopRecordingStereoFinalizeFailureMapsToValidationFailed`
+    - `StartRecordingMissingCameraBinaryMapsToError`
+  - 把 `RecordingOrchestrator` 的关键策略桥接纳入自动回归：
+    - 成功停录时 `recording_stop -> writing -> ready`
+    - `led_state` 的 `Recording -> Ready -> Init -> Ready`
+    - `stereo finalize` 失败时落到 `validation_failed / Error1`
+    - 启动前二进制缺失时落到 `error / Error5`
+- 风险与行为等价说明：
+  - 这一步只新增 `host-only` 单测，不改 runtime 行为
+  - 目标是把现场最容易回归的 stop/validate/finalize 策略桥接提前锁在纯逻辑层，减少后续只能靠板端复测才能发现的问题
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_recording_orchestrator -j4`
+  - `test_recording_orchestrator --gtest_filter='RecordingOrchestratorTest.StopRecordingSuccessSignalsWritingThenReady:RecordingOrchestratorTest.StopRecordingStereoFinalizeFailureMapsToValidationFailed:RecordingOrchestratorTest.StartRecordingMissingCameraBinaryMapsToError'`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'RecordingOrchestratorTest.StopRecordingSuccessSignalsWritingThenReady|RecordingOrchestratorTest.StopRecordingStereoFinalizeFailureMapsToValidationFailed|RecordingOrchestratorTest.StartRecordingMissingCameraBinaryMapsToError'`
+- 后续待验证：
+  - 继续把更多 `record_runtime` 故障映射压到 `host-only`
+  - 用板端真实 stop / validation / health fault 日志对照当前自动化口径
+  - 最终统一跑一轮 `host-only + board smoke + ARM container` 组合验证
+
+### 2026-04-17 - stage-b-host-only-rules-first-cut
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test gripper_hmi / pp_main test record_runtime / docs`
+- 类型：`host-only 规则下沉 / 测试自动化 / 日志回填`
+- 主要改动：
+  - 在 `pp_main/test/src/record_runtime/test_button_logic.cc` 补充：
+    - `DebouncesRepeatedShortPresses`
+    - `DualChordReleaseDoesNotEmitShortPress`
+  - 在 `pp_main/test/src/record_runtime/test_runtime_health.cc` 补充：
+    - `ReportsInputHmiDisconnected`
+    - `ReportsInputHmiInactive`
+  - 在 `pp_main/test/src/gripper_hmi/test_hmi_protocol.cc` 补充：
+    - release key report 解析
+    - beep state frame 解析
+  - 在 `pp_main/test/src/gripper_hmi/CMakeLists.txt` 与 `pp_main/test/src/record_runtime/CMakeLists.txt` 中把两类 Python 分析器接入 `ctest`：
+    - `test_check_gripper_ack_log_pass/fail`
+    - `test_check_hmi_event_log_pass/fail`
+  - 新增合成日志样本，固定第一版 `GRIPPER_DIAG / HMI_DIAG` 判定口径
+- 风险与行为等价说明：
+  - 这一步只新增 `host-only` 自动化测试和样本，不改运行时逻辑
+  - 当前下沉的是第一批稳定规则，仍然主要覆盖：
+    - button debounce / chord release
+    - HMI health fault key
+    - gripper protocol frame 解析
+    - 离线日志分析脚本的 `PASS/FAIL` 口径
+  - 还没有把真实串口重试状态机或板端完整灯效链全部抽成纯单测，这部分仍留给后续 `T12/T15` 收口
+- 已执行验证：
+  - `cmake -S /home/songwl/swl_ws/pp_main/test -B /home/songwl/swl_ws/pp_main/build/x86/test -DCMAKE_BUILD_TYPE=Release`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_hmi_protocol test_button_logic test_runtime_health -j4`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'test_hmi_protocol|test_button_logic|test_runtime_health|test_check_gripper_ack_log|test_check_hmi_event_log'`
+  - 直接执行新增 case：
+    - `test_button_logic --gtest_filter='HmiControllerTest.DebouncesRepeatedShortPresses:HmiControllerTest.DualChordReleaseDoesNotEmitShortPress'`
+    - `test_runtime_health --gtest_filter='HealthMonitorTest.ReportsInputHmiDisconnected:HealthMonitorTest.ReportsInputHmiInactive'`
+    - `test_hmi_protocol --gtest_filter='GripperHmiProtocolTest.TryConsumeFrameParsesReleaseKeyReport:GripperHmiProtocolTest.TryConsumeFrameParsesBeepState'`
+- 后续待验证：
+  - 将更多 gripper retry / recovery / timeout 规则继续下沉为纯测试
+  - 把 `led_target` 与 runtime 状态桥接关系进一步补成 deterministic 单测
+  - 板端真实日志通过 `check_gripper_ack_log.py` 与 `check_hmi_event_log.py` 做一次 end-to-end 对照验证
+
+### 2026-04-17 - stage-b-arm-container-gate-refresh
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main ARM container build / packaging / docs`
+- 类型：`ARM 容器门禁验证 / 日志回填`
+- 主要改动：
+  - 复用现有 `pp-arm-dev` 容器，对合并后的 `CameraRecorder`、`SensorRecorder`、`GripperHmiTool`、`UgripperRuntime` 再做一轮 ARM 交叉编译门禁
+  - 重新执行 ARM 安装树刷新与 `arm64` deb 产出，确认最新测试相关改动已进入 ARM 安装物
+  - 核对 `install/arm/bin/...` 下 4 个目标二进制均为 `ELF 64-bit LSB pie executable, ARM aarch64`
+- 风险与行为等价说明：
+  - 这一轮验证的是“ARM 交叉编译 + 安装树 + deb 静态产物”链路，不是原生 ARM 运行态验证
+  - 当前 `pp-arm-dev` 仍是 `amd64` 容器上的 ARM 交叉编译环境，因此不能替代真实 ARM 板的 `service / systemd / 外设` 运行验证
+- 已执行验证：
+  - `docker exec pp-arm-dev bash -lc 'cd /home/songwl/swl_ws/pp_main && cmake --build build/arm/standalone --target CameraRecorder SensorRecorder GripperHmiTool UgripperRuntime -j4'`
+  - `docker exec pp-arm-dev bash -lc 'cd /home/songwl/swl_ws/pp_main && cmake --install build/arm/standalone --prefix /home/songwl/swl_ws/pp_main/install/arm'`
+  - `file /home/songwl/swl_ws/pp_main/install/arm/bin/CameraRecorder/CameraRecorder`
+  - `file /home/songwl/swl_ws/pp_main/install/arm/bin/SensorRecorder/SensorRecorder`
+  - `file /home/songwl/swl_ws/pp_main/install/arm/bin/GripperHmiTool/GripperHmiTool`
+  - `file /home/songwl/swl_ws/pp_main/install/arm/bin/UgripperRuntime/UgripperRuntime`
+  - `TARGET_PLATFORM=arm /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+  - 产物确认：
+    - `/home/songwl/swl_ws/pp_main/build/package/arm/ugripper_1.2.8_arm64.deb`
+- 后续待验证：
+  - 对新刷出的 ARM `deb` 做一次 `dpkg-deb -I/-c` focused 静态检查
+  - 在真实 ARM 板上安装最新 `deb`，再跑 `journalctl`、`ugripper.service` 和录制链 smoke
+  - 若后续继续补 `host-only` 单测或测试工具，再补一次 ARM 容器增量构建门禁
+
+### 2026-04-17 - stage-b-gripper-hmi-observability-first-cut
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main standalone GripperHmiTool / pp_main standalone UgripperRuntime / pp_main test / docs`
+- 类型：`观测点补齐 / 测试工具落地 / 文档对齐 / 日志回填`
+- 主要改动：
+  - 在 `pp_main/standalone/GripperHmiTool/gripper_hmi_driver.cc` 为 gripper/HMI 链路补第一版结构化诊断日志：
+    - `[GRIPPER_DIAG] category=command_summary`
+    - `[GRIPPER_DIAG] category=io_summary`
+    - 覆盖 `read/write serial number`、`read/write calibration` 的 `command_id / sends / acks / timeouts / retries / recoveries / status`
+    - 补周期性 `io_summary`，汇总 `tx_led / tx_beep / tx_state_req / rx_frames / key_reports / beep_states / io_failures`
+  - 在 `pp_main/standalone/UgripperRuntime/record_runtime.cc` 补第一版 HMI 账本日志：
+    - `[HMI_DIAG] category=button_raw`
+    - `[HMI_DIAG] category=button_event`
+    - `[HMI_DIAG] category=led_target`
+    - `[HMI_DIAG] category=health_fault`
+    - `[HMI_DIAG] category=health_recovered`
+  - 在 `pp_main/test/scripts` 新增：
+    - `check_gripper_ack_log.py`
+    - `check_hmi_event_log.py`
+  - 对齐 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 中 `T2.3/T2.4` 的第一版入口说明
+- 风险与行为等价说明：
+  - 这一步主要补诊断日志与离线分析入口，不改 `UgripperRuntime` 按键语义、灯效策略或 `GripperHmiTool` 协议主流程
+  - 新增日志会增加少量 stdout/journal 输出，当前先控制在“按事件输出 + gripper 周期摘要”级别，避免直接进入逐帧日志
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_ros2 --target GripperHmiTool UgripperRuntime -j4`
+  - `/home/songwl/swl_ws/pp_main/build/x86/standalone_ros2/GripperHmiTool/GripperHmiTool --help`
+  - `/home/songwl/swl_ws/pp_main/build/x86/standalone_ros2/UgripperRuntime/UgripperRuntime --help`
+  - `python3 -m py_compile /home/songwl/swl_ws/pp_main/test/scripts/check_gripper_ack_log.py /home/songwl/swl_ws/pp_main/test/scripts/check_hmi_event_log.py`
+  - 使用合成日志分别执行：
+    - `check_gripper_ack_log.py`
+    - `check_hmi_event_log.py`
+    - 两者均返回 `PASS`
+- 后续待验证：
+  - 用真实 `journalctl -u ugripper.service` 日志跑 `check_gripper_ack_log.py`
+  - 用真实板端按钮、灯效、健康故障日志跑 `check_hmi_event_log.py`
+  - 根据真实日志噪声继续收紧 `command_summary` / `hmi_event` 判定规则
+  - 继续推进 `T12/T15` 的 `host-only` 单测与板端标准脚本
+
+### 2026-04-17 - stage-b-test-tooling-first-cut
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`pp_main test / docs`
+- 类型：`测试工具落地 / 文档对齐 / 日志回填`
+- 主要改动：
+  - 在 `pp_main/test/src/sensor_recorder` 新增 `check_sensor_mcap.cc`，并在对应 `CMakeLists.txt` 中补 `check_sensor_mcap` 可执行目标
+  - 复用 `SensorRecorder` vendored `mcap` 读取库，第一版支持：
+    - 文件非空校验
+    - topic 非空校验
+    - `sequence` 连续性检查
+    - `logTime` 单调性检查
+    - `stdout PASS/FAIL` 与 `json` 汇总输出
+  - 在 `pp_main/test/scripts` 新增 `check_video_windows.py`，第一版支持：
+    - 基于 `ffprobe` 的窗口级帧数统计
+    - 基于 `ffmpeg` 的窗口级解码失败检查
+    - `PASS/FAIL` 控制台输出与结构化 `json` 报告
+  - 对齐 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md) 中 `T6` 的工具路径，避免继续指向旧的 Python 占位入口
+- 风险与行为等价说明：
+  - 这一步只新增测试分析工具，不改 `pp_main` 运行时录制协议与板端行为
+  - `check_video_windows.py` 的运行依赖本机存在 `ffprobe/ffmpeg`，当前开发环境缺少 `ffmpeg` 时只能完成脚本级校验，不能完成端到端视频窗口回放验证
+- 已执行验证：
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target check_sensor_mcap -j4`
+  - `/home/songwl/swl_ws/pp_main/build/x86/test/src/sensor_recorder/check_sensor_mcap --help`
+  - 对空文件执行 `check_sensor_mcap`，返回 `[FAIL] file is empty`，`exit_code=1`
+  - `python3 -m py_compile /home/songwl/swl_ws/pp_main/test/scripts/check_video_windows.py`
+- 后续待验证：
+  - 用真实 `sensor_data_left.mcap`、`sensor_data_right.mcap` 跑 `check_sensor_mcap`
+  - 在具备 `ffmpeg` 的环境下，用真实主摄视频跑 `check_video_windows.py`
+  - 继续推进 `T8/T9` 的 gripper 与 HMI/Button 离线分析器
+  - 将 `T6/T7` 的稳定规则继续下沉为 `host-only` 自动化测试
+
+### 2026-04-17 - stage-b-test-plan-and-observability-kickoff
+
+- 阶段：`Stage B testing follow-up`
+- 范围：`docs / pp_main standalone SensorRecorder / pp_main standalone CameraRecorder`
+- 类型：`测试收口 / 观测点补齐 / 日志回填`
+- 主要改动：
+  - 新增并收口 [docs/ppmain-ugripper-test-plan.md](/home/songwl/swl_ws/ugripper/docs/ppmain-ugripper-test-plan.md)，把 `pp_main` 合并后 `ugripper` 的正式测试方案整理为一份独立文档
+  - 在测试方案中补齐“最终目标 + Phase 0-5 路线 + T1-T16 任务分解表”，并把当前最紧急问题口径冻结为：
+    - `SensorRecorder` 的 `MCAP` 单点丢帧/尾包缺失
+    - 主摄在 `CPU 90%+` 条件下约 `20s` 问题段的坏段检测
+    - gripper 控制帧丢失
+    - HMI 灯效状态不一致
+    - Button 事件链路不一致
+  - 在测试方案 `Phase 0` 下新增第一轮 `FAIL` 口径，明确后续分析器和 `host-only` 测试应共享同一判定标准
+  - 在 `pp_main/standalone/SensorRecorder/main.cc` 增加第一批观测点：
+    - 每路 `received_samples`
+    - 每路 `emitted_messages`
+    - `last_sequence`
+    - `last_timestamp_ns`
+    - writer 侧 `written_messages`
+    - `write_failures`
+    - `last_written_sequence`
+    - `last_write_system_time_ns`
+  - 在 `pp_main/standalone/CameraRecorder/camera_recorder.cc` 增加第一批 summary 日志：
+    - 普通 recorder 的 `observed_output_frames`
+    - 每路首尾帧时间信息与 `record_time_offset_us`
+    - stereo session 的 `submitted_frames`
+    - `max_queue_backlog`
+    - 最终 `has_output / exit_code`
+  - 顺手修正 `ShellCameraRecorder::HasWrittenOutput()`，让其按 primary output 实际落盘情况判断，不再固定返回 `false`
+- 风险与行为等价说明：
+  - 这一步不改变 `SensorRecorder` / `CameraRecorder` 的主流程录制语义，重点是补测试观测能力和后续离线分析器所需输入
+  - `CameraRecorder` 的输出判定从“始终 `false`”修正为“按主输出文件实际存在且非空判断”，可能让后续 stop/summary 日志更接近真实录制状态，但不改变已定义的录制协议和产物格式
+- 已执行验证：
+  - 文档侧：补齐 `docs/ppmain-ugripper-test-plan.md` 的最终目标、Phase 路线、任务分解表和第一轮 `FAIL` 口径
+  - 代码侧：定向增量编译通过
+    - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_ros2 --target CameraRecorder SensorRecorder -j4`
+- 后续待验证：
+  - `T6` `MCAP` 离线检查器：`pp_main/test/src/sensor_recorder/check_sensor_mcap.cc`
+  - `T7` 主摄视频窗口检查器：`check_video_windows.py`
+  - 基于新增观测点，在板端真实录制后确认统计日志是否足以支撑故障归因
+  - 将稳定判定规则继续下沉到 `pp_main/test` 的 `host-only` 集合
+
+### 2026-04-16 - stage-b-b4-merge6-config-path-board-close
+
+- 阶段：`Stage B B4 board follow-up`
+- 范围：`pp_main standalone packaging / ARM board verification / docs`
+- 类型：`打包纠偏 / 板端验证收口`
+- 主要改动：
+  - 复盘 `1.2.8+merge5` 板端复测后，确认问题不在新的路径兼容逻辑本身，而是在打包阶段复用了陈旧的 `install/arm_camera_fix`，导致 `deb` 中实际携带的仍是旧版 `CameraRecorder`
+  - 在 `pp-arm-dev` 中重新编译并安装 `CameraRecorder` 与 `UgripperRuntime` 到 `install/arm_camera_fix`，随后重新产出唯一版本包 `ugripper_1.2.8+merge6_arm64.deb`
+  - 保持 package baseline 只安装 `/opt/ugripper/bin/CameraRecorder/config/camera_recorder.yaml`，不再回退到“主包装两份 YAML”方案，继续以二进制路径兼容为正式修复口径
+  - 带外设 ARM 板 `192.168.2.240` 已确认：删除 `/opt/ugripper/config/camera_recorder.yaml` 软链接后，`ugripper.service` 仍可拉起 `CameraRecorder --stereo-daemon`，并写出 `ready=true` 的 `/tmp/umi_stereo_camera_status.json`
+- 风险与行为等价说明：
+  - 这一步不改 stereo 采集/编码语义，只纠正“新源码未真正进入 ARM 包”的交付问题
+  - 板端手工前台再起一份 `CameraRecorder --stereo-daemon` 时会与 service 内常驻 daemon 争抢双目设备，因此手工 `warming/not_ready` 不再作为最终验收口径；以 service 拉起的单实例 status 为准
+- 已执行验证：
+  - 本地确认 `install/arm_camera_fix/bin/CameraRecorder/CameraRecorder` 已包含：
+    - `bin/CameraRecorder/config`
+    - `camera config yaml not found`
+    - `[camera_recorder] config_yaml={}`
+  - `dpkg-deb -c` 确认 `merge6` 包内只保留：
+    - `/opt/ugripper/bin/CameraRecorder/config/camera_recorder.yaml`
+  - 带外设 ARM 板确认：
+    - `/opt/ugripper/config/camera_recorder.yaml` 不存在
+    - `ugripper (1.2.8+merge6)` 安装完成后，`UgripperRuntime` 与 `CameraRecorder --stereo-daemon` 可由 service 正常拉起
+    - `/tmp/umi_stereo_camera_status.json` 中左右 stereo 均为 `ready=true`、`state=ready`
+    - 真实连续两段普通录制 `episode_20260416_0001`、`episode_20260416_0002` 均已成功落盘：
+      - 两段 episode 都包含 8 路视频、`sensor_data_left.mcap`、`sensor_data_right.mcap`、`metadata.json`、`calibration.json`、`info.json`
+      - 两段 `info.json` 都包含 8 路 `*_record_time_offset_us` 与完整 `stereo_session`
+      - 两段都未生成 `validation_error.log`
+      - service 侧 stereo status 在停录后均已回到 `ready=true`
+    - `SensorRecorder` 独立板端 `L2` smoke 已通过：
+      - `./bin/SensorRecorder/SensorRecorder --help` 正常输出 usage
+      - `./bin/SensorRecorder/zeroing --help` 正常输出 usage
+      - `timeout -s INT 6s ./bin/SensorRecorder/SensorRecorder /tmp/sensor_direct_smoke` 后成功产出：
+        - `/tmp/sensor_direct_smoke/sensor_data_left.mcap`
+        - `/tmp/sensor_direct_smoke/sensor_data_right.mcap`
+    - `GripperHmiTool` 独立板端 `L1-L2` smoke 已通过：
+      - `./bin/GripperHmiTool/GripperHmiTool --help` 正常输出 usage
+      - 停止 `ugripper.service` 后，`GripperHmiTool` 可同时独立打开：
+        - `/dev/right_gripper`
+        - `/dev/left_gripper`
+      - `--duration 3 --poll-ms 100` 可正常打印双手状态并以 `exit_code=0` 退出
+      - `--read-sn` 可分别成功读出左右夹爪 SN
+      - 重启 `ugripper.service` 后，`UgripperRuntime`、audio daemon 与 `CameraRecorder --stereo-daemon` 可恢复运行
+    - updater `config.txt` 导入链已通过：
+      - `/mnt/data_disk/config.txt` 写入 `LANGUAGE=en`、`CAMERA_CODEC=h265` 后，`usb-auto-update@sda1.service` 可手动触发并完成导入
+      - `/etc/environment` 已更新为 `UGRIPPER_LANG=en`、`CAMERA_CODEC=h265`
+      - `usb_auto_update.log` 已确认：
+        - 识别 `config.txt`
+        - 进入并退出升级保护窗口
+        - 仅一次重启 `ugripper.service`
+        - 未误触发任何 deb 安装流程
+- 后续待验证：
+  - `CameraRecorder` 的独立 ARM 板 direct smoke
+  - 更长时长或多轮连续录制下的稳定性观察
+  - `ugripper_calib/` 导入 smoke
+  - `calibration.txt` 触发零位校准 smoke
+  - `ugripper-boot-install.service` 的真实 reboot 恢复链
+  - 继续确认 tactile `N160MU2` 相关 UVC 异常是否会影响完整录制交付
+
+### 2026-04-16 - stage-b-b4-merge6-prerm-reinstall-chain-passed
+
+- 阶段：`Stage B B4 board follow-up`
+- 范围：`board verification / docs`
+- 类型：`板端交付链补测 / 卸载重装恢复`
+- 主要改动：
+  - 在 ARM 板 `HSD-RB1021` 上对 `ugripper (1.2.8+merge6)` 执行真实 `dpkg -r` 卸载与 `dpkg -i` 重装
+  - 复核卸载阶段主 service 与附属 unit 的移除情况，以及重装后的 enable / active 恢复情况
+  - 确认 `CameraRecorder --stereo-daemon` 在重装后再次回到 service-managed `ready` 状态
+- 风险与行为等价说明：
+  - 这一步不改运行时逻辑，只验证 `prerm/postinst` 与 package payload 在真实板端的恢复一致性
+  - 卸载阶段 `umi-shutdown-trigger.path` 曾出现短暂保留的 systemd 状态；最终在重装后，enable/active 结果已恢复正常
+- 已执行验证：
+  - 板端：
+    - `dpkg -s ugripper | sed -n '1,20p'`
+    - `systemctl status ugripper.service --no-pager -l`
+    - `sudo dpkg -r ugripper`
+    - `systemctl status ugripper.service --no-pager -l || true`
+    - `systemctl status umi-shutdown-trigger.path --no-pager -l || true`
+    - `systemctl status ugripper-network-monitor.service --no-pager -l || true`
+    - `sudo dpkg -i /tmp/ugripper_1.2.8+merge6_arm64.deb`
+    - `systemctl status ugripper.service --no-pager -l`
+    - `systemctl status umi-shutdown-trigger.path --no-pager -l`
+    - `systemctl status ugripper-network-monitor.service --no-pager -l`
+    - `ps -ef | grep -E 'UgripperRuntime|CameraRecorder' | grep -v grep`
+    - `cat /tmp/umi_stereo_camera_status.json`
+  - 结论：
+    - 卸载后 `ugripper.service`、`ugripper-network-monitor.service` 已不存在
+    - 重装后 `ugripper.service` 恢复 `active (running)`
+    - `umi-shutdown-trigger.path` 恢复 `active (waiting)`
+    - `ugripper-network-monitor.service` 恢复 `active (running)`
+    - `UgripperRuntime`、audio daemon、`CameraRecorder --stereo-daemon` 均已重新拉起
+    - `/tmp/umi_stereo_camera_status.json` 再次达到 `ready=true`
+- 后续待验证：
+  - `ugripper_calib/` 导入 smoke
+  - `calibration.txt` 对应的硬件相关校准链
+  - `ugripper-boot-install.service` 的真实 reboot 恢复路径
+
+### 2026-04-16 - stage-b-b4-camera-config-path-fix
+
+- 阶段：`Stage B B4 board follow-up`
+- 范围：`camera_recorder / record_runtime / docs`
+- 类型：`板端故障定位 / 路径兼容修复`
+- 主要改动：
+  - 根据带外设 ARM 板 `192.168.2.240` 的真实复测，确认 `CameraRecorder --stereo-daemon` 在板端立即退出的高概率根因不是双目采集链本身，而是配置路径与 package layout 错位
+  - `CameraRecorder` 新增默认配置路径兼容：优先当前工作目录的 `config/camera_recorder.yaml`，若不存在则回退到可执行文件相邻的 `bin/CameraRecorder/config/camera_recorder.yaml`
+  - `record_runtime` 在启动 stereo daemon 失败时补明确 warning，避免现场只看到“status 文件缺失”而缺少直接原因
+  - 更新 `docs/standalone-merge-plan.md` 与 `docs/ugripper-refactor-architecture.md`，把 merge3 板端已完成验证、当前已知阻塞和剩余测试项继续收口
+- 风险与行为等价说明：
+  - 不改 camera YAML 内容，也不改 stereo/session 逻辑；只修正默认配置发现路径与板端安装布局不一致的问题
+  - repo 开发态仍优先使用仓库根目录 `config/camera_recorder.yaml`；包安装态则兼容 `bin/CameraRecorder/config/camera_recorder.yaml`
+- 已执行验证：
+  - 静态核对 `CameraRecorder` 默认参数：当前默认配置路径为 `config/camera_recorder.yaml`
+  - 静态核对 package baseline：当前主包 baseline 收包的是 `/opt/ugripper/bin/CameraRecorder/config/camera_recorder.yaml`
+  - 静态核对 `record_runtime` 子进程参数：启动普通 `CameraRecorder` 与 `--stereo-daemon` 时均未显式传 `--config-yaml`
+  - 核对板端现象与代码路径一致：
+    - `CameraRecorder --stereo-daemon` 直接 `exit 1`
+    - `/tmp/umi_stereo_camera_status.json` 缺失
+    - `ugripper.service` 中无常驻 `CameraRecorder` 进程
+- 后续待验证：
+  - 本地重新编译 `CameraRecorder` / `UgripperRuntime`
+  - 重新出包含修复的 ARM 包并在板端复测：
+    - `CameraRecorder --stereo-daemon` 可常驻并写出 status
+    - `ugripper.service` 可拉起 stereo daemon
+    - 完整开始/停止录制与 episode 校验链恢复
+
+### 2026-04-16 - stage-b-b4-merge3-board-validation-closed
+
+- 阶段：`Stage B B4 board validation`
+- 范围：`packaging / board verification / docs`
+- 类型：`板端验证收口 / 交付链验证`
+- 主要改动：
+  - 基于 ARM 板生成的 `.venv` 重新产出 `ugripper_1.2.8+merge3_arm64.deb`，把 `pygame` 运行时依赖随主包交付
+  - 在带外设目标板 `192.168.2.240` 上完成真实安装与 service 启动验证
+  - 更新 `docs/standalone-merge-plan.md` 与 `docs/ugripper-refactor-architecture.md`，把当前已完成验证与剩余未做测试拆分记录
+- 风险与行为等价说明：
+  - 这一步没有再改主链行为，重点是确认前面已落地的 `postinst` 串口补触发和 ARM `.venv` 收包在真实板端闭环
+  - 当前已能确认“主包可装、service 可起、双手设备节点恢复、音频 Python 运行时可离线运行”，但还不能把这轮验证等同于完整录制交付链全部通过
+- 已执行验证：
+  - 开发机确认回传 `.venv/bin/python3` 为 `AArch64`
+  - `pp_main/package_ugripper_deb.sh` 重新产出 `ugripper_1.2.8+merge3_arm64.deb`
+  - `dpkg-deb -c` 确认包内包含 `/opt/ugripper/.venv`、`pygame` 与 manifest
+  - 板端确认：
+    - `dpkg -s ugripper` 为 `Version: 1.2.8+merge3`
+    - `ugripper.service` 为 `active (running)`
+    - `audio_play.py` 通过 `./.venv/bin/python3` 启动
+    - `pygame 2.6.1` 导入成功并绑定 USB headset sink
+    - `/dev/left_*` 与 `/dev/right_*` 六个固定 symlink 全部存在
+- 后续待验证：
+  - `CameraRecorder` 独立 ARM 板 `L2` smoke
+  - `SensorRecorder` 独立 ARM 板 `L2` smoke
+  - `GripperHmiTool` 独立 ARM 板 `L1-L2` smoke
+  - `UgripperRuntime` 完整开始/停止录制与 episode 产物验证
+  - ARM 板 `prerm` / 卸载回滚
+  - updater 侧链的 `ugripper_calib/`、`calibration.txt`、真实 boot 恢复 smoke
+
+### 2026-04-16 - stage-b-b4-venv-build-fs-guard
+
+- 阶段：`Stage B B4 board validation follow-up`
+- 范围：`scripts / docs`
+- 类型：`工具健壮性 / 板端验证收口`
+- 主要改动：
+  - 为 `scripts/build_runtime_venv.sh` 增加目标文件系统类型检查
+  - 当 `--target-dir` 位于 `exfat/vfat` 等不支持符号链接的文件系统时，脚本会提前失败并输出明确提示
+  - 在 `README.md` 补充 `.venv` 必须在支持符号链接的 `ext4/xfs` 目录生成，再复制或归档到其他盘的说明
+- 风险与行为等价说明：
+  - 不改变 `.venv` 的生成内容，只把原本在 `uv venv` 阶段才暴露的底层文件系统错误前移成显式检查
+  - 这次 ARM 板验证表明，`pygame` 阻塞的后续处理仍依赖成功收包 `.venv`，当前失败点是 `exfat` 目标目录而不是依赖版本冲突
+- 已执行验证：
+  - 静态核对 ARM 板构建日志：`uv venv` 在 `/mnt/data_disk` (`exfat`) 上报 `failed to symlink ... Operation not permitted`
+  - `bash -n scripts/build_runtime_venv.sh`
+- 后续待验证：
+  - 在 ARM 板 `ext4` 目录重新执行 `build_runtime_venv.sh`
+  - 重新出包含 `.venv` 的主包并确认板端 `pygame` 告警消失
+
+### 2026-04-16 - stage-b-b4-uv-packaging-policy-frozen
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`docs`
+- 类型：`Python 环境策略冻结 / 维护口径收口`
+- 主要改动：
+  - 在 `README.md` 明确当前 `uv` 口径：不区分运行时依赖和开发依赖，`pyproject.toml` / `uv.lock` 锁定的整套依赖统一进入 `.venv` 并随包交付
+  - 明确仓库工作目录需要保留 `pyproject.toml`、`uv.lock` 和当前 `.venv`，用于后续恢复和重新打包
+  - 明确服务器侧按“版本号 + 架构”归档当次交付的 `.venv` / `.deb` 成品，仓库侧保留依赖清单和恢复步骤
+- 风险与行为等价说明：
+  - 当前只是冻结维护策略，不改 Python 依赖内容和打包脚本逻辑
+  - 统一打包整套 `.venv` 会增加包体，但换来更简单的恢复路径和更低的现场环境漂移风险
+- 已执行验证：
+  - 静态核对 `pyproject.toml`、`uv.lock`、`README.md` 中当前 Python 版本与 `uv` 初始化步骤
+  - 静态核对 `record_runtime` 仍优先使用 `./.venv/bin/python3`
+- 后续待验证：
+  - 按该口径生成真实 ARM `.venv`
+  - 重新出包并在板端确认 `pygame` 缺失问题消失
+
+### 2026-04-16 - stage-b-b4-add-build-runtime-venv-script
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`scripts / docs`
+- 类型：`Python 环境工具化 / 恢复信息固化`
+- 主要改动：
+  - 新增 `scripts/build_runtime_venv.sh`，封装 relocatable `.venv` 的 `uv` 生成流程
+  - 脚本支持可选版本号标签，并把版本、架构、`uv.lock` hash、`pyproject.toml` hash、git commit 写入 `.venv/.ugripper-venv-manifest.json`
+  - 更新 `README.md`，将 Python 环境初始化入口从手工长命令收口为推荐脚本调用
+- 风险与行为等价说明：
+  - 当前只把既有手工步骤脚本化，不改变 `.venv` 的打包归属和架构约束
+  - manifest 只用于恢复和归档，不参与运行时决策
+- 已执行验证：
+  - `bash -n scripts/build_runtime_venv.sh`
+  - 静态核对脚本与 `README.md` 中的 `uv` 流程、manifest 字段和版本标签约定
+- 后续待验证：
+  - 在真实 ARM 环境执行 `./scripts/build_runtime_venv.sh`
+  - 使用生成的 `.venv` 重新出包并在板端确认 `pygame` 缺失问题消失
+
+### 2026-04-15 - stage-b-b4-postinst-ch9344-tty-retrigger-fix
+
+- 阶段：`Stage B B4 board validation follow-up`
+- 范围：`packaging / install hooks / docs`
+- 类型：`安装后修复 / udev 触发补齐 / 板端验证收口`
+- 主要改动：
+  - 更新 `pack_script/postinst`，在 `udevadm control --reload-rules` 后，定向对现有 `/sys/class/tty/ttyCH9344USB*` 回放 `add` 事件
+  - 保持 `video4linux` / `sound` / `input` 触发逻辑不变，不主动触发 `block add`
+  - 记录 ARM 板 `HSD-RB1021` 上的双手串口映射与服务启动验证结果
+- 风险与行为等价说明：
+  - 根因不是 `99-fixed-usb-map.rules` 无法识别 CH9344，而是安装时设备已在位，`reload-rules` 只重载规则但不会为已存在的 `ttyCH9344USB*` 自动补跑 `add`
+  - 先前 `postinst` 只重触发 `video4linux` / `sound` / `input`，导致 `/dev/left_gripper`、`/dev/right_gripper`、`*_encoder`、`*_imu` 需要人工 `udevadm trigger --action=add /sys/class/tty/ttyCH9344USB*` 才出现
+  - 本次改动只补安装后对现有 CH9344 tty 节点的 symlink 回填，不扩大发送到其他 tty 设备的事件范围
+- 已执行验证：
+  - 板端 `HSD-RB1021`：
+    - 初始状态仅识别到左侧 `/dev/left_gripper`，右侧缺失，`ugripper.service` 因缺少 gripper/sensor 节点无法继续进入运行时
+    - `udevadm test /sys/class/tty/ttyCH9344USB0` 明确显示规则匹配成功并尝试创建 `LINK 'left_gripper'`
+    - 调整接线后，`lsusb` 可同时看到两套 `1a86:55d9` CH9344，多串口节点扩展为 `ttyCH9344USB0..15`
+    - 人工执行 `udevadm trigger --action=add /sys/class/tty/ttyCH9344USB0..2` 后，左侧 `/dev/left_gripper`、`/dev/left_encoder`、`/dev/left_imu` 全部回填；右侧 `/dev/right_gripper`、`/dev/right_encoder`、`/dev/right_imu` 同时存在
+    - `systemctl restart ugripper.service` 后，服务可通过串口设备阶段并继续等待 `/mnt/data_disk` 可写
+    - 数据盘可写后，运行时继续进入音频阶段；当前剩余阻塞为板端 Python 环境缺少 `pygame`
+- 后续待验证：
+  - 通过 `pp_main` 重新出包并安装，确认无需人工 `udevadm trigger` 即可自动生成双手 CH9344 symlink
+  - 板端复测 `ugripper.service` 开机或安装后可直接进入运行时
+  - 在真实 ARM `.venv` 收包后复测音频链路，确认 `pygame` 不再缺失
+
+### 2026-04-15 - stage-b-b4-ppmain-stage-syncs-venv
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`packaging / docs`
+- 类型：`主线打包修复 / Python 运行时收包`
+- 主要改动：
+  - 更新 `pp_main/package_ugripper_stage.sh`，使其默认尝试从 `UGRIPPER_ROOT/.venv` 收包到 `/opt/ugripper/.venv`
+  - 支持通过 `PACKAGED_VENV_SOURCE` 显式覆盖 `.venv` 来源
+  - 在 `README.md` 补充该主线打包行为说明
+- 风险与行为等价说明：
+  - 若 `.venv` 来源不存在，主包仍可继续生成，只是会继续回退到系统 `python3`
+  - 该修改的目标是恢复主线 package 对音频 Python 依赖的显式交付，不改变 C++ 二进制来源和 install 布局
+- 已执行验证：
+  - 静态核对 `record_runtime` 当前优先使用 `./.venv/bin/python3`
+  - 静态核对 `pp_main/package_ugripper_stage.sh` 之前未同步 `.venv`
+- 后续待验证：
+  - 在 ARM 环境重建 `.venv`
+  - 重新出主包并确认 `.venv` 进入 payload
+  - 板端验证 `pygame` 不再缺失
+
+### 2026-04-15 - stage-b-b4-packaged-venv-arch-guard-added
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`packaging / docs`
+- 类型：`打包防呆 / 架构一致性校验`
+- 主要改动：
+  - 在 `pp_main/package_ugripper_stage.sh` 增加可选 `.venv` 的架构校验
+  - 在 `build_deb.sh` 增加 `.venv/bin/python3` 的 ELF 架构校验
+  - 在 `README.md` 明确说明：`arm64` 包必须使用 `aarch64/arm64` 环境生成的 `.venv`
+- 风险与行为等价说明：
+  - 若未提供 `.venv`，主包仍可继续生成并按原逻辑回退到系统 `python3`
+  - 若提供了错误架构的 `.venv`，打包现在会显式失败，而不是把问题延后到板端运行时
+- 已执行验证：
+  - 静态核对 `pp-arm-dev` 当前实际是 `x86_64/amd64` 容器
+  - 静态核对板端报错与 `pygame` 缺失、`.venv` 未收包一致
+- 后续待验证：
+  - 在真实 ARM 环境生成 `.venv`
+  - 主线重新出包并确认 `.venv` 被收进 payload
+  - 板端确认音频守护进程不再报 `No module named 'pygame'`
+
+### 2026-04-15 - stage-b-b4-package-version-suffix-entry-added
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`packaging / docs`
+- 类型：`打包入口收口 / 版本辨识增强`
+- 主要改动：
+  - 将 `build_deb.sh` 改为支持 `BASE_VERSION` + `VERSION_SUFFIX` 组合生成最终 `Version`
+  - 将 `usb_updater_build.sh` 改为支持 `PKG_VERSION_BASE` + `PKG_VERSION_SUFFIX`
+  - 将 `pp_main/package_ugripper_stage.sh` 与 `pp_main/package_ugripper_deb.sh` 改为支持 `APP_VERSION_BASE` + `APP_VERSION_SUFFIX`
+  - 在 `README.md` 补充 `+merge1` 类验证包后缀用法
+- 风险与行为等价说明：
+  - 默认不传后缀时，主包仍为 `1.2.8`、updater 仍为 `1.2.2`
+  - 本次只增强版本可辨识性，不改变 payload、安装路径或运行时逻辑
+- 已执行验证：
+  - 静态核对主包、updater、pp_main 并仓打包入口的版本计算路径
+- 后续待验证：
+  - 使用带后缀版本重新出包并上板安装
+  - 核对 `dpkg -s` 与产物文件名均能显示后缀版本
+
+### 2026-04-15 - stage-b-b4-boot-recovery-smoke-passed
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`board verification / docs`
+- 类型：`板端模拟 smoke / boot-install 恢复安装`
+- 主要改动：
+  - 在 ARM 板上手动停止并卸载 `ugripper`，将包状态置为 `deinstall ok config-files`
+  - 保留 `/opt/backup/ugripper_1.2.8_arm64.deb` 与 `/opt/backup/ugripper-usb-updater_1.2.2_all.deb`
+  - 手动执行 `systemctl start ugripper-boot-install.service`
+  - 验证 `boot_check_install.sh` 能检测异常状态并自动恢复安装主包
+- 风险与行为等价说明：
+  - 这一步已经覆盖 `boot_check_install.sh` 的主逻辑分支：同版本 no-op、异常状态恢复安装
+  - 当前仍未覆盖真实 reboot 时 systemd 启动时序，只能说明脚本逻辑正确，不能完全替代真实开机 smoke
+- 已执行验证：
+  - 板端：
+    - `systemctl stop ugripper.service`
+    - `dpkg -r ugripper`
+    - `dpkg -s ugripper`
+    - `ls -lh /opt/backup`
+    - `systemctl start/status/journalctl` for `ugripper-boot-install.service`
+    - `tail /var/log/ugripper/boot_install.log`
+  - 结论：
+    - `ugripper` 状态变为 `deinstall ok config-files`
+    - `boot_check_install.sh` 正确识别异常状态并选择 `/opt/backup/ugripper_1.2.8_arm64.deb`
+    - `dpkg -i` 恢复安装成功
+    - `ugripper` 最终回到 `install ok installed`
+    - 安装后 `ugripper.service`、`ugripper-network-monitor.service`、`umi-shutdown-trigger.path` 的 enable 链重新建立
+- 后续待验证：
+  - 真实 reboot 触发的 `ugripper-boot-install.service` 恢复 smoke
+  - `ugripper_calib/` 导入 smoke
+  - `calibration.txt` 对应的硬件相关校准链
+
+### 2026-04-15 - stage-b-b4-config-import-smoke-passed
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`board verification / docs`
+- 类型：`板端模拟 smoke / updater config 导入`
+- 主要改动：
+  - 在 ARM 板挂载好的 `/mnt/data_disk` 根目录人工放置 `config.txt`
+  - 手动执行 `systemctl start usb-auto-update@<dev>.service`
+  - 验证 `usb_auto_update.sh` 能解析并应用 `LANGUAGE=en`、`CAMERA_CODEC=h265`
+- 风险与行为等价说明：
+  - 这一步验证的是低风险 `config.txt` 导入分支，不涉及 `calibration.txt` 对 encoder 零位校准的硬件依赖
+  - 当前仍未覆盖 `ugripper_calib/` 导入与真实 boot 恢复路径
+- 已执行验证：
+  - 板端：
+    - `findmnt -rn -o SOURCE --target /mnt/data_disk`
+    - `grep -E '^(UGRIPPER_LANG|CAMERA_CODEC)=' /etc/environment`
+    - 在 `/mnt/data_disk/config.txt` 写入 `LANGUAGE=en`、`CAMERA_CODEC=h265`
+    - `systemctl start/status/journalctl` for `usb-auto-update@<dev>.service`
+    - `tail /var/log/ugripper/usb_auto_update.log`
+  - 结论：
+    - 日志确认检测到 `config.txt`
+    - `UGRIPPER_LANG` 已从 `zh` 更新为 `en`
+    - `CAMERA_CODEC=h265` 被正确识别并保持
+    - 导入阶段仅重启一次 `ugripper.service`
+    - 后续未误触发 deb 安装流程
+- 后续待验证：
+  - `ugripper_calib/` 导入 smoke
+  - `ugripper-boot-install.service` 的真实 boot 恢复路径
+  - `calibration.txt` 对应的硬件相关校准链
+
+### 2026-04-15 - stage-b-b4-updater-validation-layering-documented
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`docs`
+- 类型：`验证分层收口 / 板端 smoke 策略明确`
+- 主要改动：
+  - 在 `docs/standalone-merge-plan.md` 补充 updater 侧链剩余验证的 `L1/L2/L3` 分层
+  - 明确 `config.txt` 与 `ugripper_calib/` 可先通过手动 `systemctl start usb-auto-update@<dev>.service` 做低风险模拟 smoke
+  - 明确 `ugripper-boot-install.service` 可先通过 `/opt/backup` 候选包 + 手动启动做半模拟验证，但不能替代真实 reboot 时序验证
+  - 明确根目录 `calibration.txt` 会触发 encoder 零位校准，在当前无硬件阶段不设为门禁
+- 风险与行为等价说明：
+  - 本次仅补文档与验证顺序，不改代码路径
+  - 目的是把“哪些可以先模拟、哪些必须真机”从口头约定收敛为可追踪文档
+- 已执行验证：
+  - 静态核对 `auto_update/usb_auto_update.sh` 中 `config.txt` / `ugripper_calib` / `calibration.txt` 三类入口的触发边界
+  - 静态核对 `auto_update/boot_check_install.sh` 的版本比较与恢复安装逻辑
+- 后续待验证：
+  - `config.txt` 模拟导入 smoke
+  - `ugripper_calib/` 导入 smoke
+  - `ugripper-boot-install.service` 的真实 boot 恢复路径
+  - `calibration.txt` 对应的硬件相关校准链
+
+### 2026-04-15 - stage-b-b4-optional-updater-board-verification-passed
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`board verification / docs`
+- 类型：`板端验证 / 可选包交付边界确认`
+- 主要改动：
+  - 在 ARM 板上完成“只装主包”和“主包 + 可选 updater 包”两种安装场景验证
+  - 确认主包单装时：
+    - `/mnt/data_disk` 可正常挂载并写入
+    - 系统不会再尝试拉起不存在的 `usb-auto-update@.service`
+  - 确认主包 + `ugripper-usb-updater` 同装时：
+    - `usb-auto-update@<dev>.service` 可由热插拔自动触发
+    - `usb_auto_update.sh` 可正常复用 `/mnt/data_disk` 与 `/opt/ugripper` 资源，在无待安装包场景下正常 no-op 退出
+  - 确认 `ugripper-boot-install.service` 可手动启动并在 `/opt/backup` 无候选包场景下正常 no-op 退出
+  - 确认 `ugripper-boot-install.service` 在 `/opt/backup` 存在同版本 `ugripper` / `ugripper-usb-updater` 包时，可正确识别“无需升级”并正常退出
+  - 确认 `ugripper-usb-updater` 卸载 / 重装时，其 unit 与 udev 规则会随包生命周期正确移除和恢复
+  - 同步更新 `docs/standalone-merge-plan.md` 与 `docs/baseline/deploy-script-boundaries.md`
+- 风险与行为等价说明：
+  - 当前已验证的是“可选 updater 独立包边界”和“插盘自动触发链”本身
+  - 尚未覆盖带真实 `ugripper*.deb` / `config.txt` / `ugripper_calib` / `calibration.txt` 的完整 U 盘交付内容
+  - `ugripper-boot-install.service` 目前已验证到安装/enable、无 backup 包 no-op smoke，以及同版本 backup 包识别“无需升级”；尚未完成真实开机恢复 smoke
+- 已执行验证：
+  - 板端：
+    - `dpkg -i /tmp/ugripper_1.2.8_arm64.deb`
+    - `dpkg -i /tmp/ugripper-usb-updater_1.2.2_all.deb`
+    - `systemctl list-unit-files | grep -E 'ugripper|usb-auto-update|boot-install'`
+    - 检查 `/etc/udev/rules.d/99-fixed-usb-map.rules` 与 `/etc/udev/rules.d/99-usb-auto-update.rules`
+    - 检查 `/opt/ugripper/auto_update/mount_data_disk.sh` 与 `/usr/local/scripts/lib/ugripper_shell_common.sh`
+    - 插盘 / 重插盘后确认 `/mnt/data_disk` 可写
+    - `journalctl -u usb-auto-update@<dev>.service`
+    - `tail /var/log/ugripper/usb_auto_update.log`
+    - `systemctl start/status/journalctl` for `ugripper-boot-install.service`
+    - `tail /var/log/ugripper/boot_install.log`
+    - `dpkg -r` and reinstall for `ugripper-usb-updater`
+  - 结论：
+    - 主包单装：通过
+    - 主包 + 可选 updater：通过
+    - 热插拔自动触发：通过
+    - boot-install 手动 smoke：通过
+    - updater 卸载/重装生命周期：通过
+- 后续待验证：
+  - `ugripper-boot-install.service` 开机恢复路径
+  - 带真实导包/导配置/导标定内容的 USB 交付 smoke
+
+### 2026-04-15 - stage-b-b4-updater-runtime-root-fixed
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`auto_update/usb_auto_update.sh / usb_updater_build.sh / docs`
+- 类型：`可选 updater 运行时修复 / 打包补件`
+- 主要改动：
+  - 更新 `auto_update/usb_auto_update.sh`，把运行入口根目录和资源根目录拆开处理：脚本入口仍在 `/usr/local/bin`，默认资源优先解析 `/opt/ugripper`
+  - 为 `usb_auto_update.sh` 增加 shell helper 多候选定位，优先尝试 `/opt/ugripper/scripts/lib/ugripper_shell_common.sh`，同时兼容 `/usr/local/scripts/lib/ugripper_shell_common.sh`
+  - 更新 `usb_updater_build.sh`，把 `scripts/lib/ugripper_shell_common.sh` 一并打进 updater 包的 `/usr/local/scripts/lib/`
+- 风险与行为等价说明：
+  - 不改变主包 / updater 包的职责边界，只修复可选 updater 包在真实板端触发时缺少 helper 与资源根误判的问题
+  - 当前默认仍假设主 `ugripper` 包已安装，因而优先复用 `/opt/ugripper` 下的 HMI、标定导入脚本和音频资源
+- 已执行验证：
+  - `bash -n auto_update/usb_auto_update.sh usb_updater_build.sh`
+  - `./usb_updater_build.sh`
+  - `dpkg-deb -c build/package/updater/ugripper-usb-updater_1.2.2_all.deb`
+  - 已确认包内包含：
+    - `/usr/local/bin/usb_auto_update.sh`
+    - `/usr/local/scripts/lib/ugripper_shell_common.sh`
+- 后续待验证：
+  - 板端重新安装 updater 包后，再次触发 `usb-auto-update@<dev>.service`
+  - 继续确认脚本是否还存在其他运行时资源缺失
+
+### 2026-04-14 - stage-b-b4-updater-build-entry-aligned
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`usb_updater_build.sh / README.md`
+- 类型：`打包入口收口 / 可选包出包路径统一`
+- 主要改动：
+  - 更新 `usb_updater_build.sh`，去掉对当前工作目录的隐式依赖，改为基于脚本所在仓库根目录解析 `auto_update/`
+  - 为 updater 打包入口补齐与主包一致的 `dpkg-deb` 压缩参数透传和 `--root-owner-group`
+  - 将 updater 包默认产物路径收敛为 `build/package/updater/ugripper-usb-updater_<version>_all.deb`
+  - 在 `README.md` 补充可选 updater 包的打包命令与默认产物位置说明
+- 风险与行为等价说明：
+  - 不修改 `ugripper-usb-updater` 的包名、版本号和 payload 归属
+  - 这一步主要收口构建入口稳定性与产物落位，便于后续和主包一起进入统一 release 流程，但仍保持独立包形态
+- 已执行验证：
+  - `bash -n usb_updater_build.sh`
+  - 静态核对 `README.md` 中新增的可选 updater 出包说明
+- 后续待验证：
+  - 实际执行 `./usb_updater_build.sh`
+  - 验证产物路径与 `auto-release-deb` 默认工作流是否符合预期
+
+### 2026-04-14 - stage-b-b4-updater-sidechain-decoupled
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`config / auto_update / docs`
+- 类型：`打包边界收口 / 可选 updater 解耦`
+- 主要改动：
+  - 更新 `config/99-fixed-usb-map.rules`，主包规则现在只负责数据盘挂载/卸载，不再通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@.service`
+  - 更新 `auto_update/mount_data_disk.sh`，移除挂载成功后主动 `systemctl start usb-auto-update@...` 的隐式耦合
+  - 更新 `auto_update/99-usb-auto-update.rules`，恢复 updater 包自己的真实触发规则，用于在允许的 USB 口上单独拉起 `usb-auto-update@%k.service`
+  - 同步更新 `docs/standalone-merge-plan.md`、`docs/baseline/package-contents.md`、`docs/baseline/deploy-script-boundaries.md`
+- 风险与行为等价说明：
+  - 这一步会改变“已安装 updater 包时 USB 自动升级触发链的归属方式”，但目标行为更符合“主包可独立、updater 选配”的设计边界
+  - 若现场之前依赖主包规则或 mount helper 隐式触发 updater，而没有安装新的 updater 规则包，则自动升级将不再被触发；这正是本次收口希望达成的行为边界
+- 已执行验证：
+  - 静态核对：
+    - `config/99-fixed-usb-map.rules` 中已无 `SYSTEMD_WANTS+=usb-auto-update@%k.service`
+    - `auto_update/mount_data_disk.sh` 中已无 `usb-auto-update@` 相关 `systemctl start`
+    - `auto_update/99-usb-auto-update.rules` 已恢复允许 USB 口的真实触发规则
+  - 文档交叉核对：
+    - `docs/standalone-merge-plan.md`
+    - `docs/baseline/package-contents.md`
+    - `docs/baseline/deploy-script-boundaries.md`
+- 后续待验证：
+  - 只装主 `ugripper` 包时的插盘挂载 smoke
+  - 主 `ugripper` + `ugripper-usb-updater` 同装时的插盘自动升级 smoke
+  - updater 包 `postinst/prerm/postrm` 与真实安装环境的 systemd/udev 联动
+
+### 2026-04-14 - stage-b-b4-updater-sidechain-ownership-frozen
+
+- 阶段：`Stage B B4 follow-up`
+- 范围：`docs`
+- 类型：`打包边界冻结 / 可选包归属明确`
+- 主要改动：
+  - 在 `docs/standalone-merge-plan.md` 明确 `usb-auto-update@.service` / `ugripper-boot-install.service` 及 `/usr/local/bin/usb_auto_update.sh`、`/usr/local/bin/boot_check_install.sh` 归属为可选独立包 `ugripper-usb-updater`
+  - 在 `docs/baseline/package-contents.md`、`docs/baseline/service-map.md`、`docs/baseline/deploy-script-boundaries.md` 同步主包与 updater 包的职责边界
+  - 明确把“主包数据盘挂载规则”与“updater 自动升级触发规则”拆分作为后续必须完成的收口项
+- 风险与行为等价说明：
+  - 当前仅冻结文档口径，不改变现有打包、安装、service 或 udev 行为
+  - 当前代码仍存在一个过渡性不一致：主包 `config/99-fixed-usb-map.rules` 仍会拉起 `usb-auto-update@.service`，这意味着“可选 updater 包”边界尚未在实现层完全落地
+- 已执行验证：
+  - 文档交叉核对：
+    - `docs/standalone-merge-plan.md`
+    - `docs/baseline/package-contents.md`
+    - `docs/baseline/service-map.md`
+    - `docs/baseline/deploy-script-boundaries.md`
+  - 源事实核对：
+    - `usb_updater_build.sh` 当前确实单独构建 `ugripper-usb-updater`
+    - `auto_update/usb-auto-update@.service` / `auto_update/ugripper-boot-install.service` 当前仍指向 `/usr/local/bin/...`
+- 后续待验证：
+  - 在实现层把 updater 触发规则从主包 udev 规则中拆开
+  - 验证“装主包不装 updater”和“主包 + updater 同装”两种安装场景
+
+### 2026-04-14 - stage-b-b4-zmq-followup-substage-defined
+
+- 阶段：`Stage B follow-up`
+- 范围：`docs`
+- 类型：`阶段边界冻结 / 通信迁移后移`
+- 主要改动：
+  - 在 `docs/standalone-merge-plan.md` 明确把通信 backend / ZMQ 对齐定义为 `B4` 之后的独立子阶段
+  - 明确当前 `B4` 主线只处理主包安装布局、service、udev 与 deploy/update 边界，不混入 ZMQ backend 切换
+  - 明确首批建议范围只包含 `AudioCommandPort`、`StereoSessionPort`，`ShutdownRequestPort` 继续保留 file backend
+  - 补充该独立子阶段的前置条件、执行顺序、测试门禁和完成标准
+- 风险与行为等价说明：
+  - 当前仅调整计划与阶段边界，不改变现有运行时、打包、service 或板端行为
+  - 这一步的目的是避免后续把通信 backend 迁移误混到当前 package 主线，扩大回归面
+- 已执行验证：
+  - 文档交叉核对：
+    - `docs/standalone-merge-plan.md`
+    - `docs/reference-aligned-refactor-next-steps.md`
+    - `docs/baseline/control-channel-ledger.md`
+  - 静态核对当前口径仍保持一致：
+    - transport-agnostic 接口已冻结
+    - 真正的 ZMQ backend 迁移仍后移到主仓库 / Docker ARM / ARM 板阶段
+- 后续待验证：
+  - 在独立子阶段真正启动时，补主仓库本地 Linux 编译
+  - Docker ARM 交叉编译
+  - ARM 板最小通信链路 smoke
+
+### 2026-04-14 - stage-b-b4-20-remove-dormant-install-package-compat
+
+- 阶段：`Stage B B4.20`
+- 范围：`pp_main/standalone/*/CMakeLists.txt / pp_main/package_ugripper_stage.sh / pack_script/postinst / docs`
+- 类型：`旧入口最终清理 / install-package compat 删除`
+- 主要改动：
+  - 删除 `pp_main/standalone/CMakeLists.txt` 中的 `UGRIPPER_INSTALL_LEGACY_COMPAT`
+  - 删除四个迁移对象 install 阶段的 legacy `build/src/...` symlink 和顶层兼容资源目录安装逻辑
+  - 删除 `pp_main/package_ugripper_stage.sh` 中的 `UGRIPPER_PACKAGE_INCLUDE_LEGACY_COMPAT`、顶层兼容资源补拷贝和 legacy 链接生成逻辑
+  - `pack_script/postinst` 的默认 fake calibration 恢复路径收敛为 `bin/UgripperRuntime/config/fakeCamCalib.json`
+  - 同步更新 `docs/baseline/package-contents.md` 与 `docs/standalone-merge-plan.md`
+- 风险与行为等价说明：
+  - 这一步删除的是已经不再被默认 runtime/service/USB/calibration 主链消费的 dormant 兼容代码
+  - 若后续需要回退到 legacy 布局，只能回退代码版本，不再通过开关临时生成兼容层
+- 已执行验证：
+  - `bash -n /home/songwl/swl_ws/pp_main/package_ugripper_stage.sh /home/songwl/swl_ws/ugripper/pack_script/postinst`
+  - `rg` 静态核对：
+    - `pp_main/standalone/*`、`pp_main/package_ugripper_stage.sh`、`pack_script/postinst` 中已无：
+      - `UGRIPPER_INSTALL_LEGACY_COMPAT`
+      - `UGRIPPER_PACKAGE_INCLUDE_LEGACY_COMPAT`
+      - install/package 阶段的 `build/src/...` 兼容生成逻辑
+      - `postinst` 对 `/opt/ugripper/config/fakeCamCalib.json` 的恢复回退
+  - x86 重编、install、打包：
+    - `cmake --build build/x86/standalone_ros2 --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime -j4`
+    - `cmake --install build/x86/standalone_ros2 --prefix /home/songwl/swl_ws/pp_main/install/x86/ros2`
+    - `TARGET_PLATFORM=x86 /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+  - ARM 重编、install、打包：
+    - `docker exec pp-arm-dev bash -lc 'cd /home/songwl/swl_ws/pp_main && ... && cmake --build build/arm/standalone --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime -j4'`
+    - `docker exec pp-arm-dev bash -lc 'cd /home/songwl/swl_ws/pp_main && cmake --install build/arm/standalone --prefix /home/songwl/swl_ws/pp_main/install/arm'`
+    - `TARGET_PLATFORM=arm /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+  - stage 目录核对：
+    - x86/ARM `ugripper_stage/opt/ugripper` 下均不存在 `build/src`、顶层 `audio`、顶层 `audio_en`、顶层 `config`
+    - x86/ARM `ugripper_stage/opt/ugripper/bin/UgripperRuntime` 下均保留 `audio/`、`audio_en/`、`config/fakeCamCalib.json`
+  - 干净 install prefix 核对：
+    - `cmake --install ... --prefix /tmp/ppmain-ugripper-install-clean-x86`
+    - `docker exec pp-arm-dev bash -lc 'cmake --install ... --prefix /tmp/ppmain-ugripper-install-clean-arm'`
+    - 两个干净 prefix 下均只出现 `bin/...` 新布局，不再生成 `build/src`、顶层 `audio`、顶层 `audio_en`、顶层 `config`
+- 后续待验证：
+  - 有硬件条件时，继续沿用 `B4.19` 的板端完整 runtime/service smoke
+
+### 2026-04-14 - stage-b-b4-19-runtime-fallback-removed
+
+- 阶段：`Stage B B4.19`
+- 范围：`run_record.sh / src/record_runtime / auto_calibration/* / auto_update/usb_auto_update.sh / pp_main/standalone/UgripperRuntime / docs`
+- 类型：`旧入口最终清理 / runtime-script fallback 删除`
+- 主要改动：
+  - 删除 `run_record.sh` 对 `build/src/record_runtime/record_runtime` 的兼容回退
+  - 删除 `record_runtime` 与 `pp_main/standalone/UgripperRuntime` 初始化阶段对旧 `build/src/...`、顶层 `audio/...`、顶层 `config/...` 的自动解析
+  - 删除 `run_calibration.sh`、`usb_auto_update.sh`、`import_camera_calibration.sh` 对旧 HMI helper、zeroing、顶层音频资源和顶层 `config/fakeCamCalib.json` 的默认回退
+  - 同步更新 `docs/agent/overview.md`、`docs/baseline/runtime-entrypoints.md`、`docs/baseline/runtime-paths.md`、`docs/standalone-merge-plan.md`
+- 风险与行为等价说明：
+  - 从这一步开始，默认 service / runtime / USB / calibration 主链要求安装产物满足 `bin/...` 新布局
+  - 本仓开发态仍可手工执行 `build/src/...` 做局部验证，但这些旧路径已不再属于默认运行入口
+  - `pp_main` install/package 的 legacy compat 开关暂时保留，用于必要时做回退验证，不代表主链仍支持自动命中旧布局
+- 已执行验证：
+  - `bash -n run_record.sh auto_calibration/run_calibration.sh auto_update/usb_auto_update.sh auto_calibration/import_camera_calibration.sh`
+  - `cmake --build build --target record_runtime -j4`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_ros2 --target UgripperRuntime -j4`
+  - `docker exec pp-arm-dev bash -lc 'cd /home/songwl/swl_ws/pp_main && ... && cmake --build build/arm/standalone --target UgripperRuntime -j4'`
+  - `cmake --install /home/songwl/swl_ws/pp_main/build/x86/standalone_ros2 --prefix /home/songwl/swl_ws/pp_main/install/x86/ros2`
+  - `docker exec pp-arm-dev bash -lc 'cd /home/songwl/swl_ws/pp_main && cmake --install build/arm/standalone --prefix /home/songwl/swl_ws/pp_main/install/arm'`
+  - `TARGET_PLATFORM=x86 /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+  - `TARGET_PLATFORM=arm /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+  - stage 目录核对：
+    - x86/ARM `ugripper_stage/opt/ugripper` 下均不存在 `build/src`、顶层 `audio`、顶层 `audio_en`、顶层 `config`
+    - x86/ARM `ugripper_stage/opt/ugripper/bin/UgripperRuntime` 下均存在 `audio/`、`audio_en/`、`config/fakeCamCalib.json`
+  - 二进制字符串核对：
+    - x86/ARM stage 内 `bin/UgripperRuntime/UgripperRuntime` 均不再包含：
+      - `./build/src/...`
+      - `./audio/...`
+      - `./config/fakeCamCalib.json`
+  - ARM 板无硬件条件 smoke：
+    - `sudo dpkg -i /tmp/ugripper_1.2.8_arm64.deb`
+    - `findmnt /mnt/data_disk` 与 `touch /mnt/data_disk/.codex_write_test` 确认真实 U 盘挂载且可写
+    - `strings /opt/ugripper/bin/UgripperRuntime/UgripperRuntime | grep -E '^\./build/src/|^\./audio/|^\./config/fakeCamCalib\.json$' || echo NO_LEGACY_PATHS`
+      输出 `NO_LEGACY_PATHS`
+    - `sudo -u ubuntu /opt/ugripper/bin/UgripperRuntime/UgripperRuntime --help`
+      正常输出 usage，说明新 runtime 二进制与动态库链路正常
+    - `sudo -u ubuntu bash -x /opt/ugripper/run_record.sh`
+      已确认 `run_record.sh` 正常走到启动 `/opt/ugripper/bin/UgripperRuntime/UgripperRuntime` 这一步
+- 后续待验证：
+  - ARM 板带硬件 focused smoke：
+    - 连接实际夹爪/HMI 与相关外设后，再验证 `ugripper.service` 完整启动
+    - 当前无硬件环境下的 runtime 退出，暂归类为运行时初始化硬件依赖，不再视为新路径/打包回归
+
+### 2026-04-14 - stage-b-b4-18-new-layout-defaults-switched-on
+
+- 阶段：`Stage B B4.18`
+- 范围：`pp_main/standalone/CMakeLists.txt / pp_main/package_ugripper_stage.sh / docs`
+- 类型：`旧入口最终清理前置收口 / 默认产物切到新布局`
+- 主要改动：
+  - 将 `UGRIPPER_INSTALL_LEGACY_COMPAT` 默认值从 `ON` 切到 `OFF`
+  - 将 `UGRIPPER_PACKAGE_INCLUDE_LEGACY_COMPAT` 默认值从 `1` 切到 `0`
+  - 保留两处显式开关，继续支持需要时临时回退到 legacy 兼容布局
+- 风险与行为等价说明：
+  - 从这一步开始，不带额外参数的 x86/ARM install 与 package 默认产物将只包含 `bin/...` 新布局
+  - `run_record.sh`、`record_runtime`、校准/升级脚本中的 legacy fallback 代码仍未删除，因此代码层仍保留受控回退能力
+  - 真正的“旧入口最终清理”仍需下一步专门删除 fallback 逻辑，并补一次 ARM 板 focused smoke
+- 已执行验证：
+  - `bash -n /home/songwl/swl_ws/pp_main/package_ugripper_stage.sh`
+  - x86 默认新布局验证：
+    - `TARGET_PLATFORM=x86 /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+    - `find /home/songwl/swl_ws/pp_main/build/package/x86/ugripper_stage/opt/ugripper ...`
+      仅看到：
+      - `bin/CameraRecorder/config`
+      - `bin/SensorRecorder`
+      - `bin/UgripperRuntime/audio`
+      - `bin/UgripperRuntime/audio_en`
+      - `bin/UgripperRuntime/config`
+    - 不再出现 `build/src`、顶层 `audio/`、顶层 `audio_en/`、顶层 `config/`
+  - 使用干净验证目录做 x86 默认 install + stage：
+    - `cmake -S standalone -B build/x86/standalone_default_verify -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=/home/songwl/swl_ws/pp_main/cmake/x86_64-linux-toolchain.cmake -DBUILD_TARGETS=CameraRecorder,SensorRecorder,GripperHmiTool,UgripperRuntime`
+    - `cmake --build build/x86/standalone_default_verify --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime -j4`
+    - `cmake --install build/x86/standalone_default_verify --prefix /tmp/ppmain-ugripper-install-default-clean`
+    - `TARGET_PLATFORM=x86 INSTALL_ROOT_OVERRIDE=/tmp/ppmain-ugripper-install-default-clean STAGE_ROOT_OVERRIDE=/tmp/ppmain-ugripper-stage-default-clean /home/songwl/swl_ws/pp_main/package_ugripper_stage.sh`
+    - `find` 校验 install/stage 两侧都只保留 `bin/...` 新布局
+  - ARM 默认新布局验证：
+    - `docker exec pp-arm-dev ... cmake -S standalone -B build/arm/standalone_default_verify -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=/home/songwl/swl_ws/pp_main/cmake/arm-linux-toolchain.cmake -DBUILD_TARGETS=CameraRecorder,SensorRecorder,GripperHmiTool,UgripperRuntime`
+    - `docker exec pp-arm-dev ... cmake --build build/arm/standalone_default_verify --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime -j4`
+    - `docker exec pp-arm-dev ... cmake --install build/arm/standalone_default_verify --prefix /tmp/ppmain-ugripper-install-default-arm`
+    - `find /tmp/ppmain-ugripper-install-default-arm ...`
+      仅看到：
+      - `bin/CameraRecorder/config`
+      - `bin/SensorRecorder`
+      - `bin/UgripperRuntime/audio`
+      - `bin/UgripperRuntime/audio_en`
+      - `bin/UgripperRuntime/config`
+  - ARM 默认 package：
+    - `TARGET_PLATFORM=arm /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+    - `find /home/songwl/swl_ws/pp_main/build/package/arm/ugripper_stage/opt/ugripper ...`
+      同样只保留 `bin/...` 新布局
+- 后续待验证：
+  - 若默认产物验证稳定，再进入删除 `run_record.sh` / `record_runtime` / 脚本内 legacy fallback 的下一步
+
+### 2026-04-14 - stage-b-b4-17-explicit-legacy-compat-switches
+
+- 阶段：`Stage B B4.17`
+- 范围：`pp_main/standalone/*/CMakeLists.txt / pp_main/package_ugripper_stage.sh / pack_script/postinst / docs`
+- 类型：`旧入口最终清理前置收口 / compatibility 开关显式化`
+- 主要改动：
+  - 在 `pp_main/standalone/CMakeLists.txt` 新增 `UGRIPPER_INSTALL_LEGACY_COMPAT` 选项，初始默认保持 `ON`
+  - 四个迁移对象的 install 兼容层改为受开关控制：
+    - `build/src/...` 兼容 symlink
+    - 顶层 `audio/`
+    - 顶层 `audio_en/`
+    - 顶层 `config/fakeCamCalib.json`
+    - `CameraRecorder` 顶层 `config/camera_recorder.yaml`
+  - 在 `pp_main/package_ugripper_stage.sh` 新增 `UGRIPPER_PACKAGE_INCLUDE_LEGACY_COMPAT`，初始默认保持 `1`
+    - 关闭时不再把 `INSTALL_ROOT` 中的 `build/src/`、顶层 `audio/`、`audio_en/`、`config/` 收进包
+    - 兼容目录补拷贝与 legacy symlink 生成也一并关闭
+  - `pack_script/postinst` 的默认 fake calibration 查找改为新路径优先：
+    - 先找 `/opt/ugripper/bin/UgripperRuntime/config/fakeCamCalib.json`
+    - 再 fallback `/opt/ugripper/config/fakeCamCalib.json`
+- 风险与行为等价说明：
+  - 本步默认行为不变：若不传新开关，install/package 仍保持当前“新路径优先 + legacy 兼容层并存”
+  - 新增开关的目的，是让后续“旧入口最终清理”可以先做无兼容层验证，而不是直接改代码删兼容后再临场补洞
+  - `postinst` 先补新路径优先查找，避免后续关闭顶层 `config/` 后默认标定初始化直接失效
+- 已执行验证：
+  - `bash -n /home/songwl/swl_ws/pp_main/package_ugripper_stage.sh /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+  - `bash -n pack_script/postinst`
+  - x86 默认兼容层链路：
+    - `cmake -S standalone -B build/x86/standalone_ros2 -DUGRIPPER_INSTALL_LEGACY_COMPAT=ON -DBUILD_TARGETS=CameraRecorder,SensorRecorder,GripperHmiTool,UgripperRuntime`
+    - `cmake --build build/x86/standalone_ros2 --target CameraRecorder SensorRecorder GripperHmiTool UgripperRuntime -j4`
+    - `cmake --install build/x86/standalone_ros2 --prefix /home/songwl/swl_ws/pp_main/install/x86/ros2`
+    - `TARGET_PLATFORM=x86 /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+  - x86 无兼容层验证：
+    - `cmake -S standalone -B build/x86/standalone_ros2 -DUGRIPPER_INSTALL_LEGACY_COMPAT=OFF -DBUILD_TARGETS=CameraRecorder,SensorRecorder,GripperHmiTool,UgripperRuntime`
+    - `cmake --install build/x86/standalone_ros2 --prefix /tmp/ppmain-ugripper-install-nolegacy`
+    - `UGRIPPER_PACKAGE_INCLUDE_LEGACY_COMPAT=0 TARGET_PLATFORM=x86 INSTALL_ROOT_OVERRIDE=/tmp/ppmain-ugripper-install-nolegacy STAGE_ROOT_OVERRIDE=/tmp/ppmain-ugripper-stage-nolegacy /home/songwl/swl_ws/pp_main/package_ugripper_stage.sh`
+    - `find` 校验 `/tmp/ppmain-ugripper-install-nolegacy` 与 `/tmp/ppmain-ugripper-stage-nolegacy/opt/ugripper` 中只保留 `bin/...` 新布局，不再包含 `build/src`、顶层 `audio/`、顶层 `audio_en/`、顶层 `config/`
+  - x86 工作环境恢复：
+    - `cmake -S standalone -B build/x86/standalone_ros2 -DUGRIPPER_INSTALL_LEGACY_COMPAT=ON -DBUILD_TARGETS=CameraRecorder,SensorRecorder,GripperHmiTool,UgripperRuntime`
+    - `cmake --install build/x86/standalone_ros2 --prefix /home/songwl/swl_ws/pp_main/install/x86/ros2`
+  - ARM 默认兼容层链路：
+    - `docker exec pp-arm-dev ... cmake -S standalone -B build/arm/standalone -DUGRIPPER_INSTALL_LEGACY_COMPAT=ON -DBUILD_TARGETS=CameraRecorder,SensorRecorder,GripperHmiTool,UgripperRuntime`
+    - `docker exec pp-arm-dev ... cmake --install build/arm/standalone`
+    - 由于容器内缺少 `rsync`，改为在宿主机执行 `TARGET_PLATFORM=arm /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+  - `find` 校验：
+    - `/home/songwl/swl_ws/pp_main/build/package/x86/ugripper_stage/opt/ugripper`
+    - `/home/songwl/swl_ws/pp_main/build/package/arm/ugripper_stage/opt/ugripper`
+    两者默认仍同时包含 `bin/...` 新布局与 legacy `build/src` / 顶层 `audio...` / `config`
+- 后续待验证：
+  - 若纯新布局包验证通过，再决定是否进入“旧入口最终清理”
+  - 若开始真正删除 runtime / script 中的 fallback 逻辑，再补一次 ARM 板 focused smoke
+
+### 2026-04-14 - stage-b-b4-16-runtime-default-paths-second-pass
+
+- 阶段：`Stage B B4.16`
+- 范围：`src/record_runtime/include/record_runtime.h / src/record_runtime/src/record_runtime.cpp / docs/baseline/* / docs`
+- 类型：`旧入口兼容收口 / runtime 默认路径第二轮切换`
+- 主要改动：
+  - 将 `RecordRuntimeOptions` 的默认子进程与音频资源路径切换为新安装布局优先：
+    - `./bin/CameraRecorder/CameraRecorder`
+    - `./bin/SensorRecorder/SensorRecorder`
+    - `./bin/UgripperRuntime/audio/audio_play.py`
+    - `./bin/UgripperRuntime/audio/record_usb_audio.py`
+    - `./bin/UgripperRuntime/audio/noise.prof`
+    - `./bin/UgripperRuntime/config/fakeCamCalib.json`
+  - 在 `RecordRuntime::initialize()` 中统一加入兼容解析：
+    - 若新路径缺失，则自动 fallback 到旧的 `./build/src/...` 与顶层 `./audio/...` / `./config/...`
+    - 当命中 fallback 时输出兼容解析日志，便于后续最终清理前追踪现场实际命中情况
+  - 同步更新 `docs/baseline/runtime-entrypoints.md`、`docs/baseline/runtime-paths.md`、`docs/baseline/standalone-integration-inputs.md`，明确当前已进入“新路径优先、旧路径兼容”的运行状态
+- 风险与行为等价说明：
+  - 本步不删除旧路径，只把 `record_runtime` 自身默认值从旧入口切换为新入口优先
+  - 本地工作区若仍只有 `build/src/...` 与顶层 `audio/...`，初始化阶段会自动 fallback，因此不应破坏当前 host-only 验证链
+  - 安装态若 `bin/...` 存在，将不再继续依赖旧 `build/src/...` 默认值
+- 已执行验证：
+  - `cmake --build build --target record_runtime test_process_policy test_audio_coordinator test_stereo_session_client test_button_logic test_runtime_health test_recording_orchestrator test_shutdown_request_port -j4`
+  - 直接执行：
+    - `./build/test/src/record_runtime/test_process_policy`
+    - `./build/test/src/record_runtime/test_audio_coordinator`
+    - `./build/test/src/record_runtime/test_stereo_session_client`
+    - `./build/test/src/record_runtime/test_button_logic`
+    - `./build/test/src/record_runtime/test_runtime_health`
+    - `./build/test/src/record_runtime/test_recording_orchestrator`
+    - `./build/test/src/record_runtime/test_shutdown_request_port`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_ros2 --target UgripperRuntime -j4`
+  - `cmake --install /home/songwl/swl_ws/pp_main/build/x86/standalone_ros2 --prefix /home/songwl/swl_ws/pp_main/install/x86/ros2`
+  - `TARGET_PLATFORM=x86 /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+  - 解包后的 x86 `deb` 中，`opt/ugripper/bin/UgripperRuntime/UgripperRuntime` 已同时可见：
+    - 新优先路径字符串（`bin/...`）
+    - 旧兼容 fallback 字符串（`build/src/...`、顶层 `audio/...`、`config/...`）
+  - 基于 `pp-arm-dev` 容器执行：
+    - `bash ./arm_build.sh`
+    - `cmake --install build/arm/standalone`
+    - `TARGET_PLATFORM=arm /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+  - `/home/songwl/swl_ws/pp_main/install/arm/bin/UgripperRuntime/UgripperRuntime` 已同时可见：
+    - 新优先路径字符串（`bin/...`）
+    - 旧兼容 fallback 字符串（`build/src/...`、顶层 `audio/...`、`config/...`）
+  - 解包后的 ARM `deb` 中，`opt/ugripper/bin/UgripperRuntime/UgripperRuntime` 也已同时可见上述新旧两组路径字符串
+- 后续待验证：
+  - 若要把这一步继续上板闭环，下一次板端安装应使用新刷出的 ARM `deb` 再做一次 `journalctl` / runtime 路径命中检查
+  - 进入“旧入口最终清理”前，继续冻结 `build/src/...`、顶层 `audio/...`、`config/...` 各自还需保留多久
+
+### 2026-04-14 - stage-b-b4-15-doc-entrypoint-wording-aligned
+
+- 阶段：`Stage B B4.15`
+- 范围：`README.md / docs/agent/overview.md / docs`
+- 类型：`文档口径收口 / 安装入口说明对齐`
+- 主要改动：
+  - 将 `README.md` 与 `docs/agent/overview.md` 的主入口说明更新为“`run_record.sh` + 新安装路径优先、旧 build 路径 fallback”
+  - 在模块总览中同步补齐：
+    - `bin/UgripperRuntime/UgripperRuntime`
+    - `bin/CameraRecorder/CameraRecorder`
+    - `bin/SensorRecorder/SensorRecorder`
+    - `bin/UgripperRuntime/audio/audio_play.py`
+    - `bin/SensorRecorder/zeroing`
+  - 保留对 legacy `build/src/...` 与顶层 `audio/...` 的兼容说明，避免文档口径和当前包行为脱节
+- 风险与行为等价说明：
+  - 本步只更新说明文档，不改变任何运行路径或安装内容
+  - 目标是让“新路径优先、旧路径 fallback”的现状在文档层面可追踪，降低后续最终清理前的认知偏差
+- 已执行验证：
+  - 文档静态复查
+- 后续待验证：
+  - 后续进入“旧入口最终清理”前，再统一清扫 README / overview / baseline 文档中的剩余 legacy 叙述
+
+### 2026-04-14 - stage-b-b4-14-compat-process-cleanup-patterns
+
+- 阶段：`Stage B B4.14`
+- 范围：`pack_script/postinst / pack_script/prerm / auto_update/usb_auto_update.sh / docs`
+- 类型：`旧入口兼容收口 / 进程清理模式兼容化`
+- 主要改动：
+  - 将安装、卸载与 USB 升级阶段的兜底进程清理逻辑统一补成“新旧 HMI helper 名称都识别”：
+    - `GripperHmiTool.*--state`
+    - `gripper_hmi_test.*--state`
+  - 保持 `audio/audio_play.py` 与 `/opt/ugripper/run_record.sh` 的现有清理策略不变
+  - 这一步只扩大兼容匹配范围，不删除 legacy pattern，也不改变 service / runtime 主流程
+- 风险与行为等价说明：
+  - 本步不引入新的启动路径，只让安装窗口里的残留进程清理同时覆盖新旧 helper 名称
+  - 对仍使用旧 helper 名称的包保持兼容；对已切到 `GripperHmiTool` 的包避免出现“停服务后旧兜底没杀到”的尾留风险
+- 已执行验证：
+  - `bash -n auto_update/usb_auto_update.sh pack_script/postinst pack_script/prerm`
+- 后续待验证：
+  - 基于新包重做一次 x86 / ARM 解包静态检查
+  - 继续冻结剩余必须保留的 legacy fallback 清单，再决定是否进入“旧入口最终清理”
+
+### 2026-04-14 - stage-b-b4-13-legacy-entry-downgrade-first-pass
+
+- 阶段：`Stage B B4.13`
+- 范围：`run_record.sh / usb_auto_update.sh / run_calibration.sh / import_camera_calibration.sh / scripts/lib/ugripper_shell_common.sh / docs`
+- 类型：`旧入口降级为兼容入口 / 路径解析顺序收口`
+- 主要改动：
+  - 在 `scripts/lib/ugripper_shell_common.sh` 中新增通用路径解析 helper：
+    - `ugripper_resolve_first_existing`
+    - `ugripper_resolve_existing_path`
+  - 将以下脚本的可执行/资源路径解析统一改为“优先新安装路径，旧路径 fallback”：
+    - `run_record.sh`
+    - `auto_calibration/run_calibration.sh`
+    - `auto_update/usb_auto_update.sh`
+    - `auto_calibration/import_camera_calibration.sh`
+  - 当前已优先切换到的新路径包括：
+    - `bin/UgripperRuntime/UgripperRuntime`
+    - `bin/SensorRecorder/zeroing`
+    - `bin/GripperHmiTool/GripperHmiTool`
+    - `bin/UgripperRuntime/audio/...`
+    - `bin/UgripperRuntime/audio_en/...`
+  - 旧路径 `build/src/...` 与顶层 `audio/` / `audio_en/` 仍保留为兼容 fallback，不在本步删除
+- 风险与行为等价说明：
+  - 本步只调整路径解析优先级，不删除兼容路径，不改变 service、打包和资源内容
+  - 若部署产物仍缺少新路径，脚本会自动退回旧路径，因此不应引入立即行为回归
+  - 这一步的目标是为“旧入口最终清理”创造前提，而不是在同一步完成清理
+- 已执行验证：
+  - `bash -n run_record.sh auto_calibration/run_calibration.sh auto_update/usb_auto_update.sh auto_calibration/import_camera_calibration.sh scripts/lib/ugripper_shell_common.sh`
+- 后续待验证：
+  - 基于新包重做一次 x86 / ARM 安装后路径验证
+  - 继续梳理 `pkill` / 日志提示 / 文档中的 legacy 名称是否也需要降级为兼容表述
+  - 进入“旧入口最终清理”前，先冻结仍必须保留的 fallback 清单
+
+### 2026-04-14 - stage-b-b4-12-restore-production-service-user-policy
+
+- 阶段：`Stage B B4.12`
+- 范围：`pack_script/postinst / docs`
+- 类型：`生产策略收口 / service 用户策略恢复`
+- 主要改动：
+  - 将 `pack_script/postinst` 的 service 用户策略恢复为生产默认口径：
+    - 默认固定使用 `ubuntu`
+    - 不再默认按“`ubuntu -> uid 1000 -> root`”动态探测本机用户
+  - 保留显式测试开关：
+    - 若存在 `/etc/ugripper/service_user_override`，则按文件内容覆盖
+    - 文件内容为具体用户名时，直接使用该用户名
+    - 文件内容为 `auto` 时，才启用测试环境动态探测逻辑
+  - 明确把此前的动态用户探测降为“测试环境显式 override”，不再作为生产包默认行为
+- 风险与行为等价说明：
+  - 当前生产目标环境仍以 `ubuntu` 用户运行 `ugripper.service` 为准
+  - 测试机若不存在 `ubuntu` 用户，需显式写入 `/etc/ugripper/service_user_override` 后再安装/升级，不能再依赖包默认探测
+  - 这一步只收回生产策略，不影响板端已验证过的 `ubuntu` 环境
+- 已执行验证：
+  - `bash -n pack_script/postinst`
+- 后续待验证：
+  - 基于新策略重新生成 x86 / ARM 包
+  - 在测试环境用 override 文件验证非 `ubuntu` 账户安装链
+  - 在目标板端继续按固定 `ubuntu` 用户口径做后续 `L3` smoke
+
+### 2026-04-14 - stage-b-b4-11-board-runtime-reached-storage-gate-and-exfat-classified-external
+
+- 阶段：`Stage B B4.11`
+- 范围：`ARM board validation / docs`
+- 类型：`板端运行验证收敛 / 外部环境问题归档`
+- 主要改动：
+  - 在真实 ARM 板上重新安装修复后的 `ugripper_1.2.8_arm64.deb`，确认：
+    - `dpkg -i` 成功
+    - `ugripper.service` 进入 `active (running)`
+    - `/opt/ugripper/build/src/...` 兼容路径问题已消失
+  - 运行期首个真实阻塞点继续收敛为存储环境：
+    - `run_record.sh` 已越过二进制缺失阶段
+    - 当前等待 `/mnt/data_disk` 成为真实可写挂载点
+  - 继续板端排查发现：
+    - 板子当前镜像缺少 `exfat` 内核支持，因此即便 `exfatprogs` 已安装，`mount -t exfat` 仍会失败
+    - 手动加载 `/home/user/lib/exfat.ko` 后，板子可识别并挂载 `exfat` U 盘
+    - `user_start.sh` 已按设备侧既有约定接入 `insmod /home/user/lib/exfat.ko`
+  - 明确将 `exfat` 支持归类为设备镜像/内核环境问题，不再作为 `ugripper` 代码或主仓库并仓问题继续追踪
+- 风险与行为等价说明：
+  - 当前板端验证已证明 `ugripper` 的打包、安装、service 与 legacy 路径兼容修复有效
+  - `exfat` 相关处理属于设备环境补齐，不代表正式生产方案已在 `ugripper` 代码中固化
+  - 按当前项目口径，这部分不计入 `ugripper` 主线门禁；正常目标设备不以该老机器的 `exfat` 缺失作为阻塞项
+- 已执行验证：
+  - 板端：
+    - `sudo dpkg -i /tmp/ugripper_1.2.8_arm64.deb`
+    - `systemctl status ugripper.service --no-pager -l`
+    - `journalctl -u ugripper.service --since "10 min ago" --no-pager -l`
+    - `findmnt /mnt/data_disk`
+    - `touch /mnt/data_disk/.codex_write_test`
+    - `modinfo /home/user/lib/exfat.ko`
+    - `sudo insmod /home/user/lib/exfat.ko`
+    - `grep exfat /proc/filesystems`
+    - `lsmod | grep exfat`
+- 后续待验证：
+  - 以正常目标设备环境继续补齐板端 `L3` smoke
+  - 回到 `ugripper` 主线，继续处理生产 service 用户策略、旧入口清理与后续并仓收尾
+
+### 2026-04-14 - stage-b-b4-10-board-test-found-legacy-layout-gap-and-package-fallback-fix
+
+- 阶段：`Stage B B4.10`
+- 范围：`ARM board validation / pp_main/package_ugripper_stage.sh / docs`
+- 类型：`板端验证收敛 / package compatibility fallback`
+- 主要改动：
+  - 在真实 ARM 板上完成第一轮 `.deb` 安装验证，确认：
+    - `dpkg -i` 成功
+    - `ugripper.service` 账户选择正常，`User=ubuntu`
+    - `umi-shutdown-trigger.path` 处于 `active (waiting)`
+  - 板端首个真实运行期错误收敛为：
+    - `run_record.sh` 仍按旧路径查找 `/opt/ugripper/build/src/record_runtime/record_runtime`
+    - 当时包内缺少 `build/src/...` 兼容层，导致 `ugripper.service` 以 `status=1/FAILURE` 重启
+  - 进一步检查发现：当前 ARM package payload 还缺顶层 `audio/`、`audio_en/` 等旧脚本依赖资源目录
+  - 已在 `pp_main/package_ugripper_stage.sh` 中补充打包兜底：
+    - 若 install tree 未提供 `build/src/...`，则在 package staging 中强制生成 legacy symlink
+    - 若 install tree 未提供 `audio/`、`audio_en/`、`fakeCamCalib.json`，则从 `pp_main/standalone/UgripperRuntime` 直接补齐运行时资源
+  - 基于修复后的 stage 脚本重新生成 ARM 包：
+    - `build/package/arm/ugripper_1.2.8_arm64.deb`
+- 风险与行为等价说明：
+  - 本次修复优先保证 legacy script/service 兼容路径完整，不要求 ARM install tree 先整体重装到最新
+  - 板端当前尚未验证修复后的新包，只完成了“旧包暴露缺口 -> 本地打包兜底修复”这一步
+  - 板端 `apt` 输出中的 duplicated source warnings 说明板子 APT 源配置存在重复项，但它们不是本次 `ugripper` 安装失败的根因
+- 已执行验证：
+  - 板端：
+    - `dpkg -s ugripper`
+    - `systemctl status ugripper.service --no-pager -l`
+    - `systemctl status umi-shutdown-trigger.path --no-pager -l`
+    - `journalctl -u ugripper.service -n 80 --no-pager -l`
+    - `find /opt/ugripper/bin -maxdepth 2 -type f`
+    - `file /opt/ugripper/bin/UgripperRuntime/UgripperRuntime`
+  - 本地重打包验证：
+    - `TARGET_PLATFORM=arm ./package_ugripper_deb.sh`
+    - `dpkg-deb -c build/package/arm/ugripper_1.2.8_arm64.deb`
+    - 校验新包已包含：
+      - `/opt/ugripper/build/src/...`
+      - `/opt/ugripper/audio/...`
+      - `/opt/ugripper/audio_en/...`
+- 后续待验证：
+  - 将新 ARM 包重新安装到板端
+  - 验证 `run_record.sh` 已越过 `record_runtime binary not found`
+  - 观察 service 下一层真实运行期错误
+  - 补齐最终 `L3` 交付 smoke
+
+### 2026-04-14 - stage-b-b4-9-board-validation-script
+
+- 阶段：`Stage B B4.9`
+- 范围：`scripts/verify_arm_board_install.sh / docs`
+- 类型：`板端验证辅助脚本`
+- 主要改动：
+  - 新增 `scripts/verify_arm_board_install.sh`
+  - 脚本用于 ARM 板端执行一轮标准化安装验证：
+    - 架构与 `systemd` 预检查
+    - 依赖安装
+    - `dpkg -i` / `apt --fix-broken install` / `dpkg --configure`
+    - `ugripper.service` / `umi-shutdown-trigger.path` / `journalctl` 状态采集
+    - `/opt/ugripper` 与关键二进制落位检查
+  - 默认把完整输出写入 `/tmp/ugripper_board_verify_<timestamp>.log`
+- 风险与行为等价说明：
+  - 本脚本只做安装和状态采集，不做危险清理或回滚
+  - 当前脚本会保留测试环境动态 service 用户策略的观测结果，不会自动修改该策略
+- 已执行验证：
+  - 静态检查：
+    - `bash -n scripts/verify_arm_board_install.sh`
+- 后续待验证：
+  - 在真实 ARM 板执行脚本
+  - 结合板端日志补齐 `B4.8` 之后的安装链结论
+
+### 2026-04-14 - stage-b-b4-8-arm-install-validation-blocked-by-non-systemd-container
+
+- 阶段：`Stage B B4.8`
+- 范围：`ARM install validation / docs`
+- 类型：`ARM 安装验证 / 环境阻塞定位`
+- 主要改动：
+  - 在一次性 `pp-arm-builder:arm-ready` 容器中，直接对 ARM 包执行 `dpkg -i`
+  - 确认 `ugripper_1.2.8_arm64.deb` 可以在当前容器中被 `dpkg` 正常识别、解包
+  - 继续补齐依赖后，安装流程已推进到 `postinst` 执行阶段，最终失败点定位为：
+    - `System has not been booted with systemd as init system (PID 1). Can't operate.`
+    - `Failed to connect to bus: Host is down`
+  - 明确当前阻塞点不是 ARM 包格式、也不是 `postinst` 语法，而是“验证环境不是 systemd 启动的运行时环境”
+- 风险与行为等价说明：
+  - 当前 `pp-arm-builder:arm-ready` 容器本质上仍是 `amd64` 交叉编译容器，仅注册了 `arm64` foreign architecture，不等价于真实 ARM 板运行环境
+  - 该环境足以完成 `dpkg` 解包级验证，但不足以验证依赖 `systemctl` / `udevadm` 的 `postinst`
+  - 因此 ARM 安装链当前的剩余门槛已经收敛为“需要 systemd-capable ARM 验证环境或直接上板”，而不是继续修改打包脚本
+- 已执行验证：
+  - 一次性容器环境检查：
+    - `docker run --rm -v /home/songwl/swl_ws:/workspace pp-arm-builder:arm-ready bash -lc 'uname -m; dpkg --print-architecture; dpkg --print-foreign-architectures'`
+  - 直接安装尝试：
+    - `docker run --rm -v /home/songwl/swl_ws:/workspace pp-arm-builder:arm-ready bash -lc 'dpkg -i /workspace/pp_main/build/package/arm/ugripper_1.2.8_arm64.deb'`
+  - 补依赖后重试：
+    - `docker run --rm -v /home/songwl/swl_ws:/workspace pp-arm-builder:arm-ready bash -lc 'dpkg --add-architecture arm64; apt-get update; apt-get install -y systemd udev kmod alsa-utils; apt-get install -y pulseaudio-utils:arm64 sox:arm64 libusb-1.0-0:arm64; dpkg -i /workspace/pp_main/build/package/arm/ugripper_1.2.8_arm64.deb'`
+- 后续待验证：
+  - 在 systemd-capable ARM 环境执行真实 `dpkg -i`
+  - ARM 板 `L3` 交付 smoke
+  - `postinst` / `prerm` 在 ARM 环境中的真实执行链
+  - 生产环境固定 service 用户策略恢复后的 ARM 安装验证
+
+### 2026-04-14 - stage-b-b4-7-arm-deb-output-first-pass
+
+- 阶段：`Stage B B4.7`
+- 范围：`pp_main/package_ugripper_stage.sh / pp_main/package_ugripper_deb.sh / docs`
+- 类型：`ARM deb 产出 / package artifact validation`
+- 主要改动：
+  - 复用 `pp_main/package_ugripper_stage.sh` 与 `pp_main/package_ugripper_deb.sh`，直接基于现有 `install/arm` 产出 ARM 包：
+    - `build/package/arm/ugripper_1.2.8_arm64.deb`
+  - 确认当前 package 脚本对 `TARGET_PLATFORM=arm` 已具备完整的 staging 与 deb build 能力，无需额外改脚本
+  - 解包后确认关键产物仍覆盖 `systemd unit`、`run_record.sh`、`auto_update/`、`auto_calibration/`、`CameraRecorder`、`UgripperRuntime`
+- 风险与行为等价说明：
+  - 本步只验证“ARM 包可产出、元数据正确、关键二进制确为 AArch64”，未执行 ARM 环境 `dpkg -i`
+  - 本步直接复用已有 `install/arm`，未重新跑一轮 `arm_build.sh`；因此它证明的是“当前 ARM install tree 足以打包”，不是“ARM 全量构建链本轮重新验证完成”
+  - `pp-arm-dev` 当前由 `pp-arm-builder:latest` 启动，而目标镜像标签为 `pp-arm-builder:arm-ready`；此次不影响 ARM 打包结果，但后续安装验证和构建复现时应统一
+- 已执行验证：
+  - 主仓库 ARM package：
+    - `TARGET_PLATFORM=arm ./package_ugripper_deb.sh`
+  - 包检查：
+    - `dpkg-deb -I build/package/arm/ugripper_1.2.8_arm64.deb`
+    - `dpkg-deb -c build/package/arm/ugripper_1.2.8_arm64.deb`
+    - `dpkg-deb -x build/package/arm/ugripper_1.2.8_arm64.deb /tmp/ppmain-ugripper-arm-deb-unpack`
+    - `readelf -h /tmp/ppmain-ugripper-arm-deb-unpack/opt/ugripper/bin/UgripperRuntime/UgripperRuntime`
+- 后续待验证：
+  - Docker ARM install 验证或目标 ARM 环境 `dpkg -i`
+  - ARM 板 `L3` 交付 smoke
+  - `postinst` / `prerm` 在 ARM 环境中的真实执行链
+  - 生产环境固定 service 用户策略恢复后的 ARM 安装验证
+
+### 2026-04-14 - stage-b-b4-6-x86-install-service-smoke-test-env-user-override
+
+- 阶段：`Stage B B4.6`
+- 范围：`pack_script/postinst / pp_main build/package/x86 / docs`
+- 类型：`x86 安装验证 / service 启动链验证 / 测试环境兼容补丁记录`
+- 主要改动：
+  - 基于 `pp_main/package_ugripper_deb.sh` 重新产出 x86 包：
+    - `build/package/x86/ugripper_1.2.8_amd64.deb`
+  - 在 `pack_script/postinst` 中补充测试环境兼容逻辑：安装时按 `ubuntu -> uid 1000 -> root` 解析本机可用用户，并重写已安装的 `ugripper.service` 的 `User=`
+  - 在测试机上完成真实 `dpkg -i` 安装验证，确认旧问题 `status=217/USER` 的根因是 `ugripper.service` 写死 `User=ubuntu`，而测试机并不存在该用户
+  - 二次安装后，测试机上的 `ugripper.service` 已按实际用户改写为 `User=songwl`，服务进入 `active (running)`
+- 风险与行为等价说明：
+  - 这次动态服务用户解析仅用于测试环境验证安装链路，不应直接作为生产发布策略固化
+  - 生产环境仍应回到明确、固定、可审计的 service account 策略，并在生产相似环境重新验证 `postinst -> systemd enable/restart` 链路
+  - 本步只确认“包可安装、service 能启动并越过 `217/USER`”，尚未完成生产环境账户策略、ARM 安装和板端运行链验证
+- 已执行验证：
+  - 主仓库本地 x86：
+    - `bash -n /home/songwl/swl_ws/ugripper/pack_script/postinst`
+    - `bash -n /home/songwl/swl_ws/pp_main/package_ugripper_stage.sh`
+    - `bash -n /home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+    - `/home/songwl/swl_ws/pp_main/package_ugripper_deb.sh`
+  - 测试环境安装验证：
+    - `dpkg -s ugripper`
+    - `systemctl status ugripper.service --no-pager -l`
+    - `systemctl status umi-shutdown-trigger.path --no-pager -l`
+    - `journalctl -u ugripper.service -n 50 --no-pager -l`
+    - `grep '^User=' /etc/systemd/system/ugripper.service`
+- 后续待验证：
+  - 去掉测试环境动态用户兼容后，恢复生产 service 用户策略
+  - Docker ARM deb 产出与安装验证
+  - ARM 板 `L3` 交付 smoke
+  - `ugripper.service` 进入业务运行态后的更深一层日志与资源路径验证
+
+### 2026-04-14 - stage-b-b4-5-deb-output-first-pass
+
+- 阶段：`Stage B B4.5`
+- 范围：`pp_main/package_ugripper_deb.sh / docs`
+- 类型：`真实 deb 产出 / package artifact validation`
+- 主要改动：
+  - 在 `pp_main` 根目录新增 `package_ugripper_deb.sh`
+  - 脚本会先调用 `package_ugripper_stage.sh` 刷新 staging，再使用 `dpkg-deb --root-owner-group` 产出目标包文件
+  - 当前已固定 x86 第一版输出：
+    - `build/package/x86/ugripper_1.2.8_amd64.deb`
+- 风险与行为等价说明：
+  - 本步只验证“能产包、能解包、关键 payload 正确”，不执行真实 `dpkg -i`
+  - maintainer scripts 已随包进入 control archive，但其 `systemctl` / `udevadm` / `postinst` 真实行为仍需安装环境验证
+  - 这一步仍未覆盖 ARM deb 产出与板端安装链
+- 已执行验证：
+  - 主仓库本地 x86：
+    - `bash -n package_ugripper_deb.sh`
+    - `./package_ugripper_deb.sh`
+  - 包检查：
+    - `dpkg-deb -I build/package/x86/ugripper_1.2.8_amd64.deb`
+    - `dpkg-deb -c build/package/x86/ugripper_1.2.8_amd64.deb`
+    - `dpkg-deb -x build/package/x86/ugripper_1.2.8_amd64.deb /tmp/ppmain-ugripper-deb-unpack`
+    - 校验 `opt/ugripper/bin/UgripperRuntime/UgripperRuntime`
+    - 校验 `etc/systemd/system/ugripper.service`
+    - 校验 `etc/systemd/system/umi-shutdown-trigger.path`
+- 后续待验证：
+  - `sudo dpkg -i` 真实安装
+  - `postinst` / `prerm` 执行链
+  - Docker ARM deb 产出
+  - ARM 板 `L3` 交付 smoke
+
+### 2026-04-14 - stage-b-b4-4-service-delivery-first-pass
+
+- 阶段：`Stage B B4.4`
+- 范围：`pp_main/package_ugripper_stage.sh / docs`
+- 类型：`service-path-unit 切换 / maintainer script staging / systemd delivery`
+- 主要改动：
+  - 扩展 `pp_main/package_ugripper_stage.sh`，让主仓库 package staging 同时生成：
+    - `DEBIAN/control`
+    - `DEBIAN/postinst`
+    - `DEBIAN/prerm`
+    - `DEBIAN/postrm`
+    - `/etc/systemd/system/ugripper.service`
+    - `/etc/systemd/system/ugripper-calibration.service`
+    - `/etc/systemd/system/ugripper-network-monitor.service`
+    - `/etc/systemd/system/umi-shutdown-trigger.service`
+    - `/etc/systemd/system/umi-shutdown-trigger.path`
+  - 在 staging 阶段完成 `{{APP_NAME}}`、`{{VERSION}}`、`{{ARCH}}`、`{{INSTALL_DIR}}` 模板替换，并为 maintainer scripts 赋予执行权限
+  - 明确这一步只迁入当前 legacy deb 真正安装的 unit，不提前把 `usb-auto-update@.service` 和 `ugripper-boot-install.service` 纳入同一切换
+- 风险与行为等价说明：
+  - 本步只完成 service delivery staging，不执行真实 `dpkg -i`、不做 `systemctl enable/restart`
+  - `systemd-analyze verify` 在未真实安装到 `/opt/ugripper` 的 staging 环境中，会对 `ExecStart=/opt/ugripper/...` 报“文件不存在”；这不作为本步失败门禁
+  - `usb-auto-update@.service` / `ugripper-boot-install.service` 仍保持后移，因为它们本来就不在当前 legacy deb 安装清单里
+- 已执行验证：
+  - 主仓库本地 x86：
+    - `bash -n package_ugripper_stage.sh`
+    - `./package_ugripper_stage.sh`
+  - staging 检查：
+    - 校验 `DEBIAN/control`、`postinst`、`prerm`、`postrm`
+    - 校验 5 个 unit/path 文件已落入 `/etc/systemd/system`
+    - 校验 `run_record.sh` 与 `auto_update/trigger_shutdown.sh` 在 package payload 中存在且可执行
+    - 校验模板占位符已完成替换
+    - 校验 `postinst` / `prerm` / `postrm` 权限为 `755`
+- 后续待验证：
+  - Docker ARM service-delivery staging
+  - 真实 `.deb` 产出与 `dpkg -i` 安装验证
+  - `systemctl enable/restart` 的安装后链路
+  - ARM 板 `L3` 交付 smoke
+
+### 2026-04-14 - stage-b-b4-3-package-staging-first-pass
+
+- 阶段：`Stage B B4.3`
+- 范围：`pp_main/package_ugripper_stage.sh / docs`
+- 类型：`打包清单切换 / package staging / payload manifest 收口`
+- 主要改动：
+  - 在 `pp_main` 根目录新增 `package_ugripper_stage.sh`，提供主仓库侧 `ugripper` package staging 入口
+  - 明确 package payload 真源切换为：
+    - `pp_main install tree` 中的四个 merged app 产物
+    - sibling `ugripper` 仓库中当前仍保留在 deploy/script 边界内的 `run_record.sh`、`auto_update/`、`auto_calibration/`、`scripts/`、`py_script/`
+  - staging 当前只收四个 `ugripper` 相关 app、legacy `build/src/...` 兼容路径、top-level `audio/` / `audio_en/` / `config/`、两条 udev 规则，并显式排除 `Explorer`、`Puppetry`、`MessageBridge` 等非目标 standalone app
+  - staging 结束后会生成 `manifest/files.txt`，作为当前 package payload 的可回溯清单
+- 风险与行为等价说明：
+  - 本步只建立 package staging，不产出最终 `.deb`，不迁 maintainer scripts，不切 systemd unit
+  - 当前 package staging 仍保留 sibling `ugripper` 仓库作为 deploy/script 来源；直到下一步 service / package metadata 切换前，这仍是预期的过渡状态
+  - 这一步同时暴露出后续打包门禁：`SensorRecorder` install 清单包含 `zeroing`，因此后续正式打包不能只构建 `SensorRecorder` 主程序
+- 已执行验证：
+  - 主仓库本地 x86：
+    - `./package_ugripper_stage.sh`
+  - staging 检查：
+    - 校验 `build/package/x86/ugripper_stage/opt/ugripper/bin/{CameraRecorder,SensorRecorder,GripperHmiTool,UgripperRuntime}`
+    - 校验 `run_record.sh`、`auto_update/usb_auto_update.sh`、`auto_calibration/run_calibration.sh`
+    - 校验 `/etc/udev/rules.d/99-fixed-usb-map.rules`、`99-serial.rules`
+    - `bash -n package_ugripper_stage.sh .../run_record.sh .../usb_auto_update.sh .../run_calibration.sh`
+    - 校验 `manifest/files.txt` 已生成，且 staging `bin/` 下不再包含 `Explorer` / `Puppetry` / `ROS_2`
+- 后续待验证：
+  - Docker ARM package staging
+  - `DEBIAN/control` / maintainer scripts 迁入
+  - systemd unit / path unit 的真实安装落位
+  - 最终 `.deb` 产出与 ARM 板 `L3` 交付 smoke
+
+### 2026-04-14 - stage-b-b4-2-install-layout-first-pass
+
+- 阶段：`Stage B B4.2`
+- 范围：`pp_main/standalone/UgripperRuntime/* / pp_main/standalone/*/CMakeLists.txt / docs`
+- 类型：`安装路径切换 / install layout 兼容收口 / runtime resource install`
+- 主要改动：
+  - 在 `pp_main/standalone/UgripperRuntime/` 新增并纳入 install tree：
+    - `audio/`
+    - `audio_en/`
+    - `config/fakeCamCalib.json`
+  - 在 `pp_main/standalone/UgripperRuntime/CMakeLists.txt` 中同时提供两套安装布局：
+    - `bin/UgripperRuntime/...` 的 standalone 自洽目录
+    - legacy 顶层 `audio/`、`audio_en/`、`config/` 兼容目录
+  - 保持四个 app 已有的 legacy `build/src/...` symlink 兼容路径不变，确保后续 `run_record.sh` / script / service 切换仍可单独推进
+- 风险与行为等价说明：
+  - 本步只补 install layout，不切 package、不切 service、不切 deploy 脚本入口
+  - 当前 x86 install smoke 仍受历史本地依赖前提影响：若主机未安装 `libserialport`，则 `UgripperRuntime` 运行时仍需借助 sibling `ugripper/.local-deps/libserialport` 的 `LD_LIBRARY_PATH` fallback
+  - `pp_main/standalone` 新建干净 build 目录时仍依赖外部传入 `CMAKE_TOOLCHAIN_FILE`；这属于主仓库原有构建前提，不作为本步失败门禁
+- 已执行验证：
+  - 主仓库本地 x86：
+    - `cmake -S standalone -B build/x86/standalone_ros2 -DCMAKE_BUILD_TYPE=Release -DBUILD_TARGETS=CameraRecorder,SensorRecorder,GripperHmiTool,UgripperRuntime`
+    - `cmake --build build/x86/standalone_ros2 --target UgripperRuntime CameraRecorder SensorRecorder GripperHmiTool -j8`
+    - `cmake --install build/x86/standalone_ros2 --prefix /tmp/ppmain-ugripper-install-b42`
+  - 安装树检查：
+    - 校验 `bin/UgripperRuntime/audio/*`、`bin/UgripperRuntime/audio_en/*`、`bin/UgripperRuntime/config/fakeCamCalib.json`
+    - 校验 legacy `build/src/record_runtime/record_runtime` symlink 与顶层 `audio/`、`audio_en/`、`config/fakeCamCalib.json`
+    - `python3 -m py_compile /tmp/ppmain-ugripper-install-b42/bin/UgripperRuntime/audio/*.py /tmp/ppmain-ugripper-install-b42/audio/*.py`
+    - 使用 `LD_LIBRARY_PATH=/home/songwl/swl_ws/ugripper/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu` 运行 install tree 下的 `UgripperRuntime --help`
+- 后续待验证：
+  - Docker ARM install tree 与资源布局一致性
+  - 打包清单切换
+  - service / path unit 切换
+  - ARM 板 `L3` 交付 smoke
+
+### 2026-04-13 - stage-b-b4-1-top-level-cmake-first-pass
+
+- 阶段：`Stage B B4.1`
+- 范围：`pp_main/all/CMakeLists.txt / pp_main/src/CMakeLists.txt / pp_main/standalone/CMakeLists.txt / pp_main/test/CMakeLists.txt / docs`
+- 类型：`顶层 CMake 接入 / superbuild 兼容 / 默认 standalone 入口校验`
+- 主要改动：
+  - 在 `pp_main/all/CMakeLists.txt` 中补上 `src -> standalone -> test -> documentation` 的接入顺序，避免 `standalone` 在 superbuild 中先于 core 出现
+  - 在 `pp_main/src/CMakeLists.txt` 中为 `utils`、`mathutils`、`communication`、`robotics`、`device` 补齐 `PP::` alias，统一和 package 版 target 命名
+  - 在 `pp_main/standalone/CMakeLists.txt` 与 `pp_main/test/CMakeLists.txt` 中补上 superbuild 兼容逻辑：父工程已提供 `PP::utils` 时直接复用，不再强依赖 `find_package(PPCore)`
+  - 验证 `BUILD_TARGETS=all` 的默认 standalone 入口已覆盖四个迁移对象
+- 风险与行为等价说明：
+  - 本步只处理构建入口，不改安装路径、不改打包、不改 service、不改运行时脚本
+  - `pp_main/all` superbuild 继续暴露出 `MessageBridge / exton-refactor` 对 `PPCoreROS1/ROS2` 的既有依赖链问题；这属于主仓库原有 ROS superbuild 问题，不作为当前四个 `ugripper` 迁移对象的失败门禁
+  - 当前仍不能宣布 `B4` 整体完成，后续还必须继续做安装路径、打包和 service 切换
+- 已执行验证：
+  - 主仓库本地 x86：
+    - `cmake -S standalone -B build/x86/standalone_ros2 ... -DBUILD_TARGETS=all`
+    - `cmake --build build/x86/standalone_ros2 --target CameraRecorder SensorRecorder GripperHmiTool UgripperRuntime -- -j8`
+  - Docker ARM：
+    - `docker exec pp-arm-dev ... cmake -S standalone -B build/arm/standalone ... -DBUILD_TARGETS=all`
+    - `docker exec pp-arm-dev ... cmake --build build/arm/standalone --target CameraRecorder SensorRecorder GripperHmiTool UgripperRuntime -- -j8`
+  - 额外检查：
+    - `pp_main/all` superbuild 重新配置后，已越过 `PPCore` 缺失问题；后续阻塞点定位到既有 `MessageBridge / exton-refactor` 的 `PPCoreROS1/ROS2` 依赖
+- 后续待验证：
+  - 安装路径切换
+  - 打包清单切换
+  - service / path unit 切换
+  - Docker ARM 产物与安装后路径的一致性
+  - ARM 板 `L3` 交付 smoke
+
+### 2026-04-13 - stage-b-b3-deploy-script-boundary-freeze
+
+- 阶段：`Stage B B3`
+- 范围：`docs/baseline/deploy-script-boundaries.md / docs/standalone-merge-plan.md / docs/ugripper-refactor-architecture.md`
+- 类型：`deploy-script 归属冻结 / service-path 边界梳理 / 并仓后移项固化`
+- 主要改动：
+  - 新增 `docs/baseline/deploy-script-boundaries.md`，冻结 `Updater`、`Calibration`、`Shutdown` 三条 deploy/script 链路的边界
+  - 明确 `usb_auto_update.sh`、`run_calibration.sh`、`trigger_shutdown.sh` 及相关 unit 当前都不进入首批 standalone app 成功标准
+  - 明确未来主仓库建议归属：
+    - `deploy/update`
+    - `deploy/calibration`
+    - `deploy/systemd`
+  - 把 `B3` 的完成口径和仍后移的动作同步回主计划与架构进度文档
+- 风险与行为等价说明：
+  - 本步只做归属冻结，不修改脚本行为、不切换安装路径、不切换 service
+  - 当前 `usb-auto-update@.service` / `ugripper-boot-install.service` 与真实安装路径仍存在不一致，必须后续在安装链里一起解决，不能在本步当作普通重命名处理
+  - 这一步完成不等于 deploy 交付链已通过，只说明“后续改动不再需要重新讨论归属”
+- 已执行验证：
+  - 语法检查：
+    - `bash -n auto_update/usb_auto_update.sh auto_update/boot_check_install.sh auto_update/trigger_shutdown.sh auto_calibration/run_calibration.sh auto_calibration/import_camera_calibration.sh auto_calibration/monitor_network.sh auto_calibration/network_iface_lib.sh`
+    - `python3 -m py_compile auto_calibration/generate_gripper_calibration_bin.py`
+  - 文档与以下真实脚本 / unit / packaging source 交叉核对：
+    - `auto_update/usb_auto_update.sh`
+    - `auto_update/boot_check_install.sh`
+    - `auto_update/trigger_shutdown.sh`
+    - `auto_update/usb-auto-update@.service`
+    - `auto_update/ugripper-boot-install.service`
+    - `auto_update/umi-shutdown-trigger.path`
+    - `auto_update/umi-shutdown-trigger.service`
+    - `auto_calibration/run_calibration.sh`
+    - `auto_calibration/import_camera_calibration.sh`
+    - `auto_calibration/monitor_network.sh`
+    - `auto_calibration/ugripper-calibration.service`
+    - `auto_calibration/ugripper-network-monitor.service`
+    - `build_deb.sh`
+    - `pack_script/postinst`
+    - `pack_script/prerm`
+- 后续待验证：
+  - 主仓库真实 deploy 目录落位
+  - 安装路径、打包与 service 切换
+  - Docker ARM 交叉编译
+  - ARM 板 `L3` 交付 smoke
+
+### 2026-04-13 - stage-b-b2-4-ugripper-runtime-first-pass
+
+- 阶段：`Stage B B2.4`
+- 范围：`pp_main/standalone/UgripperRuntime / pp_main/test/src/record_runtime / docs`
+- 类型：`主仓库并仓试点 / standalone app 接入 / runtime supervisor migration / host-only test migration`
+- 主要改动：
+  - 在 `pp_main/standalone/` 新增 `UgripperRuntime` 目录，迁入 `main`、`record_runtime`、`runtime_process`、`runtime_domain` 及相关头文件
+  - 在 `pp_main/test/src/record_runtime/` 迁入 `process policy`、`audio coordinator`、`stereo session client`、`button logic`、`runtime health`、`recording orchestrator`、`shutdown request port` 七组 host-only 单测
+  - 在 `pp_main/standalone/CMakeLists.txt` 中接入 `UgripperRuntime` target，并补齐与 `GripperHmiTool` 的编译关系
+  - 新增基于 `pp_main` logger 后端的轻量 stream 兼容层，避免在本步重新发明日志接口
+  - 为迁移代码补齐最小 `env_utils` / `time_utils` 支撑，并在 runtime / test 侧先以局部 support-utils 方式接线，避免本步扩散成主仓库全量公共库重构
+- 风险与行为等价说明：
+  - 当前完成的是 `UgripperRuntime` 的第一版主仓库接入，不包含 `run_record.sh`、service 切换、安装路径切换、`Updater / Calibration` app 化
+  - 运行时仍保持 `supervisor + worker` 模型，没有在本步改成单进程调度器，也没有提前把 pipe / file 控制面改写成 ZMQ
+  - 当前验证重点是“主仓库可编译、host-only 逻辑可测、ARM 可交叉编译”，不是“板端运行链已经完全通过”
+- 已执行验证：
+  - 主仓库本地 x86：
+    - `cmake -S standalone -B build/x86/standalone_ros2 -DCMAKE_BUILD_TYPE=Release -DBUILD_TARGETS=UgripperRuntime`
+    - `cmake --build build/x86/standalone_ros2 --target UgripperRuntime -j8`
+    - `cmake -S test -B build/x86/test -DCMAKE_BUILD_TYPE=Release`
+    - `cmake --build build/x86/test --target test_process_policy test_audio_coordinator test_stereo_session_client test_button_logic test_runtime_health test_recording_orchestrator test_shutdown_request_port -j8`
+    - 直接执行以上七组 host-only 单测，全部通过
+    - `build/x86/standalone_ros2/UgripperRuntime/UgripperRuntime --help`
+    - `cmake --install build/x86/standalone_ros2`
+  - Docker ARM：
+    - `docker exec pp-arm-dev ... cmake -S standalone -B build/arm/standalone -DCMAKE_BUILD_TYPE=Release -DBUILD_TARGETS=UgripperRuntime`
+    - `docker exec pp-arm-dev ... cmake --build build/arm/standalone --target UgripperRuntime -- -j8`
+    - `file` / `readelf -h` 确认 `build/arm/standalone/UgripperRuntime/UgripperRuntime` 为 `AArch64`
+- 后续待验证：
+  - `UgripperRuntime` 在 ARM 板上的 `L2` smoke：
+    - 主控可启动
+    - 日志无立即异常
+    - audio / stereo / shutdown request 链路不立即失败
+    - 最小录制流程不立即退出
+  - 后续若切 service、安装路径或交付链路，再补 `L3` 验证
+  - `pp_main` 顶层集成、打包和部署路径适配仍待后续节点处理
+
+### 2026-04-13 - stage-b-b2-3-gripper-hmi-tool-first-pass
+
+- 阶段：`Stage B B2.3`
+- 范围：`pp_main/standalone/GripperHmiTool / pp_main/test/src/gripper_hmi / docs`
+- 类型：`主仓库并仓试点 / helper tool + runtime library 接入 / host-only test migration`
+- 主要改动：
+  - 在 `pp_main/standalone/` 新增 `GripperHmiTool` 目录，按“helper tool + `gripper_hmi` 库”方式迁入 HMI 协议、LED effect、driver 与工具入口
+  - 在主仓库侧明确 `GripperHmiTool` 当前不是独立 service app，而是 standalone 目录下的工具/驱动支持模块
+  - 在 `pp_main/test/src/gripper_hmi/` 迁入 `test_hmi_protocol` 与 `test_hmi_led_effects` 两组 host-only 单测
+  - 对 `gripper_hmi` 进一步拆出 `gripper_hmi_protocol` 与 `gripper_hmi_led_effects` 纯逻辑库，避免单测被串口依赖拖住
+  - 新增基于 `pp_main` logger 的轻量 stream 兼容层，保证迁移代码先复用主仓库日志后端
+  - 对 `libserialport` 依赖做分层接线：
+    - ARM 侧使用系统 `libserialport-dev:arm64`
+    - x86 本地在缺少系统开发包时，临时回退到 sibling `ugripper/.local-deps/libserialport`
+- 风险与行为等价说明：
+  - 当前完成的是 `GripperHmiTool` 的第一版主仓库接入，不包含 `usb_auto_update.sh`、`run_calibration.sh`、`import_camera_calibration.sh` 的路径切换
+  - 当前现场脚本仍使用历史名字 `gripper_hmi_test`；本步故意不切 script 链，后续再决定是保留兼容名还是加适配层
+  - `GripperHmiTool` 当前落位在 `standalone/` 目录下，但语义上仍是“库 + helper tool”，不应误判成新的独立后台服务
+- 已执行验证：
+  - 主仓库本地 x86：
+    - `cmake -S standalone -B build/x86/standalone_ros2 ... -DBUILD_TARGETS=GripperHmiTool`
+    - `cmake --build build/x86/standalone_ros2 --target GripperHmiTool`
+    - `cmake -S test -B build/x86/test ...`
+    - `cmake --build build/x86/test --target test_hmi_protocol test_hmi_led_effects`
+    - 直接执行两组 host-only 单测，全部通过
+    - `build/x86/standalone_ros2/GripperHmiTool/GripperHmiTool --help`
+    - `cmake --install build/x86/standalone_ros2`
+  - Docker ARM：
+    - `docker exec pp-arm-dev ... cmake -S standalone -B build/arm/standalone ... -DBUILD_TARGETS=GripperHmiTool`
+    - `docker exec pp-arm-dev ... cmake --build build/arm/standalone --target GripperHmiTool`
+    - `file` / `readelf -h` 确认 `GripperHmiTool` 产物为 `AArch64`
+- 后续待验证：
+  - `GripperHmiTool` 在 ARM 板上的 `L1-L2` smoke：
+    - 程序可启动
+    - 串口基础连通正常
+    - 无立即异常退出
+  - 现场 script 是否保留兼容名字 `gripper_hmi_test`
+  - 进入 `B2.4 UgripperRuntime`
+
+### 2026-04-13 - stage-b-b2-2-sensor-recorder-first-pass
+
+- 阶段：`Stage B B2.2`
+- 范围：`pp_main/standalone/SensorRecorder / pp_main/test/src/sensor_recorder / docs`
+- 类型：`主仓库并仓试点 / standalone app 接入 / host-only test migration`
+- 主要改动：
+  - 在 `pp_main/standalone/` 新增 `SensorRecorder` app 和 `zeroing` helper，迁入 `sensor_protocol` / `sensor_domain` / IMU / encoder 相关代码
+  - 迁入 `test_bsp_crc` / `test_encoder_protocol` / `test_imu_batch_timestamp` 三个 host-only 单测
+  - 在 `pp_main/standalone/CMakeLists.txt` 接入 `SensorRecorder` target，并补齐 `BUILD_TARGETS=all` 分支下的 target 开关
+  - 新增基于 `pp_main` logger 的轻量 stream 兼容层，保证迁移代码先复用主仓库日志后端
+  - 为 `SensorRecorder` 自带最小 `mcap` 编译入口，避免在本步把主仓库第三方依赖体系一起扩散改动
+  - 对 `libserialport` 依赖做分层接线：
+    - ARM 侧使用系统 `libserialport-dev:arm64`
+    - x86 本地在缺少系统开发包时，临时回退到 sibling `ugripper/.local-deps/libserialport`
+  - 为 `SensorRecorder` 与 `zeroing` 补齐最小 `--help` 入口，锁定 CLI 基线
+- 风险与行为等价说明：
+  - 当前完成的是 `SensorRecorder` 的第一版主仓库接入，不包含 `run_calibration.sh`、校准链安装路径切换或 service 切换
+  - 当前把 `zeroing` 作为配套 helper 一起带入 `standalone/SensorRecorder/`，但没有提前推动 calibration 脚本 app 化
+  - x86 当前仍依赖 sibling `ugripper/.local-deps/libserialport` 做本地验证，不应直接视为主仓库最终依赖方案
+  - `mcap` 当前以 `SensorRecorder` 目录内最小自带方式接入，只服务本步迁移验证；后续仍需评估是否收敛为主仓库统一第三方入口
+- 已执行验证：
+  - 主仓库本地 x86：
+    - `cmake -S standalone -B build/x86/standalone_ros2 ...`
+    - `cmake --build build/x86/standalone_ros2 --target SensorRecorder zeroing`
+    - `cmake -S test -B build/x86/test ...`
+    - `cmake --build build/x86/test --target test_bsp_crc test_encoder_protocol test_imu_batch_timestamp`
+    - 直接执行三组 host-only 单测，全部通过
+    - `build/x86/standalone_ros2/SensorRecorder/SensorRecorder --help`
+    - `build/x86/standalone_ros2/SensorRecorder/zeroing --help`
+    - `cmake --install build/x86/standalone_ros2`
+  - Docker ARM：
+    - 在 `pp-arm-dev` 中安装 `libserialport-dev:arm64`
+    - `docker exec pp-arm-dev ... cmake -S standalone -B build/arm/standalone ...`
+    - `docker exec pp-arm-dev ... cmake --build build/arm/standalone --target SensorRecorder zeroing`
+    - `file` / `readelf -h` 确认 `SensorRecorder` 与 `zeroing` 产物为 `AArch64`
+- 后续待验证：
+  - `SensorRecorder` / `zeroing` 在 ARM 板上的 `L2` smoke：
+    - 程序可启动
+    - 串口设备路径解析正确
+    - 无立即崩溃
+  - `99-serial.rules` 的最终安装归属
+  - `libserialport` 与 `mcap` 在主仓库内是否需要形成正式统一依赖入口
+  - 进入 `B2.3 GripperHmiTool`
+
+### 2026-04-13 - stage-b-b2-1-camera-recorder-first-pass
+
+- 阶段：`Stage B B2.1`
+- 范围：`pp_main/standalone/CameraRecorder / pp_main/test/src/camera_recorder / docs`
+- 类型：`主仓库并仓试点 / standalone app 接入 / host-only test migration`
+- 主要改动：
+  - 在 `pp_main/standalone/` 新增 `CameraRecorder` app，保留 `main + camera_recorder + camera_domain` 三文件形态
+  - 迁入 `camera_recorder` 头文件、sample config 与 `test_camera_config` / `test_camera_command_builder` / `test_stereo_control_json` 三个 host-only 单测
+  - 在 `pp_main/standalone/CMakeLists.txt` 接入 `CameraRecorder` target，并补齐 `BUILD_TARGETS=all` 分支下的 target 开关
+  - 新增基于 `pp_main` logger 的轻量 stream 兼容层，保证迁移代码先复用主仓库日志后端
+  - 对 `libusb` 依赖改为“有则启用、无则禁用 UVC roll control 编译支持”的接线，避免 ARM 容器因缺少 `libusb-1.0.pc` 直接卡死在配置阶段
+- 风险与行为等价说明：
+  - 当前完成的是 `CameraRecorder` 的第一版主仓库接入，不包含 `run_record.sh`、service、安装路径切换或 `record_runtime` 联动
+  - x86 保持 `libusb` 路径，UVC roll control 编译能力未退化
+  - ARM 容器目前缺少 `libusb` 开发包，因此当前 ARM 产物可编译，但若运行配置依赖 `uvc_roll_absolute`，仍需板端 `L2` smoke 与后续依赖补齐
+- 已执行验证：
+  - 主仓库本地 x86：
+    - `cmake -S standalone -B build/x86/standalone_ros2 ...`
+    - `cmake --build build/x86/standalone_ros2 --target CameraRecorder`
+    - `cmake -S test -B build/x86/test ...`
+    - `cmake --build build/x86/test --target test_camera_config test_camera_command_builder test_stereo_control_json`
+    - 直接执行三组 host-only 单测，全部通过
+    - `build/x86/standalone_ros2/CameraRecorder/CameraRecorder --help`
+    - `build/x86/standalone_ros2/CameraRecorder/CameraRecorder --output-dir /tmp/pp_camera_dry_run --config-yaml test/src/camera_recorder/config_samples/schema_v1_valid.yaml --dry-run`
+    - `cmake --install build/x86/standalone_ros2`
+  - Docker ARM：
+    - `docker exec pp-arm-dev ... cmake -S standalone -B build/arm/standalone ...`
+    - `docker exec pp-arm-dev ... cmake --build build/arm/standalone --target CameraRecorder`
+    - `file` / `readelf -h` 确认产物为 `AArch64`
+- 后续待验证：
+  - `CameraRecorder` 在 ARM 板上的 `L2` smoke：
+    - 进程可启动
+    - config 可读取
+    - camera 资源路径无明显错误
+  - ARM 侧 `libusb` 依赖是否需要作为正式交付依赖补齐
+  - 进入 `B2.2 SensorRecorder`
+
+### 2026-04-13 - stage-b-b1-freeze-standalone-integration-inputs
+
+- 阶段：`Stage B B1`
+- 范围：`docs`
+- 类型：`并仓输入冻结 / standalone integration preparation`
+- 主要改动：
+  - 新增 `docs/baseline/standalone-integration-inputs.md`，冻结 `CameraRecorder`、`SensorRecorder`、`GripperHmiTool`、`UgripperRuntime` 的并仓输入
+  - 明确每个对象的源码真源、当前构建目标、直接构建依赖、运行时资源、安装后路径、启动方式与 deploy/script 保留项
+  - 补充 `GripperHmiTool` 当前实际是“库 + helper binary”而非纯 standalone app 的确认点
+  - 在 `docs/standalone-merge-plan.md` 中固定 `B1` 的输出文件位置
+- 风险与行为等价说明：
+  - 当前只冻结并仓输入，不迁主仓库代码，不修改当前仓库运行时行为
+  - 作用是减少后续 `Stage B` 迁移 PR 中的临场判断，避免边迁边猜依赖、资源和 service 归属
+- 已执行验证：
+  - 文档交叉核对：
+    - `src/camera_recorder/CMakeLists.txt`
+    - `src/sensor_recorder/CMakeLists.txt`
+    - `src/gripper_hmi/CMakeLists.txt`
+    - `src/record_runtime/CMakeLists.txt`
+    - `src/camera_recorder/include/camera_recorder/camera_recorder.h`
+    - `src/sensor_recorder/src/main.cpp`
+    - `src/record_runtime/include/record_runtime.h`
+    - `src/gripper_hmi/test/gripper_hmi_test.cpp`
+    - `docs/baseline/runtime-entrypoints.md`
+    - `docs/baseline/runtime-paths.md`
+    - `docs/baseline/service-map.md`
+    - `docs/baseline/package-contents.md`
+- 后续待验证：
+  - 主仓库侧 `standalone` 目录命名和 target 命名是否需微调
+  - `GripperHmiTool` 的最终归属是否作为独立 app 暴露
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+### 2026-04-10 - stage-b-readiness-8-6-extract-shutdown-request-port
+
+- 阶段：`Stage B readiness 8.6`
+- 范围：`src/record_runtime / test/src/record_runtime / docs`
+- 类型：`通信接口抽象 / shutdown request channel 收口`
+- 主要改动：
+  - 新增 `src/record_runtime/include/record_runtime/shutdown_request_port.h`
+  - 在 `runtime_process.cpp` 中实现 `ShutdownRequestPort` 的当前 file backend，继续向 `/tmp/umi_shutdown_request` 写 `shutdown\n`
+  - 将 `RecordRuntime::handleDualShutdownAction()` 改为依赖 `ShutdownRequestPort`，不再在顶层直接手写 request file
+  - 新增 `test_shutdown_request_port.cc`，锁定 file backend 的请求文件覆盖写入语义
+- 风险与行为等价说明：
+  - 当前只收口关机请求的发出接口，不改 `umi-shutdown-trigger.path`、`umi-shutdown-trigger.service`、`trigger_shutdown.sh` 的 systemd/file 协议
+  - 目标是让 runtime 顶层先与具体 request file 写法解耦，同时保留现有部署侧兼容路径
+- 已执行验证：
+  - `PKG_CONFIG_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu/pkgconfig CPLUS_INCLUDE_PATH=$PWD/.local-deps/libserialport/root/usr/include:$PWD/.local-deps/nlohmann/root/usr/include LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu cmake --build build --target record_runtime test_audio_coordinator test_process_policy test_stereo_session_client test_shutdown_request_port -j4`
+  - `ctest --test-dir build --output-on-failure -L host-only -R "AudioCoordinatorTest|ProcessSupervisorTest|StereoSessionClientTest"`
+  - `ctest --test-dir build --output-on-failure -R "ShutdownRequestPortTest"`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+- 后续待验证：
+  - `record_runtime` 双键关机主链的更完整无硬件 smoke
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-10 - stage-b-readiness-8-6-extract-stereo-session-port
+
+- 阶段：`Stage B readiness 8.6`
+- 范围：`src/record_runtime / test/src/record_runtime / docs`
+- 类型：`通信接口抽象 / stereo control-status channel 收口`
+- 主要改动：
+  - 新增 `src/record_runtime/include/record_runtime/stereo_session_port.h`
+  - 将 `StereoSessionClient` 改为依赖 `StereoSessionPort`，默认继续通过 file backend 复用 `/tmp/umi_stereo_camera_control.json` + `/tmp/umi_stereo_camera_status.json`
+  - 在 `runtime_process.cpp` 中实现当前 file backend，并保持现有 stereo control/status JSON 协议不变
+  - 在 `test_stereo_session_client.cc` 中新增注入式单测，锁定“session 业务层依赖接口而不是直接依赖文件/JSON 细节”
+- 风险与行为等价说明：
+  - 当前只抽 `StereoSessionPort`，不改 `camera_recorder --stereo-daemon` 的 control/status 文件协议，不改 `WaitForFinalize()` 的业务判定口径
+  - 目标是让 `record_runtime` 侧的 stereo 会话控制先与 transport/backend 细节解耦，同时保留当前 file backend 行为等价
+- 已执行验证：
+  - `PKG_CONFIG_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu/pkgconfig CPLUS_INCLUDE_PATH=$PWD/.local-deps/libserialport/root/usr/include:$PWD/.local-deps/nlohmann/root/usr/include LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu cmake --build build --target record_runtime test_audio_coordinator test_process_policy test_stereo_session_client -j4`
+  - `ctest --test-dir build --output-on-failure -L host-only -R "AudioCoordinatorTest|ProcessSupervisorTest|StereoSessionClientTest"`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+- 后续待验证：
+  - `ShutdownRequestPort` 的代码级接口抽象
+  - `camera_recorder --stereo-daemon` 与 `record_runtime` 联动的更完整无硬件 smoke
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-10 - stage-b-readiness-8-6-extract-audio-command-port
+
+- 阶段：`Stage B readiness 8.6`
+- 范围：`src/record_runtime / test/src/record_runtime / docs`
+- 类型：`通信接口抽象 / audio control channel 收口`
+- 主要改动：
+  - 新增 `src/record_runtime/include/record_runtime/audio_command_port.h`
+  - 将 `AudioCoordinator` 改为依赖 `AudioCommandPort`，默认通过 file backend 继续复用 `/tmp/umi_audio_pipe` + `/tmp/umi_audio_ready`
+  - 在 `runtime_process.cpp` 中实现当前 file backend，并保持现有 FIFO/ready 文件协议不变
+  - 在 `test_audio_coordinator.cc` 中新增注入式单测，锁定“业务层依赖接口而不是直接依赖 pipe/file 细节”
+- 风险与行为等价说明：
+  - 当前只抽 `AudioCommandPort`，不改 `audio/audio_play.py` 协议，不改 `run_calibration.sh` 的 FIFO 旁路写法
+  - 目标是让 `record_runtime` 侧先与 transport 细节解耦，同时保留当前 file backend 行为等价
+- 已执行验证：
+  - `PKG_CONFIG_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu/pkgconfig CPLUS_INCLUDE_PATH=$PWD/.local-deps/libserialport/root/usr/include:$PWD/.local-deps/nlohmann/root/usr/include LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu cmake --build build --target record_runtime test_audio_coordinator test_process_policy test_stereo_session_client -j4`
+  - `ctest --test-dir build --output-on-failure -L host-only -R "AudioCoordinatorTest|ProcessSupervisorTest|StereoSessionClientTest"`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+- 后续待验证：
+  - `run_calibration.sh` 音频旁路与 `AudioCommandPort` 的统一收口
+  - `StereoSessionPort` / `ShutdownRequestPort` 的代码级接口抽象
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-10 - stage-b-readiness-8-6-freeze-control-channel-ledger
+
+- 阶段：`Stage B readiness 8.6`
+- 范围：`docs`
+- 类型：`通信台账冻结 / transport 边界冻结`
+- 主要改动：
+  - 新增 `docs/baseline/control-channel-ledger.md`，冻结当前控制面通道事实
+  - 明确首批控制面通道为 `audio pipe`、`audio ready`、`stereo control/status`、`shutdown request`
+  - 冻结首批 future transport boundary：`AudioCommandPort`、`StereoSessionPort`、`ShutdownRequestPort`
+  - 明确 worker stdout/stderr、`waitpid` / 进程组 signal、runtime 日志同步 `.pos/.lock`、`/tmp/umi_recording.lock` 不纳入首批 ZMQ 迁移
+  - 更新主计划、参考步骤和架构文档中的 `8.6` 进度描述
+- 风险与行为等价说明：
+  - 当前只冻结通信台账与未来接口边界，不改 file / pipe backend，不引入 `zmqpp` 或 `message_hub`
+  - 目标是先把业务控制面和本地实现细节拆清，再进入后续接口抽象和主仓库阶段的 transport 替换
+- 已执行验证：
+  - 文档交叉核对：
+    - `src/record_runtime/src/record_runtime.cpp`
+    - `src/record_runtime/src/runtime_process.cpp`
+    - `src/camera_recorder/src/camera_recorder.cpp`
+    - `audio/audio_play.py`
+    - `auto_calibration/run_calibration.sh`
+    - `auto_update/trigger_shutdown.sh`
+    - `auto_update/umi-shutdown-trigger.path`
+- 后续待验证：
+  - `AudioCommandPort` / `StereoSessionPort` / `ShutdownRequestPort` 的代码级接口抽象
+  - fake/stub host-only 单测
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-10 - stage-b-readiness-8-5-localize-runtime-poll-retry-policies
+
+- 阶段：`Stage B readiness 8.5`
+- 范围：`src/record_runtime / docs`
+- 类型：`调度边界局部收口 / 停止与重试语义统一`
+- 主要改动：
+  - 在 `src/record_runtime/src/runtime_process.cpp` 引入局部 `PollUntilReady(...)` 与 `RetryIntervalElapsed(...)`
+  - 将 `SubprocessHandle::Wait()`、`AudioCoordinator::StartAudioPlayer()`、`AudioCoordinator::MaintainAudioPlayer()`、`StereoSessionClient::MaintainDaemon()`、`StereoSessionClient::WaitForFinalize()` 的轮询/超时/重试窗口统一到同一套局部策略
+  - 在主计划、参考步骤和架构文档中补充“进程内线程调度参考 `pp_main/standalone` 原则、但不直接复刻 `TaskScheduler` 实现”的统一口径，并写明 `record_runtime` / `camera_recorder` 的目标线程模型
+  - 更新计划与架构文档中的进度描述，标记 `8.5` 第一轮局部收口已完成
+- 风险与行为等价说明：
+  - 当前只统一 runtime process boundary 内部的 stop/retry/deadline 语义，不改 supervisor 主模型，不改 worker 进程边界，不引入新的全局调度器
+  - 这一步显式不直接复刻 `pp_main` 的 `TaskScheduler`，因为当前链路仍以子进程监督、pipe/file 控制面和阻塞 I/O 为主，不适合直接塞入 oneTBB + timer thread 模式
+- 已执行验证：
+  - `PKG_CONFIG_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu/pkgconfig CPLUS_INCLUDE_PATH=$PWD/.local-deps/libserialport/root/usr/include:$PWD/.local-deps/nlohmann/root/usr/include LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu cmake --build build --target record_runtime test_process_policy test_audio_coordinator test_stereo_session_client test_button_logic test_runtime_health test_recording_orchestrator -j4`
+  - `ctest --test-dir build --output-on-failure -L host-only`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+- 后续待验证：
+  - `record_runtime.cpp` 顶层主循环与 `camera_recorder` 内部周期等待的进一步局部收口
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-10 - stage-b-readiness-8-4-freeze-logger-compatibility-gap
+
+- 阶段：`Stage B readiness 8.4`
+- 范围：`src/utils / src/camera_recorder / src/record_runtime / src/gripper_hmi / docs`
+- 类型：`logger 兼容收口 / focused cleanup / 文档对齐`
+- 主要改动：
+  - 在 `src/utils/include/utils/logger.h` 为过渡期 logger 补齐 `DM_LOG_INIT(...)`、`DM_LOG_TRACE(...)` 与 `DM_LOG_TRACE_STREAM()`
+  - 保持当前 `iostream + mutex` 轻量后端不变，不在 `ugripper` 仓库内复刻 `pp_main` 的 ROS/file logger backend
+  - 将 `src/camera_recorder/src/camera_domain.cpp`、`src/record_runtime/src/main.cpp`、`src/record_runtime/src/runtime_process.cpp` 中新增或刚归并的 `_STREAM()` 调用收回到普通 `DM_LOG_*`
+  - 更新计划与架构文档中的进度描述，标记 `8.4` 第一轮兼容收口已完成
+- 风险与行为等价说明：
+  - 当前只补齐过渡期 API 兼容面并收紧新代码的日志写法，不改日志文案主语义，不改 `pp_main` 最终后端选择
+  - 历史大文件中的 `_STREAM()` 依赖暂时保留，避免在同一步混入大范围日志迁移
+- 已执行验证：
+  - `cmake --build build --target utils camera_recorder record_runtime test_camera_config test_camera_command_builder test_stereo_control_json test_process_policy test_audio_coordinator test_stereo_session_client test_button_logic test_runtime_health test_recording_orchestrator -j4`
+  - `ctest --test-dir build --output-on-failure -L host-only`
+  - `./build/src/camera_recorder/camera_recorder --help`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+- 后续待验证：
+  - 针对历史大文件的 logger `_STREAM()` focused cleanup
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-10 - stage-b-readiness-8-3-consolidate-runtime-process-and-domain-implementation
+
+- 阶段：`Stage B readiness 8.3`
+- 范围：`src/record_runtime / test/src/record_runtime / docs`
+- 类型：`runtime 实现文件归并 / 构建接线收口`
+- 主要改动：
+  - 新增 `src/record_runtime/src/runtime_process.cpp`，合并承载原 `subprocess_handle.cpp`、`process_supervisor.cpp`、`audio_coordinator.cpp`、`stereo_session_client.cpp` 的实现
+  - 新增 `src/record_runtime/src/runtime_domain.cpp`，合并承载原 `hmi_controller.cpp`、`health_monitor.cpp`、`recording_orchestrator.cpp` 的实现
+  - 删除上述 7 个小体量职责 `.cpp`，保留原有头文件 API 不变
+  - 保留 `runtime_process_boundary` 与 `runtime_control_plane` 两个库目标名，仅将其各自收口为单一实现文件
+  - 更新计划与架构文档中的进度描述，标记 `8.3` 已完成
+- 风险与行为等价说明：
+  - 当前只做 runtime 过程边界和控制面实现归并，不改 supervisor 模型、不改单测契约、不改 worker 进程边界
+  - 目标是保留 Step 7/8 已形成的职责层次，同时把物理 `.cpp` 粒度收紧到更适合并仓的形态
+- 已执行验证：
+  - `cmake --build build --target record_runtime test_process_policy test_audio_coordinator test_stereo_session_client test_button_logic test_runtime_health test_recording_orchestrator -j4`
+  - `ctest --test-dir build --output-on-failure -L host-only`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+- 后续待验证：
+  - 无硬件环境下更完整的 `record_runtime` smoke
+  - 有真实 gripper / camera / sensor / audio 设备时的 supervisor 行为等价
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-10 - stage-b-readiness-8-2-consolidate-camera-domain-implementation
+
+- 阶段：`Stage B readiness 8.2`
+- 范围：`src/camera_recorder / test/src/camera / docs`
+- 类型：`camera 实现文件归并 / 构建接线收口`
+- 主要改动：
+  - 新增 `src/camera_recorder/src/camera_domain.cpp`，合并承载原 `camera_types.cpp`、`camera_config.cpp`、`camera_command_builder.cpp`、`camera_registry.cpp`、`stereo_control_json.cpp` 的实现
+  - 删除上述 5 个小体量纯逻辑 `.cpp`，保留原有头文件边界不变
+  - 将 `src/camera_recorder/CMakeLists.txt` 收口为单一 `camera_domain` 库，再由 `camera_recorder` 可执行复用
+  - 将 `test/src/camera/CMakeLists.txt` 改为统一链接 `camera_domain`
+  - 更新计划与架构文档中的进度描述，标记 `8.2` 已完成
+- 风险与行为等价说明：
+  - 当前只做 camera 纯逻辑实现归并与构建接线调整，不改 YAML 契约、不改命令拼装语义、不改运行时行为
+  - 目标是把已拆出的纯逻辑边界保留在头文件层，同时把物理 `.cpp` 粒度收紧到更适合并仓的形态
+- 已执行验证：
+  - `cmake --build build --target camera_recorder test_camera_config test_camera_command_builder test_stereo_control_json -j4`
+  - `ctest --test-dir build --output-on-failure -L host-only`
+  - `./build/src/camera_recorder/camera_recorder --help`
+  - `./build/src/camera_recorder/camera_recorder --output-dir /tmp/ugripper_camera_stageb_ready --config-yaml test/src/camera/config_samples/schema_v1_valid.yaml --dry-run --allow-missing`
+- 后续待验证：
+  - 有真实 camera 设备时的 `camera_recorder` 行为等价
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-10 - define-stage-b-readiness-target-shape
+
+- 阶段：`Phase 0`
+- 范围：`docs`
+- 类型：`Stage B 前收口目标定义 / 架构对齐`
+- 主要改动：
+  - 在 `docs/reference-aligned-refactor-next-steps.md` 新增 `Step 9` 之后、`Stage B` 之前的 5 项收口任务
+  - 明确 `camera_recorder` 的目标物理形态为 `main.cpp + camera_recorder.cpp + camera_domain.cpp`
+  - 明确 `record_runtime` 的目标物理形态为 `main.cpp + record_runtime.cpp + runtime_process.cpp + runtime_domain.cpp`
+  - 补齐当前 logger 与 `pp_main` logger 的差距判断，明确 `_STREAM()` 兼容是并仓前必须显式处理的问题
+  - 补齐 `TaskScheduler` 参考方式与 ZMQ 渐进迁移路线，并为每项定义本地测试门禁
+  - 在架构汇报文档中补充“新增约束下的下一步目标”章节
+- 风险与行为等价说明：
+  - 当前仅更新执行文档和架构目标，不修改业务代码或运行时行为
+  - 这一步的作用是把“参考 `pp_main`”收成可执行的下一轮收口清单，避免直接跳入并仓时再临场决定文件形态、logger 兼容和通信路线
+- 已执行验证：
+  - 文档交叉核对：
+    - `docs/reference-aligned-refactor-next-steps.md`
+    - `docs/ugripper-refactor-architecture.md`
+    - `docs/standalone-merge-plan.md`
+    - `docs/ugripper-refactor-plan.md`
+  - 现状核对：
+    - `src/camera_recorder/CMakeLists.txt`
+    - `src/record_runtime/CMakeLists.txt`
+    - `src/utils/include/utils/logger.h`
+    - `/home/songwl/swl_ws/pp_main/src/utils/logger.h`
+    - `/home/songwl/swl_ws/pp_main/src/utils/task_scheduler.h`
+    - `/home/songwl/swl_ws/pp_main/src/utils/task_scheduler.cc`
+    - `/home/songwl/swl_ws/pp_main/src/communication/publisher.cc`
+    - `/home/songwl/swl_ws/pp_main/src/communication/subscriber.cc`
+- 后续待验证：
+  - 这些目标形态在后续代码重构中的实际可行性
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-10 - align-plans-with-ppmain-convergence-constraints
+
+- 阶段：`Phase 0`
+- 范围：`docs / skill`
+- 类型：`阶段计划对齐 / pp_main 靠拢约束补充`
+- 主要改动：
+  - 在主计划和仓内重构计划中补充 `camera_recorder`、`record_runtime` 的实现文件粒度约束，明确以 `2-3` 个 `.cpp` 为宜，头文件可按职责细分
+  - 明确日志对齐策略：当前阶段先收敛到 `DM_LOG_*` API 形态，并仓后再切到 `pp_main/src/utils/logger.h` 的真实后端
+  - 明确 `TaskScheduler` 只作为设计参考，不在当前阶段直接引入其实现、依赖栈或全局单例模式
+  - 明确通信迁移采用 staged migration：先收口 transport 无关接口，再从现有 pipe / file 渐进迁到 ZMQ
+  - 更新 `refactor-ugripper` skill，让后续规划默认读取 `pp_main` 的 logger / task scheduler / communication 参照实现
+- 风险与行为等价说明：
+  - 当前仅更新计划、执行约束和 skill，不修改业务代码或运行时行为
+  - 目的是把新的架构要求收成可执行规则，避免后续一边参考 `pp_main` 一边临场重新定义边界
+- 已执行验证：
+  - 文档交叉核对：
+    - `docs/standalone-merge-plan.md`
+    - `docs/ugripper-refactor-plan.md`
+    - `docs/reference-aligned-refactor-next-steps.md`
+  - skill 规则核对：
+    - `.codex/skills/refactor-ugripper/SKILL.md`
+- 后续待验证：
+  - 这些新约束在后续代码重构步骤中的实际执行效果
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-10 - restore-refactor-on-latest-v2-and-keep-process-group-cleanup
+
+- 阶段：`Post-A3 Step 7 / Step 8 integration`
+- 范围：`src/record_runtime / test/src/record_runtime / docs`
+- 类型：`重构恢复 / runtime process boundary 集成收口`
+- 主要改动：
+  - 在最新 `feature/zhouwu/v2` 基线之上恢复先前的 refactor 工作树，保留 Step 7/8 引入的 `runtime_process_boundary` 与 `runtime_control_plane` 分层
+  - 处理 `record_runtime` 恢复冲突时，删除已不再使用的旧 `RecordRuntime::ProcessRunner` 残留，避免新旧两套进程控制逻辑并存
+  - 将远端新增的“按进程组回收 worker，避免 `ffmpeg` / `gst` 子进程残留”修复并入新的 `SubprocessHandle`
+  - 在 `test_process_policy` 新增 `StopSignalsWholeProcessGroup`，锁定 `ProcessSupervisor -> SubprocessHandle` 的整组停机语义
+- 风险与行为等价说明：
+  - 本次目标是把最新 `v2` 上的 runtime 修复并入已存在的重构分层，不重写 `RecordRuntime` 业务编排，也不改变 supervisor 多进程模型
+  - 进程组信号从旧实现迁移到 `SubprocessHandle` 后，`AudioCoordinator`、`StereoSessionClient` 与后续接入 `ProcessSupervisor` 的 worker 都会共享同一停机语义
+- 已执行验证：
+  - `cmake -S . -B build -DBUILD_TESTING=ON`
+  - `cmake --build build --target test_process_policy -j4`
+  - `./build/test/src/record_runtime/test_process_policy`
+  - `cmake --build build --target test_audio_coordinator test_stereo_session_client test_button_logic test_runtime_health test_recording_orchestrator -j4`
+  - `ctest --test-dir build/test/src/record_runtime --output-on-failure`
+- 后续待验证：
+  - 全仓 host-only 单测回归
+  - `record_runtime` / `camera_recorder` / `sensor_recorder` 的无硬件最小 smoke
+  - 有真实 camera / sensor / audio 设备时的 supervisor 行为等价
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-09 - post-a3-step7-extract-runtime-process-boundary
+
+- 阶段：`Post-A3 Step 7`
+- 范围：`src/record_runtime / test/src/record_runtime / docs`
+- 类型：`runtime process boundary 收口 / host-only 单测补强`
+- 主要改动：
+  - 在 `src/record_runtime` 新增第一版 process boundary 模块：
+    - `subprocess_handle`
+    - `process_supervisor`
+    - `audio_coordinator`
+    - `stereo_session_client`
+  - 将原 `RecordRuntime::ProcessRunner` 抽出为独立 `SubprocessHandle`，并用 `ProcessSupervisor` 统一管理命名 worker 进程状态
+  - 将音频播放器启停、保活、恢复命令和控制管道写入收口到 `AudioCoordinator`
+  - 将 stereo daemon 启停、control/status file 交互与 finalize 等待收口到 `StereoSessionClient`
+  - `record_runtime.cpp` 改为复用新 boundary 模块；`record_runtime` 仍保留 supervisor 模型，不改单进程边界
+  - 新增 Step 7 的 host-only 单测：
+    - `test/src/record_runtime/test_process_policy.cc`
+    - `test/src/record_runtime/test_audio_coordinator.cc`
+    - `test/src/record_runtime/test_stereo_session_client.cc`
+  - 更新 `docs/reference-aligned-refactor-next-steps.md` 与 `test/README.md`，同步 Step 7 进度和 runtime 测试入口
+- 风险与行为等价说明：
+  - 当前只抽进程控制与外围协作者，不重写 `RecordRuntime` 的录制编排、按钮语义、健康检查或 episode 业务流程
+  - `camera_recorder`、`sensor_recorder`、audio player、stereo daemon 仍然保持独立 worker 进程
+  - `recordAudioClip()`、`attachPendingPreAudio()` 等更高层音频业务仍留在 `RecordRuntime`，后续再随 domain split 继续拆
+- 已执行验证：
+  - `cmake --build build -j$(nproc)`
+  - `ctest --test-dir build --output-on-failure -L host-only`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+- 后续待验证：
+  - 无硬件环境下更完整的 `record_runtime` smoke
+  - 有 gripper / camera / sensor / audio 设备时的 supervisor 行为等价
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-09 - post-a3-step6-extract-camera-pure-logic-modules
+
+- 阶段：`Post-A3 Step 6`
+- 范围：`src/camera_recorder / test/src/camera / docs`
+- 类型：`camera 纯逻辑收口 / host-only 单测补强`
+- 主要改动：
+  - 在 `src/camera_recorder` 新增第一版纯逻辑模块：
+    - `camera_types`
+    - `camera_config`
+    - `camera_command_builder`
+    - `camera_registry`
+    - `stereo_control_json`
+  - 将 camera mode/type、legacy/v1 YAML 兼容解析、命令拼装、stereo control/status JSON 合同从 `camera_recorder.cpp` 中抽到可测试模块
+  - `camera_recorder.cpp` 保留 app 壳、V4L2 warmup、子进程与 stereo runtime 逻辑，只改为复用新模块
+  - `Step 4` 冻结的 `schema_version: 1` 样例在本步骤开始进入可执行兼容路径
+  - 新增 Step 6 的 host-only 单测：
+    - `test/src/camera/test_camera_config.cc`
+    - `test/src/camera/test_camera_command_builder.cc`
+    - `test/src/camera/test_stereo_control_json.cc`
+  - 更新 `docs/reference-aligned-refactor-next-steps.md` 和 `test/README.md`，同步 Step 6 进度与 camera 测试入口
+- 风险与行为等价说明：
+  - 当前不重写 stereo 采集、V4L2 MMAP、warmup 状态机或 recorder manager 行为，只抽纯配置和纯命令/JSON 合同逻辑
+  - legacy flat YAML 仍可执行，但会输出一次性 deprecation warning
+  - `camera_recorder --dry-run` 对 legacy flat 与 `schema_version: 1` 样例都能给出稳定命令输出
+- 已执行验证：
+  - `cmake --build build -j$(nproc)`
+  - `ctest --test-dir build --output-on-failure -L host-only`
+  - `./build/src/camera_recorder/camera_recorder --help`
+  - `./build/src/camera_recorder/camera_recorder --output-dir /tmp/ugripper_step6_legacy_dryrun --config-yaml test/src/camera/config_samples/legacy_flat_valid.yaml --dry-run --allow-missing`
+  - `./build/src/camera_recorder/camera_recorder --output-dir /tmp/ugripper_step6_schema_v1_dryrun --config-yaml test/src/camera/config_samples/schema_v1_valid.yaml --dry-run --allow-missing`
+- 后续待验证：
+  - 有真实相机设备时的 `camera_recorder` 行为等价
+  - `--stereo-daemon` 在真实 control/status 文件交互下的运行态验证
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-09 - post-a3-step5-extract-sensor-common-testable-libraries
+
+- 阶段：`Post-A3 Step 5`
+- 范围：`src/sensor_recorder / test/src/sensor / docs`
+- 类型：`sensor 公共逻辑收口 / host-only 单测补强`
+- 主要改动：
+  - 在 `src/sensor_recorder` 新增第一版正式可测试库：
+    - `sensor_protocol`
+    - `sensor_domain`
+  - 将 CRC、编码器响应帧长度判断等纯协议逻辑收口到 `sensor_protocol`
+  - 将批量时间戳平滑与单调钳制逻辑收口到 `sensor_domain`
+  - 调整 `sensor_recorder` / `zeroing` 接线，使业务可执行仍复用新库而不重写串口 transport 或 MCAP 写入壳
+  - 新增 Step 5 的 host-only 单测：
+    - `test/src/sensor/test_bsp_crc.cc`
+    - `test/src/sensor/test_encoder_protocol.cc`
+    - `test/src/sensor/test_imu_batch_timestamp.cc`
+  - 更新 `docs/reference-aligned-refactor-next-steps.md` 的顶部进度口径，使当前基线与 Step 1-5 实际完成状态一致
+- 风险与行为等价说明：
+  - 当前只抽出 sensor 的纯协议与纯领域逻辑，不改串口 transport、线程模型、MCAP 写入策略或设备路径口径
+  - `sensor_recorder` 在无硬件环境下仍保持原有失败形态：先输出目标 MCAP 路径，再因缺少 `/dev/right_imu`、`/dev/left_imu` 报错退出
+  - `zeroing` 仍保持原有 usage 输出，不在本步骤改变 CLI 语义
+- 已执行验证：
+  - `cmake --build build -j$(nproc)`
+  - `ctest --test-dir build --output-on-failure -L host-only`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu timeout 2s ./build/src/sensor_recorder/sensor_recorder /tmp/ugripper_step5_sensor_test`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/sensor_recorder/zeroing`
+- 后续待验证：
+  - 真实 IMU / encoder 设备环境下的 `sensor_recorder` 行为等价
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-09 - post-a3-step4-freeze-naming-and-yaml-contract
+
+- 阶段：`Post-A3 Step 4`
+- 范围：`docs / test assets`
+- 类型：`命名契约 / YAML 契约 / 测试样例冻结`
+- 主要改动：
+  - 新增 `docs/naming-yaml-contract.md`，冻结 Step 4 阶段的命名、include 路径和 camera YAML 兼容策略
+  - 在主计划文档中补充 naming/YAML contract 入口：
+    - `docs/reference-aligned-refactor-next-steps.md`
+    - `docs/standalone-merge-plan.md`
+    - `docs/ugripper-refactor-plan.md`
+  - 在 `test/src/camera/config_samples/` 新增 camera 配置样例资产：
+    - `legacy_flat_valid.yaml`
+    - `schema_v1_valid.yaml`
+    - `legacy_flat_invalid_missing_output_files.yaml`
+    - `README.md`
+  - 明确 Step 4 只冻结 `schema_version: 1` contract，不修改当前 parser 行为
+- 风险与行为等价说明：
+  - 当前只更新文档和样例资产，不改 parser、不改命令拼装、不改运行时行为
+  - `schema_version: 1` 样例在本步骤是 contract 资产，不代表当前 `camera_recorder` 已经支持该格式
+- 已执行验证：
+  - 文档交叉核对：
+    - `docs/naming-yaml-contract.md`
+    - `docs/reference-aligned-refactor-next-steps.md`
+    - `docs/standalone-merge-plan.md`
+    - `docs/ugripper-refactor-plan.md`
+  - 当前 parser 对旧格式样例可读：
+    - `./build/src/camera_recorder/camera_recorder --output-dir /tmp/ugripper_step4_legacy_valid --config-yaml test/src/camera/config_samples/legacy_flat_valid.yaml --dry-run --allow-missing`
+  - 当前 parser 对非法旧格式稳定报错：
+    - `./build/src/camera_recorder/camera_recorder --output-dir /tmp/ugripper_step4_invalid --config-yaml test/src/camera/config_samples/legacy_flat_invalid_missing_output_files.yaml --dry-run --allow-missing`
+  - 当前 parser 对 `schema_version: 1` 样例仍按预期不支持：
+    - `./build/src/camera_recorder/camera_recorder --output-dir /tmp/ugripper_step4_schema_v1 --config-yaml test/src/camera/config_samples/schema_v1_valid.yaml --dry-run --allow-missing`
+    - 当前报错为缺少顶层 `cameras` 序列，符合“Step 4 只冻结契约、不改 parser”的设计
+- 后续待验证：
+  - `schema_version: 1` 的真正兼容解析与测试需在 `Post-A3 Step 6` 实现
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-09 - post-a3-step3-freeze-path-ledger-and-source-of-truth
+
+- 阶段：`Post-A3 Step 3`
+- 范围：`docs / baseline`
+- 类型：`路径台账 / 真源目录冻结`
+- 主要改动：
+  - 在 `docs/baseline/runtime-paths.md` 新增“仓库内路径真源分类”，明确实现真源、交付真源、非真源和冻结候选
+  - 在 `docs/repo-architecture.md` 新增真源目录与非真源目录规则，明确 `build/`、`tmp/`、`.local-deps/` 不属于当前真源
+  - 更新 `docs/repo-migration-map.md`，把 `test/` 固定为当前测试真源目录，并补齐 `src/utils`、`docs/`、`build/`、`tmp/`、`.local-deps/`、`ugripper/` 的迁移动作
+  - 修正 `docs/reference-aligned-refactor-next-steps.md` 与 naming/YAML reference 中关于历史副本目录的相对路径口径，将冻结候选统一到当前仓库内的 `ugripper/`
+  - 将 `runtime-paths` 中 `build/src/*` 的备注从“不存在”修正为“可能存在于本地工作区，但属于生成产物，不是真源”
+- 风险与行为等价说明：
+  - 当前只更新文档和路径治理口径，不做代码路径替换、不切安装前缀、不改运行时行为
+  - 这一步的目的是防止后续把 `build/`、`tmp/`、`.local-deps/` 或嵌套历史副本误当成重构真源
+- 已执行验证：
+  - 文档交叉核对：
+    - `docs/baseline/runtime-paths.md`
+    - `docs/repo-architecture.md`
+    - `docs/repo-migration-map.md`
+    - `docs/reference-aligned-refactor-next-steps.md`
+    - `docs/ppmain-ugripper-naming-yaml-refactor-reference.md`
+  - 关键入口输出保持不变：
+    - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+    - `./build/src/camera_recorder/camera_recorder --help`
+    - `./build/src/camera_recorder/camera_recorder --output-dir /tmp/ugripper_step3_cam_dryrun --dry-run`
+  - `camera_recorder --dry-run` 结果仍为缺失设备列表，符合当前无硬件环境预期
+- 后续待验证：
+  - 本步骤不涉及代码路径替换，因此不要求额外编译或 field test
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-09 - post-a3-step2-bootstrap-formal-test-entrypoint
+
+- 阶段：`Post-A3 Step 2`
+- 范围：`CMake / test / docs`
+- 类型：`测试入口落地 / 测试分层收口`
+- 主要改动：
+  - 在顶层 `CMakeLists.txt` 引入 `CTest`，通过 `BUILD_TESTING` 控制正式测试入口
+  - 新增 `test/CMakeLists.txt`、`test/src/CMakeLists.txt` 与按模块镜像的 `test/src/utils`、`test/src/gripper_hmi`
+  - 固定 host-only 正式单测默认使用 `GoogleTest`
+  - 新增第一批 host-only 单测目标：
+    - `test_env_utils`
+    - `test_file_utils`
+    - `test_time_utils`
+    - `test_hmi_protocol`
+    - `test_hmi_led_effects`
+  - 在 `test/README.md` 明确正式 host-only 单测、`utils_smoke_test`、`gripper_hmi_test` 与 `test/scripts/*` 的边界
+- 风险与行为等价说明：
+  - 当前只增加测试工程入口和 host-only 单测，不改业务流程、路径语义或进程模型
+  - `gripper_hmi` 单测覆盖的是协议与灯效纯逻辑，不覆盖串口设备交互
+- 已执行验证：
+  - `PKG_CONFIG_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu/pkgconfig CPLUS_INCLUDE_PATH=$PWD/.local-deps/libserialport/root/usr/include:$PWD/.local-deps/nlohmann/root/usr/include LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu cmake -S . -B build -DBUILD_TESTING=ON`
+  - `PKG_CONFIG_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu/pkgconfig CPLUS_INCLUDE_PATH=$PWD/.local-deps/libserialport/root/usr/include:$PWD/.local-deps/nlohmann/root/usr/include LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu cmake --build build -j$(nproc)`
+  - `PKG_CONFIG_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu/pkgconfig CPLUS_INCLUDE_PATH=$PWD/.local-deps/libserialport/root/usr/include:$PWD/.local-deps/nlohmann/root/usr/include LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ctest --test-dir build --output-on-failure`
+  - `ctest --test-dir build -N -L host-only`
+  - `./build/src/utils/utils_smoke_test`
+- 后续待验证：
+  - `gripper_hmi_test` 未执行；其当前定位是串口调试/工具程序，不属于 host-only 正式单测
+  - `test/scripts/*` 未执行；其当前定位是 field test，不属于 Step 2 完成门禁
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-09 - recheck-plans-and-align-refactor-skill-before-next-step
+
+- 阶段：`Phase 0`
+- 范围：`docs / skill`
+- 类型：`执行前校准 / skill 对齐`
+- 主要改动：
+  - 重新交叉核对当前主计划、baseline、`A3` 后续步骤文档与 4 份 reference 文档
+  - 更新 `.codex/skills/refactor-ugripper/SKILL.md`，让 skill 默认读取 `docs/reference-aligned-refactor-next-steps.md`
+  - 将 4 份 reference 文档标记为 `A3` 之后的 authoritative input
+  - 将 skill 的阶段判断从旧 `A4/A5/A6` 线性顺序调整为 `A3` 之后的 9 步保守顺序
+  - 在 skill 中补齐 `GoogleTest` 默认口径、YAML deprecated 策略、runtime 禁止逻辑回流到 `record_runtime.cpp`、关键测试门禁规则
+- 风险与行为等价说明：
+  - 当前仅更新执行规则与 skill，不修改业务代码或运行时行为
+  - 目的是避免后续继续按过期阶段顺序推进，或在测试/命名/YAML/runtime 边界上与 reference 脱节
+- 已执行验证：
+  - 文档交叉核对：
+    - `docs/ugripper-refactor-plan.md`
+    - `docs/standalone-merge-plan.md`
+    - `docs/reference-aligned-refactor-next-steps.md`
+    - `docs/ppmain-ugripper-test-refactor-reference.md`
+    - `docs/ppmain-ugripper-camera-refactor-reference.md`
+    - `docs/ppmain-ugripper-naming-yaml-refactor-reference.md`
+    - `docs/ppmain-ugripper-process-thread-refactor-reference.md`
+  - skill 规则核对：
+    - `.codex/skills/refactor-ugripper/SKILL.md`
+- 后续待验证：
+  - 按更新后的 skill 真正执行 `Post-A3 Step 2` 及之后步骤时的本地编译、单元测试、smoke
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-09 - integrate-reference-requirements-after-a3
+
+- 阶段：`Phase 0`
+- 范围：`docs`
+- 类型：`阶段计划 / 测试策略 / camera / naming / process-thread 约束收口`
+- 主要改动：
+  - 新增 `docs/reference-aligned-refactor-next-steps.md`
+  - 将测试、camera、naming/YAML、process-thread 4 份 reference 的新增要求，与当前已执行到 `A3` 的主重构计划做保守合并
+  - 明确 `A3` 之后的新执行顺序：测试入口前置、路径/真源冻结、naming/YAML 契约冻结、camera 纯逻辑先拆、runtime 继续保留 supervisor 边界
+  - 固化每一步必须更新 `REFACTOR_LOG`、记录已测/未测与原因的回溯要求
+  - 根据 review 反馈进一步补齐：
+    - Step 数量与正文一致
+    - Step 1 完成标准可验证
+    - Step 2 固定 `GoogleTest` 作为正式单测框架
+    - Step 4 明确 deprecated YAML 字段、warning 时点和禁止时点
+    - Step 5 固定 `sensor_protocol` / `sensor_domain` 第一版命名
+    - Step 7/8 增加 runtime 拆分后禁止逻辑回流
+    - 增加“关键测试未通过不得进入下一步”的门禁规则
+- 风险与行为等价说明：
+  - 当前仅新增规划文档，不改变运行时行为
+  - 该文档用于避免后续直接按旧顺序推进而忽略 reference 带来的测试、camera、YAML、控制面新约束
+- 已执行验证：
+  - 文档交叉核对：
+    - `docs/standalone-merge-plan.md`
+    - `docs/ugripper-refactor-plan.md`
+    - `docs/ppmain-ugripper-test-refactor-reference.md`
+    - `docs/ppmain-ugripper-camera-refactor-reference.md`
+    - `docs/ppmain-ugripper-naming-yaml-refactor-reference.md`
+    - `docs/ppmain-ugripper-process-thread-refactor-reference.md`
+  - 代码现状核对：
+    - `src/record_runtime`
+    - `src/camera_recorder`
+    - `src/sensor_recorder`
+    - `test/README.md`
+- 后续待验证：
+  - 后续每个步骤按新文档执行时的本地编译、单元测试、smoke 与主仓库/ARM 验证
+
+### 2026-04-08 - unify-cpp-standard-to-cpp20
+
+- 阶段：`Phase 0`
+- 范围：`CMake / build settings`
+- 类型：`构建规范统一`
+- 主要改动：
+  - 将顶层工程默认 `CMAKE_CXX_STANDARD` 从 `17` 提升到 `20`
+  - 将 `record_runtime`、`camera_recorder`、`gripper_hmi`、`utils` 统一提升到 `C++20`
+  - 保持 `sensor_recorder` 为 `C++20`，消除当前仓库内部的 C++ 标准分裂
+  - 将仓库内 `src/third_party/mcap_builder` 的构建标准同步到 `C++20`
+- 风险与行为等价说明：
+  - 当前仅调整编译标准，不改运行时逻辑
+  - 这一步证明“本地 Linux + 当前依赖 + 当前编译器”可以接受统一后的标准，但不自动等价于主仓库交叉编译环境也无风险
+- 已执行验证：
+  - 本机编译器版本确认：`g++ 11.4.0`
+  - 使用工作区内 `.local-deps/libserialport`、`.local-deps/nlohmann` 完成重新配置与全量编译
+- 后续待验证：
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-08 - phase-a3-unify-cpp-logging
+
+- 阶段：`Phase 3`
+- 范围：`src/utils / src/record_runtime / src/camera_recorder / src/sensor_recorder / src/gripper_hmi`
+- 类型：`日志统一 / 构建接线`
+- 主要改动：
+  - 将 `record_runtime`、`camera_recorder`、`sensor_recorder`、`gripper_hmi` 的运行日志统一接到 `DM_LOG_*` / `DM_LOG_*_STREAM()`
+  - 保留 `--help`、`--dry-run`、工具型摘要输出等 CLI 面向用户的直接 `std::cout/std::cerr`
+  - 为 `camera_recorder`、`sensor_recorder`、`zeroing`、`gripper_hmi` 补齐 `utils` 依赖，保证 logger 头文件和实现可复用
+  - 修正 `src/utils/include/utils/logger.h` 的并发输出串行化，避免多线程日志前缀交错
+- 风险与行为等价说明：
+  - 当前只替换日志入口和日志写法，不改状态机、路径语义、脚本流程或设备交互语义
+  - `sensor_recorder`、`zeroing` 等工具仍保留 usage / 成功摘要类 CLI 输出，避免把交互输出误改成运行日志
+- 已执行验证：
+  - 使用工作区内 `.local-deps/libserialport`、`.local-deps/nlohmann` 重新编译全仓库
+  - `./build/src/utils/utils_smoke_test`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+  - `./build/src/camera_recorder/camera_recorder --help`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu timeout 3s ./build/src/sensor_recorder/sensor_recorder /tmp/ugripper_a3_sensor_test`
+  - 验证到 `sensor_recorder` 在无硬件环境下仍能输出统一格式的 `[INFO]/[ERROR]` 日志
+- 后续待验证：
+  - `gripper_hmi`、`record_runtime`、`camera_recorder` 的真实初始化日志需在有设备环境下继续验证
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-08 - phase-a2-bootstrap-minimal-utils
+
+- 阶段：`Phase 2`
+- 范围：`src/utils / src/record_runtime`
+- 类型：`helper 收口 / 测试补强`
+- 主要改动：
+  - 新增最小 `src/utils` 骨架，包括 `logger.h`、`env_utils`、`time_utils`、`file_utils.hpp`
+  - 在顶层 `CMakeLists.txt` 中接入 `src/utils`
+  - 让 `record_runtime` 开始依赖 `utils`，并通过包装函数委托环境变量读取、时间函数和文件存在判断
+  - 新增 `utils_smoke_test` 作为最小无硬件测试入口
+- 风险与行为等价说明：
+  - 当前只建立被动工具层，并让 `record_runtime` 做最小接入
+  - 未改业务状态机、流程编排、路径语义或日志语义
+- 已执行验证：
+  - 使用工作区内 `.local-deps/libserialport`、`.local-deps/nlohmann` 完成重新配置与编译
+  - `./build/src/utils/utils_smoke_test`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+- 后续待验证：
+  - 更大范围的业务模块接入 `src/utils`
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+
+### 2026-04-08 - phase-a1-baseline-freeze
+
+- 阶段：`Phase 1`
+- 范围：`docs/baseline`
+- 类型：`基线冻结`
+- 主要改动：
+  - 新增 `docs/baseline/runtime-entrypoints.md`
+  - 新增 `docs/baseline/runtime-paths.md`
+  - 新增 `docs/baseline/package-contents.md`
+  - 新增 `docs/baseline/service-map.md`
+  - 新增 `docs/baseline/config-entrypoints.md`
+  - 新增 `docs/baseline/equivalence-checklist.md`
+  - 冻结当前主链入口、关键路径、打包内容、service 映射、配置入口和行为等价检查项
+  - 记录当前工作区缺少 `build/` 二进制产物这一事实，并把可执行的本地最小验证与被阻塞的验证区分开
+- 风险与行为等价说明：
+  - 当前仅新增基线文档，不改变运行时行为
+  - baseline 中已记录当前打包与 service 的若干不一致，后续阶段应视为“既有事实”而不是重构引入问题
+- 已执行验证：
+  - `bash -n run_record.sh auto_update/usb_auto_update.sh auto_calibration/run_calibration.sh auto_calibration/import_camera_calibration.sh pack_script/postinst pack_script/prerm pack_script/postrm`
+  - `python3 -m py_compile audio/*.py auto_calibration/generate_gripper_calibration_bin.py`
+  - 本地解包 `libserialport` / `nlohmann-json3-dev` 到 `.local-deps/`，并完成一次本地 Linux 编译
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+  - `./build/src/camera_recorder/camera_recorder --help`
+  - `./build/src/camera_recorder/camera_recorder --output-dir /tmp/ugripper_cam_dryrun --dry-run`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu timeout 2s ./build/src/sensor_recorder/sensor_recorder`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/sensor_recorder/zeroing`
+  - `./run_record.sh --help`（结果为先等待 `/mnt/data_disk` 可写，不直接透传 `--help`）
+  - `python3 audio/record_usb_audio.py --help`
+  - 静态核对 `build_deb.sh`、`ugripper.service`、辅助 service 与配置入口
+- 后续待验证：
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+  - 本地真实录制、真实校准、真实升级和真实音频硬件验证
+
+### 2026-04-08 - add-camera-abstraction-and-testability-requirements
+
+- 阶段：`Phase 0`
+- 范围：`docs / skill`
+- 类型：`阶段计划 / 设计约束 / 测试补强`
+- 主要改动：
+  - 在 `docs/ugripper-refactor-plan.md` 中新增 camera 抽象、单元测试补强、可读性/可维护性要求
+  - 在 `docs/standalone-merge-plan.md` 中把 camera 抽象收口升级为第一阶段明确工作项
+  - 更新 `refactor-ugripper` skill，使后续执行默认检查 camera 抽象边界、单元测试与可维护性改进
+- 风险与行为等价说明：
+  - 当前仅更新规划文档与执行约束，不改变运行时行为
+- 已执行验证：
+  - 文档内容核对
+  - `pp_main/src/device/cameras` 参考设计核对
+  - skill 规则核对
+- 后续待验证：
+  - 后续真正执行 camera 抽象收口时，需要在本地 Linux 补单元测试，并在主仓库阶段继续做 Docker ARM / ARM 板验证
+
+### 2026-04-08 - refine-standalone-merge-test-strategy-and-step-reminders
+
+- 阶段：`Phase 0`
+- 范围：`docs`
+- 类型：`阶段计划 / 测试策略 / 流程提醒`
+- 主要改动：
+  - 为 `docs/standalone-merge-plan.md` 的 `A1-A6`、`B1-B4` 补齐逐步测试策略
+  - 明确每一步的测试目标、测试环境、验证动作和后移验证范围
+  - 新增“步骤完成提醒规则”，要求每步完成后同步汇报已测、未测和下一步建议
+  - 同步约束 `refactor-ugripper` skill，在执行阶段或子步骤完成后输出完成提醒
+- 风险与行为等价说明：
+  - 当前仅更新规划文档与工作流约束，不改变运行时行为
+- 已执行验证：
+  - 文档内容核对
+  - `standalone-merge-plan.md` 结构核对
+  - `refactor-ugripper` skill 输出要求核对
+- 后续待验证：
+  - 后续实际执行各步骤时，按文档要求记录每一步的本地验证与主仓库/ARM 后续验证
+
+### 2026-04-09 - step8-runtime-domain-split
+
+- 阶段：`Post-A3 Step 8`
+- 范围：`record_runtime / test / docs`
+- 类型：`runtime control-plane refactor / unit tests / traceability`
+- 主要改动：
+  - 新增 `runtime_types`、`HmiController`、`HealthMonitor`、`RecordingOrchestrator` 三类 Step 8 控制面模块
+  - 将 `RecordRuntime` 的按钮事件状态机、健康检查轮询、录制编排与 worker 存活检查下沉到新模块，保留 `record_runtime` 作为 supervisor 壳
+  - 顶层入口保持 `RecordRuntime` / `main.cpp` 不变，只把内部收成 `RuntimeApp` 风格的委托结构
+  - 新增 host-only 单测：
+    - `test/src/record_runtime/test_button_logic.cc`
+    - `test/src/record_runtime/test_runtime_health.cc`
+    - `test/src/record_runtime/test_recording_orchestrator.cc`
+  - 更新 `docs/reference-aligned-refactor-next-steps.md` 与 `test/README.md`，同步 Step 8 完成状态与当前测试覆盖面
+- 风险与行为等价说明：
+  - 保留 `record_runtime` 监督者模型，不改 worker 进程边界
+  - 不做 `RuntimeApp` 物理改名、不改 `main.cpp`、不切 standalone 目录
+  - `EpisodeManager` 仍保留在原文件内，仅通过 orchestrator 收口调用边界
+- 已执行验证：
+  - `cmake --build build -j$(nproc)`
+  - `ctest --test-dir build --output-on-failure -L host-only`
+  - `LD_LIBRARY_PATH=$PWD/.local-deps/libserialport/root/usr/lib/x86_64-linux-gnu ./build/src/record_runtime/record_runtime --help`
+- 未执行测试与原因：
+  - `record_runtime` 真机最小录制 / HMI 按键 / 音频 / stereo 运行验证未执行，因为当前阶段按既定策略只做本地 Linux host-only 验证，硬件相关验证后移到主仓库 / ARM / 板端阶段
+  - `run_record.sh`、升级脚本、校准脚本相关联动验证未执行，因为 Step 8 只覆盖 `record_runtime` 控制面拆分，不进入 Step 9 脚本边界治理
+- 后续待验证：
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+  - Step 9 scripts / field-test boundary cleanup
+
+### 2026-04-09 - step9-scripts-and-field-test-boundary-cleanup
+
+- 阶段：`Post-A3 Step 9`
+- 范围：`shell / python / docs`
+- 类型：`script boundary cleanup / path cleanup / logging cleanup`
+- 主要改动：
+  - 新增 `scripts/lib/ugripper_shell_common.sh`，统一 shell 侧的文本规整、`/etc/environment` 读取、日志前缀和 Python 解释器选择
+  - 更新 `run_record.sh`，显式固定 `project_root`，支持 `RUNTIME_BIN_OVERRIDE`，并把日志输出统一到 `run-record` 前缀
+  - 更新 `auto_calibration/run_calibration.sh`，显式固定 `project_root`，统一日志前缀，收口 HMI/audio/zeroing 路径
+  - 更新 `auto_update/usb_auto_update.sh`，把 HMI helper、校准导入脚本和升级提示音路径改为基于 `PROJECT_ROOT` 的默认定位，减少 `/opt/ugripper` 硬编码扩散
+  - 新增 `audio/audio_common.py`，统一 `audio/*.py` 的 env 读取和日志前缀
+  - 更新 `audio/audio_play.py` 与 `audio/record_usb_audio.py`，接入统一日志与轻量公共 helper
+  - 更新 `test/README.md`，明确主链 shell/python 与 `test/scripts/*` 的边界和仓库阶段的最小验证入口
+- 风险与行为等价说明：
+  - 不重写升级、校准或录制状态机，只做路径、日志和轻量 helper 收口
+  - `run_record.sh`、`usb_auto_update.sh`、`run_calibration.sh` 仍保留原有兼容入口和主流程语义
+  - 不在本步删除 shell 包装，不把升级/校准提前 app 化
+- 已执行验证：
+  - `bash -n run_record.sh auto_update/usb_auto_update.sh auto_calibration/run_calibration.sh scripts/lib/ugripper_shell_common.sh`
+  - `python3 -m py_compile audio/*.py`
+  - `python3 audio/record_usb_audio.py --help`
+- 未执行测试与原因：
+  - `run_record.sh` 真机最小启动、`usb_auto_update.sh` 真 U 盘升级、`run_calibration.sh` 真机校准、`audio_play.py` 真音频设备验证未执行，因为这些都依赖真实存储、systemd、USB 设备、HMI 或 PulseAudio 目标，不属于当前仓库阶段的 host-only 门禁
+  - ARM / Docker / 板端验证未执行，因为按既定测试分层，这部分后移到主仓库阶段
+- 后续待验证：
+  - 主仓库本地编译
+  - Docker ARM 交叉编译
+  - ARM 板 smoke
+  - `run_record.sh` / `usb_auto_update.sh` / `run_calibration.sh` 真实设备联调
+
+### 2026-04-09 - architecture-report-documentation
+
+- 阶段：`Phase 0 / Reporting`
+- 范围：`docs`
+- 类型：`架构说明 / 汇报材料`
+- 主要改动：
+  - 新增 `docs/ugripper-refactor-architecture.md`
+  - 新增 `docs/ARCHITECTURE_OVERVIEW.md`
+  - 汇总当前 `ugripper` 仓内重构后的架构设计、模块变化、测试结构和当前进度状态
+  - 明确区分“仓内重构已完成项”和“主仓库并仓未开始项”
+- 风险与行为等价说明：
+  - 当前仅新增汇报与架构说明文档，不改变运行时行为
+- 已执行验证：
+  - 文档内容与 `docs/ugripper-refactor-plan.md`、`docs/standalone-merge-plan.md`、`docs/reference-aligned-refactor-next-steps.md`、`docs/REFACTOR_LOG.md` 交叉核对
+  - 当前目录结构与测试目录核对
+- 后续待验证：
+  - 在后续主仓库并仓阶段继续更新该架构文档中的进度状态
+
+### 2026-04-03 - establish-refactor-workflow-docs
+
+- 阶段：`Phase 0`
+- 范围：`docs`
+- 类型：`阶段计划 / 工作流收口`
+- 主要改动：
+  - 新增 `docs/repo-architecture.md`
+  - 新增 `docs/repo-migration-map.md`
+  - 新增 `docs/standalone-merge-plan.md`
+  - 新增 `docs/ugripper-refactor-plan.md`
+  - 新增 `refactor-ugripper` skill
+- 风险与行为等价说明：
+  - 当前仅新增或更新规划类文档与工作流说明，不改变运行时行为
+- 已执行验证：
+  - 文档内容核对
+  - skill 文案核对
+- 后续待验证：
+  - 后续具体重构阶段按文档推进后，再补各阶段实际改动记录
+### 2026-04-21 - t12-host-only-health-fault-gates
+
+- 阶段：`pp_main ugripper rollout / T12`
+- 范围：`pp_main/test/src/record_runtime`、`pp_main/test/scripts`、`docs`
+- 类型：`host-only test coverage / analyzer gate`
+- 主要改动：
+  - 扩展 `test/scripts/check_hmi_event_log.py`，新增 `--require-health-fault` 与 `--require-health-fault-led KEY:LED`
+  - 新增 `hmi_diag_health_faults_pass.log` / `hmi_diag_health_faults_fail.log`
+  - 在 `test/src/record_runtime/CMakeLists.txt` 注册对应 host-only CTest
+  - 回填 `docs/ppmain-ugripper-test-plan.md`，把健康故障 key 分支门禁纳入 T12 已覆盖项
+- 风险与行为等价说明：
+  - 仅增强离线日志 analyzer 与 host-only fixture，不改动板端运行逻辑
+  - 这轮补的是 `hmi_all_disconnected / hmi_ports_inactive / stereo_daemon_not_running` 的分析器门禁，不等同于 T15 板端主动刺激脚本已完成
+- 已执行验证：
+  - `cmake -S /home/songwl/swl_ws/pp_main/test -B /home/songwl/swl_ws/pp_main/build/x86/test -DCMAKE_BUILD_TYPE=Release`
+  - `python3 /home/songwl/swl_ws/pp_main/test/scripts/check_hmi_event_log.py --input /home/songwl/swl_ws/pp_main/test/src/record_runtime/testdata/hmi_diag_health_faults_pass.log --require-health-fault hmi_all_disconnected --require-health-fault hmi_ports_inactive --require-health-fault-led hmi_all_disconnected:Error2 --require-health-fault-led hmi_ports_inactive:Error2 --require-health-fault-led stereo_daemon_not_running:Error2`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'test_check_hmi_event_log_(pass|fail|led_mismatch|health_faults_pass|health_faults_fail)'`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'HmiControllerTimingTest|LedStateBridgeTest|HealthMonitorTest'`
+- 后续待验证：
+  - 运行新增 `test_check_hmi_event_log_health_faults_(pass|fail)` 并与既有 `record_runtime` HMI 相关测试一起回归
+  - 后续将同一批 key 断言接到 `board_gripper_hmi_log_check.sh` / `board_service_integration_check.sh`
+
+### 2026-04-21 - t12-gripper-reconnect-state-logic
+
+- 阶段：`pp_main ugripper rollout / T12`
+- 范围：`pp_main/standalone/UgripperRuntime`、`pp_main/test/src/record_runtime`、`docs`
+- 类型：`host-only test coverage / reconnect state logic / 文档回填`
+- 主要改动：
+  - 新增 header-only 纯逻辑 helper：
+    - `standalone/UgripperRuntime/include/record_runtime/gripper_refresh_logic.h`
+  - 将 `record_runtime.cc` 中 reconnect 后的状态推进逻辑改为复用纯逻辑 helper，收口以下分支：
+    - `connected -> reconnecting`
+    - `waiting_side_devices`
+    - `waiting_gripper_ready`
+    - `RefreshRuntimeState`
+  - 新增 `test/src/record_runtime/test_gripper_refresh_logic.cc`
+  - 回填 `docs/ppmain-ugripper-test-plan.md`，把 reconnect 状态机纳入 `T12` 已覆盖项
+- 风险与行为等价说明：
+  - 这轮没有改 gripper 串口协议、exclusive command 或 runtime 外部接口，只把已有 reconnect 状态推进逻辑提炼成可测试的纯函数
+  - 当前补到的是 reconnect 状态机，不等同于 `GripperHmiDriver` 内部 `ack / timeout / retry` 串口交互本体已完全 host-only 化
+- 已执行验证：
+  - `cmake -S /home/songwl/swl_ws/pp_main/test -B /home/songwl/swl_ws/pp_main/build/x86/test -DCMAKE_BUILD_TYPE=Release`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_gripper_refresh_logic -j8`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'GripperRefreshLogicTest|HmiControllerTimingTest|LedStateBridgeTest|test_check_hmi_event_log_(pass|fail|led_mismatch|health_faults_pass|health_faults_fail)'`
+- 未执行测试与原因：
+  - `all/` 入口下的 `UgripperRuntime` 完整 standalone 编译未完成；本地 `cmake -S /home/songwl/swl_ws/pp_main/all -B /home/songwl/swl_ws/pp_main/build/all -DCMAKE_BUILD_TYPE=Release` 在现有环境下失败，报错包含：
+    - `standalone/CMakeLists.txt:3 include called with wrong number of arguments`
+    - 缺少 `casadiConfig.cmake / casadi-config.cmake`
+  - 因此本轮只能确认 host-only 测试与测试构建通过，不能把 `all/standalone` 全量编译视为已完成
+- 后续待验证：
+  - 在可用的 standalone/all 构建环境下补跑 `UgripperRuntime` 真正编译
+  - 继续补 `GripperHmiDriver` 更近一层的 `ack / timeout / retry / recovery` 纯逻辑 coverage
+  - 再转入 `T15`，把 gripper/hmi/button 主动刺激型板端脚本收口
+
+### 2026-04-21 - standalone-x86-ugripperruntime-build-verified
+
+- 阶段：`pp_main ugripper rollout / build verification`
+- 范围：`pp_main standalone / docs`
+- 类型：`x86 standalone build verification / 环境澄清 / 文档回填`
+- 主要改动：
+  - 复核本机 `x86` Conan toolchain、`/opt/openrobots`、`pinocchio` 与 `casadi` 安装状态
+  - 确认 `build/x86/core/PPCoreConfig.cmake` 已存在，可作为 `standalone` 的 `PPCore` 输入
+  - 按 `ppmain_build.sh` 同口径环境变量与 toolchain，新建 `build/x86/standalone_verify`
+  - 在该目录成功配置 `standalone`，并完成 `UgripperRuntime` 目标编译
+- 风险与行为等价说明：
+  - 本轮不修改运行时代码行为，只补本地构建验证与结论澄清
+  - 这次验证说明“此前 `all` 入口失败”主要是调用方式问题，不是本机缺失 `openrobots/casadi`
+  - `all/` 依然不是自包含的一键从零构建入口；它仍依赖 `PPCore` 先由标准流程准备好
+- 已执行验证：
+  - `find /opt -maxdepth 4 \\( -name 'casadiConfig.cmake' -o -name 'casadi-config.cmake' \\)`
+  - `dpkg -l | grep -i casadi`
+  - `export CMAKE_PREFIX_PATH=\"/opt/openrobots:${CMAKE_PREFIX_PATH:-}\"`
+  - `export PKG_CONFIG_PATH=\"/opt/openrobots/lib/pkgconfig:${PKG_CONFIG_PATH:-}\"`
+  - `export LD_LIBRARY_PATH=\"/opt/openrobots/lib:${LD_LIBRARY_PATH:-}\"`
+  - `cmake -S /home/songwl/swl_ws/pp_main/standalone -B /home/songwl/swl_ws/pp_main/build/x86/standalone_verify -DROS_BUILD_VERSION=2 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=/home/songwl/swl_ws/pp_main/cmake/x86_64-linux-toolchain.cmake -DCMAKE_INSTALL_PREFIX=/home/songwl/swl_ws/pp_main/install/x86/ros2 -G Ninja`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_verify --target UgripperRuntime -j8`
+- 未执行测试与原因：
+  - 未跑 `cmake --build ...standalone_verify` 的全量 standalone 目标，只验证了 `UgripperRuntime` 定向编译，因为本轮目的是确认 `ugripper` 合并链路是否可在本机构建
+  - 未重新跑板端包验证，因为本轮没有产生新的功能性行为改动
+- 后续待验证：
+  - 如需做发版前构建门禁，还应补完整 `standalone` 目标集构建
+  - 继续推进 `T12` 剩余 driver 近侧 coverage，或转入 `T15` 板端主动刺激脚本
+
+### 2026-04-21 - t12-gripper-driver-logic-gates
+
+- 阶段：`pp_main ugripper rollout / T12`
+- 范围：`pp_main/standalone/GripperHmiTool`、`pp_main/test/src/gripper_hmi`、`docs`
+- 类型：`host-only test coverage / driver-near logic / 文档回填`
+- 主要改动：
+  - 新增 header-only driver 逻辑层：
+    - `standalone/GripperHmiTool/include/gripper_hmi_driver_logic.h`
+  - 将 `gripper_hmi_driver.cc` 中一批 calibration 相关纯逻辑收口到该 header，并复用到运行时代码：
+    - `retryable / abort-recovery` 状态分类
+    - calibration write `ack token` 判定
+    - header 解析与 `required_chunk_count` 计算
+    - sequential fallback 门禁
+    - calibration chunk write 的 `ack / retry / abort-and-recover / fail` 决策
+    - status/data frame buffer scan 规则：
+      - header 对齐与 trailing byte 保留
+      - exclusive status frame 匹配/跳过
+      - calibration/raw data-or-status 的 continue-scanning 与 garbage drop
+  - 新增 `test/src/gripper_hmi/test_hmi_driver_logic.cc`
+  - 在 `test/src/gripper_hmi/CMakeLists.txt` 注册 `test_hmi_driver_logic`
+- 风险与行为等价说明：
+  - 本轮不引入串口 mock，也不改协议/状态机对外行为，只把已有 driver 判断逻辑提纯并纳入 host-only
+  - 当前覆盖的是 driver 近侧决策层，不等同于 `readBytesLocked / readExpectedStatusFrameLocked / drain` 等 I/O 本体已完成 host-only 化
+- 已执行验证：
+  - `cmake -S /home/songwl/swl_ws/pp_main/test -B /home/songwl/swl_ws/pp_main/build/x86/test -DCMAKE_BUILD_TYPE=Release`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/test --target test_hmi_driver_logic -j8`
+  - `ctest --test-dir /home/songwl/swl_ws/pp_main/build/x86/test --output-on-failure -R 'GripperHmiDriverLogicTest|GripperHmiProtocolTest|GripperHmiTransportResyncTest|test_check_gripper_ack_log_(pass|fail|io_fail|retry_reconnect_pass|retry_reconnect_fail)'`
+  - `cmake --build /home/songwl/swl_ws/pp_main/build/x86/standalone_verify --target GripperHmiTool UgripperRuntime -j8`
+- 未执行测试与原因：
+  - 未引入更重的串口 fake / PTY 场景，因为本轮目标是继续以低耦合方式补齐 `T12`，避免把 driver I/O mock 设计扩大成单独子项目
+- 后续待验证：
+  - 继续补 `GripperHmiDriver` 更贴近 I/O 本体的 timeout / drain / status read 路径
+  - 视优先级转入 `T15`，把 gripper/hmi/button 主动刺激脚本标准化

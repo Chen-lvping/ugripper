@@ -3,6 +3,8 @@ set -e
 
 APP_DIR="{{INSTALL_DIR}}"
 SERVICE_NAME="{{APP_NAME}}.service"
+SERVICE_UNIT_FILE="/etc/systemd/system/${SERVICE_NAME}"
+SERVICE_USER_OVERRIDE_FILE="/etc/ugripper/service_user_override"
 
 SHUTDOWN_TRIGGER_SCRIPT="${APP_DIR}/auto_update/trigger_shutdown.sh"
 SHUTDOWN_TRIGGER_SERVICE="umi-shutdown-trigger.service"
@@ -14,6 +16,84 @@ DATA_MOUNT_POINT="/mnt/data_disk"
 EXFAT_SOURCE_MODULE="/home/user/lib/exfat.ko"
 EXFAT_MODULE_NAME="exfat"
 EXFAT_MODULES_LOAD_FILE="/etc/modules-load.d/ugripper-exfat.conf"
+
+resolve_service_user() {
+    printf '%s\n' "ubuntu"
+}
+
+resolve_dynamic_service_user() {
+    if getent passwd ubuntu >/dev/null 2>&1; then
+        printf '%s\n' "ubuntu"
+        return 0
+    fi
+
+    local uid1000_entry=""
+    uid1000_entry="$(getent passwd 1000 || true)"
+    if [ -n "$uid1000_entry" ]; then
+        printf '%s\n' "${uid1000_entry%%:*}"
+        return 0
+    fi
+
+    printf '%s\n' "root"
+}
+
+resolve_service_user_override() {
+    local configured_user=""
+
+    [ -f "$SERVICE_USER_OVERRIDE_FILE" ] || return 1
+
+    configured_user="$(sed -n '1{s/[[:space:]]*$//;p;}' "$SERVICE_USER_OVERRIDE_FILE" 2>/dev/null || true)"
+    [ -n "$configured_user" ] || return 1
+
+    case "$configured_user" in
+        auto)
+            resolve_dynamic_service_user
+            ;;
+        *)
+            printf '%s\n' "$configured_user"
+            ;;
+    esac
+}
+
+apply_service_user_override() {
+    local service_user="$1"
+
+    [ -f "$SERVICE_UNIT_FILE" ] || return 0
+
+    python3 - "$SERVICE_UNIT_FILE" "$service_user" <<'PY'
+from pathlib import Path
+import sys
+
+unit_path = Path(sys.argv[1])
+service_user = sys.argv[2]
+
+lines = unit_path.read_text(encoding="utf-8").splitlines()
+updated = []
+replaced = False
+for line in lines:
+    if line.startswith("User="):
+        updated.append(f"User={service_user}")
+        replaced = True
+    else:
+        updated.append(line)
+
+if not replaced:
+    out = []
+    in_service = False
+    inserted = False
+    for line in updated:
+        out.append(line)
+        if line == "[Service]":
+            in_service = True
+            continue
+        if in_service and not inserted and line.startswith("Type="):
+            out.append(f"User={service_user}")
+            inserted = True
+    updated = out
+
+unit_path.write_text("\n".join(updated) + "\n", encoding="utf-8")
+PY
+}
 
 stop_service_fast() {
     local service_name="$1"
@@ -28,13 +108,23 @@ stop_service_fast() {
 }
 
 force_cleanup_recording_processes() {
+    local hmi_patterns=(
+        'GripperHmiTool.*--state'
+        'gripper_hmi_test.*--state'
+    )
+    local pattern=""
+
     if command -v pkill >/dev/null 2>&1; then
         pkill -TERM -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
-        pkill -TERM -f 'gripper_hmi_test.*--state' >/dev/null 2>&1 || true
+        for pattern in "${hmi_patterns[@]}"; do
+            pkill -TERM -f "$pattern" >/dev/null 2>&1 || true
+        done
         pkill -TERM -f 'audio/audio_play.py' >/dev/null 2>&1 || true
         sleep 0.3
         pkill -KILL -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
-        pkill -KILL -f 'gripper_hmi_test.*--state' >/dev/null 2>&1 || true
+        for pattern in "${hmi_patterns[@]}"; do
+            pkill -KILL -f "$pattern" >/dev/null 2>&1 || true
+        done
         pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
     fi
 
@@ -62,9 +152,13 @@ PY
 }
 
 ensure_persist_calibration() {
-    local fallback_file="$APP_DIR/config/fakeCamCalib.json"
+    local fallback_file=""
 
-    [ -f "$fallback_file" ] || return 0
+    if [ -f "$APP_DIR/bin/UgripperRuntime/config/fakeCamCalib.json" ]; then
+        fallback_file="$APP_DIR/bin/UgripperRuntime/config/fakeCamCalib.json"
+    fi
+
+    [ -n "$fallback_file" ] || return 0
 
     if calibration_file_is_valid "$CALIB_PERSIST_FILE"; then
         return 0
@@ -144,6 +238,12 @@ chmod +x "$APP_DIR/run_record.sh"
 chmod +x "$SHUTDOWN_TRIGGER_SCRIPT"
 chmod -R 777 "$APP_DIR"
 
+SERVICE_RUN_USER="$(resolve_service_user)"
+if OVERRIDE_USER="$(resolve_service_user_override)"; then
+    SERVICE_RUN_USER="$OVERRIDE_USER"
+fi
+apply_service_user_override "$SERVICE_RUN_USER"
+
 # 初始化持久化标定目录：缺失、空文件或非法 JSON 时写入默认 fake calibration
 mkdir -p "$CALIB_PERSIST_DIR"
 ensure_persist_calibration
@@ -171,6 +271,13 @@ udevadm control --reload-rules
 udevadm trigger --subsystem-match=video4linux
 udevadm trigger --subsystem-match=sound
 udevadm trigger --subsystem-match=input
+# 对已枚举完成的 CH9344 多串口桥，reload-rules 不会补跑 tty add 事件；
+# 若安装时设备已插好，会导致 left/right_gripper、*_encoder、*_imu symlink 不回填。
+# 这里定向对现有 ttyCH9344USB* 回放 add，避免误触发其他 tty 设备。
+for tty_path in /sys/class/tty/ttyCH9344USB*; do
+    [ -e "$tty_path" ] || break
+    udevadm trigger --action=add "$tty_path"
+done
 # 不主动触发 block add，存储设备规则等待后续真实插拔事件生效
 
 # 双键系统动作触发服务
@@ -189,5 +296,5 @@ systemctl restart "$SERVICE_NAME"
 systemctl enable "$NETWORK_MONITOR_SERVICE"
 systemctl restart "$NETWORK_MONITOR_SERVICE"
 
-echo "[$SERVICE_NAME] Installed and Started successfully."
+echo "[$SERVICE_NAME] Installed and Started successfully with User=${SERVICE_RUN_USER}."
 exit 0

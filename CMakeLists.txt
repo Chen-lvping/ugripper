@@ -1,13 +1,32 @@
 cmake_minimum_required(VERSION 3.10)
 project(ugripper LANGUAGES CXX)
 
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+include(CTest)
+
+option(UGRIPPER_ENABLE_MCAP_BUILDER "Build optional src/third_party/mcap_builder target" OFF)
+
+find_package(yaml-cpp REQUIRED)
+find_package(nlohmann_json REQUIRED)
+
+if(TARGET yaml-cpp AND NOT TARGET yaml-cpp::yaml-cpp)
+    add_library(yaml-cpp::yaml-cpp ALIAS yaml-cpp)
+endif()
 
 # ========= third_party =========
-add_subdirectory(src/third_party/mcap_builder)
+if(UGRIPPER_ENABLE_MCAP_BUILDER)
+    add_subdirectory(src/third_party/mcap_builder)
+endif()
+add_subdirectory(src/utils)
+if(NOT TARGET PP::utils)
+    add_library(PP::utils ALIAS utils)
+endif()
 
-# ========= 子模块 =========
-add_subdirectory(src/sensor_recorder)
-add_subdirectory(src/camera_recorder)
-add_subdirectory(src/gripper_hmi)
-add_subdirectory(src/record_runtime)
+# ========= 主链应用 =========
+add_subdirectory(standalone)
+
+if(BUILD_TESTING)
+    add_subdirectory(test)
+endif()

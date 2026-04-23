@@ -1,5 +1,28 @@
-# USB 内容检查入口已统一到主包的 `config/99-fixed-usb-map.rules`：
-# 1. 允许的物理 USB 口会直接触发 `systemd-mount` 挂载到 `/mnt/data_disk`
-# 2. 同一条 udev 规则通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@<dev>.service`
-#
-# updater 包保留该文件仅用于兼容安装布局，避免继续通过旧固定口规则重复触发。
+# 可选 updater 包的职责是“在主包已完成数据盘挂载后，拉起 usb-auto-update@.service”。
+# 主包 `config/99-fixed-usb-map.rules` 只负责允许 USB 口和挂载 `/mnt/data_disk`，
+# 不再直接拉起 `usb-auto-update@<dev>.service`，这样未安装 updater 包时也不会出现
+# 对缺失 unit 的隐式依赖。
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="1-1", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="5-1", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="9-1", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="11-1", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="6-1", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="8-1", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="10-1", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
+ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+  ENV{ID_FS_USAGE}=="filesystem", KERNELS=="12-1", \
+  ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"

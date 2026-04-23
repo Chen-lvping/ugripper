@@ -1,0 +1,98 @@
+#pragma once
+
+#include <cstdint>
+#include <string>
+#include <vector>
+
+namespace ugripper::runtime {
+
+enum class RuntimeLedState
+{
+    Init,
+    Ready,
+    Recording,
+    Error1,
+    Error2,
+    Error3,
+    Error4,
+    Error5,
+    CalibPre,
+    CalibRun,
+    CalibDone,
+    Exit,
+};
+
+struct ButtonSnapshot
+{
+    bool up_pressed = false;
+    bool down_pressed = false;
+};
+
+struct ButtonStateTracker
+{
+    uint64_t up_pressed_since_ms = 0;
+    uint64_t down_pressed_since_ms = 0;
+    uint64_t both_pressed_since_ms = 0;
+    bool up_long_handled = false;
+    bool down_long_handled = false;
+    bool dual_chord_active = false;
+    bool dual_long_handled = false;
+    bool shutdown_prompt_played = false;
+};
+
+enum class HmiEventType
+{
+    ShortUpPressed,
+    ShortDownPressed,
+    LongUpPressed,
+    LongDownPressed,
+    ShutdownPromptRequested,
+    ShutdownRequested,
+};
+
+struct HmiEvent
+{
+    HmiEventType type = HmiEventType::ShortUpPressed;
+};
+
+enum class HealthStatus
+{
+    Unknown,
+    Ok,
+    Error,
+};
+
+struct HealthState
+{
+    HealthStatus status = HealthStatus::Unknown;
+    std::string last_error_key;
+    uint64_t last_check_ms = 0;
+};
+
+struct HealthFault
+{
+    RuntimeLedState led_state = RuntimeLedState::Error5;
+    std::string key;
+    std::string detail;
+};
+
+struct HmiHealthSnapshot
+{
+    bool has_connected_device = false;
+    bool input_connected = false;
+    bool input_active = false;
+    uint64_t input_last_rx_age_ms = 0;
+    std::vector<std::string> disconnected_ports;
+    std::vector<std::string> inactive_ports;
+    std::vector<std::string> inactive_port_details;
+    std::vector<std::string> port_activity;
+};
+
+struct RecordingState
+{
+    bool is_recording = false;
+    std::string current_episode_dir;
+    std::string last_episode_dir;
+};
+
+}  // namespace ugripper::runtime

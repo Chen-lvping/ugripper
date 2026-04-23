@@ -1,20 +1,57 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${script_dir}"
 
 # ================= 配置区域 =================
 # 源文件所在目录
-SRC_DIR="./auto_update"
+SRC_DIR="${SRC_DIR:-${script_dir}/auto_update}"
 
 # 软件包信息
 PKG_NAME="ugripper-usb-updater"
-PKG_VERSION="1.2.3"
+PKG_VERSION_BASE="${PKG_VERSION_BASE:-1.2.2}"
+PKG_VERSION_SUFFIX="${PKG_VERSION_SUFFIX:-}"
+PKG_VERSION="${PKG_VERSION:-${PKG_VERSION_BASE}${PKG_VERSION_SUFFIX}}"
 ARCH="all"
 MAINTAINER="User <user@example.com>"
 DESC="Auto update ugripper via USB and Boot Check"
 
-# 构建临时目录
-BUILD_DIR="temp_build_usb_updater"
-PKG_DIR="${PKG_NAME}_${PKG_VERSION}_${ARCH}"
+# 构建临时目录与输出位置
+BUILD_DIR="${BUILD_DIR:-${script_dir}/temp_build_usb_updater}"
+OUTPUT_DIR="${OUTPUT_DIR:-${script_dir}/build/package/updater}"
+OUTPUT_DEB="${OUTPUT_DEB:-${OUTPUT_DIR}/${PKG_NAME}_${PKG_VERSION}_${ARCH}.deb}"
+
+DPKG_DEB_COMPRESSOR="${DPKG_DEB_COMPRESSOR:-xz}"
+DPKG_DEB_LEVEL="${DPKG_DEB_LEVEL:-1}"
+DPKG_DEB_STRATEGY="${DPKG_DEB_STRATEGY:-}"
+DPKG_DEB_UNIFORM_COMPRESSION="${DPKG_DEB_UNIFORM_COMPRESSION:-}"
+
+resolve_dpkg_deb_args() {
+    DPKG_DEB_BUILD_ARGS=(--root-owner-group)
+
+    if [ -n "${DPKG_DEB_COMPRESSOR}" ]; then
+        DPKG_DEB_BUILD_ARGS+=("-Z${DPKG_DEB_COMPRESSOR}")
+    fi
+    if [ -n "${DPKG_DEB_LEVEL}" ]; then
+        DPKG_DEB_BUILD_ARGS+=("-z${DPKG_DEB_LEVEL}")
+    fi
+    if [ -n "${DPKG_DEB_STRATEGY}" ]; then
+        DPKG_DEB_BUILD_ARGS+=("-S${DPKG_DEB_STRATEGY}")
+    fi
+
+    case "${DPKG_DEB_UNIFORM_COMPRESSION}" in
+        true|1|yes)
+            DPKG_DEB_BUILD_ARGS+=(--uniform-compression)
+            ;;
+        false|0|no|"")
+            ;;
+        *)
+            echo "错误：非法 DPKG_DEB_UNIFORM_COMPRESSION 值: ${DPKG_DEB_UNIFORM_COMPRESSION}" >&2
+            exit 1
+            ;;
+    esac
+}
 
 # ================= 0. 检查源文件 =================
 echo "检查源文件..."
@@ -42,8 +79,11 @@ done
 # ================= 1. 创建目录结构 =================
 echo "正在清理并创建构建目录 $BUILD_DIR ..."
 rm -rf "$BUILD_DIR"
+mkdir -p "${OUTPUT_DIR}"
+rm -f "${OUTPUT_DEB}"
 
 mkdir -p "${BUILD_DIR}/usr/local/bin"
+mkdir -p "${BUILD_DIR}/usr/local/scripts/lib"
 mkdir -p "${BUILD_DIR}/etc/udev/rules.d"
 mkdir -p "${BUILD_DIR}/lib/systemd/system"
 mkdir -p "${BUILD_DIR}/DEBIAN"
@@ -55,6 +95,8 @@ echo "复制业务文件..."
 # 脚本
 cp "$SRC_DIR/usb_auto_update.sh" "${BUILD_DIR}/usr/local/bin/"
 chmod 755 "${BUILD_DIR}/usr/local/bin/usb_auto_update.sh"
+cp "${script_dir}/scripts/lib/ugripper_shell_common.sh" "${BUILD_DIR}/usr/local/scripts/lib/"
+chmod 644 "${BUILD_DIR}/usr/local/scripts/lib/ugripper_shell_common.sh"
 # Udev 规则
 cp "$SRC_DIR/99-usb-auto-update.rules" "${BUILD_DIR}/etc/udev/rules.d/"
 chmod 644 "${BUILD_DIR}/etc/udev/rules.d/99-usb-auto-update.rules"
@@ -199,7 +241,8 @@ chmod 755 "${BUILD_DIR}/DEBIAN/postrm"
 
 # ================= 4. 打包 =================
 echo "开始构建 .deb 包..."
-dpkg-deb --build "$BUILD_DIR" "${PKG_DIR}.deb"
+resolve_dpkg_deb_args
+dpkg-deb "${DPKG_DEB_BUILD_ARGS[@]}" --build "$BUILD_DIR" "${OUTPUT_DEB}"
 
 # Refresh source baseline manifest for auto-release-deb diff detection.
 MANIFEST_WRITER=".codex/skills/auto-release-deb/scripts/write_source_manifest.sh"
@@ -209,5 +252,6 @@ fi
 
 echo "========================================"
 echo "构建完成！"
-ls -lh "${PKG_DIR}.deb"
+ls -lh "${OUTPUT_DEB}"
+echo "OUTPUT_DEB=${OUTPUT_DEB}"
 echo "========================================"

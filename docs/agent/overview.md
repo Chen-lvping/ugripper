@@ -5,7 +5,7 @@
 
 ## 1. 当前系统一句话
 - 当前系统默认以**单机双手、本地控制**方式运行。
-- 主控制链路已经收口到 `build/src/record_runtime/record_runtime`，`run_record.sh` 负责等待数据盘、维护 v1 风格运行日志，并拉起该二进制。
+- 主控制链路当前以 `run_record.sh -> /opt/ugripper/bin/UgripperRuntime/UgripperRuntime` 作为安装入口。
 - 默认录制产物为 **2 路主相机 + 2 路 stereo + 4 路触觉相机 + 左右两份传感器 MCAP**。
 - HMI 按键、RGB 灯效、提示音、pre/post 音频录制、停录校验，以及右手双键关机/左手双键卸载数据盘请求都已纳入当前运行时。
 - U 盘流程统一负责 `deb` 升级/重装、`config.txt` 导入、标定数据导入和 encoder 零位校准触发；当前自动安装名单已覆盖 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint` 与 `device-ota-mender`，并会在整批安装完成后通过 PulseAudio 播放 `upgrade_completed.wav`。
@@ -14,7 +14,7 @@
 - 安装目录：`/opt/ugripper`
 - 主服务：`pack_script/ugripper.service`
 - 主入口：`/opt/ugripper/run_record.sh`
-- 主运行时：`/opt/ugripper/build/src/record_runtime/record_runtime`
+- 主运行时：`/opt/ugripper/bin/UgripperRuntime/UgripperRuntime`
 - 数据目录：`/mnt/data_disk/<device_sn_lower>/data`
 - 持久化标定目录：`/etc/ugripper/config/calibration`
 - 日志目录：`/var/log/ugripper`
@@ -26,15 +26,15 @@
 | --- | --- | --- | --- |
 | systemd 主服务 | `pack_script/ugripper.service` | 以 `ubuntu` 用户拉起录制服务 | `/opt/ugripper/run_record.sh` |
 | 薄壳启动脚本 | `run_record.sh` | 切到安装目录、等待 `/mnt/data_disk` 可写、维护本地 `/tmp` 到 `/mnt/data_disk/logs` 的增量日志同步，再拉起 `record_runtime` | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/umi_sys_<sn>_<date>.log` |
-| 主运行时 | `build/src/record_runtime/record_runtime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、系统动作请求（关机/卸载数据盘） | episode 目录、`/tmp/umi_system_action_request` |
-| 相机录制 | `build/src/camera_recorder/camera_recorder` | 普通录制模式下负责主摄/触觉会话录制；`--stereo-daemon` 模式下负责双目常驻预热、热插拔恢复与 session finalize | 8 路 `mkv`（默认） |
-| 传感器录制 | `build/src/sensor_recorder/sensor_recorder` | 录制左右 IMU/encoder，按“采样入队 + 每侧独立 MCAP 写线程”分别输出 MCAP，并在本进程内完成 IMU 超阈值判定 | `sensor_data_left.mcap`、`sensor_data_right.mcap`、motion alert pipe |
-| HMI 类库 | `src/gripper_hmi` | 读取夹爪按键，并在驱动内部以单线程 owner 线程完成状态查询、灯效生成与 RGB 指令发送；默认由状态机切灯效，必要时仍可直接下发 RGB；当前也提供 SN 与 1024-byte 标定参数读写 API | 按键快照、RGB 指令、SN/标定参数读写 |
-| 音频播放 | `audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
+| 主运行时 | `bin/UgripperRuntime/UgripperRuntime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
+| 相机录制 | `bin/CameraRecorder/CameraRecorder` | 普通录制模式下负责主摄/触觉会话录制；`--stereo-daemon` 模式下负责双目常驻预热、热插拔恢复与 session finalize | 8 路 `mkv`（默认） |
+| 传感器录制 | `bin/SensorRecorder/SensorRecorder` | 录制左右 IMU/encoder，按“采样入队 + 每侧独立 MCAP 写线程”分别输出 MCAP | `sensor_data_left.mcap`、`sensor_data_right.mcap` |
+| HMI 类库 | `standalone/GripperHmiTool` | 读取夹爪按键，并在驱动内部以单线程 owner 线程完成状态查询、灯效生成与 RGB 指令发送；默认由状态机切灯效，必要时仍可直接下发 RGB；当前也提供 SN 与 1024-byte 标定参数读写 API | 按键快照、RGB 指令、SN/标定参数读写 |
+| 音频播放 | `bin/UgripperRuntime/audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 优先从受支持 USB 耳机麦克风录音，无耳机时回退系统默认 source，供 pre/post 处理链路使用 | 临时 wav 文件 |
-| 数据盘挂载 | `config/99-fixed-usb-map.rules` | 限定允许物理 USB 口，按 USB 父链路而不是 `ID_BUS` 匹配数据盘，并在 `add/change` 事件里调用 helper 将数据盘挂到 `/mnt/data_disk`，再拉起 updater | `/mnt/data_disk`、`usb-auto-update@<dev>.service` |
-| USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级/重装、配置导入、标定数据导入、encoder 校准触发；当前会按固定名单自动安装 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`，只要 U 盘根目录存在名单内包就执行安装，同版本也会强制重装；全部安装完成后再通过 PulseAudio 播放 `upgrade_completed.wav`；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload | `/etc/environment`、`calibration.json`、夹爪 HMI |
-| 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、复用 `/mnt/data_disk` 触发左右编码器并行 zeroing、恢复服务 | `build/src/sensor_recorder/zeroing` |
+| 数据盘挂载 | `config/99-fixed-usb-map.rules` | 限定允许物理 USB 口，使用独立 mount helper 将数据盘挂到 `/mnt/data_disk`；主包只负责挂载/卸载，不再直接拉起 updater | `/mnt/data_disk` |
+| USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级/重装、配置导入、标定数据导入、encoder 校准触发；当前会按固定名单自动安装 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`，只要 U 盘根目录存在名单内包就执行安装，同版本也会强制重装；全部安装完成后再通过 PulseAudio 播放 `upgrade_completed.wav`；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload。该脚本及其 `/usr/local/bin` + systemd unit 触发链归属可选独立包 `ugripper-usb-updater` | `/etc/environment`、`calibration.json`、夹爪 HMI |
+| 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、复用 `/mnt/data_disk` 触发左右编码器并行 zeroing、恢复服务 | `bin/SensorRecorder/zeroing` |
 
 ## 4. 启动链路
 1. `pack_script/postinst` 在安装或升级 `ugripper` 时会尝试把 `/home/user/lib/exfat.ko` 复制到 `/lib/modules/<kernel>/extra/`，写入 `/etc/modules-load.d/ugripper-exfat.conf`，并在安装当次立即尝试加载 `exfat`。
@@ -42,7 +42,7 @@
 3. systemd 启动 `ugripper.service`。
 4. 服务进入 `/opt/ugripper/run_record.sh`。
 5. `run_record.sh` 读取 `/etc/environment` 中的 `DEVICE_SN`，建立当天运行日志文件名 `umi_sys_<device_sn_lower>_<YYYYMMDD>.log`。
-6. `run_record.sh` 检查 `./build/src/record_runtime/record_runtime` 是否存在，并等待 `/mnt/data_disk` 成为真实可写挂载点。
+6. `run_record.sh` 检查 `./bin/UgripperRuntime/UgripperRuntime`，然后等待 `/mnt/data_disk` 成为真实可写挂载点。
 7. 数据盘可写后，`run_record.sh` 启动 v1 风格日志维护：业务 stdout/stderr 先落到 `/tmp`；当收到视频停录、音频停录请求或运行时退出时，再按增量方式同步到 `/mnt/data_disk/logs`，并清理本地与数据盘上同 SN 的非当天日志。
 8. `run_record.sh` 再拉起 `record_runtime`；运行时退出前会额外补一次日志同步。
 9. `record_runtime` 启动后读取 `/etc/environment`，至少关注：
@@ -51,8 +51,8 @@
    - `UGRIPPER_LANG`：决定提示音语言。
 10. 运行时连接左右夹爪 HMI、启动 LED 渲染线程、尝试拉起音频守护进程。
 - HMI 状态查询与 LED RGB 下发会在单个 gripper 串口内由驱动 owner 线程统一调度；`record_runtime` 只切换灯效模式，不再跨线程推送录制态的 500ms 亮灭边沿。当前驱动参考旧版 `driver_origin/led_manager` 的职责分离思路做了收敛：按键输入仍以 HMI 主动上报 `KeyReport` 为主，串口主动查询已降为约 `1s` 一次的低频探活/状态刷新；LED 仅在颜色变化、状态切换或低频补发时下发，避免高频状态查询与 RGB 指令互相抢占；若有专项诊断或直控需求，仍可走 direct RGB 通道覆盖当前效果。
-- `src/gripper_hmi` 当前新增了 UMI SN / 标定参数协议封装：SN 固定为 32-byte 字段（当前现场 SN 文本示例为 16-char，尾部补 `0x00`），标定参数固定为 `1024 byte` 严格对齐结构；当前 payload 已覆盖 RGB 主相机、双目 `cam0/cam1`、`cam->imu` 外参、IMU 离散噪声/随机游走与残差统计，其中 header 会保留内部有效数据长度，但当前 `V1.1` 固件写入时仍必须补满 `64 x 16B` 数据包，具体协议见 `docs/umi_calibration_protocol.md`。
-- UMI 标定写入当前增加了异常恢复口径：若写入阶段收到 `0xFE`（当前 chunk 零数据校验错误），驱动会优先重发当前 chunk；若出现 `0xF3`（missing_data）或 `0xFF`（checksum_error），则会视为本轮整包写入状态已失配，先发送 `AbortWriteInData` 清理固件残留写入状态，再从头重写整份 `1024-byte` 标定 payload；整份写入当前最多尝试 `3` 次，全部失败后才报错。
+- `standalone/GripperHmiTool` 当前新增了 UMI SN / 标定参数协议封装：SN 固定为 32-byte 字段（当前现场 SN 文本示例为 16-char，尾部补 `0x00`），标定参数固定为 `1024 byte` 严格对齐结构；当前 payload 已覆盖 RGB 主相机、双目 `cam0/cam1`、`cam->imu` 外参、IMU 离散噪声/随机游走与残差统计，其中 header 会保留内部有效数据长度，但当前 `V1.1` 固件写入时仍必须补满 `64 x 16B` 数据包，具体协议见 `docs/umi_calibration_protocol.md`。
+- UMI 标定写入当前增加了异常恢复口径：若写入阶段收到 `0xFE`（当前 chunk 零数据校验错误），驱动会优先重发当前 chunk；若连续出现 `0xFE`，或后续读 SN / 读标定返回 `0xF3/0xFE`，则会发送一次 `AbortWriteInData` 清理固件残留写入状态后再重试。
 11. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
 12. `record_runtime` 初始化阶段会额外拉起一个常驻 warmup daemon；当前由 `camera_recorder --stereo-daemon` 入口维护左右双目的预热状态，并通过 `/tmp/umi_stereo_camera_status.json` 暴露 `ready/not-ready` 状态。
 13. `record_runtime` 当前按 recorder 进程组而不是单一父 PID 回收 `camera_recorder` / `sensor_recorder`；当停录或异常收尾时，会向整组发送退出信号，降低内部 `ffmpeg`/`gst` 子进程残留导致后续卡死的概率。
@@ -101,28 +101,8 @@
    - `data_format_version=2`
    - `record_runtime=cpp`
    - `reset_recording=<true|false>`
-   - `reset_source_episode_dir=<path-or-empty>`
-   - `gripper_left.serial_number`
-   - `gripper_left.calibration_status`
-   - `gripper_right.serial_number`
-   - `gripper_right.calibration_status`
-   - `gripper_left` / `gripper_right` 子字段顺序固定为：`serial_number -> calibration_status`
-   - 禁止重新引入 `serial_number_valid`、`calibration_valid`、`connected`、`source`、错误信息等临时或重复字段
-3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `config/fakeCamCalib.json`。`calibration.json` 的输出格式当前已锁定：
-   - 这是锁定格式，顶层字段集合不得增加，已有字段的职责不得漂移；若必须调整，必须先更新本节文档，再同步修改生成代码、持久化刷新逻辑与 episode 校验口径。
-   - 顶层只保留 `metadata/calibration_info/observation`
-   - `metadata.format_version=2.0`
-   - `metadata` 只保留 `format_version/generation_date/description/calibration_status`
-   - `calibration_info` 只保留 `calibration_date/calibration_status/notes`
-   - tactile 只保留 4 路 `left_tcam_l/left_tcam_r/right_tcam_l/right_tcam_r`
-   - 不再写入 gripper 连接态、SN、valid/source 等重复字段
-   - 左右主摄、左右 stereo、左右 imu 的标定参数都由 gripper payload 自动填充；即使无 SN 或未标定，也允许继续录制
-4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 统一生成，且当前只保留旧版 offset 字段：
-   - 这是锁定格式，顶层只允许保留下面这些字段；禁止再回填 `stereo_session`、`paired_master_sn` 或其他临时调试字段。
-   - `boot_time_offset`
-   - `boot_time_offset_us`
-   - 8 路 `<camera>_record_time_offset_us`
-   - 不再输出 `stereo_session`
+3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `bin/UgripperRuntime/config/fakeCamCalib.json`。持久化与 episode `calibration.json` 当前都会保留左右主摄、四路 tactile、`observation.images.left_stereo/right_stereo` 以及 `observation.imu.left_imu/right_imu`；每侧 stereo / IMU 的 payload 子集会额外挂到 `calibration_info.stereo_imu_bundles.<side>`。起录时仍会用 `udevadm` 从现场 `/dev/left_tcam_l`、`/dev/left_tcam_r`、`/dev/right_tcam_l`、`/dev/right_tcam_r` 分别回填 4 路真实 tactile USB serial；若持久化 calibration 里还只有旧的 `gripper_left_tactile` / `gripper_right_tactile`，运行时会按左右侧复制参数到四路独立项，但 episode 输出不再保留旧键。不回写持久化 calibration。
+4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 在每路首个 pre-mux packet 锁定 `PTS + 系统时间` 后统一生成。
 5. 若已准备 pre audio，则移动到本次 episode 的 `audio_pre.wav`。
 6. 并行启动：
    - `camera_recorder --codec <codec> --output-dir <episode> --only left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
@@ -336,7 +316,7 @@
 ### 9.5 安装脚本与网络行为
 `pack_script/postinst` 当前会：
 - 停掉旧的录制相关进程。
-- 初始化持久化标定目录；若 `calibration.json` 缺失、空文件或非法 JSON，则自动用 `config/fakeCamCalib.json` 修复。
+- 初始化持久化标定目录；若 `calibration.json` 缺失、空文件或非法 JSON，则自动用 `bin/UgripperRuntime/config/fakeCamCalib.json` 修复。
 - 自动配置 exfat 提前加载：若现场仍使用 `/home/user/lib/exfat.ko` 外部模块，安装时会把它复制进 `/lib/modules/<kernel>/extra/`、写入 `/etc/modules-load.d/ugripper-exfat.conf`，并在本次安装窗口内尝试立即加载。
 - 重新加载 udev 规则。
 - 启用 `umi-shutdown-trigger.path`。
@@ -349,10 +329,10 @@
 - 当前录制启动不依赖对端网络存在。
 
 数据盘挂载当前行为：
-- `config/99-fixed-usb-map.rules` 会在允许的物理 USB 口上按 `SUBSYSTEMS=="usb"` + 固定 `KERNELS` 路径匹配数据盘，不再依赖易漂移的 `ID_BUS`；对经 USB-SATA/UAS bridge 暴露成 `ID_BUS=ata` 的盘，也会在 `add/change` 事件里继续调用 helper 挂到固定挂载点 `/mnt/data_disk`。
-- 同一条 udev 规则会通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@<dev>.service`；`usb_auto_update.sh` 只会在确认 `/mnt/data_disk` 当前挂载源就是该设备后，才扫描 deb / config / calibration 文件。
+- `config/99-fixed-usb-map.rules` 会在允许的物理 USB 口上调用 `mount_data_disk.sh`，固定挂载点仍然是 `/mnt/data_disk`。
+- 主包规则现在只负责挂载/卸载；若额外安装了可选包 `ugripper-usb-updater`，则由 updater 包自己的 `99-usb-auto-update.rules` 通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@<dev>.service`。
 - 允许的 USB 分区在 `remove` 事件里会显式对 `/mnt/data_disk` 执行卸载清理；此外还保留了 USB block `remove` 的兜底触发，尽量覆盖 hub 断链或热插拔时分区级事件不完整的场景，避免拔盘后残留 stale mount。
-- `mount_data_disk.sh` 当前除了匹配挂载源设备节点，还会把“挂载点只读”“挂载源设备节点已不存在”或“挂载点已不可访问”视为脏状态并优先清理；`run_record.sh` 也会把这类状态视为未就绪。
+- `mount_data_disk.sh` 当前除了匹配挂载源设备节点，还会把“挂载点只读”“挂载源设备节点已不存在”或“挂载点已不可访问”视为脏状态并优先清理；它不再主动启动 updater service；`run_record.sh` 也会把这类状态视为未就绪。
 
 ### 9.6 网线监测行为
 `auto_calibration/monitor_network.sh` 当前行为：
@@ -364,7 +344,8 @@
 - 主包当前仍直接携带项目内 `.venv` 与 `.venv/.python-runtime`，部署后继续以 `/opt/ugripper/.venv/bin/python3` 作为首选解释器入口。
 - `build_deb.sh` 的 staging 目录默认按增量方式复用：项目主体与 `.venv` 分开同步，避免每次打包都先删除再完整重拷 `.venv`。
 - `build_deb.sh` 默认 `dpkg-deb` 压缩口径为 `xz -1`，兼顾构建速度与包体积；`build_deb.sh -q` 仍跳过 C++ 编译，并沿用同一默认压缩口径。如需在速度与包体积之间切换，可通过 `DPKG_DEB_COMPRESSOR`、`DPKG_DEB_LEVEL`、`DPKG_DEB_STRATEGY`、`DPKG_DEB_UNIFORM_COMPRESSION` 覆盖默认参数。
-- 若当前 worktree 未自带 `.venv` 或 `build`，打包脚本可通过 `PACKAGED_VENV_SOURCE`、`PACKAGED_BUILD_DIR` 复用外部已有产物；若最终 `.venv` 来源不存在，脚本会同步移除 staging 中旧的 `.venv`，此时包仍可生成，但不再满足部署后直接运行的交付约束。
+- 主包打包当前默认优先从 Nexus raw 仓库下载并解压归档好的 `.venv` `tar.gz`，再沿用同一套 `.venv` 架构校验与 staging 同步逻辑；当前这条入口只针对 raw 制品下载，不走 Conan recipe。
+- 若需要临时切回本地或外部目录中的 `.venv` / `build`，可显式设置 `PACKAGED_VENV_URL=''` 后再配合 `PACKAGED_VENV_SOURCE`、`PACKAGED_BUILD_DIR` 覆盖来源；若最终 `.venv` 来源不存在，脚本会同步移除 staging 中旧的 `.venv`，此时包仍可生成，但不再满足部署后直接运行的交付约束。
 
 ## 10. 常用检查与排障入口
 ### 10.1 服务管理

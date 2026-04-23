@@ -1,6 +1,42 @@
 #!/bin/bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PRIMARY_RESOURCE_ROOT="${PRIMARY_RESOURCE_ROOT_OVERRIDE:-/opt/ugripper}"
+RESOURCE_ROOT="${RESOURCE_ROOT_OVERRIDE:-$PRIMARY_RESOURCE_ROOT}"
+if [ ! -d "$RESOURCE_ROOT" ]; then
+  RESOURCE_ROOT="$PROJECT_ROOT"
+fi
+
+resolve_existing_file() {
+  local candidate=""
+
+  for candidate in "$@"; do
+    if [ -f "$candidate" ]; then
+      printf '%s' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+SHELL_COMMON="$(resolve_existing_file \
+  "${SHELL_COMMON_OVERRIDE:-}" \
+  "$RESOURCE_ROOT/scripts/lib/ugripper_shell_common.sh" \
+  "$PROJECT_ROOT/scripts/lib/ugripper_shell_common.sh" \
+  "/usr/local/scripts/lib/ugripper_shell_common.sh" \
+  || true)"
+
+if [ -z "$SHELL_COMMON" ]; then
+  echo "[usb-update][ERROR] missing shell helper: ${SHELL_COMMON_OVERRIDE:-$RESOURCE_ROOT/scripts/lib/ugripper_shell_common.sh}"
+  exit 1
+fi
+
+# shellcheck source=/dev/null
+. "$SHELL_COMMON"
+
 # ================= 配置区域 =================
 DATA_MOUNT_POINT="/mnt/data_disk"
 MOUNT_POINT="$DATA_MOUNT_POINT"
@@ -26,9 +62,10 @@ AUTO_INSTALL_PACKAGES=(
 
 # ===========================================
 
-HMI_HELPER_BIN="/opt/ugripper/build/src/gripper_hmi/gripper_hmi_test"
+DEFAULT_HMI_HELPER_BIN="$RESOURCE_ROOT/bin/GripperHmiTool/GripperHmiTool"
+HMI_HELPER_BIN="${HMI_HELPER_BIN_OVERRIDE:-$DEFAULT_HMI_HELPER_BIN}"
 HMI_PORT_ARGS=(--port /dev/right_gripper --port /dev/left_gripper)
-CALIB_IMPORT_SCRIPT="/opt/ugripper/auto_calibration/import_camera_calibration.sh"
+CALIB_IMPORT_SCRIPT="${CALIB_IMPORT_SCRIPT_OVERRIDE:-$RESOURCE_ROOT/auto_calibration/import_camera_calibration.sh}"
 LED_RUN_USER="ubuntu"
 PID_LED_SHELL=""
 
@@ -42,7 +79,7 @@ RERUN_AFTER_SELF_UPDATE=0
 UGRIPPER_PACKAGE_INSTALLED=0
 
 log() {
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" | tee -a "$LOG_FILE"
+  ugripper_log "usb-update" "INFO" "$*" | tee -a "$LOG_FILE"
 }
 
 realpath_or_empty() {
@@ -100,10 +137,7 @@ prepare_scan_mountpoint() {
 }
 
 trim_text() {
-  local text="$1"
-  text="${text#"${text%%[![:space:]]*}"}"
-  text="${text%"${text##*[![:space:]]}"}"
-  printf '%s' "$text"
+  ugripper_trim_text "$1"
 }
 
 normalize_language() {
@@ -158,8 +192,7 @@ read_env_file_value() {
   local env_file="$1"
   local env_key="$2"
 
-  [ -f "$env_file" ] || return 1
-  awk -F= -v key="$env_key" '$1 == key { print substr($0, index($0, "=") + 1); exit }' "$env_file"
+  ugripper_read_env_value "$env_file" "$env_key"
 }
 
 parse_language_from_config() {
@@ -355,33 +388,35 @@ select_upgrade_completed_sound() {
   local env_lang="zh"
   local raw_lang=""
   local normalized_lang=""
+  local primary_en_sound="$RESOURCE_ROOT/bin/UgripperRuntime/audio_en/upgrade_completed.wav"
+  local primary_zh_sound="$RESOURCE_ROOT/bin/UgripperRuntime/audio/upgrade_completed.wav"
 
   raw_lang="$(read_env_file_value "/etc/environment" "UGRIPPER_LANG" || true)"
   if normalized_lang="$(normalize_language "$raw_lang")"; then
     env_lang="$normalized_lang"
   fi
 
-  if [ "$env_lang" = "en" ] && [ -f "/opt/ugripper/audio_en/upgrade_completed.wav" ]; then
-    printf '%s' "/opt/ugripper/audio_en/upgrade_completed.wav"
+  if [ "$env_lang" = "en" ]; then
+    ugripper_resolve_existing_path \
+      "$primary_en_sound" \
+      "$primary_zh_sound"
     return 0
   fi
 
-  if [ -f "/opt/ugripper/audio/upgrade_completed.wav" ]; then
-    printf '%s' "/opt/ugripper/audio/upgrade_completed.wav"
-    return 0
-  fi
+  ugripper_resolve_existing_path \
+    "$primary_zh_sound" \
+    "$primary_en_sound"
+  return 0
+}
 
-  if [ -f "/opt/ugripper/audio_en/upgrade_completed.wav" ]; then
-    printf '%s' "/opt/ugripper/audio_en/upgrade_completed.wav"
-    return 0
-  fi
-
-  return 1
+resolve_audio_module_dir() {
+  printf '%s' "$RESOURCE_ROOT/bin/UgripperRuntime/audio"
 }
 
 play_upgrade_completed_sound() {
   local sound_path=""
   local python_bin=""
+  local audio_module_dir=""
 
   sound_path="$(select_upgrade_completed_sound || true)"
   if [ -z "$sound_path" ]; then
@@ -404,7 +439,7 @@ play_upgrade_completed_sound() {
     return 1
   fi
 
-  python_bin="/opt/ugripper/.venv/bin/python3"
+  python_bin="$RESOURCE_ROOT/.venv/bin/python3"
   if [ ! -x "$python_bin" ]; then
     python_bin="$(command -v python3 || true)"
   fi
@@ -414,10 +449,16 @@ play_upgrade_completed_sound() {
     return 1
   fi
 
+  audio_module_dir="$(resolve_audio_module_dir)"
+  if [ ! -d "$audio_module_dir" ]; then
+    log "未找到音频模块目录，跳过升级完成提示音。"
+    return 1
+  fi
+
   log "安装流程完成，开始通过 PulseAudio 播放升级完成提示音：$sound_path"
   if timeout 20s runuser -u "$LED_RUN_USER" -- env \
     UPGRADE_SOUND_PATH="$sound_path" \
-    PYTHONPATH="/opt/ugripper/audio" \
+    PYTHONPATH="$audio_module_dir" \
     "$python_bin" - <<'PY'
 import os
 import subprocess
@@ -479,16 +520,26 @@ stop_service_fast() {
 }
 
 stop_record_stack_fast() {
+  local hmi_patterns=(
+    'GripperHmiTool.*--state'
+    'gripper_hmi_test.*--state'
+  )
+  local pattern=""
+
   stop_service_fast "ugripper.service" 6
 
   # 兜底：防止旧 run_record/音频/灯光进程在安装窗口残留
   if command -v pkill >/dev/null 2>&1; then
     pkill -TERM -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
-    pkill -TERM -f 'gripper_hmi_test.*--state' >/dev/null 2>&1 || true
+    for pattern in "${hmi_patterns[@]}"; do
+      pkill -TERM -f "$pattern" >/dev/null 2>&1 || true
+    done
     pkill -TERM -f 'audio/audio_play.py' >/dev/null 2>&1 || true
     sleep 0.3
     pkill -KILL -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
-    pkill -KILL -f 'gripper_hmi_test.*--state' >/dev/null 2>&1 || true
+    for pattern in "${hmi_patterns[@]}"; do
+      pkill -KILL -f "$pattern" >/dev/null 2>&1 || true
+    done
     pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
   fi
 
@@ -614,6 +665,7 @@ install_usb_package_if_needed() {
   fi
 
   installed_version="$(get_installed_version "$pkg_name")"
+
   ensure_package_install_window
 
   if [ "$pkg_name" = "ugripper-usb-updater" ]; then

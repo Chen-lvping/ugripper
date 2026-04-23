@@ -4,10 +4,13 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ================= 变量定义区域 =================
 APP_NAME="ugripper"
-VERSION="1.2.11"       # 每次发布前修改这里
+BASE_VERSION="${BASE_VERSION:-1.2.8}"
+VERSION_SUFFIX="${VERSION_SUFFIX:-}"
+VERSION="${VERSION:-${BASE_VERSION}${VERSION_SUFFIX}}"
 ARCH="arm64"
 INSTALL_DIR="/opt/${APP_NAME}"
 BUILD_ROOT="temp_build_deb"
+BUILD_AUX_ROOT="${BUILD_ROOT}_aux"
 PACK_SCRIPT_DIR="pack_script"
 
 # 默认行为变量
@@ -17,17 +20,103 @@ DPKG_DEB_LEVEL="${DPKG_DEB_LEVEL:-}"
 DPKG_DEB_STRATEGY="${DPKG_DEB_STRATEGY:-}"
 DPKG_DEB_UNIFORM_COMPRESSION="${DPKG_DEB_UNIFORM_COMPRESSION:-}"
 PACKAGED_VENV_SOURCE="${PACKAGED_VENV_SOURCE:-.venv}"
+DEFAULT_PACKAGED_VENV_URL="http://nexus.dmrobot.com:8081/repository/dmrobot_raw_hosted/ugripper-v2-uv-venv/py311-v1/ugripper_venv_20260423_143813.tar.gz"
+PACKAGED_VENV_URL="${PACKAGED_VENV_URL-$DEFAULT_PACKAGED_VENV_URL}"
 PACKAGED_BUILD_DIR="${PACKAGED_BUILD_DIR:-build}"
 TARGET_INSTALL_ROOT=""
 ASSEMBLE_DURATION=0
 VENV_DURATION=0
 PACKAGE_DURATION=0
+RESOLVED_PACKAGED_VENV_SOURCE="$PACKAGED_VENV_SOURCE"
+
+require_host_tool() {
+    local tool_name="$1"
+    if ! command -v "$tool_name" >/dev/null 2>&1; then
+        echo "❌ Required command not found: $tool_name" >&2
+        exit 1
+    fi
+}
 
 log_duration() {
     local label="$1"
     local start="$2"
     local duration=$((SECONDS - start))
     printf -- "--> %s: %ss\n" "$label" "$duration"
+}
+
+resolve_expected_venv_machine_pattern() {
+    case "$ARCH" in
+        amd64)
+            printf '%s\n' 'x86-64|x86_64'
+            ;;
+        arm64)
+            printf '%s\n' 'aarch64|arm64'
+            ;;
+        *)
+            echo "Unsupported package architecture for .venv validation: $ARCH" >&2
+            exit 1
+            ;;
+    esac
+}
+
+validate_packaged_venv() {
+    local source_venv="$1"
+    local python_bin="$source_venv/bin/python3"
+    local file_output=""
+    local expected_pattern=""
+
+    if [ ! -d "$source_venv" ]; then
+        return 0
+    fi
+
+    if [ ! -e "$python_bin" ]; then
+        echo "❌ Packaged .venv is missing python3 entrypoint: $python_bin" >&2
+        exit 1
+    fi
+
+    require_host_tool file
+
+    file_output="$(file -L "$python_bin")"
+    expected_pattern="$(resolve_expected_venv_machine_pattern)"
+    if ! printf '%s\n' "$file_output" | grep -Eiq "$expected_pattern"; then
+        echo "❌ Packaged .venv architecture mismatch for package arch: $ARCH" >&2
+        echo "   - source: $source_venv" >&2
+        echo "   - python: $python_bin" >&2
+        echo "   - file:   $file_output" >&2
+        echo "   - action: build or copy an architecture-matching .venv, then retry packaging." >&2
+        exit 1
+    fi
+}
+
+validate_binary_arch() {
+    local binary_path="$1"
+    local description="$2"
+    local file_output=""
+    local expected_pattern=""
+
+    if [ ! -x "$binary_path" ]; then
+        echo "❌ Missing required executable for packaging: $description ($binary_path)" >&2
+        exit 1
+    fi
+
+    require_host_tool file
+    file_output="$(file -L "$binary_path")"
+    expected_pattern="$(resolve_expected_venv_machine_pattern)"
+    if ! printf '%s\n' "$file_output" | grep -Eiq "$expected_pattern"; then
+        echo "❌ Executable architecture mismatch for package arch: $ARCH" >&2
+        echo "   - target: $description" >&2
+        echo "   - path:   $binary_path" >&2
+        echo "   - file:   $file_output" >&2
+        exit 1
+    fi
+}
+
+validate_packaged_binaries() {
+    validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/CameraRecorder/CameraRecorder" "CameraRecorder"
+    validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/SensorRecorder/SensorRecorder" "SensorRecorder"
+    validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/SensorRecorder/zeroing" "SensorRecorder zeroing"
+    validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/GripperHmiTool/GripperHmiTool" "GripperHmiTool"
+    validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/UgripperRuntime/UgripperRuntime" "UgripperRuntime"
 }
 
 ensure_dir() {
@@ -51,16 +140,144 @@ copy_if_exists() {
     cp -a "$source" "$target"
 }
 
+copy_first_existing() {
+    local target="$1"
+    shift
+
+    local source=""
+    for source in "$@"; do
+        if [ -e "$source" ]; then
+            copy_if_exists "$source" "$target"
+            return 0
+        fi
+    done
+
+    rm -rf "$target"
+    return 0
+}
+
+has_any_existing() {
+    local source=""
+    for source in "$@"; do
+        if [ -e "$source" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
 sync_project_tree() {
-    echo "--> Incremental sync project files..."
-    rm -rf "$TARGET_INSTALL_ROOT/.uv"
-    rsync -a --delete "${EXCLUDE_LIST[@]}" ./ "$TARGET_INSTALL_ROOT/"
+    echo "--> Syncing package whitelist..."
+    copy_if_exists "run_record.sh" "$TARGET_INSTALL_ROOT/run_record.sh"
+    copy_if_exists "scripts" "$TARGET_INSTALL_ROOT/scripts"
+    copy_if_exists "auto_update" "$TARGET_INSTALL_ROOT/auto_update"
+    copy_if_exists "auto_calibration" "$TARGET_INSTALL_ROOT/auto_calibration"
+    find "$TARGET_INSTALL_ROOT" \
+        \( -type d -name '__pycache__' -o -type f -name '*.pyc' \) \
+        -exec rm -rf {} +
+}
+
+clean_target_install_root() {
+    local path=""
+    local name=""
+
+    ensure_dir "$TARGET_INSTALL_ROOT"
+    shopt -s dotglob nullglob
+    for path in "$TARGET_INSTALL_ROOT"/*; do
+        name="$(basename "$path")"
+        if [ "$name" = ".venv" ]; then
+            continue
+        fi
+        rm -rf "$path"
+    done
+    shopt -u dotglob nullglob
+}
+
+resolve_downloaded_venv_dir() {
+    local extract_dir="$1"
+    local -a candidates=()
+    local candidate=""
+    local marker=""
+
+    if [ -x "$extract_dir/bin/python3" ]; then
+        printf '%s\n' "$extract_dir"
+        return 0
+    fi
+
+    if [ -x "$extract_dir/.venv/bin/python3" ]; then
+        printf '%s\n' "$extract_dir/.venv"
+        return 0
+    fi
+
+    while IFS= read -r marker; do
+        candidate="$(dirname "$(dirname "$marker")")"
+        candidates+=("$candidate")
+    done < <(find "$extract_dir" -mindepth 2 -maxdepth 4 -path '*/bin/python3' -type f | sort)
+
+    if [ "${#candidates[@]}" -eq 1 ]; then
+        printf '%s\n' "${candidates[0]}"
+        return 0
+    fi
+
+    if [ "${#candidates[@]}" -eq 0 ]; then
+        echo "❌ Failed to locate extracted .venv root under $extract_dir" >&2
+        return 1
+    fi
+
+    echo "❌ Multiple extracted .venv candidates found under $extract_dir" >&2
+    printf '   - %s\n' "${candidates[@]}" >&2
+    return 1
+}
+
+prepare_packaged_venv_source() {
+    local archive_name=""
+    local archive_path=""
+    local extract_dir=""
+    local resolved_dir=""
+
+    RESOLVED_PACKAGED_VENV_SOURCE="$PACKAGED_VENV_SOURCE"
+
+    if [ -z "$PACKAGED_VENV_URL" ]; then
+        return 0
+    fi
+
+    if ! command -v curl >/dev/null 2>&1; then
+        echo "❌ Required command not found for PACKAGED_VENV_URL: curl" >&2
+        exit 1
+    fi
+
+    if ! command -v tar >/dev/null 2>&1; then
+        echo "❌ Required command not found for PACKAGED_VENV_URL: tar" >&2
+        exit 1
+    fi
+
+    archive_name="${PACKAGED_VENV_URL##*/}"
+    archive_name="${archive_name%%\?*}"
+    if [ -z "$archive_name" ]; then
+        archive_name="packaged_venv.tar.gz"
+    fi
+
+    archive_path="$BUILD_AUX_ROOT/.packaged_venv_download/$archive_name"
+    extract_dir="$BUILD_AUX_ROOT/.packaged_venv_extract"
+
+    rm -rf "$BUILD_AUX_ROOT/.packaged_venv_download" "$extract_dir"
+    ensure_dir "$(dirname "$archive_path")"
+    ensure_dir "$extract_dir"
+
+    echo "--> Downloading packaged .venv from $PACKAGED_VENV_URL ..."
+    curl -fL --retry 3 --retry-delay 2 -o "$archive_path" "$PACKAGED_VENV_URL"
+    echo "--> Extracting packaged .venv archive..."
+    tar -xf "$archive_path" -C "$extract_dir"
+
+    resolved_dir="$(resolve_downloaded_venv_dir "$extract_dir")"
+    RESOLVED_PACKAGED_VENV_SOURCE="$resolved_dir"
+    echo "--> Using downloaded packaged .venv from $RESOLVED_PACKAGED_VENV_SOURCE"
 }
 
 sync_packaged_venv() {
     local start="$SECONDS"
     local target_venv="$TARGET_INSTALL_ROOT/.venv"
-    local source_venv="$PACKAGED_VENV_SOURCE"
+    local source_venv="$RESOLVED_PACKAGED_VENV_SOURCE"
 
     if [ ! -d "$source_venv" ]; then
         echo "--> Packaged .venv source not found at $source_venv; removing stale staged copy if present."
@@ -70,6 +287,7 @@ sync_packaged_venv() {
     fi
 
     echo "--> Incremental sync packaged .venv from $source_venv..."
+    validate_packaged_venv "$source_venv"
     ensure_dir "$target_venv"
     # Keep .venv in a dedicated rsync pass so unchanged interpreter files can be reused.
     rsync -a --delete "$source_venv"/ "$target_venv"/
@@ -81,14 +299,17 @@ prepare_generated_dirs() {
            "$BUILD_ROOT/usr/local/bin" \
            "$BUILD_ROOT/etc/systemd/system" \
            "$BUILD_ROOT/etc/udev/rules.d" \
-           "$TARGET_INSTALL_ROOT/build" \
-           "$TARGET_INSTALL_ROOT/py_script"
+           "$BUILD_ROOT/.packaged_venv_download" \
+           "$BUILD_ROOT/.packaged_venv_extract" \
+           "$BUILD_ROOT/.auto_release_ugripper.manifest" \
+           "$BUILD_AUX_ROOT"
 
     ensure_dir "$BUILD_ROOT/DEBIAN"
     ensure_dir "$TARGET_INSTALL_ROOT"
     ensure_dir "$BUILD_ROOT/usr/local/bin"
     ensure_dir "$BUILD_ROOT/etc/systemd/system"
     ensure_dir "$BUILD_ROOT/etc/udev/rules.d"
+    clean_target_install_root
 }
 
 resolve_dpkg_deb_args() {
@@ -142,7 +363,7 @@ if [ "$QUICK_MODE" = true ]; then
     echo "   - 排除 .env，增量复用已维护好的 .venv"
 else
     echo "🐢 标准构建模式 (Standard Mode)"
-    echo "   - 执行全量编译"
+    echo "   - 执行主包所需目标编译"
     echo "   - 打包 staging 改为增量复用，仅覆盖变化内容"
     echo "   - 默认使用 dpkg-deb xz -1 压缩口径"
 fi
@@ -162,65 +383,50 @@ echo "=== [2/5] 编译 C++ 模块 (统一构建) ==="
 
 if [ "$QUICK_MODE" = true ]; then
     echo "--> [SKIP] Skipping C++ compilation."
-    if [ ! -f "$PACKAGED_BUILD_DIR/src/sensor_recorder/sensor_recorder" ] || \
-       [ ! -f "$PACKAGED_BUILD_DIR/src/sensor_recorder/zeroing" ] || \
-       [ ! -f "$PACKAGED_BUILD_DIR/src/camera_recorder/camera_recorder" ] || \
-       [ ! -f "$PACKAGED_BUILD_DIR/src/record_runtime/record_runtime" ]; then
-        echo "⚠️  警告: 核心 C++ 二进制缺失！打包可能不可用。"
-    fi
-    if [ ! -f "$PACKAGED_BUILD_DIR/src/gripper_hmi/gripper_hmi_test" ]; then
-        echo "ℹ️  提示: gripper_hmi_test 未生成，包内将缺少该测试工具。"
-    fi
+    validate_packaged_binaries
 else
-    echo "--> Building C++ modules (root CMake)..."
-    rm -rf build
-    mkdir -p build
-    cd build
-    cmake .. -DCMAKE_BUILD_TYPE=Release
-    make -j$(nproc)
-    cd ..
+    echo "--> Building package-required C++ modules..."
+    rm -rf "$PACKAGED_BUILD_DIR"
+    cmake -S . -B "$PACKAGED_BUILD_DIR" \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_TESTING=OFF \
+        -DUGRIPPER_ENABLE_MCAP_BUILDER=OFF
+    cmake --build "$PACKAGED_BUILD_DIR" \
+        --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime \
+        --parallel "$(nproc)"
+    validate_packaged_binaries
 fi
 
 echo "=== [3/5] 组装文件资源 ==="
 assemble_start="$SECONDS"
 
-# 定义基础排除项
-EXCLUDE_LIST=(
-    --exclude='ASR'
-    --exclude='py_script'
-    --exclude='.git'
-    --exclude='build_deb.sh'
-    --exclude='pack_script'
-    --exclude="$BUILD_ROOT"
-    --exclude='build'
-    --exclude='.venv'
-    --exclude='.uv'
-    --exclude='ref_src'
-    --exclude='src/sensor_recorder'
-    --exclude='src/camera_recorder'
-    --exclude='*.deb'
-)
-
-# --- 快速模式特有的智能排除逻辑 ---
-if [ "$QUICK_MODE" = true ]; then
-    # 1. 排除 .env (防止覆盖配置)
-    echo "--> [Exclude] Skipping .env (preserve config)"
-    EXCLUDE_LIST+=( --exclude='.env' )
-fi
-
 # 1. 拷贝项目主体文件
 sync_project_tree
+prepare_packaged_venv_source
 sync_packaged_venv
 ASSEMBLE_DURATION=$((SECONDS - assemble_start - VENV_DURATION))
 log_duration "Project staging sync (including .venv pass)" "$assemble_start"
 
-# 2. 手动补回编译好的二进制文件 (from unified build/ directory)
-echo "--> Restoring compiled binaries..."
-copy_if_exists "$PACKAGED_BUILD_DIR/src/sensor_recorder/sensor_recorder" "$TARGET_INSTALL_ROOT/build/src/sensor_recorder/sensor_recorder"
-copy_if_exists "$PACKAGED_BUILD_DIR/src/sensor_recorder/zeroing" "$TARGET_INSTALL_ROOT/build/src/sensor_recorder/zeroing"
-copy_if_exists "$PACKAGED_BUILD_DIR/src/camera_recorder/camera_recorder" "$TARGET_INSTALL_ROOT/build/src/camera_recorder/camera_recorder"
-copy_if_exists "$PACKAGED_BUILD_DIR/src/gripper_hmi/gripper_hmi_test" "$TARGET_INSTALL_ROOT/build/src/gripper_hmi/gripper_hmi_test"
-copy_if_exists "$PACKAGED_BUILD_DIR/src/record_runtime/record_runtime" "$TARGET_INSTALL_ROOT/build/src/record_runtime/record_runtime"
+# 2. 手动补回编译好的二进制文件与 standalone runtime 资源
+echo "--> Restoring compiled standalone payload..."
+copy_first_existing "$TARGET_INSTALL_ROOT/bin/SensorRecorder/SensorRecorder" \
+    "$PACKAGED_BUILD_DIR/standalone/SensorRecorder/SensorRecorder"
+copy_first_existing "$TARGET_INSTALL_ROOT/bin/SensorRecorder/zeroing" \
+    "$PACKAGED_BUILD_DIR/standalone/SensorRecorder/zeroing"
+copy_first_existing "$TARGET_INSTALL_ROOT/bin/SensorRecorder/99-serial.rules" \
+    "standalone/SensorRecorder/99-serial.rules"
+copy_first_existing "$TARGET_INSTALL_ROOT/bin/CameraRecorder/CameraRecorder" \
+    "$PACKAGED_BUILD_DIR/standalone/CameraRecorder/CameraRecorder"
+copy_first_existing "$TARGET_INSTALL_ROOT/bin/GripperHmiTool/GripperHmiTool" \
+    "$PACKAGED_BUILD_DIR/standalone/GripperHmiTool/GripperHmiTool"
+copy_first_existing "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/UgripperRuntime" \
+    "$PACKAGED_BUILD_DIR/standalone/UgripperRuntime/UgripperRuntime"
+
+copy_if_exists "standalone/CameraRecorder/config" "$TARGET_INSTALL_ROOT/bin/CameraRecorder/config"
+copy_if_exists "standalone/UgripperRuntime/audio" "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/audio"
+copy_if_exists "standalone/UgripperRuntime/audio_en" "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/audio_en"
+copy_if_exists "standalone/UgripperRuntime/config/fakeCamCalib.json" \
+    "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/config/fakeCamCalib.json"
 
 # py_script is excluded from rsync by default; restore required runtime/test scripts explicitly.
 copy_if_exists "py_script/usb_audio_play_test.py" "$TARGET_INSTALL_ROOT/py_script/usb_audio_play_test.py"
@@ -229,7 +435,8 @@ copy_if_exists "py_script/usb_audio_noise_profile.py" "$TARGET_INSTALL_ROOT/py_s
 
 # 4. 部署 Udev 规则
 copy_if_exists "config/99-fixed-usb-map.rules" "$BUILD_ROOT/etc/udev/rules.d/99-fixed-usb-map.rules"
-copy_if_exists "src/sensor_recorder/99-serial.rules" "$BUILD_ROOT/etc/udev/rules.d/99-serial.rules"
+copy_first_existing "$BUILD_ROOT/etc/udev/rules.d/99-serial.rules" \
+    "standalone/SensorRecorder/99-serial.rules"
 echo "--> .venv sync: ${VENV_DURATION}s"
 
 echo "=== [4/5] 处理配置脚本与变量替换 ==="
@@ -275,6 +482,7 @@ echo "--> dpkg-deb args: ${DPKG_DEB_BUILD_ARGS[*]}"
 dpkg-deb "${DPKG_DEB_BUILD_ARGS[@]}" --build "$BUILD_ROOT" "${APP_NAME}_${VERSION}_${ARCH}.deb"
 PACKAGE_DURATION=$((SECONDS - package_start))
 log_duration "dpkg-deb build" "$package_start"
+rm -rf "$BUILD_AUX_ROOT"
 
 # Refresh source baseline manifest for auto-release-deb diff detection.
 MANIFEST_WRITER=".codex/skills/auto-release-deb/scripts/write_source_manifest.sh"

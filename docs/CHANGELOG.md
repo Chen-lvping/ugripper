@@ -5,26 +5,23 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
-- 新增运行时触觉损坏轻量抽检：夹爪插回并完成该侧 refresh 后，会按 tactile 相机 USB `serial` 刷新参考灰度帧缓存；停录阶段只抽取起录附近单帧做快速比对，不扫描整段视频，也不重新读取 MCAP 做 encoder 对齐。
-- 同一 tactile `serial` 最近 `3` 个 episode 都异常时，空闲态改为黄灯闪烁 `WARNING`，并播放对应的 `left/right_tcam_*_damaged.wav` 提示音；该能力属于软告警，不会把当前 episode 升级为 `validation_failed`。
-- 运行时触觉轻量阈值进一步收紧为 `mean_abs_diff >= 3.0`、`mask_ratio >= 0.05`、`correlation <= 0.94`，降低明显异常被漏报的概率。
-- 新增按 tactile `serial` 绑定的 `12h` 持久化 baseline：插爪阶段和停录阶段都会与上一份持久化 baseline 比较；若超阈值则同样触发 damaged 软告警，并冻结该 `serial` 的持久化 baseline，只有服务重启后下一次插爪才允许刷新。
-- 主摄 `uvc_roll_absolute` 从录制启动链路解耦：改为在主摄 `video4linux` 主节点插入时由 `udev` 触发独立 helper 执行，同一次插入只处理一次，重新插拔后再重新检查。
-- `camera_recorder` 新增 `--apply-uvc-roll-only` 模式，供插入事件单独执行主摄 roll 检测/设置；普通录制阶段不再主动执行主摄 roll 检测。
-- 主摄 `video4linux` udev 规则改为显式补齐 `MODE/GROUP/TAG`，降低主摄节点在驱动重绑后的权限漂移风险。
-- 新增左手双键长按卸载数据盘：仅在停止录制时允许触发；运行时会先刷运行日志，再通过统一 system action helper 请求卸载 `/mnt/data_disk`，成功后播放 `umount.wav`，失败播放 `error.wav`；原右手双键长按关机继续沿用同一 helper 分流执行。
-- 补齐左手新 hub 下 `left_tcam_r` 的 `udev` 映射：左侧 `left_tcam_r` 现同时接受旧 hub 的 `.4.1` 与新 hub 的 `.3` 端口，保证新旧左手 hub 规则共存。
-- 修正左手更换新 hub 后的 `udev` 视频映射：左侧 `left_cam_main` / `left_tcam_l` 改为“设备类型优先 + 左侧链路约束”匹配，不再只依赖 `.4.2/.4.4` 固定内部端口，避免左主摄与左触觉因 hub 内部端口变化而丢失 `/dev/left_cam_main`、`/dev/left_tcam_l`。
-- 修复 `camera_recorder` 的 ffmpeg 子进程生命周期：统一改为“逐路启动 recorder 对象 + 子进程独立进程组 + 父死子亡保护”的正确口径，既避免 `camera_recorder` 异常退出后遗留孤儿 `ffmpeg` 持续占用 tactile 设备，也避免从短生命周期启动线程里 `fork()` 触发 `PR_SET_PDEATHSIG` 误杀子进程，现场表现为 `Device or resource busy`、触觉 recorder `exit_code=137` 或输出 mkv 缺失。
-- 主摄 `direct-copy-h26x` 录制链路改为 `camera_recorder` 进程内 `V4L2 MMAP capture -> appsrc -> h26xparse -> matroskamux -> filesink`，`record_time_offset_us` 的 system time 打点前移到 `VIDIOC_DQBUF` / `v4l2_buffer.timestamp` 附近，减少 shell 管线日志解析带来的软件延迟。
-- 主摄容器时间轴改为在进程内显式写入单调 `PTS/DTS`，降低 `non_monotonic_dts_count` 这类由后置时间戳链路引入的异常概率。
-- 调整 UMI 标定写入重试策略：`0xFE` 仍优先在当前 chunk 内重发；若写标定过程中收到 `0xF3/0xFF`，则不再只重试当前 chunk，而是先发送 `AbortWriteInData` 结束本轮，再从头重写整份 `1024-byte` 标定 payload；整份写入最多尝试 `3` 次，全部失败后才报错退出。
-- 修复 USB 标定导入时 root 创建的 `.import_stage.*` 目录权限过严的问题：stage 目录现在会显式开放遍历权限，并把生成的夹爪 `payload bin` 设为可读，避免 `runuser -u ubuntu` 调起的 HMI helper 报 `Failed to read calibration binary`。
-- 调整 gripper 热插拔后的运行时标定刷新时序：夹爪插回后不再立刻同步读 SN/标定，而是先等待该侧相机、stereo、触觉、encoder、imu 等关键设备节点全部恢复，再在实际读 SN/标定并刷新缓存的短窗口切 `INIT` 蓝灯。
-- 修复 gripper 断连事件会在持久化阶段再次同步重读另一侧夹爪标定的问题；持久化 `calibration.json` 改为只消费最近一次成功缓存的 payload，避免热插拔窗口里的 `6500ms` range read 把主循环、红灯切换和恢复呼吸灯拖慢。
-- 继续优化主摄 warmup `pre-roll`：session 启动时改为先选取最接近录制开始的安全随机访问点片段，再桥接缓存 pre-roll 注入期间到达的 live AU，减少“等关键帧才能起播”带来的主摄首段缺失，同时避免 pre-roll 与 live 交界处产生 `gap / duplicate dts / non-monotonic dts`。
-- 新增 `test/scripts/scan_main_camera_mkv_issues.py`：支持递归扫描当前目录或指定目录下的 `left_cam_main.mkv` / `right_cam_main.mkv`，并发检查包时间戳异常、显著时间洞和可疑解码错误，并对齐同目录左右主摄的异常时间点，便于批量定位疑似花屏/坏流文件。
-- 修复 USB 数据盘在 UAS / USB-SATA bridge 场景下的自动重挂载：`config/99-fixed-usb-map.rules` 改为按 USB 父链路 `SUBSYSTEMS=="usb"` + 固定物理口匹配，并在 `add/change` 事件里触发 helper，不再依赖可能显示成 `ID_BUS=ata` 的分区属性；避免盘抖动重枚举后只有桌面 `udisks` 挂到 `/media/ubuntu/...`，而 `/mnt/data_disk` 没有被重新拉起。
+- 出包链路继续收口到“当前仓库可独立稳定出包”口径：
+  - 顶层 `CMakeLists.txt` 默认关闭可选 `src/third_party/mcap_builder`，避免普通主包构建被私有 SSH 拉仓阻塞
+  - `build_deb.sh` 标准模式改为只编译主包必需目标，并新增 `.venv` 与 5 个核心二进制的 ELF 架构校验
+  - 修复 `build_deb.sh` staging 污染：`.venv` 下载/解压缓存和 auto-release manifest 不再误打入最终 `deb`
+  - 新增 `scripts/build_arm_deb_in_pp_arm_dev.sh`，固化当前已验证通过的 `pp-arm-dev` 容器内 ARM 一键出包流程
+- `build_deb.sh` 进一步收口为“默认优先 Nexus raw 归档 `.venv`”口径：脚本内置当前 `ugripper-v2-uv-venv/py311-v1` raw URL，默认先下载解压再打包；若需临时回退本地 `.venv`，必须显式设置 `PACKAGED_VENV_URL=''`。
+- `build_deb.sh` 新增可选 `PACKAGED_VENV_URL` 入口：支持在打包前从 Nexus raw 仓库下载并解压归档好的 `.venv` 压缩包，再复用现有 `.venv` 架构校验与 staging 同步流程；未设置时保持原本的本地 `PACKAGED_VENV_SOURCE` 行为不变。
+- `pp_main` 合并后继续补齐 `v2` 最新 HMI/runtime 修复：`GripperHmiTool` 读 SN + 读标定改为单次独占事务，串口连接增加 `TIOCEXCL` 独占锁，降低读标定时被后台轮询打断或多进程竞争串口导致的失败概率。
+- `UgripperRuntime` 补回 gripper 重连刷新链路：HMI 断开后会清空对应侧 runtime 状态；重连后等待本侧 camera/imu/encoder 设备和 HMI 活跃态恢复，再重新拉取 SN/标定缓存，避免 episode `metadata/calibration` 长时间保留断开前的旧状态。
+- `ugripper`/`pp_main` 合并后同步 `v2` 最新修复：主摄 `UVC roll` 从“每次起录时处理”改为由 `udev + apply_main_camera_roll_once.sh` 在设备枚举后单次处理，降低主摄启动抖动和重复控制带来的风险。
+- 双键系统动作链路从单一 `shutdown` 扩展为 `shutdown / umount`：`trigger_shutdown.sh`、`umi-shutdown-trigger.path` 和安装脚本统一切到 `/tmp/umi_system_action_request|result`。
+- USB 自动安装允许同版本包重装：当 U 盘上的 `deb` 版本与已安装版本相同，不再直接跳过，而是显式执行“重装”，便于现场覆盖损坏安装或补齐缺失文件。
+- HMI SN 写入补强重试和 abort recovery：`GripperHmiTool` 在串口返回 `missing data / checksum` 等状态时，会按 chunk/preamble 级别重试并尝试退出残留写入态，降低现场写 SN 偶发失败。
+- 音频资源补齐 `umount` 与 4 路 `tactile damaged` 提示音，打包输出同步包含中英文资源。
+- 调整 `scripts/build_runtime_venv.sh` 的失败提示：当 `.venv` 目标目录位于 `exfat/vfat` 等不支持符号链接的文件系统时，脚本会提前报错并提示改到 `ext4/xfs` 目录构建，避免等到 `uv venv` 阶段才暴露底层 `symlink` 失败。
+- 修复 `ugripper` 安装后的 CH9344 双手串口识别补齐：`postinst` 在 `udevadm control --reload-rules` 后，新增对现有 `ttyCH9344USB*` 的定向 `add` 触发，避免设备已在位时只重载规则却不回填 `/dev/left_gripper`、`/dev/right_gripper`、`*_encoder`、`*_imu`。
+- 板端 `HSD-RB1021` 验证确认：双手 CH9344 在接线正确且回放 `tty add` 后，可稳定生成 6 个固定 symlink；`ugripper.service` 能继续通过 gripper/sensor 初始化阶段。当前剩余板端阻塞为音频 Python 环境缺少 `pygame`。
 - 修复 recorder 停录/异常收尾时可能遗留 `ffmpeg`/`gst` 子进程的问题：`record_runtime` 现在按整个进程组回收 `camera_recorder` 与 `sensor_recorder`，降低主摄抖动或 recorder 意外退出后残留录制进程拖住后续录制的概率。
 - 补强 `camera_recorder` 的 stop 日志与输出管道清理路径；在强制 `SIGKILL` 后若子进程仍未被回收，会明确记日志，便于现场继续定位内核态阻塞或设备异常。
 - 录制态新增 IMU 超阈值报警：`sensor_recorder` 直接在本进程的 IMU 消费路径里完成左右手独立的阈值判定，并通过轻量本地 `pipe` 把告警状态变化发给 `record_runtime`；`record_runtime` 统一控制左右夹爪 HMI 蜂鸣，service 日志仅在进入告警时写一次 warning，不再持续刷实时运动日志。

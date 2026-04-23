@@ -1,0 +1,4 @@
+interface:
+  display_name: "Test Ugripper Rollout"
+  short_description: "面向 ppmain 合并后 ugripper 测试推进、文档回填与板端验证收口的标准工作流"
+  default_prompt: "Use $test-ugripper-rollout to review the ppmain ugripper test plan, separate landed/wired/revalidated status, summarize current gaps and next steps, wait for explicit start before edits, and update the formal test docs plus refactor log when progress is made."

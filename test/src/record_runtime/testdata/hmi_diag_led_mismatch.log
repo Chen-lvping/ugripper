@@ -1,0 +1,3 @@
+[HMI_DIAG] category=button_raw up=0 down=0
+[HMI_DIAG] category=health_fault key=critical_devices_missing led_state=Error5
+[HMI_DIAG] category=led_target state=Error2 progress=0.000

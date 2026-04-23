@@ -1,0 +1,21 @@
+CameraRecorder:
+  schema_version: 1
+  cameras:
+    - id: step4_demo_camera
+      role: main
+      side: left
+      kind: direct_h265
+      groups: [session, critical]
+
+      device:
+        path: /dev/null
+        backend: v4l2
+        fps: 30
+        width: 1920
+        height: 1080
+
+      record:
+        pipeline: direct_copy_h265
+
+      output:
+        file_name: step4_demo_camera.mkv

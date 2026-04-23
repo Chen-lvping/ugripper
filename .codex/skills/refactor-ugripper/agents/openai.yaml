@@ -1,0 +1,4 @@
+interface:
+  display_name: "Refactor Ugripper"
+  short_description: "面向 ugripper 重构、收口与并仓准备的分阶段工作流"
+  default_prompt: "Use $refactor-ugripper to refactor ugripper in phased steps: read the refactor and standalone plans first, identify the current phase, output impact/risk/test strategy, wait for explicit start, and prioritize in-repo refactor before standalone integration."

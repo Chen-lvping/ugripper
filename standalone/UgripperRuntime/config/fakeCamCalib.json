@@ -1,0 +1,96 @@
+{
+    "metadata": {
+        "format_version": "1.0",
+        "generation_date": "2025-01-09",
+        "description": "Camera calibration parameters",
+        "calibration_status": "uncalibrated"
+    },
+    "observation.images.{{CAM_MAIN}}": {
+        "shape": [
+            1080,
+            1920,
+            3
+        ],
+        "names": [
+            "height",
+            "width",
+            "channels"
+        ],
+        "info": null,
+        "intrinsics": {
+            "1920x1080": {
+                "fx": 1000.0,
+                "fy": 1000.0,
+                "ppx": 960.0,
+                "ppy": 540.0
+            }
+        },
+        "dtype": "video",
+        "fps": 60
+    },
+    "observation.images.left_tcam_l": {
+        "shape": [
+            480,
+            640,
+            3
+        ],
+        "names": [
+            "height",
+            "width",
+            "channels"
+        ],
+        "info": null,
+        "dtype": "video",
+        "serial": "{{LEFT_TCAM_L_SERIAL}}"
+    },
+    "observation.images.left_tcam_r": {
+        "shape": [
+            480,
+            640,
+            3
+        ],
+        "names": [
+            "height",
+            "width",
+            "channels"
+        ],
+        "info": null,
+        "dtype": "video",
+        "serial": "{{LEFT_TCAM_R_SERIAL}}"
+    },
+    "observation.images.right_tcam_l": {
+        "shape": [
+            480,
+            640,
+            3
+        ],
+        "names": [
+            "height",
+            "width",
+            "channels"
+        ],
+        "info": null,
+        "dtype": "video",
+        "serial": "{{RIGHT_TCAM_L_SERIAL}}"
+    },
+    "observation.images.right_tcam_r": {
+        "shape": [
+            480,
+            640,
+            3
+        ],
+        "names": [
+            "height",
+            "width",
+            "channels"
+        ],
+        "info": null,
+        "dtype": "video",
+        "serial": "{{RIGHT_TCAM_R_SERIAL}}"
+    },
+    "calibration_info": {
+        "calibration_date": "2025-01-09",
+        "calibration_status": "uncalibrated",
+        "notes": "Replace {{CAM_MAIN}} with actual camera name (e.g., cam_left or cam_right); tactile placeholders are resolved at runtime for left_tcam_l/left_tcam_r/right_tcam_l/right_tcam_r."
+    }
+}
