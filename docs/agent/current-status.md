@@ -167,12 +167,13 @@
 #### 7.2.1 推荐出包流程
 - 推荐命令：`./scripts/build_arm_deb_in_pp_arm_dev.sh`
 - 当前这条路径的定位是“给日常维护者和 agent 的默认安全路径”
-- 它会在运行中的 `pp-arm-dev` 容器里依次完成：
+- 它默认在 `pp-arm-dev` 容器内部执行，并依次完成：
   - 设置 `PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig`
   - 用本仓 `cmake/arm-linux-toolchain.cmake` 把 5 个主包必需目标编到 `build/arm_container_release`
   - 在容器内调用 `PACKAGED_BUILD_DIR=build/arm_container_release ./build_deb.sh -q`
-  - 在容器内把 `build/`、`temp_build_deb*` 和生成的 `.deb` 统一 `chown` 回宿主机用户
+  - 如果脚本以 root 运行，把 `build/`、`temp_build_deb*` 和生成的 `.deb` 统一 `chown` 回仓库目录 owner
 - 当前一键脚本会把 `BASE_VERSION` / `VERSION_SUFFIX` / `VERSION` 透传给 `build_deb.sh`，因此最终 `.deb` 文件名与主打包脚本保持同一口径，不再写死版本号
+- 当前一键脚本默认要求在容器环境内运行；若确实要在非容器环境复用，需要显式传 `ALLOW_HOST_RUN=1`
 - 当前这样设计的原因是：
   - `build_deb.sh` 自己不负责 cross toolchain 配置
   - `build_deb.sh` 标准模式默认是“直接本机 cmake 编译”
@@ -223,8 +224,8 @@
 
 #### 7.2.4 当前手动出包方法
 - 方法 A：推荐，整套自动
-  - 前提：本机有运行中的 `pp-arm-dev` 容器
-  - 命令：`./scripts/build_arm_deb_in_pp_arm_dev.sh`
+  - 前提：已进入 `pp-arm-dev` 容器，并位于仓库根目录
+  - 命令：`cd /home/dm/proj/pp-main/standalone/UGripper && ./scripts/build_arm_deb_in_pp_arm_dev.sh`
 - 方法 B：手动拆成“先编译，再组包”
   - 适用：要单独控制容器内编译步骤，或排查编译依赖问题
   - 步骤 1：在 `pp-arm-dev` 容器内手动编译
@@ -245,17 +246,18 @@
 - 如果用户说“本地环境不可信，优先用归档 Python 环境”，当前默认行为已经满足，不需要额外传参
 - 如果用户说“不要走 Nexus，改用手头本地 `.venv`”，才显式传 `PACKAGED_VENV_URL=''`
 - 如果用户在 `x86_64` 宿主机上直接跑 `./build_deb.sh` 失败，优先怀疑不是代码问题，而是走错了出包路径
-- 如果用户是通过容器一键出包，当前脚本会默认把构建产物所有权回收给宿主机 `HOST_UID/HOST_GID`
+- 如果用户是通过容器一键出包，且脚本以 root 运行，当前脚本会默认把构建产物所有权回收给仓库目录 owner
 - 如有特殊工作区映射或 CI 用户，允许显式覆盖：
   - `HOST_UID=<uid>`
   - `HOST_GID=<gid>`
+- 如需在非容器环境强制复用一键脚本，必须显式传 `ALLOW_HOST_RUN=1`
 - 如果用户要“正式出包”而不是“本地验证出包”，不要默认沿用 `BASE_VERSION=1.2.8`；应明确传入：
   - `VERSION_SUFFIX=+<tag>`
   - 或 `VERSION=<full-version>`
 
 #### 7.2.6 当前 ARM 出包容器所需环境
 - 当前默认容器名：`pp-arm-dev`
-- 当前脚本假设这是一个“已存在并正在运行”的开发容器；脚本不会负责创建容器，也不会负责安装完整交叉工具链
+- 当前脚本假设调用者已经进入开发容器；脚本不会负责创建容器或从宿主机 `docker exec`
 - 当前仓库已提供环境初始化脚本：`scripts/setup_arm_build_env.sh`
 - 该脚本是“环境补齐入口”，不是一键出包主链的必经步骤
 - 若要手动补容器环境，推荐在容器内直接执行：`bash ./scripts/setup_arm_build_env.sh`

@@ -41,18 +41,79 @@ bash test/scripts/testVideoPipe.sh
 
 更具体的脚本说明、环境变量和注意事项见 `test/README.md`。
 
-## 推荐出包路径
-当前推荐直接走容器内 ARM 一键出包：
+## 首次交叉编译环境准备
+首次在开发机上为 `ugripper` 出 `arm64 deb` 时，建议先拉起统一的 ROS2 Humble ARM 交叉编译容器。后续推荐进入容器后直接执行出包脚本，因此容器工作目录建议保持为本仓 `standalone/UGripper`。
+
+### 拉取 Docker 镜像
+```bash
+docker pull harbor.dmrobot.com/library/ros2-humble-arm
+```
+
+### 启动交叉编译容器
+以下命令按当前仓库所在路径 `/home/dm/proj/pp-main` 准备，宿主机挂载 `/home/dm/proj` 后，容器内可以继续使用同一路径访问本仓库：
 
 ```bash
+docker run -dit \
+  --name pp-arm-dev \
+  --privileged \
+  --gpus all \
+  --runtime=nvidia \
+  --env NVIDIA_VISIBLE_DEVICES=all \
+  --env NVIDIA_DRIVER_CAPABILITIES=compute,utility,graphics \
+  --env="DISPLAY" \
+  --env="QT_X11_NO_MITSHM=1" \
+  --network host \
+  --device=/dev/bus/usb \
+  -v /home/dm/proj:/home/dm/proj \
+  -v /tmp/.X11-unix:/tmp/.X11-unix:rw \
+  -v /usr/local/cuda:/usr/local/cuda:ro \
+  -v /tmp:/tmp \
+  -v /dev:/dev \
+  -v /run/udev:/run/udev:ro \
+  -v /sys/bus/usb:/sys/bus/usb:ro \
+  --device=/dev/dri/renderD128 \
+  --device=/dev/snd \
+  -v /run/user/1000/pulse/native:/run/user/1000/pulse/native \
+  -v $HOME/.config/pulse:/root/.config/pulse \
+  -e PULSE_SERVER=unix:/run/user/1000/pulse/native \
+  -w /home/dm/proj/pp-main/standalone/UGripper \
+  harbor.dmrobot.com/library/ros2-humble-arm
+```
+
+如果宿主机仓库不在 `/home/dm/proj/pp-main`，需要同步调整 `-v` 的宿主机路径和 `-w` 工作目录。
+
+### 初始化 ARM 交叉编译依赖
+首次创建容器后，进入容器并执行一次环境初始化：
+
+```bash
+docker exec -it pp-arm-dev bash
+cd /home/dm/proj/pp-main/standalone/UGripper
+bash ./scripts/setup_arm_build_env.sh
+```
+
+该脚本会在仓库内生成隔离的 ARM64 sysroot 和构建环境文件：
+- `.local-deps/sysroot-arm64`
+- `.local-deps/downloads/apt`
+- `.local-deps/arm-build-env.sh`
+
+后续如果 `.local-deps/arm-build-env.sh` 已存在，推荐的一键出包脚本会直接复用；如果文件缺失，脚本也会在容器内自动补齐。
+
+## 推荐出包路径
+当前推荐进入容器后直接执行 ARM 一键出包脚本：
+
+```bash
+docker exec -it pp-arm-dev bash
+cd /home/dm/proj/pp-main/standalone/UGripper
 ./scripts/build_arm_deb_in_pp_arm_dev.sh
 ```
 
-默认会在 `pp-arm-dev` 容器里自动完成：
+默认会在当前容器内自动完成：
 - 设置 `PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig`
 - 编译主包必需目标
 - 调用 `build_deb.sh -q` 产出 `arm64 deb`
-- 把 `build/`、`temp_build_deb*` 和生成的 `.deb` 所有权回收给宿主机当前用户
+- 如果脚本以 root 运行，把 `build/`、`temp_build_deb*` 和生成的 `.deb` 所有权回收给仓库目录 owner
+
+脚本默认要求在容器内运行；如确实需要在非容器环境中复用，可显式设置 `ALLOW_HOST_RUN=1`。
 
 如果需要手动补齐容器环境，可单独执行：
 
@@ -90,9 +151,10 @@ PACKAGED_BUILD_DIR=build/arm_container_release ./build_deb.sh -q
 只在默认路径不适用时再覆盖：
 
 ```bash
-CONTAINER_NAME=pp-arm-dev PARALLEL=12 ./scripts/build_arm_deb_in_pp_arm_dev.sh
+PARALLEL=12 ./scripts/build_arm_deb_in_pp_arm_dev.sh
 VERSION_SUFFIX=+merge1 ./scripts/build_arm_deb_in_pp_arm_dev.sh
 HOST_UID=$(id -u) HOST_GID=$(id -g) ./scripts/build_arm_deb_in_pp_arm_dev.sh
+ALLOW_HOST_RUN=1 ./scripts/build_arm_deb_in_pp_arm_dev.sh
 PACKAGED_BUILD_DIR=/home/ubuntu/proj/ugripper_v2/build ./build_deb.sh -q
 PACKAGED_VENV_URL='' PACKAGED_VENV_SOURCE=/home/ubuntu/proj/ugripper_v2/.venv ./build_deb.sh -q
 VERSION_SUFFIX=+merge1 ./build_deb.sh -q
@@ -100,10 +162,10 @@ DPKG_DEB_COMPRESSOR=xz DPKG_DEB_LEVEL=3 ./build_deb.sh
 ```
 
 变量说明：
-- `CONTAINER_NAME`：ARM 构建容器名，默认 `pp-arm-dev`
 - `PARALLEL`：容器内编译并行度
 - `BASE_VERSION` / `VERSION_SUFFIX` / `VERSION`：透传给 `build_deb.sh`，决定最终 `.deb` 文件名；当前默认 `BASE_VERSION=1.2.8` 只是脚本占位值
-- `HOST_UID` / `HOST_GID`：容器出包后回收文件所有权时使用的宿主机用户 / 组
+- `HOST_UID` / `HOST_GID`：脚本以 root 运行时，出包后回收文件所有权使用的用户 / 组；默认取仓库目录 owner
+- `ALLOW_HOST_RUN`：默认不允许在非容器环境中运行；设为 `1` 后跳过容器环境检查
 - `PACKAGED_BUILD_DIR`：已有 ARM 构建产物目录
 - `PACKAGED_VENV_URL`：归档 `.venv` 下载地址；设为空则不下载
 - `PACKAGED_VENV_SOURCE`：本地 `.venv` 来源目录
