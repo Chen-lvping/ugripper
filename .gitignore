@@ -4,6 +4,8 @@
 .venv/
 # uv 缓存
 .uv/
+# 本地交叉编译 sysroot / apt 缓存
+.local-deps/
 # 构建产物
 dist/
 build/

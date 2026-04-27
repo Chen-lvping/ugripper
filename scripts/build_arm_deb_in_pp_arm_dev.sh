@@ -35,12 +35,18 @@ cd '${CONTAINER_REPO_ROOT}'
 
 export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:\${PKG_CONFIG_PATH:-}
 
+if [ ! -f '.local-deps/arm-build-env.sh' ]; then
+  ./scripts/setup_arm_build_env.sh
+fi
+source '.local-deps/arm-build-env.sh'
+
 rm -rf '${PACKAGED_BUILD_DIR}'
 cmake -S . -B '${PACKAGED_BUILD_DIR}' \
   -DCMAKE_BUILD_TYPE=Release \
   -DBUILD_TESTING=OFF \
   -DUGRIPPER_ENABLE_MCAP_BUILDER=OFF \
-  -DCMAKE_TOOLCHAIN_FILE='${TOOLCHAIN_FILE}'
+  -DCMAKE_TOOLCHAIN_FILE='${TOOLCHAIN_FILE}' \
+  \"\${UGRIPPER_ARM_CMAKE_ARGS[@]}\"
 
 cmake --build '${PACKAGED_BUILD_DIR}' \
   --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime \
