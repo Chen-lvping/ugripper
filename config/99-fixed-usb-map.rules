@@ -115,6 +115,32 @@ ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", 
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
   RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-main-roll-left-%k /opt/ugripper/config/apply_main_camera_roll_once.sh left_cam_main 11-1.4.4'"
 
+# ---- Chest main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
+# 胸部主摄插在板载 4 个 USB 口任意一个都允许，但必须是直连，不允许落在 hub 下。
+# 因此这里按直连 usb interface 路径 `X-1:1.0` 匹配 video 节点；
+# VID/PID 直接复用 usb_id 已导入的 ENV，避免 `KERNELS=="X-1:1.0"` 与
+# `ATTRS{idVendor}`/`ATTRS{idProduct}` 落在不同父节点上导致规则无法命中。
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNEL=="1-1", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNEL=="5-1", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNEL=="9-1", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNEL=="11-1", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1:1.0", \
+  ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
+  SYMLINK+="chest_cam_main"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1:1.0", \
+  ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
+  SYMLINK+="chest_cam_main"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1:1.0", \
+  ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
+  SYMLINK+="chest_cam_main"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1:1.0", \
+  ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
+  SYMLINK+="chest_cam_main"
+
 # ---- Right stereo camera ----
 # 允许 USB3 hub 内部端口 .1/.2 互换，不把厂家名写进节点命名。
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.1", ATTR{index}=="0", \

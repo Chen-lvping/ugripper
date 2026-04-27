@@ -138,6 +138,7 @@ private:
         std::vector<uint64_t> delayedStateRequestDueMs_;
         std::vector<bool> lastKnownConnectedStates_;
         std::vector<ConnectionEvent> pendingConnectionEvents_;
+        std::vector<GripperBeepState> currentDriverBeepStates_;
         size_t inputDriverIndex_ = 0;
         bool hasDedicatedRightInput_ = false;
         bool hasLedEffect_ = false;
@@ -194,6 +195,7 @@ private:
                        std::string deviceSn,
                        std::string language,
                        std::string cameraCodec,
+                       bool chestCameraEnabled,
                        std::string tactileStateDir,
                        std::string persistCalibrationFile,
                        std::string exampleCalibrationFile,
@@ -228,6 +230,7 @@ private:
         std::string deviceSnLower_;
         std::string language_;
         std::string cameraCodec_;
+        bool chestCameraEnabled_ = true;
         std::string tactileStateDir_;
         std::string persistCalibrationFile_;
         std::string exampleCalibrationFile_;
@@ -314,6 +317,7 @@ private:
     bool initialized_ = false;
     std::string deviceSn_;
     std::string language_;
+    bool chestCameraEnabled_ = true;
     std::string packageVersion_;
     std::string updaterVersion_;
     std::string pendingPreAudioFile_;

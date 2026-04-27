@@ -98,21 +98,42 @@
    - `ugripper_lang=<zh|en>`
    - `ugripper_version=<deb version>`
    - `ugripper_usb_updater_version=<deb version>`
-   - `data_format_version=2`
+   - `data_format_version=3`
    - `record_runtime=cpp`
    - `reset_recording=<true|false>`
-3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `bin/UgripperRuntime/config/fakeCamCalib.json`。持久化与 episode `calibration.json` 当前都会保留左右主摄、四路 tactile、`observation.images.left_stereo/right_stereo` 以及 `observation.imu.left_imu/right_imu`；每侧 stereo / IMU 的 payload 子集会额外挂到 `calibration_info.stereo_imu_bundles.<side>`。起录时仍会用 `udevadm` 从现场 `/dev/left_tcam_l`、`/dev/left_tcam_r`、`/dev/right_tcam_l`、`/dev/right_tcam_r` 分别回填 4 路真实 tactile USB serial；若持久化 calibration 里还只有旧的 `gripper_left_tactile` / `gripper_right_tactile`，运行时会按左右侧复制参数到四路独立项，但 episode 输出不再保留旧键。不回写持久化 calibration。
-4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 在每路首个 pre-mux packet 锁定 `PTS + 系统时间` 后统一生成。
+   - `reset_source_episode_dir=<path-or-empty>`
+   - `gripper_left.serial_number`
+   - `gripper_left.calibration_status`
+   - `gripper_right.serial_number`
+   - `gripper_right.calibration_status`
+   - `gripper_left` / `gripper_right` 子字段顺序固定为：`serial_number -> calibration_status`
+   - 禁止重新引入 `serial_number_valid`、`calibration_valid`、`connected`、`source`、错误信息等临时或重复字段
+3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `bin/UgripperRuntime/config/fakeCamCalib.json`。`calibration.json` 的输出格式当前已锁定：
+   - 这是锁定格式，顶层字段集合不得增加，已有字段的职责不得漂移；若必须调整，必须先更新本节文档，再同步修改生成代码、持久化刷新逻辑与 episode 校验口径。
+   - 顶层只保留 `metadata/calibration_info/observation`；主摄、stereo、tactile、IMU 按字段白名单输出，fallback 只补缺不覆盖合法数据。
+   - `metadata.format_version=3.0`
+   - `metadata` 只保留 `format_version/generation_date/description/calibration_status`
+   - `calibration_info` 只保留 `calibration_date/calibration_status/notes`
+   - tactile 只保留 4 路 `left_tcam_l/left_tcam_r/right_tcam_l/right_tcam_r`
+   - 可选胸部主摄启用时保留 `observation.images.chest_cam_main`，关闭时不写该项。
+   - 不再写入 gripper 连接态、SN、valid/source 等重复字段
+   - 左右主摄、左右 stereo、左右 imu 的标定参数都由 gripper payload 自动填充；即使无 SN 或未标定，也允许继续录制
+4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 统一生成，且当前只保留旧版 offset 字段：
+   - 这是锁定格式，顶层只允许保留下面这些字段；禁止再回填 `stereo_session`、`paired_master_sn` 或其他临时调试字段。
+   - `boot_time_offset`
+   - `boot_time_offset_us`
+   - 8 路基础 `<camera>_record_time_offset_us`，启用 `chest_cam_main` 时额外包含该路 offset。
+   - 不再输出 `stereo_session`
 5. 若已准备 pre audio，则移动到本次 episode 的 `audio_pre.wav`。
 6. 并行启动：
-   - `camera_recorder --codec <codec> --output-dir <episode> --only left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
+   - `camera_recorder --codec <codec> --output-dir <episode> --only left_cam_main,right_cam_main[,chest_cam_main],left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
    - `sensor_recorder <episode_dir>`
 7. 同时向 stereo warmup daemon 写入本次 session 控制文件；双目不重启采集管线，只把本次 session 窗口内的帧纳入当前 episode，由 session writer 抽帧并编码落盘。
 8. 切换到 `RECORDING` 状态并播放开始提示音。
 
 ### 6.2 相机链路
 - 配置入口：`config/camera_recorder.yaml`。
-- 当前 YAML 定义 8 路相机：左右主摄、左右 stereo、4 路触觉。
+- 当前 YAML 定义 9 路相机：左右主摄、可选胸部主摄、左右 stereo、4 路触觉。
 - `udev` 口位策略当前口径：
   - stereo 与 CH9344 串口桥允许同侧 hub 的内部端口 `.1/.2` 互换；
   - tactile `l/r` 仍按左右侧固定 kernel 路径命名，不做跨侧互换；
@@ -178,6 +199,7 @@
 - 视频：
   - `left_cam_main.mkv`
   - `right_cam_main.mkv`
+  - `chest_cam_main.mkv`（启用胸部主摄时）
   - `left_stereo.mkv`
   - `right_stereo.mkv`
   - `left_tcam_l.mkv`
@@ -276,6 +298,7 @@
 | `DEVICE_SN` | 决定数据路径与标定导入匹配目录 | 建议视为必填 |
 | `UGRIPPER_LANG` | 提示音语言 | 由 `config.txt` 导入 |
 | `CAMERA_CODEC` | `camera_recorder` 启动参数 | 仅支持 `h264` / `h265` |
+| `ENABLE_CHEST_CAM_MAIN` | `record_runtime` 读取 | 默认启用胸部主摄；显式写成 `0/false/no/off/disable/disabled` 时关闭 |
 
 说明：当前录制与 U 盘导入流程都不再使用角色环境变量；episode `metadata.json` 也不再写角色字段。
 
@@ -283,7 +306,7 @@
 | 项目 | 当前默认口径 |
 | --- | --- |
 | 部署形态 | 单机双手、本地录制 |
-| 录制相机集合 | 左右主摄 + 左右 stereo + 4 路触觉 |
+| 录制相机集合 | 左右主摄 + 左右 stereo + 4 路触觉；默认额外启用胸部主摄，可通过 `ENABLE_CHEST_CAM_MAIN` 关闭 |
 | 网络 | 业务可在无对端设备时启动 |
 | 静态 IP | 主包不托管，沿用系统现有有线配置 |
 
@@ -377,6 +400,7 @@ tail -n 200 /mnt/data_disk/logs/umi_sys_<device_sn_lower>_$(date +%Y%m%d).log
 优先检查以下 symlink / 设备是否存在且方向正确：
 - `/dev/left_cam_main`
 - `/dev/right_cam_main`
+- `/dev/chest_cam_main`（启用胸部主摄时）
 - `/dev/left_tcam_l`
 - `/dev/left_tcam_r`
 - `/dev/right_tcam_l`
@@ -391,7 +415,7 @@ tail -n 200 /mnt/data_disk/logs/umi_sys_<device_sn_lower>_$(date +%Y%m%d).log
 ### 10.6 快速定位建议
 - 不能启动：先看 `ugripper.service` 日志和 `record_runtime` 是否成功拉起。
 - 能录不能停：优先检查 HMI 按键事件、状态机和 `sensor_recorder` / `camera_recorder` 退出路径。
-- 少文件或校验失败：先核对八路视频、双 MCAP、`metadata.json`、`calibration.json` 是否完整；若已进入 `ERROR_1`，优先查看 episode 下的 `validation_error.log`。
+- 少文件或校验失败：先核对默认八路视频、胸部主摄启用时的第九路视频、双 MCAP、`metadata.json`、`calibration.json` 是否完整；若已进入 `ERROR_1`，优先查看 episode 下的 `validation_error.log`。
 - warmup 一起双目就掉线：先查是否同时存在多份 `camera_recorder --stereo-daemon`。重复 warmup daemon 抢占同一批双目视频设备时，可能把双目打进 `recovering`，严重时会伴随 USB 侧重枚举；先清掉多余 daemon，再观察 `/tmp/umi_stereo_camera_status.json` 与 `journalctl -u ugripper.service -n 200`。
 - tactile serial 不对：先分别用 `udevadm info --attribute-walk --name=/dev/left_tcam_l`、`/dev/left_tcam_r`、`/dev/right_tcam_l`、`/dev/right_tcam_r` 向上核对 USB `ATTRS{serial}`，再对比 episode `calibration.json` 中 `observation.images.left_tcam_l.serial`、`left_tcam_r.serial`、`right_tcam_l.serial`、`right_tcam_r.serial`；当前口径只修正 episode，不回写 `/etc/ugripper/config/calibration/calibration.json`，且不再输出 `gripper_left_tactile` / `gripper_right_tactile` 两个旧键。
 - 进入错误灯效但录制进程还活着：优先检查 `/mnt/data_disk` 是否仍可写、关键 `/dev/*` 设备节点是否还在，以及 HMI 是否持续响应。
@@ -432,7 +456,7 @@ PY
 - `py_script/hmi_sn_batch_writer.py` 默认会在启动时把自身和本次使用的 `.xlsx` 同步复制到 `/mnt/data_disk/hmi_sn_writer/`；标定源目录可通过 `--calib-root` 指向包含 `.bin`、summary `.md` 或 `rgb_video_ros-camchain.yaml + output-results-imucam.txt` 的目录。若未找到目标 SN 对应标定文件，脚本会只写 SN，并在控制台用黄色提示“未写标定”。
 
 ## 11. 当前使用注意点
-- `config/camera_recorder.yaml` 当前 8 路配置全部默认启用；若现场需要裁剪录制集合，应明确同步调整 `record_runtime` 的 `--only` 参数与 episode 校验清单。
+- `config/camera_recorder.yaml` 当前包含 9 路配置；胸部主摄是否参与录制、校验和 health check 由 `ENABLE_CHEST_CAM_MAIN` 决定。若现场还要裁剪录制集合，应同步调整 `record_runtime` 的 `--only` 参数与 episode 校验清单。
 - 仓库内仍有部分后处理脚本依赖旧输出命名或旧假设，不能默认视为当前主链路的一部分。
 - `test/scripts/` 下的脚本属于仓库侧辅助工具，默认不随主包安装；若现场需要长期保留，应明确同步部署方式与使用说明。
 - `info.json` 会生成，但当前不属于最小强校验集合。

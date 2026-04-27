@@ -451,6 +451,7 @@ TARGET_KEYS = {
     "left": "observation.images.left_cam_main",
     "right": "observation.images.right_cam_main",
 }
+CHEST_TARGET_KEY = "observation.images.chest_cam_main"
 
 STEREO_IMAGE_KEYS = {
     "left": "observation.images.left_stereo",
@@ -476,6 +477,18 @@ LEGACY_KEYS = {
         "observation.images.{{CAM_MAIN}}",
     ],
 }
+CHEST_LEGACY_KEYS = [
+    "observation.images.chest_cam_main",
+]
+CHEST_TEMPLATE_KEYS = [
+    "observation.images.left_cam_main",
+    "observation.images.right_cam_main",
+    "observation.images.cam_left",
+    "observation.images.left_main",
+    "observation.images.cam_right",
+    "observation.images.right_main",
+    "observation.images.{{CAM_MAIN}}",
+]
 
 
 def load_text(path):
@@ -563,12 +576,60 @@ def parse_prefixed_side_args(arguments, prefix):
     return parsed
 
 
+def get_json_path(data, path):
+    if path in data:
+        return data.get(path)
+    cursor = data
+    for token in path.split("."):
+        if not isinstance(cursor, dict) or token not in cursor:
+            return None
+        cursor = cursor[token]
+    return cursor
+
+
+def set_json_path(data, path, value):
+    cursor = data
+    tokens = path.split(".")
+    for token in tokens[:-1]:
+        child = cursor.get(token)
+        if not isinstance(child, dict):
+            child = {}
+            cursor[token] = child
+        cursor = child
+    cursor[tokens[-1]] = value
+
+
+def pop_json_path(data, path):
+    removed = None
+    if path in data:
+        removed = data.pop(path, None)
+
+    cursor = data
+    parents = []
+    tokens = path.split(".")
+    for token in tokens[:-1]:
+        if not isinstance(cursor, dict) or token not in cursor or not isinstance(cursor[token], dict):
+            return removed
+        parents.append((cursor, token))
+        cursor = cursor[token]
+
+    if isinstance(cursor, dict) and tokens[-1] in cursor:
+        nested_removed = cursor.pop(tokens[-1], None)
+        if removed is None:
+            removed = nested_removed
+        while parents and isinstance(cursor, dict) and not cursor:
+            parent, token = parents.pop()
+            parent.pop(token, None)
+            cursor = parent
+    return removed
+
+
 def pop_existing_image_entry(data, side):
     for key in LEGACY_KEYS[side]:
-        value = data.get(key)
+        value = get_json_path(data, key)
         if isinstance(value, dict):
             if key != TARGET_KEYS[side]:
-                data.pop(key, None)
+                pop_json_path(data, key)
             return value
     return None
 
@@ -745,27 +806,34 @@ def ensure_stereo_image_entry(side, stereo_payload):
         "shape": [400, 1280, 3],
         "names": ["height", "width", "channels"],
         "info": None,
-        "intrinsics": {
-            "cam0_640x400": {
-                "fx": fx0,
-                "fy": fy0,
-                "ppx": cx0,
-                "ppy": cy0,
+        "cam0": {
+            "camera_model_enum": cam0["camera_model_enum"],
+            "intrinsics": {
+                "640x400": {
+                    "fx": fx0,
+                    "fy": fy0,
+                    "ppx": cx0,
+                    "ppy": cy0,
+                }
             },
-            "cam1_640x400": {
-                "fx": fx1,
-                "fy": fy1,
-                "ppx": cx1,
-                "ppy": cy1,
-            },
+            "distortion_coeffs": cam0["distortion_coefficients"],
         },
-        "camera_model": cam0["camera_model"],
-        "distortion_model": cam0["distortion_model"],
-        "distortion_coeffs": cam0["distortion_coefficients"],
+        "cam1": {
+            "camera_model_enum": cam1["camera_model_enum"],
+            "intrinsics": {
+                "640x400": {
+                    "fx": fx1,
+                    "fy": fy1,
+                    "ppx": cx1,
+                    "ppy": cy1,
+                }
+            },
+            "distortion_coeffs": cam1["distortion_coefficients"],
+        },
+        "extrinsics": stereo_payload["extrinsics"],
+        "residuals": stereo_payload["residuals"],
         "dtype": "video",
         "fps": 60,
-        "side": side,
-        "stereo": stereo_payload,
     }
 
 
@@ -775,11 +843,58 @@ def ensure_imu_entry(stereo_payload):
         "dtype": "imu",
         "model": imu["model"],
         "update_rate_hz": imu["update_rate_hz"],
-        "acc_noise_density_discrete": imu["accelerometer"]["noise_density_discrete"],
-        "acc_random_walk": imu["accelerometer"]["random_walk"],
-        "gyro_noise_density_discrete": imu["gyroscope"]["noise_density_discrete"],
-        "gyro_random_walk": imu["gyroscope"]["random_walk"],
+        "accelerometer": {
+            "noise_density_discrete": imu["accelerometer"]["noise_density_discrete"],
+            "random_walk": imu["accelerometer"]["random_walk"],
+        },
+        "gyroscope": {
+            "noise_density_discrete": imu["gyroscope"]["noise_density_discrete"],
+            "random_walk": imu["gyroscope"]["random_walk"],
+        },
     }
+
+
+def ensure_locked_calibration_root(existing):
+    data = existing if isinstance(existing, dict) else {}
+    locked = {
+        "metadata": data.get("metadata") if isinstance(data.get("metadata"), dict) else {},
+        "calibration_info": data.get("calibration_info") if isinstance(data.get("calibration_info"), dict) else {},
+        "observation": data.get("observation") if isinstance(data.get("observation"), dict) else {},
+    }
+    locked["observation"]["images"] = (
+        locked["observation"].get("images") if isinstance(locked["observation"].get("images"), dict) else {}
+    )
+    locked["observation"]["imu"] = (
+        locked["observation"].get("imu") if isinstance(locked["observation"].get("imu"), dict) else {}
+    )
+    return locked
+
+
+def pop_existing_chest_image_entry(data):
+    for key in CHEST_LEGACY_KEYS:
+        value = get_json_path(data, key)
+        if isinstance(value, dict):
+            if key != CHEST_TARGET_KEY:
+                pop_json_path(data, key)
+            return value
+    return None
+
+
+def reserve_chest_camera_entry(data):
+    existing_entry = pop_existing_chest_image_entry(data)
+    if isinstance(existing_entry, dict):
+        set_json_path(data, CHEST_TARGET_KEY, existing_entry)
+        return
+
+    template_entry = None
+    for key in CHEST_TEMPLATE_KEYS:
+        value = get_json_path(data, key)
+        if isinstance(value, dict):
+            template_entry = json.loads(json.dumps(value))
+            break
+
+    if isinstance(template_entry, dict):
+        set_json_path(data, CHEST_TARGET_KEY, template_entry)
 
 
 src_json_path = pathlib.Path(base_json)
@@ -787,6 +902,7 @@ if src_json_path.exists():
     data = json.loads(src_json_path.read_text(encoding="utf-8"))
 else:
     data = json.loads(pathlib.Path(fallback_json).read_text(encoding="utf-8"))
+data = ensure_locked_calibration_root(data)
 
 side_to_file = parse_prefixed_side_args(side_args, "camchain:")
 side_to_imucam = parse_prefixed_side_args(side_args, "imucam:")
@@ -799,20 +915,6 @@ if set(side_to_file.keys()) != set(side_to_imucam.keys()):
         f"camchain={sorted(side_to_file.keys())} imucam={sorted(side_to_imucam.keys())}"
     )
 
-main_cameras = {}
-stereo_imu_bundles = {}
-existing_calibration_info = data.get("calibration_info")
-if not isinstance(existing_calibration_info, dict):
-    existing_calibration_info = {}
-
-existing_main_cameras = existing_calibration_info.get("main_cameras")
-if isinstance(existing_main_cameras, dict):
-    main_cameras.update(existing_main_cameras)
-
-existing_stereo_imu_bundles = existing_calibration_info.get("stereo_imu_bundles")
-if isinstance(existing_stereo_imu_bundles, dict):
-    stereo_imu_bundles.update(existing_stereo_imu_bundles)
-
 for side, camchain_file in sorted(side_to_file.items()):
     camchain = parse_camchain(camchain_file)
     stereo_payload = parse_imucam(side_to_imucam[side])
@@ -820,65 +922,60 @@ for side, camchain_file in sorted(side_to_file.items()):
     fx, fy, cx, cy = camchain["intrinsics"]
     target_key = TARGET_KEYS[side]
     existing_entry = pop_existing_image_entry(data, side)
-    data[target_key] = ensure_image_entry(
-        existing_entry,
-        width,
-        height,
-        fx,
-        fy,
-        cx,
-        cy,
-        camchain["camera_model"],
-        camchain["distortion_model"],
-        camchain["distortion_coeffs"],
+    set_json_path(
+        data,
+        target_key,
+        ensure_image_entry(
+            existing_entry,
+            width,
+            height,
+            fx,
+            fy,
+            cx,
+            cy,
+            camchain["camera_model"],
+            camchain["distortion_model"],
+            camchain["distortion_coeffs"],
+        ),
     )
-    data[target_key].pop("rostopic", None)
+    target_entry = get_json_path(data, target_key)
+    if not isinstance(target_entry, dict):
+        raise ValueError(f"failed to materialize target calibration entry: {target_key}")
+    target_entry.pop("rostopic", None)
     if camchain.get("rostopic"):
-        data[target_key]["rostopic"] = camchain["rostopic"]
+        target_entry["rostopic"] = camchain["rostopic"]
 
-    main_cameras[side] = {
-        "source": pathlib.Path(camchain_file).name,
-        "camera_model": camchain["camera_model"],
-        "distortion_model": camchain["distortion_model"],
-        "resolution": camchain["resolution"],
-    }
+    set_json_path(data, STEREO_IMAGE_KEYS[side], ensure_stereo_image_entry(side, stereo_payload))
+    set_json_path(data, IMU_KEYS[side], ensure_imu_entry(stereo_payload))
 
-    data[STEREO_IMAGE_KEYS[side]] = ensure_stereo_image_entry(side, stereo_payload)
-    data[IMU_KEYS[side]] = ensure_imu_entry(stereo_payload)
-    stereo_imu_bundles[side] = {
-        "source": pathlib.Path(side_to_imucam[side]).name,
-        "calibration_data_format_version": stereo_payload["calibration_data_format_version"],
-        "cam0": stereo_payload["cam0"],
-        "cam1": stereo_payload["cam1"],
-        "extrinsics": stereo_payload["extrinsics"],
-        "imu0": stereo_payload["imu0"],
-        "residuals": stereo_payload["residuals"],
-    }
+legacy_cleanup_paths = [
+    "observation.images.{{CAM_MAIN}}",
+    "observation.images.cam_left",
+    "observation.images.left_main",
+    "observation.images.cam_right",
+    "observation.images.right_main",
+    "observation.images.fays_cam0",
+    "observation.images.fays_cam1",
+    "observation.imu.fays_imu0",
+]
+for key in legacy_cleanup_paths:
+    pop_json_path(data, key)
 
-data.pop("observation.images.{{CAM_MAIN}}", None)
-data.pop("observation.images.fays_cam0", None)
-data.pop("observation.images.fays_cam1", None)
-data.pop("observation.imu.fays_imu0", None)
+reserve_chest_camera_entry(data)
 
-metadata = data.get("metadata", {}) if isinstance(data.get("metadata"), dict) else {}
-metadata["format_version"] = metadata.get("format_version", "1.0")
+metadata = {}
+metadata["format_version"] = "3.0"
 metadata["generation_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-metadata["description"] = "Imported calibration parameters"
+metadata["description"] = "Camera calibration parameters"
 metadata["calibration_status"] = "calibrated"
 data["metadata"] = metadata
 
-calib_info = data.get("calibration_info", {}) if isinstance(data.get("calibration_info"), dict) else {}
+calib_info = {}
 calib_info["calibration_date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 calib_info["calibration_status"] = "calibrated"
-calib_info["device_sn"] = device_sn
-calib_info.pop("main_camera", None)
-calib_info["main_cameras"] = main_cameras
-calib_info.pop("fays_imu_bundle", None)
-calib_info["stereo_imu_bundles"] = stereo_imu_bundles
-calib_info["imported_sides"] = sorted(side_to_file.keys())
 calib_info["notes"] = (
-    "Auto-imported from USB by device SN after gripper SN matching. "
-    "Host calibration.json now keeps per-side main camera, stereo, and board IMU payload fields aligned with the gripper calibration payload."
+    "Imported from USB by device SN after gripper SN matching. "
+    "Only the locked calibration.json fields are updated; main/stereo/imu entries stay under observation."
 )
 data["calibration_info"] = calib_info
 

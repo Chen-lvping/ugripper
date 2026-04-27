@@ -19,7 +19,7 @@ MCAP_FALLBACK_ROOTS = [
     PROJECT_ROOT / "build" / "_deps" / "mcap-src" / "python" / "mcap",
 ]
 
-VIDEO_FILES = [
+BASE_VIDEO_FILES = [
     ("left_cam_main", "left_cam_main.mkv", "left"),
     ("right_cam_main", "right_cam_main.mkv", "right"),
     ("left_stereo", "left_stereo.mkv", "left"),
@@ -29,7 +29,8 @@ VIDEO_FILES = [
     ("right_tcam_l", "right_tcam_l.mkv", "right"),
     ("right_tcam_r", "right_tcam_r.mkv", "right"),
 ]
-MAIN_CAMERA_NAMES = {"left_cam_main", "right_cam_main"}
+CHEST_VIDEO_FILE = ("chest_cam_main", "chest_cam_main.mkv", "chest")
+MAIN_CAMERA_NAMES = {"left_cam_main", "right_cam_main", "chest_cam_main"}
 STEREO_CAMERA_NAMES = {"left_stereo", "right_stereo"}
 TACTILE_CAMERA_NAMES = {"left_tcam_l", "left_tcam_r", "right_tcam_l", "right_tcam_r"}
 SENSOR_FILES = [
@@ -64,19 +65,44 @@ EXPECTED_METADATA_KEYS = {
 EXPECTED_INFO_KEYS = {
     "boot_time_offset",
     "boot_time_offset_us",
-    *(f"{video_name}_record_time_offset_us" for video_name, _, _ in VIDEO_FILES),
+    *(f"{video_name}_record_time_offset_us" for video_name, _, _ in BASE_VIDEO_FILES),
 }
 OPTIONAL_INFO_KEYS = {"stereo_session"}
 EXPECTED_CALIBRATION_ROOT_KEYS = {"calibration_info", "metadata", "observation"}
 EXPECTED_CALIBRATION_OBSERVATION_KEYS = {"images", "imu"}
 REQUIRED_CALIBRATION_ROOT_KEYS = ["calibration_info", "metadata", "observation"]
-REQUIRED_CALIBRATION_IMAGE_KEYS = [video_name for video_name, _, _ in VIDEO_FILES]
+REQUIRED_CALIBRATION_IMAGE_KEYS = [video_name for video_name, _, _ in BASE_VIDEO_FILES]
 REQUIRED_CALIBRATION_IMU_KEYS = ["left_imu", "right_imu"]
+MAIN_CAMERA_CALIBRATION_KEYS = {
+    "shape",
+    "names",
+    "info",
+    "intrinsics",
+    "camera_model",
+    "distortion_model",
+    "distortion_coeffs",
+    "dtype",
+    "fps",
+}
+STEREO_CALIBRATION_KEYS = {
+    "shape",
+    "names",
+    "info",
+    "cam0",
+    "cam1",
+    "extrinsics",
+    "residuals",
+    "dtype",
+    "fps",
+}
+STEREO_CAMERA_NODE_KEYS = {"camera_model_enum", "intrinsics", "distortion_coeffs"}
+TACTILE_CALIBRATION_KEYS = {"shape", "names", "info", "dtype", "serial"}
+IMU_CALIBRATION_KEYS = {"dtype", "model", "update_rate_hz", "accelerometer", "gyroscope"}
 REQUIRED_FILES = [
     "metadata.json",
     "calibration.json",
     "info.json",
-    *(file_name for _, file_name, _ in VIDEO_FILES),
+    *(file_name for _, file_name, _ in BASE_VIDEO_FILES),
     *(file_name for _, file_name, _ in SENSOR_FILES),
 ]
 
@@ -337,6 +363,7 @@ class EpisodeValidator:
         self.video_stats: dict[str, VideoStats] = {}
         self.sensor_stats: dict[str, SensorTopicStats] = {}
         self.artifacts: dict[str, Any] = {}
+        self.active_video_files: list[tuple[str, str, str]] = list(BASE_VIDEO_FILES)
 
     def add_finding(self, severity: str, code: str, summary: str, **details: Any) -> None:
         self.findings.append(Finding(severity=severity, code=code, summary=summary, details=details))
@@ -351,6 +378,8 @@ class EpisodeValidator:
         self.load_metadata()
         self.load_info()
         self.load_calibration()
+        self.resolve_active_video_files()
+        self.check_dynamic_required_files()
         self.validate_metadata_fields()
         self.validate_info_fields()
         self.validate_calibration_structure()
@@ -409,6 +438,31 @@ class EpisodeValidator:
                 continue
             if path.stat().st_size <= 0:
                 self.add_finding("FAIL", "empty_file", f"关键文件为空: {name}", path=str(path))
+
+    def chest_camera_enabled(self) -> bool:
+        chest_file = self.episode_dir / CHEST_VIDEO_FILE[1]
+        chest_offset_key = f"{CHEST_VIDEO_FILE[0]}_record_time_offset_us"
+        images = ((self.calibration.get("observation") or {}).get("images") or {}) if isinstance(self.calibration, dict) else {}
+        return (
+            chest_file.exists()
+            or chest_offset_key in self.info
+            or CHEST_VIDEO_FILE[0] in images
+        )
+
+    def resolve_active_video_files(self) -> None:
+        self.active_video_files = list(BASE_VIDEO_FILES)
+        if self.chest_camera_enabled():
+            self.active_video_files.insert(2, CHEST_VIDEO_FILE)
+
+    def check_dynamic_required_files(self) -> None:
+        if not self.chest_camera_enabled():
+            return
+        file_name = CHEST_VIDEO_FILE[1]
+        path = self.episode_dir / file_name
+        if not path.exists():
+            self.add_finding("FAIL", "missing_file", f"缺少关键文件: {file_name}", path=str(path))
+        elif path.stat().st_size <= 0:
+            self.add_finding("FAIL", "empty_file", f"关键文件为空: {file_name}", path=str(path))
 
     def check_optional_artifacts(self) -> None:
         validation_error_path = self.episode_dir / "validation_error.log"
@@ -558,8 +612,11 @@ class EpisodeValidator:
 
     def validate_info_fields(self) -> None:
         info_keys = set(self.info.keys())
-        missing_keys = sorted(EXPECTED_INFO_KEYS - info_keys)
-        unexpected_keys = sorted(info_keys - EXPECTED_INFO_KEYS - OPTIONAL_INFO_KEYS)
+        expected_info_keys = set(EXPECTED_INFO_KEYS)
+        if self.chest_camera_enabled():
+            expected_info_keys.add("chest_cam_main_record_time_offset_us")
+        missing_keys = sorted(expected_info_keys - info_keys)
+        unexpected_keys = sorted(info_keys - expected_info_keys - OPTIONAL_INFO_KEYS)
         if missing_keys:
             self.add_finding(
                 "FAIL",
@@ -590,7 +647,7 @@ class EpisodeValidator:
                     boot_time_offset_us=boot_offset_us,
                 )
 
-        for video_name, _, _ in VIDEO_FILES:
+        for video_name, _, _ in self.active_video_files:
             field_name = f"{video_name}_record_time_offset_us"
             value = safe_int(self.info.get(field_name))
             if value is None or value <= 0:
@@ -648,7 +705,10 @@ class EpisodeValidator:
         if not isinstance(images, dict):
             self.add_finding("FAIL", "calibration_field", "calibration.json.observation.images 缺失或非法")
         else:
-            unexpected_image_keys = sorted(set(images.keys()) - set(REQUIRED_CALIBRATION_IMAGE_KEYS))
+            expected_image_keys = list(REQUIRED_CALIBRATION_IMAGE_KEYS)
+            if self.chest_camera_enabled():
+                expected_image_keys.append(CHEST_VIDEO_FILE[0])
+            unexpected_image_keys = sorted(set(images.keys()) - set(expected_image_keys))
             if unexpected_image_keys:
                 self.add_finding(
                     "FAIL",
@@ -656,9 +716,10 @@ class EpisodeValidator:
                     "calibration.json.observation.images 出现未登记字段，疑似 schema 被改动",
                     unexpected_keys=unexpected_image_keys,
                 )
-            for key in REQUIRED_CALIBRATION_IMAGE_KEYS:
+            for key in expected_image_keys:
                 if key not in images:
                     self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images 缺少 {key}")
+            self.validate_calibration_image_entries(images, expected_image_keys)
         imu = observation.get("imu")
         if not isinstance(imu, dict):
             self.add_finding("FAIL", "calibration_field", "calibration.json.observation.imu 缺失或非法")
@@ -674,6 +735,60 @@ class EpisodeValidator:
             for key in REQUIRED_CALIBRATION_IMU_KEYS:
                 if key not in imu:
                     self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.imu 缺少 {key}")
+            self.validate_calibration_imu_entries(imu)
+
+    def validate_entry_allowed_keys(self, entry: Any, expected_keys: set[str], path: str) -> None:
+        if not isinstance(entry, dict):
+            self.add_finding("FAIL", "calibration_field", f"{path} 缺失或非法")
+            return
+        unexpected_keys = sorted(set(entry.keys()) - expected_keys)
+        if unexpected_keys:
+            self.add_finding(
+                "FAIL",
+                "calibration_schema_unexpected_keys",
+                f"{path} 出现未登记字段，疑似 schema 被改动",
+                unexpected_keys=unexpected_keys,
+            )
+
+    def validate_calibration_image_entries(self, images: dict[str, Any], expected_image_keys: list[str]) -> None:
+        for key in expected_image_keys:
+            entry = images.get(key)
+            if key in MAIN_CAMERA_NAMES:
+                self.validate_entry_allowed_keys(entry, MAIN_CAMERA_CALIBRATION_KEYS, f"calibration.json.observation.images.{key}")
+            elif key in STEREO_CAMERA_NAMES:
+                self.validate_entry_allowed_keys(entry, STEREO_CALIBRATION_KEYS, f"calibration.json.observation.images.{key}")
+                if isinstance(entry, dict):
+                    for camera_node in ("cam0", "cam1"):
+                        self.validate_entry_allowed_keys(
+                            entry.get(camera_node),
+                            STEREO_CAMERA_NODE_KEYS,
+                            f"calibration.json.observation.images.{key}.{camera_node}",
+                        )
+            elif key in TACTILE_CAMERA_NAMES:
+                self.validate_entry_allowed_keys(entry, TACTILE_CALIBRATION_KEYS, f"calibration.json.observation.images.{key}")
+                if isinstance(entry, dict):
+                    serial = entry.get("serial")
+                    if not isinstance(serial, str) or not serial.strip():
+                        self.add_finding(
+                            "FAIL",
+                            "calibration_field",
+                            f"calibration.json.observation.images.{key}.serial 缺失或非法",
+                        )
+                    elif serial.strip().startswith("{{") and serial.strip().endswith("}}"):
+                        self.add_finding(
+                            "FAIL",
+                            "calibration_field",
+                            f"calibration.json.observation.images.{key}.serial 仍是占位符，未写入真实设备 serial",
+                            serial=serial,
+                        )
+
+    def validate_calibration_imu_entries(self, imu: dict[str, Any]) -> None:
+        for key in REQUIRED_CALIBRATION_IMU_KEYS:
+            self.validate_entry_allowed_keys(
+                imu.get(key),
+                IMU_CALIBRATION_KEYS,
+                f"calibration.json.observation.imu.{key}",
+            )
 
     def ffprobe_stream_info(self, path: Path) -> tuple[str | None, float | None, float | None]:
         result = run_command(
@@ -721,7 +836,7 @@ class EpisodeValidator:
         return (json.loads(result.stdout or "{}").get("packets") or [])
 
     def scan_videos(self) -> None:
-        for video_name, file_name, side in VIDEO_FILES:
+        for video_name, file_name, side in self.active_video_files:
             path = self.episode_dir / file_name
             stats = VideoStats(name=video_name, side=side, path=str(path))
             self.video_stats[video_name] = stats

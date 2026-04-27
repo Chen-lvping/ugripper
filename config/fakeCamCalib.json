@@ -7,7 +7,7 @@
     "metadata": {
         "calibration_status": "uncalibrated",
         "description": "Camera calibration parameters",
-        "format_version": "2.0",
+        "format_version": "3.0",
         "generation_date": "2025-01-09"
     },
     "observation": {
@@ -44,7 +44,6 @@
                 ]
             },
             "left_stereo": {
-                "camera_model": "pinhole",
                 "cam0": {
                     "camera_model_enum": 0,
                     "distortion_coeffs": [
@@ -79,7 +78,6 @@
                         }
                     }
                 },
-                "distortion_model": "equidistant",
                 "dtype": "video",
                 "extrinsics": {
                     "T_ic_cam0_to_imu0": [
@@ -195,7 +193,6 @@
                 ]
             },
             "right_stereo": {
-                "camera_model": "pinhole",
                 "cam0": {
                     "camera_model_enum": 0,
                     "distortion_coeffs": [
@@ -230,7 +227,6 @@
                         }
                     }
                 },
-                "distortion_model": "equidistant",
                 "dtype": "video",
                 "extrinsics": {
                     "T_ic_cam0_to_imu0": [

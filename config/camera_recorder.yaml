@@ -17,6 +17,14 @@ cameras:
     fps: 60
     output_files: [right_cam_main.mkv]
 
+  - name: chest_cam_main
+    device: /dev/chest_cam_main
+    mode: direct-copy-h265
+    width: 1920
+    height: 1080
+    fps: 60
+    output_files: [chest_cam_main.mkv]
+
   - name: left_stereo
     device: /dev/left_stereo
     mode: stereo-hybrid-decode-encode

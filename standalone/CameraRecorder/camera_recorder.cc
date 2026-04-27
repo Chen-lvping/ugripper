@@ -763,7 +763,9 @@ bool EnsureUvcRollAbsolute(const CameraConfig& config) {
 #endif
 
 bool IsMainCamera(const CameraConfig& config) {
-    return config.name == "left_cam_main" || config.name == "right_cam_main";
+    return config.name == "left_cam_main" ||
+           config.name == "right_cam_main" ||
+           config.name == "chest_cam_main";
 }
 
 int64_t CurrentSystemTimeUs() {

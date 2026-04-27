@@ -40,8 +40,8 @@ namespace fs = std::filesystem;
 using json = nlohmann::json;
 
 namespace {
-constexpr const char *kSessionCameraStreamsCsv = "left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r";
 constexpr const char *kStereoCameraStreamsCsv = "left_stereo,right_stereo";
+constexpr const char *kChestCameraEnvKey = "ENABLE_CHEST_CAM_MAIN";
 constexpr uint64_t kActionDebounceMs = 250;
 constexpr uint64_t kLongPressThresholdMs = 800;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
@@ -79,9 +79,10 @@ struct EpisodeVideoArtifact
     const char *fileName;
 };
 
-constexpr std::array<EpisodeVideoArtifact, 8> kEpisodeVideoArtifacts = {{
+constexpr std::array<EpisodeVideoArtifact, 9> kAllEpisodeVideoArtifacts = {{
     {"left_cam_main", "left_cam_main.mkv"},
     {"right_cam_main", "right_cam_main.mkv"},
+    {"chest_cam_main", "chest_cam_main.mkv"},
     {"left_stereo", "left_stereo.mkv"},
     {"right_stereo", "right_stereo.mkv"},
     {"left_tcam_l", "left_tcam_l.mkv"},
@@ -90,9 +91,10 @@ constexpr std::array<EpisodeVideoArtifact, 8> kEpisodeVideoArtifacts = {{
     {"right_tcam_r", "right_tcam_r.mkv"},
 }};
 
-constexpr std::array<const char *, 12> kCriticalDevicePaths = {{
+constexpr std::array<const char *, 13> kAllCriticalDevicePaths = {{
     "/dev/right_cam_main",
     "/dev/left_cam_main",
+    "/dev/chest_cam_main",
     "/dev/right_stereo",
     "/dev/left_stereo",
     "/dev/right_tcam_l",
@@ -250,6 +252,77 @@ std::string formatFixed(double value, int precision)
 {
     std::ostringstream stream;
     stream << std::fixed << std::setprecision(precision) << value;
+    return stream.str();
+}
+
+bool isFalseLikeValue(const std::string &value)
+{
+    std::string lowered = value;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return lowered == "0" || lowered == "false" || lowered == "no" ||
+           lowered == "off" || lowered == "disable" || lowered == "disabled";
+}
+
+std::vector<EpisodeVideoArtifact> activeEpisodeVideoArtifacts(bool chestCameraEnabled)
+{
+    std::vector<EpisodeVideoArtifact> artifacts;
+    artifacts.reserve(kAllEpisodeVideoArtifacts.size());
+    for (const auto &artifact : kAllEpisodeVideoArtifacts)
+    {
+        if (!chestCameraEnabled && std::strcmp(artifact.cameraName, "chest_cam_main") == 0)
+        {
+            continue;
+        }
+        artifacts.push_back(artifact);
+    }
+    return artifacts;
+}
+
+std::vector<const char *> activeCriticalDevicePaths(bool chestCameraEnabled)
+{
+    std::vector<const char *> paths;
+    paths.reserve(kAllCriticalDevicePaths.size());
+    for (const char *path : kAllCriticalDevicePaths)
+    {
+        if (!chestCameraEnabled && std::strcmp(path, "/dev/chest_cam_main") == 0)
+        {
+            continue;
+        }
+        paths.push_back(path);
+    }
+    return paths;
+}
+
+std::vector<std::string> sessionCameraStreams(bool chestCameraEnabled)
+{
+    std::vector<std::string> streams = {
+        "left_cam_main",
+        "right_cam_main",
+        "left_tcam_l",
+        "left_tcam_r",
+        "right_tcam_l",
+        "right_tcam_r",
+    };
+    if (chestCameraEnabled)
+    {
+        streams.insert(streams.begin() + 2, "chest_cam_main");
+    }
+    return streams;
+}
+
+std::string joinCsv(const std::vector<std::string> &items)
+{
+    std::ostringstream stream;
+    for (size_t index = 0; index < items.size(); ++index)
+    {
+        if (index > 0)
+        {
+            stream << ",";
+        }
+        stream << items[index];
+    }
     return stream.str();
 }
 
@@ -985,6 +1058,38 @@ json makeRgbCalibrationEntryFromPayload(const gripper_hmi::GripperCalibrationDat
     });
 }
 
+json makeMainCameraPlaceholderFromTemplate(const json *templateEntry)
+{
+    const json source = (templateEntry != nullptr && templateEntry->is_object()) ? *templateEntry : json::object();
+    json normalized = json::object();
+    normalized["shape"] = source.contains("shape") && source["shape"].is_array()
+                              ? source["shape"]
+                              : json::array({1080, 1920, 3});
+    normalized["names"] = source.contains("names") && source["names"].is_array()
+                              ? source["names"]
+                              : json::array({"height", "width", "channels"});
+    normalized["info"] = source.contains("info") ? source["info"] : json(nullptr);
+    normalized["intrinsics"] = source.contains("intrinsics") && source["intrinsics"].is_object() && !source["intrinsics"].empty()
+                                   ? source["intrinsics"]
+                                   : json::object({
+                                         {"1920x1080",
+                                          json::object({
+                                              {"fx", 1920.0},
+                                              {"fy", 1080.0},
+                                              {"ppx", 960.0},
+                                              {"ppy", 540.0},
+                                          })},
+                                     });
+    normalized["camera_model"] = source.contains("camera_model") ? source["camera_model"] : json("pinhole");
+    normalized["distortion_model"] = source.contains("distortion_model") ? source["distortion_model"] : json("equidistant");
+    normalized["distortion_coeffs"] = source.contains("distortion_coeffs") && source["distortion_coeffs"].is_array()
+                                          ? source["distortion_coeffs"]
+                                          : json::array({0.0, 0.0, 0.0, 0.0});
+    normalized["dtype"] = source.contains("dtype") ? source["dtype"] : json("video");
+    normalized["fps"] = source.contains("fps") ? source["fps"] : json("unknown");
+    return normalized;
+}
+
 json makeStereoCalibrationEntryFromPayload(const std::string &side,
                                            const gripper_hmi::GripperCalibrationDataV1 &payload)
 {
@@ -1095,7 +1200,7 @@ json makeLockedCalibrationMetadata(const std::string &generationDate,
     return json::object({
         {"calibration_status", calibrationStatus},
         {"description", "Camera calibration parameters"},
-        {"format_version", "2.0"},
+        {"format_version", "3.0"},
         {"generation_date", generationDate},
     });
 }
@@ -1359,7 +1464,7 @@ void flushEpisodeDirectoriesToDisk(const fs::path &episodeDir, const char *phase
     }
 }
 
-void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, const char *phaseLabel)
+void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEnabled, const char *phaseLabel)
 {
     if (episodeDir.empty())
     {
@@ -1367,9 +1472,10 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, const char *phaseLa
     }
 
     std::vector<fs::path> paths;
-    paths.reserve(kEpisodeVideoArtifacts.size() + 6);
+    const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled);
+    paths.reserve(artifacts.size() + 6);
 
-    for (const auto &artifact : kEpisodeVideoArtifacts)
+    for (const auto &artifact : artifacts)
     {
         paths.push_back(episodeDir / artifact.fileName);
     }
@@ -2376,6 +2482,10 @@ bool RecordRuntime::initialize()
         options_.cameraCodec = "h264";
     }
 
+    chestCameraEnabled_ = !isFalseLikeValue(readEnvValue(options_.envFile, kChestCameraEnvKey));
+    DM_LOG_INFO_STREAM() << kChestCameraEnvKey << "="
+                         << (chestCameraEnabled_ ? "true" : "false") << std::endl;
+
     if (options_.gripperPorts.empty())
     {
         options_.gripperPorts.emplace_back("/dev/right_gripper");
@@ -2393,6 +2503,7 @@ bool RecordRuntime::initialize()
         deviceSn_,
         language_,
         options_.cameraCodec,
+        chestCameraEnabled_,
         options_.tactileStateDir,
         options_.persistCalibrationFile,
         options_.exampleCalibrationFile,
@@ -2469,12 +2580,13 @@ bool RecordRuntime::initialize()
             options_.systemActionRequestFile,
             options_.systemActionResultFile);
 
+    const auto criticalDevicePaths = activeCriticalDevicePaths(chestCameraEnabled_);
     healthMonitor_ = std::make_unique<ugripper::runtime::HealthMonitor>(
         ugripper::runtime::HealthMonitorOptions{
             .disk_root = options_.diskRoot,
             .stereo_status_file = options_.stereoStatusFile,
             .critical_device_paths =
-                std::vector<std::string>(kCriticalDevicePaths.begin(), kCriticalDevicePaths.end()),
+                std::vector<std::string>(criticalDevicePaths.begin(), criticalDevicePaths.end()),
             .poll_interval_ms = kHealthCheckIntervalMs,
             .hmi_active_timeout_ms = kHmiActiveTimeoutMs,
         },
@@ -2513,7 +2625,7 @@ bool RecordRuntime::initialize()
             .camera_recorder_bin = options_.cameraRecorderBin,
             .sensor_recorder_bin = options_.sensorRecorderBin,
             .camera_codec = options_.cameraCodec,
-            .session_camera_streams_csv = kSessionCameraStreamsCsv,
+            .session_camera_streams_csv = joinCsv(sessionCameraStreams(chestCameraEnabled_)),
             .worker_stop_timeout_ms = 5000,
             .stereo_finalize_timeout_ms = 10000,
         },
@@ -2632,8 +2744,8 @@ bool RecordRuntime::initialize()
                     return waitForStereoFinalize(episode_dir, timeout_ms, error_message);
                 },
             .flush_episode_artifacts =
-                [](const std::string& episode_dir, const char* stage) {
-                    flushEpisodeArtifactsToDisk(fs::path(episode_dir), stage);
+                [this](const std::string& episode_dir, const char* stage) {
+                    flushEpisodeArtifactsToDisk(fs::path(episode_dir), chestCameraEnabled_, stage);
                 },
             .write_validation_error_log =
                 [](const std::string& episode_dir, const std::string& error_message) {
@@ -4799,6 +4911,7 @@ RecordRuntime::EpisodeManager::EpisodeManager(std::string diskRoot,
                                               std::string deviceSn,
                                               std::string language,
                                               std::string cameraCodec,
+                                              bool chestCameraEnabled,
                                               std::string tactileStateDir,
                                               std::string persistCalibrationFile,
                                               std::string exampleCalibrationFile,
@@ -4810,6 +4923,7 @@ RecordRuntime::EpisodeManager::EpisodeManager(std::string diskRoot,
       deviceSnLower_(RecordRuntime::toLower(deviceSn_)),
       language_(std::move(language)),
       cameraCodec_(std::move(cameraCodec)),
+      chestCameraEnabled_(chestCameraEnabled),
       tactileStateDir_(std::move(tactileStateDir)),
       persistCalibrationFile_(std::move(persistCalibrationFile)),
       exampleCalibrationFile_(std::move(exampleCalibrationFile)),
@@ -5078,6 +5192,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
 {
     const int64_t validateStartMs = steadyNowMs();
     DM_LOG_INFO_STREAM() << "[PERF] validateEpisode begin: episode_dir=" << episodeDir << std::endl;
+    const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled_);
     const std::vector<std::string> requiredFiles = {
         "sensor_data_left.mcap",
         "sensor_data_right.mcap",
@@ -5086,7 +5201,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         "info.json",
     };
 
-    for (const auto &artifact : kEpisodeVideoArtifacts)
+    for (const auto &artifact : artifacts)
     {
         const std::string path = episodeDir + "/" + artifact.fileName;
         if (!RecordRuntime::fileExistsAndNotEmpty(path))
@@ -5176,7 +5291,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     }
 
     std::map<std::string, int64_t> recordTimeOffsetUsByCamera;
-    for (const auto &artifact : kEpisodeVideoArtifacts)
+    for (const auto &artifact : artifacts)
     {
         int64_t recordTimeOffsetUs = 0;
         const std::string fieldName = std::string(artifact.cameraName) + "_record_time_offset_us";
@@ -5207,9 +5322,9 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     }
 
     std::vector<VideoProbeResult> probes;
-    probes.reserve(kEpisodeVideoArtifacts.size());
+    probes.reserve(artifacts.size());
     double referenceSpanSec = 0.0;
-    for (const auto &artifact : kEpisodeVideoArtifacts)
+    for (const auto &artifact : artifacts)
     {
         VideoProbeResult probe;
         probe.cameraName = artifact.cameraName;
@@ -5572,7 +5687,7 @@ bool RecordRuntime::EpisodeManager::writeMetadata(const std::string &episodeDir,
            << "  \"ugripper_lang\": " << json(language_).dump() << ",\n"
            << "  \"ugripper_version\": " << json(packageVersion_).dump() << ",\n"
            << "  \"ugripper_usb_updater_version\": " << json(updaterVersion_).dump() << ",\n"
-           << "  \"data_format_version\": \"2\",\n"
+           << "  \"data_format_version\": \"3\",\n"
            << "  \"record_runtime\": \"cpp\",\n"
            << "  \"reset_recording\": " << (resetRecording ? "true" : "false") << ",\n"
            << "  \"reset_source_episode_dir\": " << json(resetSourceDir).dump() << ",\n"
@@ -5670,8 +5785,10 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
 
     json leftStereoTemplate;
     json rightStereoTemplate;
+    json chestCameraTemplate;
     const json *leftStereoTemplatePtr = nullptr;
     const json *rightStereoTemplatePtr = nullptr;
+    const json *chestCameraTemplatePtr = nullptr;
     if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.left_stereo");
         entry != nullptr && entry->is_object())
     {
@@ -5697,6 +5814,24 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
         rightStereoTemplate = *entry;
         rightStereoTemplatePtr = &rightStereoTemplate;
     }
+    if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.chest_cam_main");
+        entry != nullptr && entry->is_object())
+    {
+        chestCameraTemplate = *entry;
+        chestCameraTemplatePtr = &chestCameraTemplate;
+    }
+    else if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.left_cam_main");
+             entry != nullptr && entry->is_object())
+    {
+        chestCameraTemplate = *entry;
+        chestCameraTemplatePtr = &chestCameraTemplate;
+    }
+    else if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.right_cam_main");
+             entry != nullptr && entry->is_object())
+    {
+        chestCameraTemplate = *entry;
+        chestCameraTemplatePtr = &chestCameraTemplate;
+    }
 
     removeIfPresent(&calibrationJson, "observation.images.fays_cam0");
     removeIfPresent(&calibrationJson, "observation.images.fays_cam1");
@@ -5709,6 +5844,17 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
     if (json *rightStereo = findJsonPath(&calibrationJson, "observation.images.right_stereo", true))
     {
         *rightStereo = makeStereoPlaceholderFromTemplate(rightStereoTemplatePtr);
+    }
+    if (chestCameraEnabled_)
+    {
+        if (json *chestCamera = findJsonPath(&calibrationJson, "observation.images.chest_cam_main", true))
+        {
+            *chestCamera = makeMainCameraPlaceholderFromTemplate(chestCameraTemplatePtr);
+        }
+    }
+    else
+    {
+        removeIfPresent(&calibrationJson, "observation.images.chest_cam_main");
     }
 
     for (const auto &target : kTactileCalibrationTargets)
