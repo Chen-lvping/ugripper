@@ -143,7 +143,6 @@ private:
         bool hasLedEffect_ = false;
         bool hasDirectLedColor_ = false;
         bool hasBeepState_ = false;
-        std::vector<GripperBeepState> currentDriverBeepStates_;
         GripperLedEffect currentLedEffect_{};
         GripperLedColor currentLedColor_{};
         GripperBeepState currentBeepState_{};
