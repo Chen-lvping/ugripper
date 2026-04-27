@@ -152,12 +152,12 @@ size_t requiredCalibrationChunkCountFromHeader(const gripper_hmi::GripperCalibra
     const size_t requiredBytes = std::max<size_t>(header.payloadSize, header.headerSize);
     const size_t clampedBytes = std::min(requiredBytes, gripper_hmi::kCalibrationPayloadSize);
     return std::max<size_t>(
-        kCalibrationHeaderChunkCount,
+        gripper_hmi::driver_logic::kCalibrationHeaderChunkCount,
         (clampedBytes + GripperHmiProtocol::kCalibrationChunkSize - 1) / GripperHmiProtocol::kCalibrationChunkSize);
 }
 
 bool tryParseCalibrationHeader(const std::array<uint8_t, gripper_hmi::kCalibrationPayloadSize> &raw,
-                               const std::array<bool, kCalibrationChunkCount> &received,
+                               const std::array<bool, gripper_hmi::driver_logic::kCalibrationChunkCount> &received,
                                gripper_hmi::GripperCalibrationHeader *header,
                                size_t *requiredChunkCount)
 {
@@ -165,7 +165,8 @@ bool tryParseCalibrationHeader(const std::array<uint8_t, gripper_hmi::kCalibrati
     {
         return false;
     }
-    for (size_t packetIndex = 0; packetIndex < kCalibrationHeaderChunkCount; ++packetIndex)
+    for (size_t packetIndex = 0; packetIndex < gripper_hmi::driver_logic::kCalibrationHeaderChunkCount;
+         ++packetIndex)
     {
         if (!received[packetIndex])
         {
@@ -193,7 +194,8 @@ bool tryParseCalibrationHeader(const std::array<uint8_t, gripper_hmi::kCalibrati
     return true;
 }
 
-bool hasAllCalibrationChunks(const std::array<bool, kCalibrationChunkCount> &received, size_t requiredChunkCount)
+bool hasAllCalibrationChunks(const std::array<bool, gripper_hmi::driver_logic::kCalibrationChunkCount> &received,
+                             size_t requiredChunkCount)
 {
     const size_t verifyCount = std::min(requiredChunkCount, received.size());
     return std::all_of(received.begin(), received.begin() + static_cast<std::ptrdiff_t>(verifyCount),
@@ -1529,25 +1531,20 @@ bool GripperHmiDriver::readCalibrationDataLocked(gripper_hmi::GripperCalibration
                         break;
                     }
 
-                    if (readAction == gripper_hmi::driver_logic::CalibrationChunkReadAction::AbortRecoverRetry &&
-                        abortCalibrationWriteStateLocked("chunk read recovery packet=" +
-                                                         std::to_string(packetIndex) + " after " +
-                                                         describeStatusFrame(responseToken, statusCode)))
+                    if (readAction == gripper_hmi::driver_logic::CalibrationChunkReadAction::AbortRecoverRetry)
                     {
-                        if (result == ExclusiveFrameReadResult::Status)
+                        if (abortCalibrationWriteStateLocked("chunk read recovery packet=" +
+                                                             std::to_string(packetIndex) + " after " +
+                                                             describeStatusFrame(responseToken, statusCode)))
                         {
-                            lastCommandError_ = "calibration read failed at chunk " + std::to_string(packetIndex) +
-                                                ": " + describeStatusFrame(responseToken, statusCode);
+                            std::this_thread::sleep_for(
+                                std::chrono::milliseconds(kCalibrationChunkSendIntervalMs));
+                            continue;
                         }
-                        else
-                        {
-                            lastCommandError_ = "timed out waiting for calibration chunk " + std::to_string(packetIndex);
-                        }
-                        return false;
+                        break;
                     }
 
-                    if (readAction == gripper_hmi::driver_logic::CalibrationChunkReadAction::AbortRecoverRetry ||
-                        readAction == gripper_hmi::driver_logic::CalibrationChunkReadAction::RetryAfterDelay)
+                    if (readAction == gripper_hmi::driver_logic::CalibrationChunkReadAction::RetryAfterDelay)
                     {
                         std::this_thread::sleep_for(std::chrono::milliseconds(kCalibrationChunkSendIntervalMs));
                         continue;
@@ -1555,7 +1552,7 @@ bool GripperHmiDriver::readCalibrationDataLocked(gripper_hmi::GripperCalibration
 
                     break;
                 }
-                if (!filledAnyChunk)
+                if (!chunkReceived)
                 {
                     break;
                 }
@@ -1700,9 +1697,9 @@ bool GripperHmiDriver::writeCalibrationData(const gripper_hmi::GripperCalibratio
                     break;
                 }
 
-                    if (!gripper_hmi::driver_logic::IsCalibrationWriteAckToken(packetIndex, token))
-                    {
-                        continue;
+                if (!gripper_hmi::driver_logic::IsCalibrationWriteAckToken(packetIndex, token))
+                {
+                    continue;
                 }
 
                 if (responseToken != nullptr)
@@ -1810,15 +1807,17 @@ bool GripperHmiDriver::writeCalibrationData(const gripper_hmi::GripperCalibratio
 
                 uint8_t responseToken = 0;
                 uint8_t statusCode = 0;
-                if (!waitForAnyCalibrationStatus(&responseToken,
-                                                 &statusCode,
-                                                 kExclusiveCommandTimeoutMs))
+                if (!waitForCalibrationChunkStatus(packetIndex,
+                                                   &responseToken,
+                                                   &statusCode,
+                                                   kExclusiveCommandTimeoutMs))
                 {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(kCalibrationChunkSendIntervalMs));
                     continue;
                 }
-                sawBeginStatus = true;
-                lastBeginToken = responseToken;
-                lastBeginStatusCode = statusCode;
+                sawStatus = true;
+                lastResponseToken = responseToken;
+                lastStatusCode = statusCode;
 
                 if (statusCode == GripperHmiProtocol::kStatusOk)
                 {
@@ -1863,7 +1862,7 @@ bool GripperHmiDriver::writeCalibrationData(const gripper_hmi::GripperCalibratio
                 return finish(false, lastCommandError_);
             }
 
-            if (!beginReady)
+            if (!chunkSent)
             {
                 lastCommandError_ = "calibration chunk " + std::to_string(packetIndex) +
                                     " failed after retry" +
@@ -1875,6 +1874,7 @@ bool GripperHmiDriver::writeCalibrationData(const gripper_hmi::GripperCalibratio
                 }
                 return finish(false, lastCommandError_);
             }
+        }
 
         const auto endCommand = GripperHmiProtocol::buildEndCalibrationWriteCommand();
         ++stats.sends;

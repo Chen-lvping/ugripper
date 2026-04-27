@@ -98,6 +98,24 @@ void SignalHandler(int) {
     g_stop_requested.store(true, std::memory_order_relaxed);
 }
 
+bool ConfigureManagedChildProcessGroup() {
+    if (prctl(PR_SET_PDEATHSIG, SIGKILL) != 0) {
+        std::cerr << "[camera_recorder] failed to set parent-death signal: "
+                  << std::strerror(errno) << std::endl;
+        return false;
+    }
+    if (getppid() == 1) {
+        std::cerr << "[camera_recorder] parent exited before child setup completed" << std::endl;
+        return false;
+    }
+    if (setpgid(0, 0) != 0 && errno != EACCES) {
+        std::cerr << "[camera_recorder] failed to create child process group: "
+                  << std::strerror(errno) << std::endl;
+        return false;
+    }
+    return true;
+}
+
 std::string Trim(const std::string& input) {
     const std::string whitespace = " \t\r\n";
     const size_t start = input.find_first_not_of(whitespace);

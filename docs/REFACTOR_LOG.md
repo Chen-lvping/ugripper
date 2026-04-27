@@ -34,6 +34,264 @@
 
 ## Entries
 
+### 2026-04-27 - arm-package-gripper-hmi-manual-and-release-gate
+
+- 阶段：`Stage B / board package release gate`
+- 范围：`board_gripper_hmi_active_check.sh`、`board_gripper_hmi_log_check.sh`、`summarize_ugripper_rollout.py`
+- 类型：`人工板端验证 / release gate 汇总`
+- 主要改动：
+  - 本轮不改业务代码，对板端已安装的 `ugripper 1.2.8` 补齐 `gripper_hmi` 人工 suite，并重新生成完整 release gate 汇总
+  - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
+- 风险与行为等价说明：
+  - direct HMI 阶段由人工现场确认 `READY / RECORDING / ERROR_1 / beep`
+  - 原 `board_gripper_hmi_active_check.sh` 在 direct 阶段后，进入 button 阶段前卡在 `board_service_restart_check.sh` 的瞬时 stereo status 判定；随后确认服务与 stereo status 实际恢复为 ready
+  - 因此 button 阶段改为手动执行按键动作，并用 `board_gripper_hmi_log_check.sh --journal-since "2026-04-27 16:38:21"` 做日志 analyzer 收口
+- 已执行验证：
+  - direct HMI：
+    - `READY -> confirmed`
+    - `RECORDING -> confirmed`
+    - `ERROR_1 -> confirmed`
+    - `beep -> confirmed`
+  - button phase：
+    - `ShortUpPressed -> 1`
+    - `ShortDownPressed -> 1`
+    - `ShutdownPromptRequested -> 1`
+    - `Recording` LED target 命中
+    - `gripper_report.json -> ok=true`
+    - `hmi_button_report.json -> ok=true`
+    - service 日志显示 `episode_20260427_0003`，`validation phase end ... valid=true`
+  - gripper/HMI 结果目录：`tmp/board_results/gripper_hmi_active_1_2_8_manual_20260427`
+  - gripper/HMI 汇总：`tmp/board_results/gripper_hmi_active_1_2_8_manual_20260427/test_summary.json`
+  - release gate 汇总：`tmp/board_results/release_gate_1_2_8_20260427/test_summary_with_gripper_hmi.json`
+  - 最终结论：
+    - `ok=true`
+    - `release_gate_ready=true`
+    - `validation_reason=ok`
+    - `missing_suites=[]`
+    - `uniform_package_version=true`
+    - `package_versions=["1.2.8"]`
+- 后续待验证：
+  - 若要减少人工流程中的误判，应修正 `board_service_restart_check.sh` 对 stereo status 的等待逻辑，避免 status 文件存在但内容尚未 ready 时立即失败
+
+### 2026-04-27 - arm-package-release-gate-auto-suite-summary
+
+- 阶段：`Stage B / board package smoke`
+- 范围：`summarize_ugripper_rollout.py`、`camera`、`sensor`、`service`
+- 类型：`统一汇总 / release gate 边界`
+- 主要改动：
+  - 本轮不改代码，将 `ugripper 1.2.8` 当前已完成的自动化板端 suite 汇总为 release-gate 风格 JSON
+- 风险与行为等价说明：
+  - 当前汇总只纳入 `camera / sensor / service` 三个 suite，三者均为同一包版本 `1.2.8`
+  - 因仍缺 `gripper_hmi` 人工主动刺激 suite，`release_gate_ready=false` 是预期结果，不代表已通过完整发布门禁
+- 已执行验证：
+  - `python3 test/scripts/summarize_ugripper_rollout.py ...`
+  - 结果目录：`tmp/board_results/release_gate_1_2_8_20260427`
+  - 汇总：`tmp/board_results/release_gate_1_2_8_20260427/test_summary.json`
+  - 结论：
+    - `ok=true`
+    - `release_gate_ready=false`
+    - `validation_reason=missing_required_suite`
+    - `missing_suites=["gripper_hmi"]`
+    - `uniform_package_version=true`
+    - `package_versions=["1.2.8"]`
+- 后续待验证：
+  - 现场人工执行 `board_gripper_hmi_active_check.sh`，补齐 `gripper_hmi` suite 后重新生成统一 release gate 汇总
+
+### 2026-04-27 - arm-package-board-standard-camera-stress
+
+- 阶段：`Stage B / board package smoke`
+- 范围：`CameraRecorder`、`board_camera_stress.sh`
+- 类型：`板端标准压力重跑`
+- 主要改动：
+  - 本轮不改代码，对板端已安装的 `ugripper 1.2.8` 补跑标准参数 camera stress
+  - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
+- 风险与行为等价说明：
+  - 本轮覆盖 `board_camera_stress.sh` 默认参数下的左右主摄窗口级检查
+  - 该项验证不覆盖 service 外层 episode 校验、sensor、HMI 人工视觉确认或 gripper 主动刺激
+- 已执行验证：
+  - `board_camera_stress.sh --output-dir /tmp/ugripper_camera_stress_lz4_checker_20260427_1630/camera_stress`
+  - 默认参数：
+    - `duration_sec=30`
+    - `cpu_workers=7`
+    - `only=left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
+  - 结果目录：`tmp/board_results/camera_stress_lz4_checker_20260427`
+  - 汇总：`tmp/board_results/camera_stress_lz4_checker_20260427/test_summary.json`
+  - 结论：`ok=true`
+  - 关键结果：
+    - `left_cam_main.mkv`：`duration_sec=29.800595`，窗口检查通过
+    - `right_cam_main.mkv`：`duration_sec=29.817262`，窗口检查通过
+    - 左右 span gap：`0.017s`
+- 后续待验证：
+  - 人工视觉确认型 `board_gripper_hmi_active_check.sh`
+  - 统一 release gate 汇总入口
+
+### 2026-04-27 - arm-package-board-sensor-checker-lz4-rerun
+
+- 阶段：`Stage B / board package smoke`
+- 范围：`check_sensor_mcap`、`board_sensor_smoke.sh`、`board_service_integration_check.sh`
+- 类型：`板端测试工具链修复 / 分项重跑`
+- 主要改动：
+  - 本轮不修改已安装业务包，仅替换板端测试工具 `check_sensor_mcap`
+  - 在 `ugripper-arm` 容器中用 ARM toolchain 直接编译当前仓库 checker：
+    - `build/arm_tools/check_sensor_mcap`
+    - 架构：`ELF 64-bit LSB pie executable, ARM aarch64`
+    - 动态依赖包含：`liblz4.so.1`
+  - 板端备份旧 checker：
+    - `/home/ubuntu/pp_main/test/scripts/check_sensor_mcap.nolz4.bak_20260427`
+  - 板端替换目标：
+    - `/home/ubuntu/pp_main/test/scripts/check_sensor_mcap`
+- 风险与行为等价说明：
+  - 本轮只改变板端测试脚本使用的 analyzer，不改变 `/opt/ugripper` 已安装包和 systemd 服务
+  - 上一轮 `unsupported compression: lz4` 已确认是板端 checker 能力问题；替换后同一类 MCAP 可在板端原地解析通过
+- 已执行验证：
+  - checker 原地验证：
+    - 对 `/tmp/ugripper_full_smoke_20260427_1609/sensor_smoke/sensor_data_left.mcap` 检查通过
+    - 对 `/tmp/ugripper_full_smoke_20260427_1609/sensor_smoke/sensor_data_right.mcap` 检查通过
+  - 板端重跑：
+    - `board_sensor_smoke.sh --output-dir /tmp/ugripper_full_smoke_lz4_checker_20260427_1625/sensor_smoke --duration-sec 6`
+    - `board_service_integration_check.sh --output-dir /tmp/ugripper_full_smoke_lz4_checker_20260427_1625/service_integration --journal-since "30 min ago"`
+  - 结果目录：`tmp/board_results/full_smoke_lz4_checker_20260427`
+  - 汇总：`tmp/board_results/full_smoke_lz4_checker_20260427/test_summary.json`
+  - 结论：`ok=true`
+  - 关键结果：
+    - `board_sensor_analyzer_lz4_supported=true`
+    - `sensor_smoke=true`
+    - `service_integration_with_sensor_check=true`
+- 后续待验证：
+  - 若要把板端测试工具链固定下来，应将支持 `lz4` 的 ARM 版 `check_sensor_mcap` 纳入标准测试资产同步流程，避免板端 `/home/ubuntu/pp_main/test/scripts` 再次落后
+  - 完整 release gate 仍需继续补跑标准 camera stress、gripper/HMI 主动刺激和统一汇总入口
+
+### 2026-04-27 - arm-package-board-full-smoke-attempt
+
+- 阶段：`Stage B / board package smoke`
+- 范围：`ARM deb`、`CameraRecorder`、`SensorRecorder`、`service integration`、`gripper/HMI log analyzer`
+- 类型：`板端分项验证 / analyzer 边界确认`
+- 主要改动：
+  - 本轮不改代码，对板端已安装的 `ugripper 1.2.8` 继续补跑分项验证
+  - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
+- 风险与行为等价说明：
+  - 本轮验证说明 `1.2.8` 包在当前板端可以完成主摄直录、sensor 录制、service episode 文件/视频/HMI 日志检查
+  - 板端现有 `/home/ubuntu/pp_main/test/scripts/check_sensor_mcap` 无法解析 `lz4` 压缩 MCAP，报 `unsupported compression: lz4`，因此板端原地 sensor analyzer 失败不能直接归因于 `SensorRecorder`
+  - 拉回本地后，使用当前仓库 `build/host_test/test/src/sensor_recorder/check_sensor_mcap` 对同一批 MCAP 复测通过，证明本轮 sensor 数据本身可读且 topic/sequence/timestamp 基本检查通过
+- 已执行验证：
+  - 板端自动化：
+    - `board_camera_stress.sh --duration-sec 10 --cpu-workers 0`
+    - `board_sensor_smoke.sh --duration-sec 6`
+    - `board_service_integration_check.sh --journal-since "30 min ago"`
+    - `board_service_integration_check.sh --journal-since "30 min ago" --skip-sensor-check`
+  - 本地复核：
+    - `build/host_test/test/src/sensor_recorder/check_sensor_mcap --expect-topic imu_left --expect-topic encoder_left --min-message-count 2 ... sensor_data_left.mcap`
+    - `build/host_test/test/src/sensor_recorder/check_sensor_mcap --expect-topic imu_right --expect-topic encoder_right --min-message-count 2 ... sensor_data_right.mcap`
+  - 结果目录：`tmp/board_results/full_smoke_20260427`
+  - 汇总：`tmp/board_results/full_smoke_20260427/test_summary.json`
+  - 结论：`ok=true`，但包含一个测试工具链问题：
+    - `camera_stress_10s_no_cpu=true`
+    - `sensor_smoke_recording=true`
+    - `sensor_mcap_local_lz4_analysis=true`
+    - `service_integration_skip_sensor_analyzer=true`
+    - `board_sensor_analyzer_lz4_supported=false`
+- 后续待验证：
+  - 更新或重编板端 `check_sensor_mcap`，确保链接 `liblz4` 后，重新跑不带 `--skip-sensor-check` 的 `board_sensor_smoke.sh` 与 `board_service_integration_check.sh`
+  - 如要作为发布候选，继续补跑带 CPU 压力的标准 camera stress、完整 gripper/HMI 主动刺激和统一 release gate 汇总
+
+### 2026-04-27 - arm-package-board-smoke
+
+- 阶段：`Stage B / board package smoke`
+- 范围：`ARM deb`、`ugripper.service`、`UgripperRuntime`、`CameraRecorder stereo daemon`
+- 类型：`板端安装验证 / 最小冒烟`
+- 主要改动：
+  - 本轮不改代码，仅对已安装到板端的 `ugripper_1.2.8_arm64.deb` 做最小运行验证
+  - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
+  - 板端当前包版本：`dpkg -s ugripper -> Version: 1.2.8`
+- 风险与行为等价说明：
+  - 本轮验证的是当前已安装的 `1.2.8` 包可以拉起服务并完成一次已有 episode 的停录校验闭环
+  - 这不等同于完整 release gate，也不覆盖长时录制、相机压力、sensor 深度校验、HMI 人工视觉确认或标定读写专项
+  - 该包版本低于历史测试计划中部分 `1.2.8+merge*` 记录，后续对比结论时必须按包版本区分
+- 已执行验证：
+  - 网络连通：
+    - `ping -c 2 192.168.2.240`
+  - 板端实时检查：
+    - `dpkg -s ugripper`
+    - `systemctl is-active ugripper.service`
+    - `systemctl --no-pager --lines=20 status ugripper.service`
+    - `ps -eo pid,ppid,stat,comm,args | grep -E "UgripperRuntime|CameraRecorder|SensorRecorder|audio_play.py"`
+    - `cat /tmp/umi_stereo_camera_status.json`
+    - `journalctl -u ugripper.service -n 180 --no-pager`
+  - 结果目录：`tmp/board_results/package_smoke_20260427_rerun`
+  - 汇总：`tmp/board_results/package_smoke_20260427_rerun/test_summary.json`
+  - 原始输出：`tmp/board_results/package_smoke_20260427_rerun/ssh_smoke_output.txt`
+  - 结论：`ok=true`
+  - 关键证据：
+    - `ugripper.service -> active`
+    - `UgripperRuntime`、`audio_play.py`、`CameraRecorder --stereo-daemon` 均在运行
+    - `/tmp/umi_stereo_camera_status.json` 存在，左右 stereo `ready=true`
+    - 最近日志包含 `[HMI_DIAG]`、`[GRIPPER_DIAG]`
+    - 最近日志包含 `validation phase end ... valid=true`
+- 后续待验证：
+  - 如要把该包作为发布候选，仍需按正式测试计划补跑同一版本的 camera / sensor / service / gripper_hmi suite，并生成统一 release gate 汇总
+
+### 2026-04-27 - arm-package-build-blockers-cleanup
+
+- 阶段：`Stage B / ARM packaging unblock`
+- 范围：`standalone/CameraRecorder`、`standalone/GripperHmiTool`、`standalone/UgripperRuntime`
+- 类型：`并仓收口 / 编译阻塞清理 / 头文件去重`
+- 主要改动：
+  - 在 `standalone/CameraRecorder/camera_recorder.cc` 补上 `ConfigureManagedChildProcessGroup()`，收口子进程组配置缺失，消除 ARM 构建时的未定义符号
+  - 在 `standalone/GripperHmiTool/gripper_hmi_driver.cc` 修正校准读写路径中的迁移残留问题：
+    - 补齐 `gripper_hmi::driver_logic::*` 常量限定
+    - 修正 sequential fallback 中的 chunk 完成判断
+    - 修正 `writeCalibrationData()` 中 chunk ACK 等待、重试状态记录和括号层级
+  - 在 `standalone/UgripperRuntime/include/record_runtime.h` 清理重复声明，恢复声明/定义一致性：
+    - 去掉重复的 `tactileStateDir`
+    - 去掉重复的 `currentDriverBeepStates_`
+    - 去掉重复的 motion alert / gripper refresh / runtime state 声明
+    - 将 `handleButtons` 声明收回为与实现一致的单参数版本
+- 风险与行为等价说明：
+  - 本轮目标是清理 standalone 迁移后的编译阻塞，优先保证现有代码语义自洽并恢复可出包状态
+  - `CameraRecorder` 改动涉及子进程生命周期边界，`GripperHmiTool` 改动涉及校准读写路径，虽然主要是迁移残留修复，但仍需后续在真实设备上补最小功能验证
+  - `UgripperRuntime` 头文件改动主要是去重和签名对齐，不引入新的运行时流程
+- 已执行验证：
+  - 定向编译：
+    - `docker exec ugripper-arm bash -lc 'cd /home/songwl/swl_ws/ugripper && cmake --build build/arm_container_release --target GripperHmiTool --parallel 8'`
+    - `docker exec ugripper-arm bash -lc 'cd /home/songwl/swl_ws/ugripper && cmake --build build/arm_container_release --target UgripperRuntime --parallel 8'`
+  - ARM 出包：
+    - `CONTAINER_NAME=ugripper-arm ./scripts/build_arm_deb_in_pp_arm_dev.sh`
+  - 结果：
+    - `GripperHmiTool` 编译通过
+    - `UgripperRuntime` 编译通过
+    - 成功生成 `ugripper_1.2.8_arm64.deb`
+- 后续待验证：
+  - 在真实 gripper / sensor / camera 环境补一次最小功能验证，重点覆盖：
+    - `CameraRecorder` 子进程拉起与退出
+    - `GripperHmiTool` 标定参数读写
+    - `UgripperRuntime` HMI 按键流程
+  - 若后续继续以团队统一容器为默认 ARM 出包环境，应把容器依赖补充固化到基础镜像，而不是继续依赖运行时手工修补
+
+### 2026-04-27 - host-only-regression-after-arm-packaging-unblock
+
+- 阶段：`Stage B / host-only regression check`
+- 范围：`test/src/*`、`standalone/*`
+- 类型：`host-only 回归验证 / 构建环境确认`
+- 主要改动：
+  - 在本机补齐 `host-only` 构建所需开发依赖后，重新执行正式 `CTest` 回归
+  - 确认本轮为 ARM 出包 unblock 做的代码修复，没有破坏当前 `host-only` 测试入口
+- 风险与行为等价说明：
+  - 本轮不再修改业务代码，只验证当前工作树在本机 `x86_64` 环境下仍满足正式 `host-only` 单测门禁
+  - 这轮也顺带确认了：此前“测试跑不起来”的直接原因是本机/容器依赖不完整，不是测试资产或本轮代码修复本身损坏
+- 已执行验证：
+  - 本机配置：
+    - `cmake -S . -B build/host_test -DBUILD_TESTING=ON`
+  - 本机编译：
+    - `cmake --build build/host_test --parallel 8`
+  - 本机测试：
+    - `ctest --test-dir build/host_test -L host-only --output-on-failure`
+  - 结果：
+    - `142/142` tests passed
+    - `0` tests failed
+    - 总耗时约 `3.61s`
+- 后续待验证：
+  - 若后续希望在容器内也稳定执行 `host-only`，建议单独准备 x86 host-only 测试容器，不再复用以 ARM 交叉编译/出包为主的 `pp-arm-dev`
+
 ### 2026-04-22 - architecture-doc-realigned-to-post-merge-reality
 
 - 阶段：`pp_main ugripper rollout / architecture alignment`

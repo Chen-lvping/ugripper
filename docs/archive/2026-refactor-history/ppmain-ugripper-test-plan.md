@@ -34,10 +34,114 @@
 
 ### 0.1 最近一次板端重跑结果
 
-截至 `2026-04-21`，当前最新已确认板端安装包版本为 `1.2.8+merge13`。`merge8` 那轮 `camera/sensor/service` 重跑仍然保留为历史基线记录；当前最新的 `gripper/HMI/button` 主动刺激与 analyzer 收口结果以 `merge13` 为准。
+截至 `2026-04-27`，最新一次板端包安装后最小 smoke 已对 `1.2.8` 包完成实时复核；`2026-04-21` 的 `merge8/merge13/merge14` 结果仍保留为历史分项基线，不能与 `1.2.8` 直接混作同一 release gate 结论。
 
 本轮已确认通过的板端检查如下：
 
+- `ugripper_1.2.8_arm64.deb` 安装后最小 smoke（`2026-04-27`）
+  - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
+  - 结果目录：`tmp/board_results/package_smoke_20260427_rerun`
+  - 汇总：`tmp/board_results/package_smoke_20260427_rerun/test_summary.json`
+  - 原始输出：`tmp/board_results/package_smoke_20260427_rerun/ssh_smoke_output.txt`
+  - 结论：`ok=true`
+  - 说明：
+    - `dpkg -s ugripper -> Version: 1.2.8`
+    - `ugripper.service -> active`
+    - `UgripperRuntime`、`audio_play.py`、`CameraRecorder --stereo-daemon` 均在运行
+    - `/tmp/umi_stereo_camera_status.json` 存在，左右 stereo `ready=true`
+    - 最近日志包含 `[HMI_DIAG]`、`[GRIPPER_DIAG]` 与 `validation phase end ... valid=true`
+  - 边界：
+    - 本轮是安装后最小运行 smoke，不等同于完整 `T16 release gate`
+    - 尚未覆盖同一 `1.2.8` 包版本下的 camera / sensor / service / gripper_hmi 全套脚本重跑
+- `ugripper 1.2.8` 分项 smoke 补跑（`2026-04-27`）
+  - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
+  - 结果目录：`tmp/board_results/full_smoke_20260427`
+  - 汇总：`tmp/board_results/full_smoke_20260427/test_summary.json`
+  - 结论：`ok=true`，但存在板端测试工具链问题
+  - 已通过：
+    - `board_camera_stress.sh --duration-sec 10 --cpu-workers 0`：左右主摄约 `9.77s`，窗口检查与左右 span 对齐通过
+    - `board_sensor_smoke.sh --duration-sec 6`：录制产物已生成；拉回本地后，当前仓库 `check_sensor_mcap` 可解析左右 MCAP，`imu/encoder` topic、sequence gap、timestamp regression 基本检查通过
+    - `board_service_integration_check.sh --skip-sensor-check`：episode 文件齐全，左右主摄视频检查通过，`gripper_report.json` 与 `hmi_button_report.json` 均通过
+  - 当前阻塞：
+    - 板端 `/home/ubuntu/pp_main/test/scripts/check_sensor_mcap` 报 `unsupported compression: lz4`
+    - 因此不带 `--skip-sensor-check` 的 `board_sensor_smoke.sh` 与 `board_service_integration_check.sh` 在板端原地 analyzer 阶段失败
+  - 边界：
+    - 本轮 camera 为 `10s / no cpu load` 快速 smoke，不等同于标准压力参数
+    - 本轮没有重跑人工视觉确认型 `gripper_hmi_active_check`
+    - 完整 `T16 release gate` 仍需先更新板端 `check_sensor_mcap`，再按同一包版本重跑统一汇总
+- `ugripper 1.2.8` sensor analyzer 修复后重跑（`2026-04-27`）
+  - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
+  - 变更：
+    - 使用 `ugripper-arm` 容器交叉编译当前仓库 `check_sensor_mcap`
+    - 替换板端 `/home/ubuntu/pp_main/test/scripts/check_sensor_mcap`
+    - 旧 checker 已备份到 `/home/ubuntu/pp_main/test/scripts/check_sensor_mcap.nolz4.bak_20260427`
+  - 结果目录：`tmp/board_results/full_smoke_lz4_checker_20260427`
+  - 汇总：`tmp/board_results/full_smoke_lz4_checker_20260427/test_summary.json`
+  - 结论：`ok=true`
+  - 已通过：
+    - 新 checker 在板端原地解析 `lz4` MCAP 通过，`board_sensor_analyzer_lz4_supported=true`
+    - `board_sensor_smoke.sh --duration-sec 6` 通过，左右 `sensor_data_*.mcap` 均通过 topic、message count、sequence gap 与 timestamp regression 基本检查
+    - `board_service_integration_check.sh` 不再需要 `--skip-sensor-check`，episode 文件、sensor MCAP、左右主摄视频、gripper/HMI 日志分析均通过
+  - 边界：
+    - 本轮仍未补跑标准 CPU 压力 camera stress，也未执行人工视觉确认型 `gripper_hmi_active_check`
+    - 当前已经关闭 `1.2.8` 包在 sensor analyzer 上的 `lz4` 阻塞点，但还不能直接等同于完整 `T16 release gate`
+- `ugripper 1.2.8` 标准 camera stress 重跑（`2026-04-27`）
+  - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
+  - 结果目录：`tmp/board_results/camera_stress_lz4_checker_20260427`
+  - 汇总：`tmp/board_results/camera_stress_lz4_checker_20260427/test_summary.json`
+  - 结论：`ok=true`
+  - 执行参数：
+    - `duration_sec=30`
+    - `cpu_workers=7`
+    - `only=left_cam_main,right_cam_main,left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
+  - 说明：
+    - `left_cam_main.mkv duration_sec=29.800595`
+    - `right_cam_main.mkv duration_sec=29.817262`
+    - 左右 span gap `0.017s`
+    - 左右主摄全部 `2s` 窗口检查通过，`validation_reason=ok`
+  - 边界：
+    - 当前同一 `1.2.8` 包版本下，camera stress、sensor smoke、service integration 均已有通过记录
+    - 仍缺人工视觉确认型 `gripper_hmi_active_check` 和统一 release gate 汇总入口
+- `ugripper 1.2.8` 自动化 suite 统一汇总（`2026-04-27`）
+  - 结果目录：`tmp/board_results/release_gate_1_2_8_20260427`
+  - 汇总：`tmp/board_results/release_gate_1_2_8_20260427/test_summary.json`
+  - 纳入 suite：
+    - `camera -> ok=true`
+    - `sensor -> ok=true`
+    - `service -> ok=true`
+  - 结论：
+    - `ok=true`
+    - `release_gate_ready=false`
+    - `validation_reason=missing_required_suite`
+    - `missing_suites=["gripper_hmi"]`
+    - `uniform_package_version=true`
+    - `package_versions=["1.2.8"]`
+  - 边界：
+    - 这份汇总说明自动化三项已经同包版本通过
+    - 仍需现场人工执行 `board_gripper_hmi_active_check.sh` 后，才能把 `gripper_hmi` suite 纳入完整 release gate
+- `ugripper 1.2.8` gripper/HMI 人工 suite 与完整 release gate（`2026-04-27`）
+  - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
+  - gripper/HMI 结果目录：`tmp/board_results/gripper_hmi_active_1_2_8_manual_20260427`
+  - gripper/HMI 汇总：`tmp/board_results/gripper_hmi_active_1_2_8_manual_20260427/test_summary.json`
+  - 完整 release gate 汇总：`tmp/board_results/release_gate_1_2_8_20260427/test_summary_with_gripper_hmi.json`
+  - gripper/HMI 结论：`ok=true`
+  - 已通过：
+    - direct HMI 人工确认：`READY / RECORDING / ERROR_1 / beep` 均通过
+    - button phase analyzer：`ShortUpPressed`、`ShortDownPressed`、`ShutdownPromptRequested` 均命中
+    - service 录制样本：`episode_20260427_0003`，日志显示 `validation phase end ... valid=true`
+    - `gripper_report.json -> ok=true`
+    - `hmi_button_report.json -> ok=true`
+  - 完整 release gate 结论：
+    - `ok=true`
+    - `release_gate_ready=true`
+    - `validation_reason=ok`
+    - `missing_suites=[]`
+    - `uniform_package_version=true`
+    - `package_versions=["1.2.8"]`
+  - 边界：
+    - 原 `board_gripper_hmi_active_check.sh` 在 direct 阶段后，进入 button 阶段前卡在 `board_service_restart_check.sh` 的瞬时 stereo status 判定；随后确认服务与 stereo status 实际恢复为 ready
+    - button phase 因此采用人工动作 + `board_gripper_hmi_log_check.sh --journal-since "2026-04-27 16:38:21"` 收口
+    - 后续应修正 `board_service_restart_check.sh`：status 文件存在但内容尚未 ready 时应继续等待，而不是立即失败
 - `board_camera_stress.sh`
   - 结果目录：`tmp/board_results/camera_stress_20260421_110053`
   - 汇总：`tmp/board_results/camera_stress_20260421_110053/test_summary.json`

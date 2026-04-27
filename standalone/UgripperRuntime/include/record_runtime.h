@@ -45,7 +45,6 @@ struct RecordRuntimeOptions
     std::string cameraCodec = "h264";
     std::string stereoControlFile = "/tmp/umi_stereo_camera_control.json";
     std::string stereoStatusFile = "/tmp/umi_stereo_camera_status.json";
-    std::string tactileStateDir = "/tmp/umi_tactile_state";
     int pollMs = 20;
 };
 
@@ -139,7 +138,6 @@ private:
         std::vector<uint64_t> delayedStateRequestDueMs_;
         std::vector<bool> lastKnownConnectedStates_;
         std::vector<ConnectionEvent> pendingConnectionEvents_;
-        std::vector<GripperBeepState> currentDriverBeepStates_;
         size_t inputDriverIndex_ = 0;
         bool hasDedicatedRightInput_ = false;
         bool hasLedEffect_ = false;
@@ -277,7 +275,7 @@ private:
     bool areSideCriticalDevicesReady(const std::string &side) const;
     bool startRecording(bool resetRecording);
     bool stopRecording(bool dueToError, const std::string &reason);
-    void handleButtons(const ButtonSnapshot &buttons, const ButtonSnapshot &leftButtons);
+    void handleButtons(const ButtonSnapshot &buttons);
     bool handleShortUpAction();
     bool handleShortDownAction();
     bool handleLongUpAction();
@@ -302,21 +300,8 @@ private:
     bool waitForStereoFinalize(const std::string &episodeDir, int timeoutMs, std::string *errorMessage);
     bool mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const;
     bool syncRuntimeLogToDisk(const char *reason) const;
-    bool startMotionAlertPipe(int *writeFd);
-    void stopMotionAlertPipe();
-    void clearMotionAlertOutputs();
-    void pollMotionAlertPipe();
-    void applyMotionAlertState(const std::string &side, bool active);
-    void handleGripperConnectionEvents();
-    void processPendingGripperRefreshes();
-    void clearGripperRuntimeStateForSide(const std::string &side,
-                                         bool connected,
-                                         const std::string &status,
-                                         const std::string &errorMessage);
-    void refreshGripperRuntimeStateForSide(const std::string &side);
     void refreshTactileReferenceCachesForSide(const std::string &side);
     void applyIdleState();
-    bool areSideCriticalDevicesReady(const std::string &side) const;
     void setAudioRecoveryCommand(std::string command);
     void sendAudioCommand(const std::string &command) const;
     void setLedState(LedState state, double progress = 0.0);
@@ -348,16 +333,13 @@ private:
     double lastLoggedLedProgress_ = 0.0;
     bool hasLastLoggedLedState_ = false;
     ugripper::runtime::HealthState healthState_{};
+    std::unique_ptr<EpisodeManager> episodeManager_;
     std::array<EpisodeManager::GripperRuntimeState, 2> gripperRuntimeStates_{};
     std::array<bool, 2> pendingGripperRefresh_{};
     int motionAlertReadFd_ = -1;
     int motionAlertWriteFd_ = -1;
     bool leftMotionAlertActive_ = false;
     bool rightMotionAlertActive_ = false;
-    std::unique_ptr<EpisodeManager> episodeManager_;
-    std::array<EpisodeManager::GripperRuntimeState, 2> gripperRuntimeStates_{};
-    std::array<bool, 2> pendingGripperRefresh_{};
-    int motionAlertReadFd_ = -1;
     MotionAlertOutputState motionAlertOutputState_{};
     GripperPanelManager panelManager_;
     std::unique_ptr<HmiLedController> ledController_;
