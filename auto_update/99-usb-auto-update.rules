@@ -1,28 +1,56 @@
-# 可选 updater 包的职责是“在主包已完成数据盘挂载后，拉起 usb-auto-update@.service”。
-# 主包 `config/99-fixed-usb-map.rules` 只负责允许 USB 口和挂载 `/mnt/data_disk`，
-# 不再直接拉起 `usb-auto-update@<dev>.service`，这样未安装 updater 包时也不会出现
-# 对缺失 unit 的隐式依赖。
-ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+# 可选 updater 包独立负责“USB 分区出现后挂载 /mnt/data_disk 并拉起 usb-auto-update@.service”。
+# 主包不直接依赖 updater unit；未安装 updater 包时不会触发缺失 unit。
+# 这里按 USB 父链路匹配，兼容部分 USB-SATA/UAS bridge 暴露成 ID_BUS=ata 的数据盘。
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="1-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-mount-%k /usr/local/bin/ugripper_mount_data_disk.sh add \"$devnode\" \"$env{ID_FS_TYPE}\"'", \
   ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
-ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", KERNELS=="1-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-umount-%k /usr/local/bin/ugripper_mount_data_disk.sh remove \"$devnode\"'"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="5-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-mount-%k /usr/local/bin/ugripper_mount_data_disk.sh add \"$devnode\" \"$env{ID_FS_TYPE}\"'", \
   ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
-ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", KERNELS=="5-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-umount-%k /usr/local/bin/ugripper_mount_data_disk.sh remove \"$devnode\"'"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="9-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-mount-%k /usr/local/bin/ugripper_mount_data_disk.sh add \"$devnode\" \"$env{ID_FS_TYPE}\"'", \
   ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
-ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", KERNELS=="9-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-umount-%k /usr/local/bin/ugripper_mount_data_disk.sh remove \"$devnode\"'"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="11-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-mount-%k /usr/local/bin/ugripper_mount_data_disk.sh add \"$devnode\" \"$env{ID_FS_TYPE}\"'", \
   ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
-ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", KERNELS=="11-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-umount-%k /usr/local/bin/ugripper_mount_data_disk.sh remove \"$devnode\"'"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="6-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-mount-%k /usr/local/bin/ugripper_mount_data_disk.sh add \"$devnode\" \"$env{ID_FS_TYPE}\"'", \
   ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
-ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", KERNELS=="6-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-umount-%k /usr/local/bin/ugripper_mount_data_disk.sh remove \"$devnode\"'"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="8-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-mount-%k /usr/local/bin/ugripper_mount_data_disk.sh add \"$devnode\" \"$env{ID_FS_TYPE}\"'", \
   ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
-ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", KERNELS=="8-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-umount-%k /usr/local/bin/ugripper_mount_data_disk.sh remove \"$devnode\"'"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="10-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-mount-%k /usr/local/bin/ugripper_mount_data_disk.sh add \"$devnode\" \"$env{ID_FS_TYPE}\"'", \
   ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
-ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_BUS}=="usb", \
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", KERNELS=="10-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-umount-%k /usr/local/bin/ugripper_mount_data_disk.sh remove \"$devnode\"'"
+ACTION=="add|change", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", \
   ENV{ID_FS_USAGE}=="filesystem", KERNELS=="12-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-mount-%k /usr/local/bin/ugripper_mount_data_disk.sh add \"$devnode\" \"$env{ID_FS_TYPE}\"'", \
   ENV{SYSTEMD_WANTS}+="usb-auto-update@%k.service"
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", KERNELS=="12-1", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-umount-%k /usr/local/bin/ugripper_mount_data_disk.sh remove \"$devnode\"'"
+
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", SUBSYSTEMS=="usb", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-umount-fallback-%k /usr/local/bin/ugripper_mount_data_disk.sh remove \"$devnode\"'"
+ACTION=="remove", SUBSYSTEM=="block", ENV{DEVTYPE}=="disk", SUBSYSTEMS=="usb", \
+  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-updater-data-umount-fallback-%k /usr/local/bin/ugripper_mount_data_disk.sh remove \"$devnode\"'"

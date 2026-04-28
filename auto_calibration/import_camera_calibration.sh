@@ -8,9 +8,11 @@ DEFAULT_HMI_HELPER_BIN="$PROJECT_ROOT/bin/GripperHmiTool/GripperHmiTool"
 HMI_HELPER_BIN="${HMI_HELPER_BIN_OVERRIDE:-$DEFAULT_HMI_HELPER_BIN}"
 GRIPPER_CALIB_GENERATOR="${GRIPPER_CALIB_GENERATOR_OVERRIDE:-$PROJECT_ROOT/auto_calibration/generate_gripper_calibration_bin.py}"
 HMI_RUN_USER="${HMI_RUN_USER_OVERRIDE:-ubuntu}"
+HMI_LOCK_FILE="${HMI_LOCK_FILE_OVERRIDE:-/run/ugripper_hmi_operation.lock}"
+HMI_LOCK_TIMEOUT_SEC="${HMI_LOCK_TIMEOUT_SEC_OVERRIDE:-30}"
 
 log() {
-    echo "[calib-import][$(date '+%Y-%m-%d %H:%M:%S')] $*"
+    echo "[calib-import][$(date '+%Y-%m-%d %H:%M:%S')] $*" >&2
 }
 
 resolve_import_sides() {
@@ -42,28 +44,6 @@ resolve_import_sides() {
     printf '%s\n' "${result[@]}"
 }
 
-detect_camera_side() {
-    local path="$1"
-    local filename stem
-
-    filename="$(basename "$path")"
-    stem="${filename%.*}"
-    stem="${stem,,}"
-
-    case "$stem" in
-        *_left)
-            printf 'left'
-            return 0
-            ;;
-        *_right)
-            printf 'right'
-            return 0
-            ;;
-    esac
-
-    return 1
-}
-
 read_env_value() {
     local key="$1"
     if [ ! -f /etc/environment ]; then
@@ -81,6 +61,17 @@ run_hmi_helper() {
     if [ ! -x "$HMI_HELPER_BIN" ]; then
         log "HMI helper not found or not executable: $HMI_HELPER_BIN"
         return 1
+    fi
+
+    if command -v flock >/dev/null 2>&1; then
+        if [ "$(id -u)" -eq 0 ] && id "$HMI_RUN_USER" >/dev/null 2>&1; then
+            flock -w "$HMI_LOCK_TIMEOUT_SEC" "$HMI_LOCK_FILE" \
+                runuser -u "$HMI_RUN_USER" -- "$HMI_HELPER_BIN" "$@"
+        else
+            flock -w "$HMI_LOCK_TIMEOUT_SEC" "$HMI_LOCK_FILE" \
+                "$HMI_HELPER_BIN" "$@"
+        fi
+        return $?
     fi
 
     if [ "$(id -u)" -eq 0 ] && id "$HMI_RUN_USER" >/dev/null 2>&1; then
@@ -318,31 +309,9 @@ else
     log "No DEVICE_SN-specific calibration root for DEVICE_SN=$DEVICE_SN, fallback to recursive gripper SN matching under $CALIB_ROOT"
 fi
 
-declare -A SIDE_CAMCHAIN_FILES=()
-while IFS= read -r file; do
-    side="$(detect_camera_side "$file" || true)"
-    if [ -z "$side" ]; then
-        log "Ignoring camchain without _left/_right suffix: $(basename "$file")"
-        continue
-    fi
-
-    if [ -n "${SIDE_CAMCHAIN_FILES[$side]:-}" ]; then
-        log "Multiple camchain files found for side=$side: $(basename "${SIDE_CAMCHAIN_FILES[$side]}"), $(basename "$file")"
-        exit 1
-    fi
-
-    SIDE_CAMCHAIN_FILES[$side]="$file"
-done < <(find "$SEARCH_ROOT" -maxdepth 2 -type f \( -name '*camchain*.yaml' -o -name '*camchain*.yml' \) | sort)
-
-for side in left right; do
-    if [ -n "${SIDE_CAMCHAIN_FILES[$side]:-}" ]; then
-        log "Detected ${side} camchain: $(basename "${SIDE_CAMCHAIN_FILES[$side]}")"
-    fi
-done
-
 PERSIST_CALIB_DIR="${CALIB_PERSIST_DIR_OVERRIDE:-/etc/ugripper/config/calibration}"
 PERSIST_CALIB_FILE="$PERSIST_CALIB_DIR/calibration.json"
-FALLBACK_CAM_JSON="$PROJECT_ROOT/bin/UgripperRuntime/config/fakeCamCalib.json"
+FALLBACK_CAM_JSON="${FALLBACK_CAM_JSON_OVERRIDE:-$PROJECT_ROOT/bin/UgripperRuntime/config/fakeCamCalib.json}"
 
 if [ ! -f "$PERSIST_CALIB_FILE" ] && [ ! -f "$FALLBACK_CAM_JSON" ]; then
     log "Base calibration.json missing (persist + fallback)"
@@ -371,6 +340,7 @@ declare -A SIDE_TARGETED=()
 declare -A SIDE_GRIPPER_SN=()
 declare -A SIDE_GRIPPER_SOURCE=()
 declare -A SIDE_GRIPPER_BIN=()
+declare -A SIDE_CAMCHAIN_FILES=()
 declare -A SIDE_IMUCAM_FILES=()
 
 for side in "${IMPORT_SIDES[@]}"; do
@@ -393,9 +363,6 @@ for side in "${IMPORT_SIDES[@]}"; do
     fi
     rm -f /tmp/gripper_find_${side}.log
 
-    if [ -n "${SIDE_CAMCHAIN_FILES[$side]:-}" ]; then
-        SIDE_TARGETED[$side]=1
-    fi
 done
 
 for side in "${IMPORT_SIDES[@]}"; do
@@ -403,18 +370,11 @@ for side in "${IMPORT_SIDES[@]}"; do
         continue
     fi
 
-    if [ -z "${SIDE_GRIPPER_SOURCE[$side]:-}" ]; then
-        log "目标侧缺少匹配的夹爪标定源，拒绝导入：side=$side gripper_sn=${SIDE_GRIPPER_SN[$side]}"
+    if ! SIDE_CAMCHAIN_FILES[$side]="$(resolve_source_camchain "${SIDE_GRIPPER_SOURCE[$side]}")"; then
+        log "无法从夹爪标定源解析主相机 camchain：side=$side source=${SIDE_GRIPPER_SOURCE[$side]}"
         exit 1
     fi
-
-    if [ -z "${SIDE_CAMCHAIN_FILES[$side]:-}" ]; then
-        if ! SIDE_CAMCHAIN_FILES[$side]="$(resolve_source_camchain "${SIDE_GRIPPER_SOURCE[$side]}")"; then
-            log "无法从夹爪标定源解析主相机 camchain：side=$side source=${SIDE_GRIPPER_SOURCE[$side]}"
-            exit 1
-        fi
-        log "Resolved ${side} camchain from matched gripper source: $(basename "${SIDE_CAMCHAIN_FILES[$side]}")"
-    fi
+    log "Resolved ${side} camchain from matched gripper source: $(basename "${SIDE_CAMCHAIN_FILES[$side]}")"
 
     if ! SIDE_IMUCAM_FILES[$side]="$(resolve_source_imucam "${SIDE_GRIPPER_SOURCE[$side]}")"; then
         log "无法从夹爪标定源解析 imucam：side=$side source=${SIDE_GRIPPER_SOURCE[$side]}"

@@ -10,7 +10,7 @@ SRC_DIR="${SRC_DIR:-${script_dir}/auto_update}"
 
 # 软件包信息
 PKG_NAME="ugripper-usb-updater"
-PKG_VERSION_BASE="${PKG_VERSION_BASE:-1.2.2}"
+PKG_VERSION_BASE="${PKG_VERSION_BASE:-1.2.4}"
 PKG_VERSION_SUFFIX="${PKG_VERSION_SUFFIX:-}"
 PKG_VERSION="${PKG_VERSION:-${PKG_VERSION_BASE}${PKG_VERSION_SUFFIX}}"
 ARCH="all"
@@ -63,6 +63,7 @@ fi
 # 核心文件列表
 REQUIRED_FILES=(
     "usb_auto_update.sh"
+    "mount_data_disk.sh"
     "99-usb-auto-update.rules"
     "usb-auto-update@.service"
     "boot_check_install.sh"
@@ -83,6 +84,7 @@ mkdir -p "${OUTPUT_DIR}"
 rm -f "${OUTPUT_DEB}"
 
 mkdir -p "${BUILD_DIR}/usr/local/bin"
+mkdir -p "${BUILD_DIR}/usr/local/lib/${PKG_NAME}"
 mkdir -p "${BUILD_DIR}/usr/local/scripts/lib"
 mkdir -p "${BUILD_DIR}/etc/udev/rules.d"
 mkdir -p "${BUILD_DIR}/lib/systemd/system"
@@ -95,6 +97,11 @@ echo "复制业务文件..."
 # 脚本
 cp "$SRC_DIR/usb_auto_update.sh" "${BUILD_DIR}/usr/local/bin/"
 chmod 755 "${BUILD_DIR}/usr/local/bin/usb_auto_update.sh"
+cp "$SRC_DIR/mount_data_disk.sh" "${BUILD_DIR}/usr/local/bin/ugripper_mount_data_disk.sh"
+chmod 755 "${BUILD_DIR}/usr/local/bin/ugripper_mount_data_disk.sh"
+cp -a "${script_dir}/auto_calibration" "${BUILD_DIR}/usr/local/lib/${PKG_NAME}/"
+find "${BUILD_DIR}/usr/local/lib/${PKG_NAME}/auto_calibration" -type f -name '*.sh' -exec chmod 755 {} \;
+chmod 755 "${BUILD_DIR}/usr/local/lib/${PKG_NAME}/auto_calibration/generate_gripper_calibration_bin.py"
 cp "${script_dir}/scripts/lib/ugripper_shell_common.sh" "${BUILD_DIR}/usr/local/scripts/lib/"
 chmod 644 "${BUILD_DIR}/usr/local/scripts/lib/ugripper_shell_common.sh"
 # Udev 规则
@@ -122,7 +129,7 @@ Version: ${PKG_VERSION}
 Section: admin
 Priority: optional
 Architecture: ${ARCH}
-Depends: bash, systemd, udev, util-linux
+Depends: bash, systemd, udev, util-linux, python3
 Maintainer: ${MAINTAINER}
 Description: ${DESC}
  This package installs:

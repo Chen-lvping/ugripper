@@ -170,8 +170,8 @@ sync_project_tree() {
     echo "--> Syncing package whitelist..."
     copy_if_exists "run_record.sh" "$TARGET_INSTALL_ROOT/run_record.sh"
     copy_if_exists "scripts" "$TARGET_INSTALL_ROOT/scripts"
-    copy_if_exists "auto_update" "$TARGET_INSTALL_ROOT/auto_update"
     copy_if_exists "auto_calibration" "$TARGET_INSTALL_ROOT/auto_calibration"
+    copy_if_exists "auto_update/trigger_shutdown.sh" "$TARGET_INSTALL_ROOT/auto_update/trigger_shutdown.sh"
     find "$TARGET_INSTALL_ROOT" \
         \( -type d -name '__pycache__' -o -type f -name '*.pyc' \) \
         -exec rm -rf {} +

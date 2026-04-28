@@ -8,6 +8,7 @@ RESOURCE_ROOT="${RESOURCE_ROOT_OVERRIDE:-$PRIMARY_RESOURCE_ROOT}"
 if [ ! -d "$RESOURCE_ROOT" ]; then
   RESOURCE_ROOT="$PROJECT_ROOT"
 fi
+UPDATER_RESOURCE_ROOT="${UPDATER_RESOURCE_ROOT_OVERRIDE:-/usr/local/lib/ugripper-usb-updater}"
 
 resolve_existing_file() {
   local candidate=""
@@ -65,7 +66,15 @@ AUTO_INSTALL_PACKAGES=(
 DEFAULT_HMI_HELPER_BIN="$RESOURCE_ROOT/bin/GripperHmiTool/GripperHmiTool"
 HMI_HELPER_BIN="${HMI_HELPER_BIN_OVERRIDE:-$DEFAULT_HMI_HELPER_BIN}"
 HMI_PORT_ARGS=(--port /dev/right_gripper --port /dev/left_gripper)
-CALIB_IMPORT_SCRIPT="${CALIB_IMPORT_SCRIPT_OVERRIDE:-$RESOURCE_ROOT/auto_calibration/import_camera_calibration.sh}"
+CALIB_IMPORT_SCRIPT="${CALIB_IMPORT_SCRIPT_OVERRIDE:-$(resolve_existing_file \
+  "$UPDATER_RESOURCE_ROOT/auto_calibration/import_camera_calibration.sh" \
+  "$RESOURCE_ROOT/auto_calibration/import_camera_calibration.sh" \
+  "$PROJECT_ROOT/auto_calibration/import_camera_calibration.sh" \
+  || true)}"
+FALLBACK_CAM_JSON="$RESOURCE_ROOT/bin/UgripperRuntime/config/fakeCamCalib.json"
+HMI_LOCK_FILE="${HMI_LOCK_FILE_OVERRIDE:-/run/ugripper_hmi_operation.lock}"
+HMI_LOCK_TIMEOUT_SEC="${HMI_LOCK_TIMEOUT_SEC_OVERRIDE:-30}"
+LED_HELPER_DURATION_SEC="${LED_HELPER_DURATION_SEC_OVERRIDE:-1}"
 LED_RUN_USER="ubuntu"
 PID_LED_SHELL=""
 
@@ -519,28 +528,73 @@ stop_service_fast() {
   fi
 }
 
+systemd_unit_exists() {
+  local service_name="$1"
+
+  [ -e "/etc/systemd/system/$service_name" ] && return 0
+  [ -e "/lib/systemd/system/$service_name" ] && return 0
+  [ -e "/usr/lib/systemd/system/$service_name" ] && return 0
+
+  systemctl list-unit-files "$service_name" --no-legend 2>/dev/null | grep -q "^$service_name[[:space:]]"
+}
+
 stop_record_stack_fast() {
   local hmi_patterns=(
     'GripperHmiTool.*--state'
     'gripper_hmi_test.*--state'
   )
+  local runtime_patterns=(
+    '/opt/ugripper/run_record.sh'
+    '/opt/ugripper/bin/UgripperRuntime/UgripperRuntime'
+    'bin/UgripperRuntime/UgripperRuntime'
+    'bin/CameraRecorder/CameraRecorder'
+    'CameraRecorder.*--stereo-daemon'
+    'audio/audio_play.py'
+  )
   local pattern=""
+  local port=""
+  local waited=0
 
   stop_service_fast "ugripper.service" 6
 
-  # 兜底：防止旧 run_record/音频/灯光进程在安装窗口残留
+  # 兜底：防止旧 run_record/runtime/camera/音频/灯光进程在安装窗口残留。
   if command -v pkill >/dev/null 2>&1; then
-    pkill -TERM -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
+    for pattern in "${runtime_patterns[@]}"; do
+      pkill -TERM -f "$pattern" >/dev/null 2>&1 || true
+    done
     for pattern in "${hmi_patterns[@]}"; do
       pkill -TERM -f "$pattern" >/dev/null 2>&1 || true
     done
-    pkill -TERM -f 'audio/audio_play.py' >/dev/null 2>&1 || true
-    sleep 0.3
-    pkill -KILL -f '/opt/ugripper/run_record.sh' >/dev/null 2>&1 || true
+    sleep 0.5
+    for pattern in "${runtime_patterns[@]}"; do
+      pkill -KILL -f "$pattern" >/dev/null 2>&1 || true
+    done
     for pattern in "${hmi_patterns[@]}"; do
       pkill -KILL -f "$pattern" >/dev/null 2>&1 || true
     done
-    pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
+  fi
+
+  if command -v fuser >/dev/null 2>&1; then
+    while [ "$waited" -lt 20 ]; do
+      local busy=0
+      for port in /dev/left_gripper /dev/right_gripper; do
+        [ -e "$port" ] || continue
+        if fuser "$port" >/dev/null 2>&1; then
+          busy=1
+        fi
+      done
+      [ "$busy" -eq 0 ] && break
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+
+    for port in /dev/left_gripper /dev/right_gripper; do
+      [ -e "$port" ] || continue
+      if fuser "$port" >/dev/null 2>&1; then
+        log "夹爪串口仍被占用，强制释放：$port"
+        fuser -k "$port" >/dev/null 2>&1 || true
+      fi
+    done
   fi
 
   rm -f /tmp/umi_audio_pipe /tmp/umi_recording.lock || true
@@ -581,14 +635,38 @@ set_led_state() {
 
   stop_led_helper
 
-  if id "$LED_RUN_USER" >/dev/null 2>&1; then
-    runuser -u "$LED_RUN_USER" -- "$HMI_HELPER_BIN" "${HMI_PORT_ARGS[@]}" --state "$state" --led-only --duration 0 >/dev/null 2>&1 &
-  else
-    "$HMI_HELPER_BIN" "${HMI_PORT_ARGS[@]}" --state "$state" --led-only --duration 0 >/dev/null 2>&1 &
-  fi
+  (
+    while :; do
+      run_hmi_helper_queued --state "$state" --led-only --duration "$LED_HELPER_DURATION_SEC" >/dev/null 2>&1 || true
+      sleep 0.05
+    done
+  ) &
 
   PID_LED_SHELL=$!
   sleep 0.2
+}
+
+run_hmi_helper_queued() {
+  if [ ! -x "$HMI_HELPER_BIN" ]; then
+    return 1
+  fi
+
+  if command -v flock >/dev/null 2>&1; then
+    if id "$LED_RUN_USER" >/dev/null 2>&1; then
+      flock -w "$HMI_LOCK_TIMEOUT_SEC" "$HMI_LOCK_FILE" \
+        runuser -u "$LED_RUN_USER" -- "$HMI_HELPER_BIN" "${HMI_PORT_ARGS[@]}" "$@"
+    else
+      flock -w "$HMI_LOCK_TIMEOUT_SEC" "$HMI_LOCK_FILE" \
+        "$HMI_HELPER_BIN" "${HMI_PORT_ARGS[@]}" "$@"
+    fi
+    return $?
+  fi
+
+  if id "$LED_RUN_USER" >/dev/null 2>&1; then
+    runuser -u "$LED_RUN_USER" -- "$HMI_HELPER_BIN" "${HMI_PORT_ARGS[@]}" "$@"
+  else
+    "$HMI_HELPER_BIN" "${HMI_PORT_ARGS[@]}" "$@"
+  fi
 }
 
 stop_led_helper() {
@@ -625,9 +703,16 @@ restart_ugripper_if_needed() {
     return 0
   fi
 
+  if ! systemd_unit_exists "ugripper.service"; then
+    log "ugripper.service 未安装，跳过重启。"
+    NEED_UGRIPPER_RESTART=0
+    return 0
+  fi
+
   log "检测到配置已更新，重启 ugripper.service 以应用最新配置。"
   if systemctl restart ugripper.service >/dev/null 2>&1; then
     log "ugripper.service 重启成功。"
+    NEED_UGRIPPER_RESTART=0
     return 0
   fi
 
@@ -700,6 +785,11 @@ install_usb_package_if_needed() {
 restore_ugripper_service() {
   restart_ugripper_if_needed || true
 
+  if ! systemd_unit_exists "ugripper.service"; then
+    log "ugripper.service 未安装，跳过业务服务恢复。"
+    return 0
+  fi
+
   if systemctl is-active --quiet ugripper.service; then
     return 0
   fi
@@ -761,7 +851,11 @@ apply_imports_with_led_feedback() {
     if [ ! -x "$CALIB_IMPORT_SCRIPT" ]; then
       log "标定导入脚本不存在或不可执行：$CALIB_IMPORT_SCRIPT"
       has_failure=1
-    elif "$CALIB_IMPORT_SCRIPT" "$MOUNT_POINT"; then
+    elif HMI_LOCK_FILE_OVERRIDE="$HMI_LOCK_FILE" \
+         HMI_LOCK_TIMEOUT_SEC_OVERRIDE="$HMI_LOCK_TIMEOUT_SEC" \
+         HMI_HELPER_BIN_OVERRIDE="$HMI_HELPER_BIN" \
+         FALLBACK_CAM_JSON_OVERRIDE="$FALLBACK_CAM_JSON" \
+         "$CALIB_IMPORT_SCRIPT" "$MOUNT_POINT"; then
       log "标定导入成功。"
       any_imported=1
     else
@@ -802,7 +896,10 @@ apply_imports_with_led_feedback() {
   fi
 
   log "导入流程完成，重启 ugripper.service（仅一次）。"
-  if systemctl restart ugripper.service >/dev/null 2>&1; then
+  if ! systemd_unit_exists "ugripper.service"; then
+    log "ugripper.service 未安装，跳过导入后的服务重启。"
+    NEED_UGRIPPER_RESTART=0
+  elif systemctl restart ugripper.service >/dev/null 2>&1; then
     log "ugripper.service 重启成功。"
     NEED_UGRIPPER_RESTART=0
   else
@@ -927,7 +1024,11 @@ if [ "$HAS_CALIBRATION_TRIGGER" -eq 1 ]; then
     log "已触发 ugripper-calibration.service，跳过本次 deb 升级流程。"
   else
     log "触发 ugripper-calibration.service 失败，尝试恢复 ugripper.service。"
-    systemctl start ugripper.service >/dev/null 2>&1 || true
+    if systemd_unit_exists "ugripper.service"; then
+      systemctl start ugripper.service >/dev/null 2>&1 || true
+    else
+      log "ugripper.service 未安装，跳过校准失败后的服务恢复。"
+    fi
     exit 1
   fi
   exit 0
