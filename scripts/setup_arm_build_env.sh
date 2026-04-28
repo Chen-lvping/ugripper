@@ -281,9 +281,9 @@ To build manually:
     -DCMAKE_TOOLCHAIN_FILE="\${PWD}/cmake/arm-linux-toolchain.cmake" \\
     "\${UGRIPPER_ARM_CMAKE_ARGS[@]}"
   cmake --build build/arm_container_release \\
-    --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime \\
+    --target CameraRecorder main_camera_xu_tool SensorRecorder zeroing GripperHmiTool UgripperRuntime \\
     --parallel 8
-  PACKAGED_BUILD_DIR=build/arm_container_release ./build_deb.sh -q
+  ./scripts/build_arm_deb_in_pp_arm_dev.sh
 EOF
 }
 

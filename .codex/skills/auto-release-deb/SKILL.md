@@ -20,8 +20,8 @@ description: 在代码修改完成后，自动确认改动影响范围，并判�
    - 是否影响 `ugripper` 主包。
    - 是否影响 `ugripper-usb-updater` 包。
 4. 自动判断 `ugripper` 构建模式：
-   - 命中 C/C++/CMake 改动时，判定为全量构建（`./build_deb.sh`）。
-   - 未命中上述改动且 quick 所需二进制齐全时，判定可快速构建（`./build_deb.sh -q`）。
+   - 命中 C/C++/CMake 改动时，判定为全量 ARM 构建（`./scripts/build_arm_deb_in_pp_arm_dev.sh`）。
+   - 未命中上述改动且 quick 所需 ARM 二进制齐全时，判定可快速构建（`./scripts/build_arm_deb_in_pp_arm_dev.sh -q`）。
    - quick 所需二进制缺失时，回退全量构建。
 5. `updater` 无 quick 模式：
    - 只要命中 updater 相关改动，判定需要执行 `./usb_updater_build.sh`（全量）。
@@ -36,7 +36,7 @@ description: 在代码修改完成后，自动确认改动影响范围，并判�
    - `bash .codex/skills/auto-release-deb/scripts/auto_release_deb.sh`
    - 可选：`--ugripper-manifest <PATH>` / `--updater-manifest <PATH>` 覆盖默认 manifest 路径。
 2. 根据脚本输出执行建议构建命令（若存在）：
-   - `./build_deb.sh` 或 `./build_deb.sh -q`
+   - `./scripts/build_arm_deb_in_pp_arm_dev.sh` 或 `./scripts/build_arm_deb_in_pp_arm_dev.sh -q`
    - `./usb_updater_build.sh`
 3. 构建成功后，默认安装本次生成的 `deb` 包：
    - `sudo dpkg -i ./ugripper_<VERSION>_arm64.deb`

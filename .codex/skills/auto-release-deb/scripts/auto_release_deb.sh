@@ -56,6 +56,8 @@ is_full_build_trigger_file() {
 PRINT_FILES=true
 UGRIPPER_BASELINE_MANIFEST="temp_build_deb/.auto_release_ugripper.manifest"
 UPDATER_BASELINE_MANIFEST="temp_build_usb_updater/.auto_release_updater.manifest"
+UGRIPPER_ARM_BUILD_SCRIPT="./scripts/build_arm_deb_in_pp_arm_dev.sh"
+UGRIPPER_ARM_PACKAGED_BUILD_DIR="${PACKAGED_BUILD_DIR:-build/arm_container_release}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -163,10 +165,13 @@ fi
 
 missing_binaries=()
 for bin_path in \
-  "build/src/sensor_recorder/sensor_recorder" \
-  "build/src/sensor_recorder/zeroing" \
-  "build/src/camera_recorder/camera_recorder"; do
-  if [[ ! -f "$bin_path" ]]; then
+  "${UGRIPPER_ARM_PACKAGED_BUILD_DIR}/standalone/CameraRecorder/CameraRecorder" \
+  "${UGRIPPER_ARM_PACKAGED_BUILD_DIR}/standalone/CameraRecorder/main_camera_xu_tool" \
+  "${UGRIPPER_ARM_PACKAGED_BUILD_DIR}/standalone/SensorRecorder/SensorRecorder" \
+  "${UGRIPPER_ARM_PACKAGED_BUILD_DIR}/standalone/SensorRecorder/zeroing" \
+  "${UGRIPPER_ARM_PACKAGED_BUILD_DIR}/standalone/GripperHmiTool/GripperHmiTool" \
+  "${UGRIPPER_ARM_PACKAGED_BUILD_DIR}/standalone/UgripperRuntime/UgripperRuntime"; do
+  if [[ ! -x "$bin_path" ]]; then
     missing_binaries+=("$bin_path")
   fi
 done
@@ -234,9 +239,9 @@ fi
 
 echo "Recommended commands:"
 if [[ "$ugripper_mode" == "full" ]]; then
-  echo "- ./build_deb.sh"
+  echo "- ${UGRIPPER_ARM_BUILD_SCRIPT}"
 elif [[ "$ugripper_mode" == "quick" ]]; then
-  echo "- ./build_deb.sh -q"
+  echo "- ${UGRIPPER_ARM_BUILD_SCRIPT} -q"
 else
   echo "- (skip ugripper build)"
 fi

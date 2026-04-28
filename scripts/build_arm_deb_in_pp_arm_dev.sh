@@ -16,6 +16,75 @@ PACKAGED_BUILD_DIR="${PACKAGED_BUILD_DIR:-build/arm_container_release}"
 PARALLEL="${PARALLEL:-8}"
 HOST_UID="${HOST_UID:-$(stat -c %u "${REPO_ROOT}")}"
 HOST_GID="${HOST_GID:-$(stat -c %g "${REPO_ROOT}")}"
+QUICK_MODE=false
+CLEAN_BUILD=true
+
+usage() {
+    cat <<'EOF'
+Usage:
+  ./scripts/build_arm_deb_in_pp_arm_dev.sh [options]
+
+Build the ugripper arm64 package from inside the pp-arm-dev container.
+
+Modes:
+  default           Cross-compile required C++ targets, then package with build_deb.sh -q.
+  -q, --quick       Skip C++ build and repackage using existing ARM binaries in PACKAGED_BUILD_DIR.
+
+Options:
+  --build-dir PATH  Override PACKAGED_BUILD_DIR (default: build/arm_container_release).
+  -j, --parallel N  Override CMake build parallelism (default: 8 or PARALLEL env).
+  --clean           Remove PACKAGED_BUILD_DIR before a full C++ build (default).
+  --no-clean        Reuse PACKAGED_BUILD_DIR during a full C++ build.
+  -h, --help        Show this help message.
+
+Common env:
+  VERSION=1.2.12 ./scripts/build_arm_deb_in_pp_arm_dev.sh
+  VERSION=1.2.12 ./scripts/build_arm_deb_in_pp_arm_dev.sh --quick
+  PACKAGED_VENV_URL='' PACKAGED_VENV_SOURCE=/path/to/.venv ./scripts/build_arm_deb_in_pp_arm_dev.sh --quick
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -q|--quick)
+            QUICK_MODE=true
+            shift
+            ;;
+        --build-dir)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for --build-dir" >&2
+                exit 1
+            fi
+            PACKAGED_BUILD_DIR="$2"
+            shift 2
+            ;;
+        -j|--parallel)
+            if [[ $# -lt 2 ]]; then
+                echo "Missing value for $1" >&2
+                exit 1
+            fi
+            PARALLEL="$2"
+            shift 2
+            ;;
+        --clean)
+            CLEAN_BUILD=true
+            shift
+            ;;
+        --no-clean)
+            CLEAN_BUILD=false
+            shift
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $1" >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
 
 is_container_runtime() {
     [[ -f "/.dockerenv" || -f "/run/.containerenv" ]] && return 0
@@ -40,22 +109,35 @@ cd "${REPO_ROOT}"
 
 export PKG_CONFIG_PATH="/usr/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}"
 
-if [[ ! -f ".local-deps/arm-build-env.sh" ]]; then
-    ./scripts/setup_arm_build_env.sh
+if [[ "${QUICK_MODE}" == true ]]; then
+  echo "Quick ARM package mode:"
+  echo "  build_dir=${REPO_ROOT}/${PACKAGED_BUILD_DIR}"
+  echo "  action=skip C++ cross-build, repackage existing ARM payload"
+else
+  echo "Full ARM package mode:"
+  echo "  build_dir=${REPO_ROOT}/${PACKAGED_BUILD_DIR}"
+  echo "  toolchain=${TOOLCHAIN_FILE}"
+  echo "  parallel=${PARALLEL}"
+
+  if [[ ! -f ".local-deps/arm-build-env.sh" ]]; then
+      ./scripts/setup_arm_build_env.sh
+  fi
+  source ".local-deps/arm-build-env.sh"
+
+  if [[ "${CLEAN_BUILD}" == true ]]; then
+      rm -rf "${PACKAGED_BUILD_DIR}"
+  fi
+  cmake -S . -B "${PACKAGED_BUILD_DIR}" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DBUILD_TESTING=OFF \
+    -DUGRIPPER_ENABLE_MCAP_BUILDER=OFF \
+    -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" \
+    "${UGRIPPER_ARM_CMAKE_ARGS[@]}"
+
+  cmake --build "${PACKAGED_BUILD_DIR}" \
+    --target CameraRecorder main_camera_xu_tool SensorRecorder zeroing GripperHmiTool UgripperRuntime \
+    --parallel "${PARALLEL}"
 fi
-source ".local-deps/arm-build-env.sh"
-
-rm -rf "${PACKAGED_BUILD_DIR}"
-cmake -S . -B "${PACKAGED_BUILD_DIR}" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBUILD_TESTING=OFF \
-  -DUGRIPPER_ENABLE_MCAP_BUILDER=OFF \
-  -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" \
-  "${UGRIPPER_ARM_CMAKE_ARGS[@]}"
-
-cmake --build "${PACKAGED_BUILD_DIR}" \
-  --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime \
-  --parallel "${PARALLEL}"
 
 BASE_VERSION="${BASE_VERSION}" \
 VERSION_SUFFIX="${VERSION_SUFFIX}" \
