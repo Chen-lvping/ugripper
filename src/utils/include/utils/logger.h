@@ -1,94 +1,75 @@
 #pragma once
 
-#include <iostream>
-#include <mutex>
-#include <sstream>
-#include <string>
-#include <utility>
+#include "file_logger.h"
 
-namespace utils {
-namespace detail {
+#ifdef ROS1_APP
+#  warning "Compiling with ROS1_APP"
+#  include <ros/console.h>
+#  include <ros/ros.h>
+#  include <spdlog/fmt/fmt.h>
+#  define DM_LOG_INIT(enable_file, file_path) \
+  do { \
+    ::DA::utils::FileLogger::Init((enable_file), (file_path)); \
+  } while (0)
 
-inline std::mutex &LogMutex()
-{
-    static std::mutex mutex;
-    return mutex;
-}
+#  define DM_ROS1_LOG_IMPL(ROS_MACRO, LEVEL_CHAR, ...) \
+  do { \
+    auto _msg = fmt::format(__VA_ARGS__); \
+    ROS_MACRO("%s", _msg.c_str()); \
+    ::DA::utils::FileLogger::Log((LEVEL_CHAR), _msg, __FILE__, __LINE__, __func__); \
+  } while (0)
 
-// Transitional logger shim for ugripper refactor.
-// Keep the API surface close to pp_main where practical, but avoid importing
-// the full backend before standalone integration.
-template <typename... Args>
-inline void LogInit(Args&&...)
-{
-}
+#  define DM_LOG_DEBUG(...)    DM_ROS1_LOG_IMPL(ROS_DEBUG,    "D", __VA_ARGS__)
+#  define DM_LOG_INFO(...)     DM_ROS1_LOG_IMPL(ROS_INFO,     "I", __VA_ARGS__)
+#  define DM_LOG_WARN(...)     DM_ROS1_LOG_IMPL(ROS_WARN,     "W", __VA_ARGS__)
+#  define DM_LOG_ERROR(...)    DM_ROS1_LOG_IMPL(ROS_ERROR,    "E", __VA_ARGS__)
+#  define DM_LOG_CRITICAL(...) DM_ROS1_LOG_IMPL(ROS_FATAL,    "F", __VA_ARGS__)
 
-class LogStream
-{
-public:
-    LogStream(std::ostream &stream, const char *level)
-        : stream_(stream), level_(level)
-    {
-    }
 
-    ~LogStream()
-    {
-        const std::lock_guard<std::mutex> lock(LogMutex());
-        stream_ << "[" << level_ << "] " << buffer_.str() << std::endl;
-    }
+// ------------------------- ROS2 -------------------------
+#elif ROS2_APP
+#  warning "Compiling with ROS2_APP"
+#  include "rclcpp/rclcpp.hpp"
+#  include <spdlog/fmt/fmt.h>
+#  define DM_LOG_INIT(enable_file, file_path) \
+  do { \
+    ::DA::utils::FileLogger::Init((enable_file), (file_path)); \
+  } while (0)
 
-    template <typename T>
-    LogStream &operator<<(T &&value)
-    {
-        buffer_ << std::forward<T>(value);
-        return *this;
-    }
+#  define DM_ROS2_LOG_IMPL(RCLCPP_MACRO, LEVEL_CHAR, ...) \
+  do { \
+    auto _msg = fmt::format(__VA_ARGS__); \
+    RCLCPP_MACRO(rclcpp::get_logger(""), "%s", _msg.c_str()); \
+    ::DA::utils::FileLogger::Log((LEVEL_CHAR), _msg, __FILE__, __LINE__, __func__); \
+  } while (0)
 
-    LogStream &operator<<(std::ostream &(*manip)(std::ostream &))
-    {
-        if (manip != static_cast<std::ostream &(*)(std::ostream &)>(std::endl))
-        {
-            manip(buffer_);
-        }
-        return *this;
-    }
+#  define DM_LOG_DEBUG(...)    DM_ROS2_LOG_IMPL(RCLCPP_DEBUG,    "D", __VA_ARGS__)
+#  define DM_LOG_INFO(...)     DM_ROS2_LOG_IMPL(RCLCPP_INFO,     "I", __VA_ARGS__)
+#  define DM_LOG_WARN(...)     DM_ROS2_LOG_IMPL(RCLCPP_WARN,     "W", __VA_ARGS__)
+#  define DM_LOG_ERROR(...)    DM_ROS2_LOG_IMPL(RCLCPP_ERROR,    "E", __VA_ARGS__)
+#  define DM_LOG_CRITICAL(...) DM_ROS2_LOG_IMPL(RCLCPP_CRITICAL, "F", __VA_ARGS__)
 
-    LogStream &operator<<(std::ios_base &(*manip)(std::ios_base &))
-    {
-        manip(buffer_);
-        return *this;
-    }
 
-private:
-    std::ostream &stream_;
-    const char *level_;
-    std::ostringstream buffer_;
-};
+// ------------------------- Default Logger (spdlog) -------------------------
+#else
+#  include "spd_logger.h"
+#  warning "Compiling with default logger (spdlog)"
+#  define LOGGER DA::utils::SpdLogger::GetInstance()
+#  define DM_LOG_INIT LOGGER.init
+#  if __cplusplus >= 202002L
+#    define DM_LOG_TRACE(...) LOGGER.trace(std::source_location::current(), __VA_ARGS__)
+#    define DM_LOG_DEBUG(...) LOGGER.debug(std::source_location::current(), __VA_ARGS__)
+#    define DM_LOG_INFO(...) LOGGER.info(std::source_location::current(), __VA_ARGS__)
+#    define DM_LOG_WARN(...) LOGGER.warn(std::source_location::current(), __VA_ARGS__)
+#    define DM_LOG_ERROR(...) LOGGER.error(std::source_location::current(), __VA_ARGS__)
+#    define DM_LOG_CRITICAL(...) LOGGER.critical(std::source_location::current(), __VA_ARGS__)
+#  else
+#    define DM_LOG_TRACE(...) LOGGER.trace(__FILE__, __LINE__, __func__, __VA_ARGS__)
+#    define DM_LOG_DEBUG(...) LOGGER.debug(__FILE__, __LINE__, __func__, __VA_ARGS__)
+#    define DM_LOG_INFO(...) LOGGER.info(__FILE__, __LINE__, __func__, __VA_ARGS__)
+#    define DM_LOG_WARN(...) LOGGER.warn(__FILE__, __LINE__, __func__, __VA_ARGS__)
+#    define DM_LOG_ERROR(...) LOGGER.error(__FILE__, __LINE__, __func__, __VA_ARGS__)
+#    define DM_LOG_CRITICAL(...) LOGGER.critical(__FILE__, __LINE__, __func__, __VA_ARGS__)
+#  endif
 
-template <typename... Args>
-inline void Log(std::ostream &stream, const char *level, Args &&...args)
-{
-    std::ostringstream buffer;
-    ((buffer << std::forward<Args>(args)), ...);
-    const std::lock_guard<std::mutex> lock(LogMutex());
-    stream << "[" << level << "] " << buffer.str() << std::endl;
-}
-
-}  // namespace detail
-}  // namespace utils
-
-#define DM_LOG_DEBUG(...) ::utils::detail::Log(::std::cout, "DEBUG", __VA_ARGS__)
-#define DM_LOG_INFO(...) ::utils::detail::Log(::std::cout, "INFO", __VA_ARGS__)
-#define DM_LOG_TRACE(...) ::utils::detail::Log(::std::cout, "TRACE", __VA_ARGS__)
-#define DM_LOG_WARN(...) ::utils::detail::Log(::std::cerr, "WARN", __VA_ARGS__)
-#define DM_LOG_ERROR(...) ::utils::detail::Log(::std::cerr, "ERROR", __VA_ARGS__)
-#define DM_LOG_CRITICAL(...) ::utils::detail::Log(::std::cerr, "CRITICAL", __VA_ARGS__)
-
-#define DM_LOG_INIT(...) ::utils::detail::LogInit(__VA_ARGS__)
-
-#define DM_LOG_DEBUG_STREAM() ::utils::detail::LogStream(::std::cout, "DEBUG")
-#define DM_LOG_INFO_STREAM() ::utils::detail::LogStream(::std::cout, "INFO")
-#define DM_LOG_TRACE_STREAM() ::utils::detail::LogStream(::std::cout, "TRACE")
-#define DM_LOG_WARN_STREAM() ::utils::detail::LogStream(::std::cerr, "WARN")
-#define DM_LOG_ERROR_STREAM() ::utils::detail::LogStream(::std::cerr, "ERROR")
-#define DM_LOG_CRITICAL_STREAM() ::utils::detail::LogStream(::std::cerr, "CRITICAL")
+#endif  // ROS2_APP

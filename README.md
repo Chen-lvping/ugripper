@@ -96,6 +96,17 @@ bash ./scripts/setup_arm_build_env.sh
 - `.local-deps/downloads/apt`
 - `.local-deps/arm-build-env.sh`
 
+当前 ARM sysroot 需要包含以下主链 C++ 目标开发依赖：
+- `libyaml-cpp-dev:arm64`
+- `nlohmann-json3-dev`
+- `liblz4-dev:arm64`
+- `libserialport-dev:arm64`
+- `libusb-1.0-0-dev:arm64`
+- `libfmt-dev:arm64`
+- `libspdlog-dev:arm64`
+- `libgstreamer1.0-dev:arm64`
+- `libgstreamer-plugins-base1.0-dev:arm64`
+
 后续如果 `.local-deps/arm-build-env.sh` 已存在，推荐的一键出包脚本会直接复用；如果文件缺失，脚本也会在容器内自动补齐。
 
 ## 推荐出包路径
@@ -134,6 +145,7 @@ PACKAGED_BUILD_DIR=build/arm_container_release ./build_deb.sh -q
 - 打包前会校验 `.venv/bin/python3` 和以上 5 个核心二进制的 ELF 架构，避免把 `x86_64` 产物误打进 `arm64` 包。
 - 顶层默认不再强制构建 `src/third_party/mcap_builder`，普通主包出包不会再被这个可选目标阻塞。
 - 顶层当前直接依赖系统 `yaml-cpp` 和 `nlohmann_json`；仓库内不再保留 `.local-deps/nlohmann` fallback。
+- C++ 日志后端当前对齐 `pp_main` spdlog 实现，主包运行依赖已包含 `libfmt8` 和 `libspdlog1`；若板端离线安装，需要确保这两个运行库能通过系统源或本地依赖包安装。
 
 ## 当前版本口径
 - 当前主包文件名模式：`ugripper_<version>_arm64.deb`

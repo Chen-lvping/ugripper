@@ -290,11 +290,17 @@
 - `libyaml-cpp-dev:arm64`
 - `nlohmann-json3-dev`
 - `liblz4-dev:arm64`
-- `libzstd-dev:arm64`
 - `libserialport-dev:arm64`
 - `libusb-1.0-0-dev:arm64`
+- `libfmt-dev:arm64`
+- `libspdlog-dev:arm64`
 - `libgstreamer1.0-dev:arm64`
 - `libgstreamer-plugins-base1.0-dev:arm64`
+
+主包运行依赖新增日志后端运行库：
+- `libfmt8`
+- `libspdlog1`
+- 原因：当前 `src/utils` 已切到 `pp_main` 同款 spdlog 后端，`CameraRecorder`、`SensorRecorder`、`zeroing`、`GripperHmiTool`、`UgripperRuntime` 都会动态依赖 `libspdlog.so.1` 与 `libfmt.so.8`
 
 第三层：和当前出包策略绑定的外部条件
 - 容器内需要能访问 Nexus raw，因为 `build_deb.sh` 默认会下载归档 `.venv`
@@ -312,6 +318,7 @@
   - `command -v tar`
   - `command -v file`
   - `bash ./scripts/setup_arm_build_env.sh --help`
+  - `source .local-deps/arm-build-env.sh && pkg-config --exists fmt && pkg-config --exists spdlog`
 
 ### 7.3 Python 运行环境
 - 当前默认 Python 运行环境由 `.venv` 随主包一起交付

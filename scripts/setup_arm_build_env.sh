@@ -13,6 +13,8 @@
 #   liblz4-dev:arm64=1.9.3-2build2
 #   libserialport-dev:arm64=0.1.1-4
 #   libusb-1.0-0-dev:arm64=2:1.0.25-1ubuntu2
+#   libfmt-dev:arm64=8.1.1+ds1-2
+#   libspdlog-dev:arm64=1:1.9.2+ds-0.2
 #   libgstreamer1.0-dev:arm64=1.20.3-0ubuntu1.1
 #   libgstreamer-plugins-base1.0-dev:arm64=1.20.1-1ubuntu0.6
 #
@@ -124,6 +126,8 @@ ARM_PACKAGES=(
     liblz4-dev:arm64=1.9.3-2build2
     libserialport-dev:arm64=0.1.1-4
     libusb-1.0-0-dev:arm64=2:1.0.25-1ubuntu2
+    libfmt-dev:arm64=8.1.1+ds1-2
+    libspdlog-dev:arm64=1:1.9.2+ds-0.2
     libgstreamer1.0-dev:arm64=1.20.3-0ubuntu1.1
     libgstreamer-plugins-base1.0-dev:arm64=1.20.1-1ubuntu0.6
 )
@@ -246,6 +250,8 @@ validate_sysroot() {
     pkg-config --exists libserialport
     pkg-config --exists liblz4
     pkg-config --exists libusb-1.0
+    pkg-config --exists fmt
+    pkg-config --exists spdlog
     pkg-config --exists gstreamer-1.0
     pkg-config --exists gstreamer-app-1.0
     pkg-config --exists gstreamer-base-1.0

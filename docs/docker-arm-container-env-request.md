@@ -74,12 +74,17 @@ apt-get install -y \
   libyaml-cpp-dev:arm64 \
   nlohmann-json3-dev \
   liblz4-dev:arm64 \
-  libzstd-dev:arm64 \
   libserialport-dev:arm64 \
   libusb-1.0-0-dev:arm64 \
+  libfmt-dev:arm64 \
+  libspdlog-dev:arm64 \
   libgstreamer1.0-dev:arm64 \
   libgstreamer-plugins-base1.0-dev:arm64
 ```
+
+说明：
+- `libfmt-dev:arm64` 与 `libspdlog-dev:arm64` 是 `ugripper` 对齐 `pp_main` spdlog 日志后端后的新增编译依赖。
+- 主包运行依赖同步需要 `libfmt8` 与 `libspdlog1`，否则板端安装后 C++ 可执行文件会缺 `libfmt.so.8` / `libspdlog.so.1`。
 
 ## 建议补充的环境变量
 ```bash
@@ -89,4 +94,4 @@ export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH:-}
 ## 验证结果
 - 在上述环境补充完成后，已成功完成 `ugripper` ARM 出包验证
 - 产物：`ugripper_1.2.8_arm64.deb`
-
+- 2026-04-28 复验：新增 `libfmt-dev:arm64`、`libspdlog-dev:arm64` 后，`ros2-humble-arm:latest` 容器内可完成 ARM 交叉编译与主包出包；包体 `Depends` 已包含 `libfmt8`、`libspdlog1`

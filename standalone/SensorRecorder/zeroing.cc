@@ -75,6 +75,13 @@ EncoderData sampleFinalState(EncoderDriver *encoder, std::chrono::milliseconds d
 }
 
 int main(int argc, char *argv[]) {
+    DM_LOG_INIT("zeroing",
+                "info",
+                "./logs/SensorRecorder/zeroing.log",
+                1024 * 1024 * 10,
+                3,
+                false);
+
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 

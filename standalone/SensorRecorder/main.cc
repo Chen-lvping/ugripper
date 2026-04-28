@@ -497,6 +497,13 @@ bool connectEncoderWithFallback(EncoderRuntime &encoderRuntime) {
 }
 
 int main(int argc, char *argv[]) {
+    DM_LOG_INIT("SensorRecorder",
+                "info",
+                "./logs/SensorRecorder/SensorRecorder.log",
+                1024 * 1024 * 10,
+                3,
+                false);
+
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 

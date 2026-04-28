@@ -1,5 +1,6 @@
 #include "gripper_hmi_driver.h"
 #include "gripper_hmi_led_effects.h"
+#include "gripper_hmi/logging_compat.h"
 
 #include <array>
 #include <atomic>
@@ -437,6 +438,13 @@ static void printCalibrationSummary(const gripper_hmi::GripperCalibrationDataV1 
 
 int main(int argc, char **argv)
 {
+    DM_LOG_INIT("GripperHmiTool",
+                "info",
+                "./logs/GripperHmiTool/GripperHmiTool.log",
+                1024 * 1024 * 10,
+                3,
+                false);
+
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
 

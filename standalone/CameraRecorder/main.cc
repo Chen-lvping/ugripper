@@ -53,6 +53,13 @@ std::filesystem::path ResolveConfigYamlPath(const camera_recorder::Options& opti
 }  // namespace
 
 int main(int argc, char** argv) {
+    DM_LOG_INIT("CameraRecorder",
+                "info",
+                "./logs/CameraRecorder/CameraRecorder.log",
+                1024 * 1024 * 10,
+                3,
+                false);
+
     try {
         using namespace camera_recorder;
 

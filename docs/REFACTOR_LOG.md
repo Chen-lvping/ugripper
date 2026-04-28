@@ -34,6 +34,54 @@
 
 ## Entries
 
+### 2026-04-28 - align-ugripper-logger-with-ppmain-spdlog
+
+- 阶段：`A3 / logger alignment`
+- 范围：`src/utils`、`standalone/*Recorder`、`standalone/GripperHmiTool`、`standalone/UgripperRuntime`
+- 类型：`日志统一 / pp_main logger 对齐`
+- 主要改动：
+  - 将 `pp_main/src/utils` 的 spdlog 日志后端迁入 `ugripper/src/utils`，替换原本只拼接 stdout 的过渡 logger shim
+  - `DM_LOG_INIT`、`DM_LOG_INFO("{}")` 等宏语义改为与 `pp_main` 默认 standalone logger 一致，支持 fmt 格式化、source location 与控制台 sink
+  - 在 `CameraRecorder`、`SensorRecorder`、`zeroing`、`GripperHmiTool` 入口补 `DM_LOG_INIT(..., false)`，只启用控制台日志，不新增独立文件日志落盘行为
+  - `GripperHmiTool` 可执行目标显式链接 `PP::utils`，保证入口初始化与 driver 内部日志共用同一 logger 后端
+  - ARM sysroot 构建依赖补入 `libfmt-dev:arm64`、`libspdlog-dev:arm64`，主包 `Depends` 补入运行库 `libfmt8`、`libspdlog1`
+- 风险与行为等价说明：
+  - 这轮只收口 C++ 日志后端，不改变 `run_record.sh` 通过 `tee` 捕获 stdout/stderr 并同步到 U 盘的链路
+  - 各独立进程现在启动时会输出一条 `SpdLogger initialized...` 初始化日志；这是 `pp_main` 当前 spdlog 后端行为
+  - `src/utils/include/utils/logger.h` 保留了 `pp_main` 原有 `#warning "Compiling with default logger (spdlog)"`，编译时会出现提示但不影响产物
+- 已执行验证：
+  - `cmake --build build/x86/logger_check --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime -j4`
+  - `./build/x86/logger_check/standalone/CameraRecorder/CameraRecorder --dry-run --config-yaml standalone/CameraRecorder/config/camera_recorder.yaml --output-dir /tmp/ugripper_logger_check --allow-missing`
+  - `./build/x86/logger_check/standalone/SensorRecorder/SensorRecorder --help`
+  - `./build/x86/logger_check/standalone/SensorRecorder/zeroing --help`
+  - `./build/x86/logger_check/standalone/GripperHmiTool/GripperHmiTool --help`
+  - `./build/x86/logger_check/standalone/UgripperRuntime/UgripperRuntime --help`
+  - `docker exec ugripper-arm bash -lc 'cd /home/songwl/swl_ws/ugripper && ./scripts/setup_arm_build_env.sh --skip-host-install'`
+  - `docker exec ugripper-arm bash -lc 'cd /home/songwl/swl_ws/ugripper && ./scripts/build_arm_deb_in_pp_arm_dev.sh'`
+  - `docker exec ugripper-arm bash -lc 'cd /home/songwl/swl_ws/ugripper && PACKAGED_BUILD_DIR=build/arm_container_release ./build_deb.sh -q'`
+  - `dpkg-deb -f ugripper_1.2.8_arm64.deb Package Version Architecture Depends`
+  - `file temp_build_deb/opt/ugripper/bin/{CameraRecorder/CameraRecorder,SensorRecorder/SensorRecorder,SensorRecorder/zeroing,GripperHmiTool/GripperHmiTool,UgripperRuntime/UgripperRuntime}`
+  - `readelf -d temp_build_deb/opt/ugripper/bin/*/* | grep NEEDED`
+  - `./usb_updater_build.sh`
+  - `dpkg-deb -f build/package/updater/ugripper-usb-updater_1.2.2_all.deb Package Version Architecture Depends`
+  - 板端安装：
+    - `scp ugripper_1.2.8_arm64.deb ubuntu@192.168.2.240:/tmp/ugripper_1.2.8_logger_arm64.deb`
+    - `ssh ubuntu@192.168.2.240 'sudo dpkg -i /tmp/ugripper_1.2.8_logger_arm64.deb'`
+  - 板端手动录制 smoke：
+    - `dpkg -s ugripper libfmt8 libspdlog1`
+    - `systemctl status ugripper.service --no-pager -l`
+    - `ldd /opt/ugripper/bin/{CameraRecorder/CameraRecorder,SensorRecorder/SensorRecorder,SensorRecorder/zeroing,GripperHmiTool/GripperHmiTool,UgripperRuntime/UgripperRuntime}`
+    - `journalctl -u ugripper.service --since '2026-04-28 15:38:00' --no-pager -l`
+  - 板端结果目录：`tmp/board_results/logger_spdlog_board_20260428`
+  - 板端汇总：`tmp/board_results/logger_spdlog_board_20260428/manual_recording_summary.json`
+  - 板端录制样本：`/mnt/data_disk/dap912263b000689/data/episode_20260428_0005`
+- 未执行测试与原因：
+  - 未重新执行完整 camera / sensor / service / gripper_hmi release gate；本轮只验证 logger 后端上板安装、服务启动、动态库解析、手动短录与日志同步链路
+- 后续待验证：
+  - 同一天运行日志中仍保留安装前旧包写入的历史 `config_yaml={}...` 行；如需完全干净的日志证据，应清理 `/tmp/umi_sys_*` 与 `/mnt/data_disk/logs/umi_sys_*` 后再重跑
+  - 若要把这轮 logger 包纳入正式 release gate，需要在同一安装包状态下重跑 camera / sensor / service / gripper_hmi 汇总
+  - 若编译提示噪声影响 CI，可在确认允许偏离 `pp_main` 原文件后，单独移除 `logger.h` 的 `#warning`
+
 ### 2026-04-27 - arm-package-gripper-hmi-manual-and-release-gate
 
 - 阶段：`Stage B / board package release gate`

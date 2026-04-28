@@ -34,10 +34,32 @@
 
 ### 0.1 最近一次板端重跑结果
 
-截至 `2026-04-27`，最新一次板端包安装后最小 smoke 已对 `1.2.8` 包完成实时复核；`2026-04-21` 的 `merge8/merge13/merge14` 结果仍保留为历史分项基线，不能与 `1.2.8` 直接混作同一 release gate 结论。
+截至 `2026-04-28`，最新一次板端包安装后手动录制 smoke 已对接入 `pp_main` spdlog 后端后的 `1.2.8` 包完成实时复核；`2026-04-27` 的完整 release gate 仍是当前同包版本主链路基线，`2026-04-21` 的 `merge8/merge13/merge14` 结果仍保留为历史分项基线，不能与 `1.2.8` 直接混作同一 release gate 结论。
 
 本轮已确认通过的板端检查如下：
 
+- `ugripper_1.2.8_arm64.deb` spdlog logger 手动录制 smoke（`2026-04-28`）
+  - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
+  - 结果目录：`tmp/board_results/logger_spdlog_board_20260428`
+  - 汇总：`tmp/board_results/logger_spdlog_board_20260428/manual_recording_summary.json`
+  - 原始输出：
+    - `tmp/board_results/logger_spdlog_board_20260428/board_logger_smoke_output.txt`
+    - `tmp/board_results/logger_spdlog_board_20260428/manual_recording_output.txt`
+    - `tmp/board_results/logger_spdlog_board_20260428/manual_recording_exact_output.txt`
+  - 结论：`ok=true`
+  - 说明：
+    - 本地新包上传为板端 `/tmp/ugripper_1.2.8_logger_arm64.deb` 并通过 `sudo dpkg -i` 覆盖安装
+    - `dpkg -s ugripper -> Version: 1.2.8`
+    - `libfmt8` 与 `libspdlog1` 均为 `arm64 install ok installed`
+    - `ugripper.service -> active/enabled`
+    - 5 个核心二进制均为 `ARM aarch64`，并通过 `ldd` 解析到 `/lib/aarch64-linux-gnu/libspdlog.so.1` 与 `/lib/aarch64-linux-gnu/libfmt.so.8`
+    - 手动录制生成 `episode_20260428_0005`，日志显示 `validation phase end ... valid=true`
+    - 停录后日志显示 `synced runtime log to disk after video stop`，目标为 `/mnt/data_disk/logs/umi_sys_dap912263b000689_20260428.log`
+    - 安装后的新日志可见 `SpdLogger initialized`、`[HMI_DIAG]`、`[GRIPPER_DIAG]`，`CameraRecorder` 新格式为 `config_yaml=bin/CameraRecorder/config/camera_recorder.yaml`
+  - 边界：
+    - 同一天运行日志中仍保留安装前旧包写入的历史行，例如 `config_yaml={}...`；这不是新包安装后的输出
+    - 本轮只验证“新 logger 后端包可安装、服务可启动、手动短录有效、运行日志可进入 journal/tmp/U 盘日志链路”
+    - 本轮未重新执行 camera / sensor / service / gripper_hmi 全套 release gate
 - `ugripper_1.2.8_arm64.deb` 安装后最小 smoke（`2026-04-27`）
   - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
   - 结果目录：`tmp/board_results/package_smoke_20260427_rerun`
