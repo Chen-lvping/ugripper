@@ -3,7 +3,7 @@
 #include "camera_recorder/camera_config.h"
 #include "camera_recorder/camera_registry.h"
 #include "camera_recorder/stereo_control_json.h"
-#include "camera_recorder/logging_compat.h"
+#include "utils/logger.h"
 
 #include <algorithm>
 #include <array>
@@ -964,9 +964,9 @@ public:
             return false;
         }
 
-        DM_LOG_INFO_STREAM() << "[camera_recorder] starting " << config_.name
-                             << " mode=" << ugripper::camera::ModeName(config_.mode);
-        DM_LOG_INFO_STREAM() << "[camera_recorder] cmd: " << command_;
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[camera_recorder] starting " << config_.name
+                             << " mode=" << ugripper::camera::ModeName(config_.mode)).str());
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[camera_recorder] cmd: " << command_).str());
 
         int output_pipe[2] = {-1, -1};
         if (pipe(output_pipe) != 0) {
@@ -1028,11 +1028,11 @@ public:
         const bool unexpected_exit = !stop_requested_;
         if (unexpected_exit) {
             failure_ = true;
-            DM_LOG_ERROR_STREAM() << "[camera_recorder] recorder exited early: " << config_.name
-                                  << " exit_code=" << *exit_code_;
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] recorder exited early: " << config_.name
+                                  << " exit_code=" << *exit_code_).str());
         } else {
-            DM_LOG_INFO_STREAM() << "[camera_recorder] recorder stopped: " << config_.name
-                                 << " exit_code=" << *exit_code_;
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << "[camera_recorder] recorder stopped: " << config_.name
+                                 << " exit_code=" << *exit_code_).str());
         }
     }
 
@@ -1055,8 +1055,8 @@ public:
             std::this_thread::sleep_for(kRecorderStopPollInterval);
         }
 
-        DM_LOG_WARN_STREAM() << "[camera_recorder] stop timeout after SIGINT, escalating to SIGTERM: "
-                             << config_.name;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "[camera_recorder] stop timeout after SIGINT, escalating to SIGTERM: "
+                             << config_.name).str());
         kill(-pid_, SIGTERM);
         const auto hard_deadline = std::chrono::steady_clock::now() + kRecorderStopSigtermTimeout;
         while (std::chrono::steady_clock::now() < hard_deadline) {
@@ -1068,8 +1068,8 @@ public:
             std::this_thread::sleep_for(kRecorderStopPollInterval);
         }
 
-        DM_LOG_WARN_STREAM() << "[camera_recorder] stop timeout after SIGTERM, escalating to SIGKILL: "
-                             << config_.name;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "[camera_recorder] stop timeout after SIGTERM, escalating to SIGKILL: "
+                             << config_.name).str());
         kill(-pid_, SIGKILL);
         const auto reap_deadline = std::chrono::steady_clock::now() + kRecorderStopReapTimeout;
         while (std::chrono::steady_clock::now() < reap_deadline) {
@@ -1183,7 +1183,7 @@ protected:
             return;
         }
 
-        DM_LOG_INFO_STREAM() << "[" << config_.name << "] " << line;
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[" << config_.name << "] " << line).str());
     }
 
     void StartOutputReaderThread(int read_fd) {
@@ -1258,7 +1258,7 @@ protected:
         const bool has_output = output_path.has_value() && fs::exists(*output_path, error) &&
                                 fs::file_size(*output_path, error) > 0;
         const auto output_size = has_output ? fs::file_size(*output_path, error) : 0;
-        DM_LOG_INFO_STREAM() << "[camera_recorder][summary] name=" << config_.name
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[camera_recorder][summary] name=" << config_.name
                              << " mode=" << ugripper::camera::ModeName(config_.mode)
                              << " observed_output_frames=" << observed_output_frames
                              << " first_pts_us=" << first_pts_us.value_or(-1)
@@ -1268,7 +1268,7 @@ protected:
                              << " record_time_offset_us=" << offset_us.value_or(-1)
                              << " has_output=" << (has_output ? "true" : "false")
                              << " output_size=" << output_size
-                             << " exit_code=" << exit_code_.value_or(-1);
+                             << " exit_code=" << exit_code_.value_or(-1)).str());
     }
 
     CameraConfig config_;
@@ -1320,8 +1320,8 @@ public:
             failure_ = true;
             exit_code_ = -1;
             last_error_ = error_message;
-            DM_LOG_ERROR_STREAM() << "[camera_recorder] failed to start " << config_.name
-                                  << ": " << error_message;
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] failed to start " << config_.name
+                                  << ": " << error_message).str());
             CleanupPipeline();
             CleanupDevice();
             return false;
@@ -1773,9 +1773,9 @@ private:
             GError* warning = nullptr;
             gchar* debug = nullptr;
             gst_message_parse_warning(message, &warning, &debug);
-            DM_LOG_WARN_STREAM() << "[camera_recorder] warning from main camera pipeline "
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "[camera_recorder] warning from main camera pipeline "
                                  << config_.name << ": "
-                                 << (warning != nullptr ? warning->message : "unknown");
+                                 << (warning != nullptr ? warning->message : "unknown")).str());
             if (warning != nullptr) {
                 g_error_free(warning);
             }
@@ -1826,7 +1826,7 @@ private:
 
     void SetFailure(const std::string& error_message) {
         if (!failure_) {
-            DM_LOG_ERROR_STREAM() << "[camera_recorder] " << error_message;
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] " << error_message).str());
         }
         failure_ = true;
         last_error_ = error_message;
@@ -2698,8 +2698,8 @@ public:
             return false;
         }
 
-        DM_LOG_INFO_STREAM() << "[camera_recorder] starting stereo session " << config_.name;
-        DM_LOG_INFO_STREAM() << "[camera_recorder] cmd: " << command_;
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[camera_recorder] starting stereo session " << config_.name).str());
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[camera_recorder] cmd: " << command_).str());
 
         int input_pipe[2] = {-1, -1};
         int output_pipe[2] = {-1, -1};
@@ -2774,11 +2774,11 @@ public:
         exit_code_ = DecodeExitCode(status);
         if (!stop_requested_) {
             failure_ = true;
-            DM_LOG_ERROR_STREAM() << "[camera_recorder] stereo session exited early: " << config_.name
-                                  << " exit_code=" << *exit_code_;
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] stereo session exited early: " << config_.name
+                                  << " exit_code=" << *exit_code_).str());
         } else {
-            DM_LOG_INFO_STREAM() << "[camera_recorder] stereo session stopped: " << config_.name
-                                 << " exit_code=" << *exit_code_;
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << "[camera_recorder] stereo session stopped: " << config_.name
+                                 << " exit_code=" << *exit_code_).str());
         }
     }
 
@@ -2978,8 +2978,8 @@ private:
                           frame.jpeg_bytes.size())) {
                 if (!stop_requested_) {
                     failure_ = true;
-                    DM_LOG_ERROR_STREAM() << "[camera_recorder] failed to write stereo frame to ffmpeg stdin: "
-                                          << config_.name;
+                    DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] failed to write stereo frame to ffmpeg stdin: "
+                                          << config_.name).str());
                 }
                 break;
             }
@@ -3012,7 +3012,7 @@ private:
             return;
         }
 
-        DM_LOG_INFO_STREAM() << "[" << config_.name << "] " << line;
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[" << config_.name << "] " << line).str());
     }
 
     void StartOutputReaderThread(int read_fd) {
@@ -3115,7 +3115,7 @@ private:
             last_submitted_system_time_us = last_submitted_frame_system_time_us_;
         }
 
-        DM_LOG_INFO_STREAM() << "[camera_recorder][stereo_session_summary] name=" << config_.name
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[camera_recorder][stereo_session_summary] name=" << config_.name
                              << " submitted_frames=" << submitted_frame_count
                              << " max_queue_backlog=" << max_queue_backlog_
                              << " first_submitted_system_time_us=" << first_submitted_system_time_us.value_or(-1)
@@ -3126,7 +3126,7 @@ private:
                              << " last_system_time_us=" << last_system_time_us.value_or(-1)
                              << " record_time_offset_us=" << offset_us.value_or(-1)
                              << " has_output=" << (HasWrittenOutput() ? "true" : "false")
-                             << " exit_code=" << exit_code_.value_or(-1);
+                             << " exit_code=" << exit_code_.value_or(-1)).str());
     }
 
     CameraConfig config_;
@@ -3218,9 +3218,9 @@ public:
                     if (!session_has_progress &&
                         session_restart_attempts_ <= kStereoSessionMaxRestartAttempts &&
                         ready()) {
-                        DM_LOG_WARN_STREAM() << "[camera_recorder] stereo session recorder exited before first frame, restarting: "
+                        DM_LOG_WARN("{}", (::DA::utils::LogString() << "[camera_recorder] stereo session recorder exited before first frame, restarting: "
                                              << config_.name
-                                             << " attempt=" << (session_restart_attempts_ + 1);
+                                             << " attempt=" << (session_restart_attempts_ + 1)).str());
                         restart_episode_dir = session_episode_dir_;
                         should_restart = true;
                     } else {
@@ -3885,8 +3885,8 @@ bool CameraRecorderManager::WriteInfoJson() const {
     const fs::path info_json_path = options_.output_dir / "info.json";
     std::ofstream output(info_json_path, std::ios::trunc);
     if (!output.is_open()) {
-        DM_LOG_ERROR_STREAM() << "[camera_recorder] failed to open info.json for write: "
-                              << info_json_path;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] failed to open info.json for write: "
+                              << info_json_path).str());
         return false;
     }
 
@@ -3900,12 +3900,12 @@ bool CameraRecorderManager::WriteInfoJson() const {
         auto offset_us = recorder->RecordTimeOffsetUs();
         if (!offset_us.has_value() && options_.codec == "h265" && IsMainCamera(recorder->config())) {
             offset_us = boot_time_offset_us;
-            DM_LOG_WARN_STREAM() << "[camera_recorder] fallback to boot_time_offset_us for main camera "
-                                 << recorder->config().name << " in h265 direct-stream mode";
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "[camera_recorder] fallback to boot_time_offset_us for main camera "
+                                 << recorder->config().name << " in h265 direct-stream mode").str());
         }
         if (!offset_us.has_value()) {
-            DM_LOG_ERROR_STREAM() << "[camera_recorder] missing record time offset for "
-                                  << recorder->config().name;
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] missing record time offset for "
+                                  << recorder->config().name).str());
             missing_offset = true;
             continue;
         }
@@ -3940,14 +3940,14 @@ bool ApplyUvcRollForSelectedCameras(const Options& options, const std::vector<Ca
             if (changed && !WaitForDeviceNode(config.device, kDeviceRebindTimeout)) {
                 throw std::runtime_error("device node did not recover after UVC roll update: " + config.device);
             }
-            DM_LOG_INFO_STREAM() << "[camera_recorder] uvc roll "
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << "[camera_recorder] uvc roll "
                                  << (changed ? "applied" : "already_ok")
                                  << ": camera=" << config.name
-                                 << " device=" << config.device;
+                                 << " device=" << config.device).str());
         } catch (const std::exception& ex) {
             ok = false;
-            DM_LOG_ERROR_STREAM() << "[camera_recorder] failed to apply UVC roll for "
-                                  << config.name << ": " << ex.what();
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] failed to apply UVC roll for "
+                                  << config.name << ": " << ex.what()).str());
         }
     }
 

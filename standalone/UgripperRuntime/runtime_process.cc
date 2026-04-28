@@ -5,7 +5,6 @@
 #include "record_runtime/stereo_session_client.h"
 #include "record_runtime/stereo_session_port.h"
 #include "record_runtime/subprocess_handle.h"
-#include "record_runtime/logging_compat.h"
 
 #include "utils/logger.h"
 #include "utils/time_utils.h"
@@ -408,7 +407,7 @@ bool SubprocessHandle::Start(const std::vector<std::string>& arguments,
     }
     argv.push_back(nullptr);
 
-    DM_LOG_INFO_STREAM() << "launching " << name_ << ": " << JoinArguments(arguments);
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "launching " << name_ << ": " << JoinArguments(arguments)).str());
 
     pid_ = fork();
     if (pid_ < 0)
@@ -446,7 +445,7 @@ bool SubprocessHandle::Start(const std::vector<std::string>& arguments,
         {
             *error_message = std::string("setpgid failed: ") + std::strerror(errno);
         }
-        DM_LOG_WARN_STREAM() << "failed to assign process group for " << name_ << ": " << std::strerror(errno);
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to assign process group for " << name_ << ": " << std::strerror(errno)).str());
     }
 
     process_group_id_ = pid_;
@@ -507,7 +506,7 @@ bool SubprocessHandle::Stop(ProcessStopMode stop_mode, int timeout_ms, std::stri
     {
         if (!SendSignal(SIGINT) && errno != ESRCH)
         {
-            DM_LOG_WARN_STREAM() << "failed to send SIGINT to " << name_ << ": " << std::strerror(errno);
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to send SIGINT to " << name_ << ": " << std::strerror(errno)).str());
         }
         if (Wait(sigint_timeout_ms))
         {
@@ -517,7 +516,7 @@ bool SubprocessHandle::Stop(ProcessStopMode stop_mode, int timeout_ms, std::stri
 
     if (!SendSignal(SIGTERM) && errno != ESRCH)
     {
-        DM_LOG_WARN_STREAM() << "failed to send SIGTERM to " << name_ << ": " << std::strerror(errno);
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to send SIGTERM to " << name_ << ": " << std::strerror(errno)).str());
     }
     if (Wait(sigterm_timeout_ms))
     {
@@ -525,10 +524,10 @@ bool SubprocessHandle::Stop(ProcessStopMode stop_mode, int timeout_ms, std::stri
     }
 
     set_timeout_error(stop_mode == ProcessStopMode::SigIntThenTermThenKill ? "sigterm" : "stop");
-    DM_LOG_WARN_STREAM() << name_ << " did not exit after stop signal, escalating to SIGKILL";
+    DM_LOG_WARN("{}", (::DA::utils::LogString() << name_ << " did not exit after stop signal, escalating to SIGKILL").str());
     if (!SendSignal(SIGKILL) && errno != ESRCH)
     {
-        DM_LOG_WARN_STREAM() << "failed to send SIGKILL to " << name_ << ": " << std::strerror(errno);
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to send SIGKILL to " << name_ << ": " << std::strerror(errno)).str());
     }
     PollExit(true);
     return pid_ <= 0;
@@ -792,7 +791,7 @@ bool AudioCoordinator::StartAudioPlayer(std::string* error_message)
 
     if (!supervisor_->Start(WorkerName::AudioPlayer, spec, error_message))
     {
-        DM_LOG_WARN_STREAM() << "failed to launch audio player, sound prompts disabled";
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to launch audio player, sound prompts disabled").str());
         audio_player_started_ = false;
         return false;
     }
@@ -806,7 +805,7 @@ bool AudioCoordinator::StartAudioPlayer(std::string* error_message)
                 *error_message = "audio player exited before ready, last_exit=" +
                                  std::to_string(status.last_exit_code);
             }
-            DM_LOG_WARN_STREAM() << "audio player exited before ready, last_exit=" << status.last_exit_code;
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "audio player exited before ready, last_exit=" << status.last_exit_code).str());
             audio_player_started_ = false;
             return true;
         }
@@ -819,7 +818,7 @@ bool AudioCoordinator::StartAudioPlayer(std::string* error_message)
         audio_player_started_ = playback_ready;
         if (!playback_ready)
         {
-            DM_LOG_INFO_STREAM() << "audio player launched; waiting for USB headset sink";
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << "audio player launched; waiting for USB headset sink").str());
         }
         return true;
     });
@@ -833,7 +832,7 @@ bool AudioCoordinator::StartAudioPlayer(std::string* error_message)
     {
         *error_message = "audio player pipe timeout";
     }
-    DM_LOG_WARN_STREAM() << "audio player pipe timeout, audio daemon did not finish bootstrap";
+    DM_LOG_WARN("{}", (::DA::utils::LogString() << "audio player pipe timeout, audio daemon did not finish bootstrap").str());
     supervisor_->Stop(WorkerName::AudioPlayer, "audio bootstrap timeout", nullptr);
     audio_player_started_ = false;
     return false;
@@ -865,7 +864,7 @@ void AudioCoordinator::MaintainAudioPlayer()
                 return;
             }
 
-            DM_LOG_WARN_STREAM() << "audio player running without pipe, restarting";
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "audio player running without pipe, restarting").str());
             supervisor_->Stop(WorkerName::AudioPlayer, "missing audio pipe", nullptr);
         }
 
@@ -875,7 +874,7 @@ void AudioCoordinator::MaintainAudioPlayer()
             audio_player_started_ = true;
             if (recovered)
             {
-                DM_LOG_INFO_STREAM() << "audio player recovered and is ready";
+                DM_LOG_INFO("{}", (::DA::utils::LogString() << "audio player recovered and is ready").str());
                 if (!recovery_command_.empty())
                 {
                     SendCommand(recovery_command_);
@@ -886,7 +885,7 @@ void AudioCoordinator::MaintainAudioPlayer()
 
         if (audio_player_started_)
         {
-            DM_LOG_WARN_STREAM() << "audio player lost ready marker, waiting for USB headset recovery";
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "audio player lost ready marker, waiting for USB headset recovery").str());
         }
         audio_player_started_ = false;
         return;
@@ -894,7 +893,7 @@ void AudioCoordinator::MaintainAudioPlayer()
 
     if (audio_player_started_)
     {
-        DM_LOG_WARN_STREAM() << "audio player exited, will retry";
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "audio player exited, will retry").str());
         audio_player_started_ = false;
     }
 
@@ -918,7 +917,7 @@ void AudioCoordinator::SendCommand(const std::string& command) const
     {
         if (command != "exit")
         {
-            DM_LOG_WARN_STREAM() << "failed to send audio command '" << command << "': " << error_message;
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to send audio command '" << command << "': " << error_message).str());
         }
         return;
     }
@@ -962,7 +961,7 @@ bool StereoSessionClient::StartDaemon(std::string* error_message)
 
     if (!WriteControl(false, "", 0, 0, error_message))
     {
-        DM_LOG_WARN_STREAM() << "failed to reset stereo control file before launch";
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to reset stereo control file before launch").str());
     }
 
     ProcessSpec spec;
@@ -974,7 +973,7 @@ bool StereoSessionClient::StartDaemon(std::string* error_message)
 
     if (!supervisor_->Start(WorkerName::StereoDaemon, spec, error_message))
     {
-        DM_LOG_WARN_STREAM() << "failed to launch stereo daemon";
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to launch stereo daemon").str());
         daemon_started_ = false;
         return false;
     }
@@ -1004,7 +1003,7 @@ void StereoSessionClient::MaintainDaemon()
 
     if (daemon_started_)
     {
-        DM_LOG_WARN_STREAM() << "stereo daemon exited, will retry";
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "stereo daemon exited, will retry").str());
         daemon_started_ = false;
     }
 
@@ -1104,8 +1103,8 @@ bool StereoSessionClient::WriteControl(bool recording,
                                      next_command_seq,
                                      error_message))
     {
-        DM_LOG_WARN_STREAM() << "failed to write stereo control file: "
-                             << (error_message != nullptr ? *error_message : std::string());
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write stereo control file: "
+                             << (error_message != nullptr ? *error_message : std::string())).str());
         return false;
     }
     return true;

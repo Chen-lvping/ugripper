@@ -1,7 +1,7 @@
 #include "record_runtime.h"
+#include "utils/logger.h"
 #include "record_runtime/gripper_refresh_logic.h"
 #include "record_runtime/motion_alert_ipc.h"
-#include "record_runtime/logging_compat.h"
 #include "utils/env_utils.h"
 #include "utils/file_utils.hpp"
 #include "utils/time_utils.h"
@@ -363,7 +363,7 @@ std::set<std::string> loadPersistentResetSerials(const fs::path &path)
     }
     catch (const std::exception &ex)
     {
-        DM_LOG_WARN_STREAM() << "failed to parse tactile persistent reset list: " << ex.what() << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to parse tactile persistent reset list: " << ex.what() << std::endl).str());
     }
     return result;
 }
@@ -1443,8 +1443,8 @@ void flushEpisodeDirectoriesToDisk(const fs::path &episodeDir, const char *phase
     {
         if (!fs::exists(directory))
         {
-            DM_LOG_INFO_STREAM() << "[PERF] flush dir skip missing: phase=" << phaseLabel
-                      << " path=" << directory << std::endl;
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush dir skip missing: phase=" << phaseLabel
+                      << " path=" << directory << std::endl).str());
             continue;
         }
 
@@ -1452,15 +1452,15 @@ void flushEpisodeDirectoriesToDisk(const fs::path &episodeDir, const char *phase
         std::error_code error;
         if (!flushDirectoryToDisk(directory, &error))
         {
-            DM_LOG_WARN_STREAM() << "failed to flush episode directory: phase=" << phaseLabel
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to flush episode directory: phase=" << phaseLabel
                       << " path=" << directory
-                      << " error=" << error.message() << std::endl;
+                      << " error=" << error.message() << std::endl).str());
             continue;
         }
 
-        DM_LOG_INFO_STREAM() << "[PERF] flush dir done: phase=" << phaseLabel
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush dir done: phase=" << phaseLabel
                   << " path=" << directory
-                  << " elapsed_ms=" << (steadyNowMs() - dirFlushStartMs) << std::endl;
+                  << " elapsed_ms=" << (steadyNowMs() - dirFlushStartMs) << std::endl).str());
     }
 }
 
@@ -1499,15 +1499,15 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
     }
 
     const int64_t flushStartMs = steadyNowMs();
-    DM_LOG_INFO_STREAM() << "[PERF] flush begin: phase=" << phaseLabel
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush begin: phase=" << phaseLabel
               << " episode_dir=" << episodeDir
-              << " candidate_paths=" << paths.size() << std::endl;
+              << " candidate_paths=" << paths.size() << std::endl).str());
 
     for (const auto &path : paths)
     {
         if (!fs::exists(path))
         {
-            DM_LOG_INFO_STREAM() << "[PERF] flush skip missing: path=" << path << std::endl;
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush skip missing: path=" << path << std::endl).str());
             continue;
         }
 
@@ -1515,20 +1515,20 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
         std::error_code error;
         if (!flushFileToDisk(path, &error))
         {
-            DM_LOG_WARN_STREAM() << "failed to flush episode artifact: "
-                      << path << " error=" << error.message() << std::endl;
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to flush episode artifact: "
+                      << path << " error=" << error.message() << std::endl).str());
             continue;
         }
 
-        DM_LOG_INFO_STREAM() << "[PERF] flush done: path=" << path
-                  << " elapsed_ms=" << (steadyNowMs() - artifactFlushStartMs) << std::endl;
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush done: path=" << path
+                  << " elapsed_ms=" << (steadyNowMs() - artifactFlushStartMs) << std::endl).str());
     }
 
     flushEpisodeDirectoriesToDisk(episodeDir, phaseLabel);
 
-    DM_LOG_INFO_STREAM() << "[PERF] flush end: phase=" << phaseLabel
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush end: phase=" << phaseLabel
               << " episode_dir=" << episodeDir
-              << " elapsed_ms=" << (steadyNowMs() - flushStartMs) << std::endl;
+              << " elapsed_ms=" << (steadyNowMs() - flushStartMs) << std::endl).str());
 }
 
 std::string makeTimestampString()
@@ -1564,14 +1564,14 @@ void writeValidationErrorLog(const fs::path &episodeDir, const std::string &erro
     std::string writeError;
     if (!writeTextFileAtomically(errorLogPath, content, &writeError))
     {
-        DM_LOG_WARN_STREAM() << "failed to write validation_error.log: " << writeError << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write validation_error.log: " << writeError << std::endl).str());
         return;
     }
 
     std::error_code flushError;
     if (!flushFileToDisk(errorLogPath, &flushError))
     {
-        DM_LOG_WARN_STREAM() << "failed to flush validation_error.log: " << flushError.message() << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to flush validation_error.log: " << flushError.message() << std::endl).str());
     }
     flushEpisodeDirectoriesToDisk(episodeDir, "validation_error");
 }
@@ -1989,41 +1989,41 @@ void injectRuntimeTactileSerial(json *calibrationJson,
     const std::string previous = entry.value("serial", std::string());
     if (previous.empty())
     {
-        DM_LOG_INFO_STREAM() << "tactile serial missing in source calibration, inject runtime value:"
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "tactile serial missing in source calibration, inject runtime value:"
                   << " camera=" << target.cameraName
                   << " device=" << target.devicePath
-                  << " serial=" << runtimeSerial << std::endl;
+                  << " serial=" << runtimeSerial << std::endl).str());
     }
     else if (previous == target.serialPlaceholder)
     {
-        DM_LOG_INFO_STREAM() << "tactile serial placeholder resolved at runtime:"
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "tactile serial placeholder resolved at runtime:"
                   << " camera=" << target.cameraName
                   << " placeholder=" << target.serialPlaceholder
                   << " device=" << target.devicePath
-                  << " serial=" << runtimeSerial << std::endl;
+                  << " serial=" << runtimeSerial << std::endl).str());
     }
     else if (previous != runtimeSerial)
     {
-        DM_LOG_WARN_STREAM() << "tactile serial mismatch, correcting episode calibration only:"
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile serial mismatch, correcting episode calibration only:"
                   << " camera=" << target.cameraName
                   << " source_serial=" << previous
                   << " runtime_serial=" << runtimeSerial
                   << " source_file=" << sourceFile
-                  << " persist_rewritten=false" << std::endl;
+                  << " persist_rewritten=false" << std::endl).str());
     }
     else
     {
-        DM_LOG_INFO_STREAM() << "tactile serial matches runtime hardware:"
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "tactile serial matches runtime hardware:"
                   << " camera=" << target.cameraName
                   << " device=" << target.devicePath
-                  << " serial=" << runtimeSerial << std::endl;
+                  << " serial=" << runtimeSerial << std::endl).str());
     }
 
     if (!probeDetail.empty())
     {
-        DM_LOG_INFO_STREAM() << "tactile serial probe detail:"
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "tactile serial probe detail:"
                   << " camera=" << target.cameraName
-                  << " detail=" << probeDetail << std::endl;
+                  << " detail=" << probeDetail << std::endl).str());
     }
 
     replaceJsonStringValues(calibrationJson, target.serialPlaceholder, runtimeSerial);
@@ -2034,9 +2034,9 @@ void injectRuntimeTactileSerial(json *calibrationJson,
         !previous.empty() &&
         previous != target.serialPlaceholder)
     {
-        DM_LOG_INFO_STREAM() << "persist calibration remains unchanged;"
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "persist calibration remains unchanged;"
                   << " episode calibration now uses runtime tactile serial for camera=" << target.cameraName
-                  << std::endl;
+                  << std::endl).str());
     }
 }
 
@@ -2052,7 +2052,7 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
     }
 
     const int64_t probeStartMs = steadyNowMs();
-    DM_LOG_INFO_STREAM() << "[PERF] ffprobe begin: file=" << filePath << std::endl;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] ffprobe begin: file=" << filePath << std::endl).str());
     const CommandCaptureResult probe = runCommandCapture(
         {
             "ffprobe",
@@ -2070,8 +2070,8 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
 
     if (probe.timedOut)
     {
-        DM_LOG_WARN_STREAM() << "[PERF] ffprobe timeout: file=" << filePath
-                  << " elapsed_ms=" << (steadyNowMs() - probeStartMs) << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "[PERF] ffprobe timeout: file=" << filePath
+                  << " elapsed_ms=" << (steadyNowMs() - probeStartMs) << std::endl).str());
         if (errorMessage != nullptr)
         {
             *errorMessage = "ffprobe timeout after " + std::to_string(kVideoProbeTimeoutMs) + "ms";
@@ -2080,9 +2080,9 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
     }
     if (!probe.success)
     {
-        DM_LOG_WARN_STREAM() << "[PERF] ffprobe failed: file=" << filePath
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "[PERF] ffprobe failed: file=" << filePath
                   << " elapsed_ms=" << (steadyNowMs() - probeStartMs)
-                  << " exit_code=" << probe.exitCode << std::endl;
+                  << " exit_code=" << probe.exitCode << std::endl).str());
         if (errorMessage != nullptr)
         {
             std::string detail = trim(probe.output);
@@ -2142,11 +2142,11 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
         return false;
     }
 
-    DM_LOG_INFO_STREAM() << "[PERF] ffprobe done: file=" << filePath
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] ffprobe done: file=" << filePath
               << " elapsed_ms=" << (steadyNowMs() - probeStartMs)
               << " start_sec=" << formatSeconds(result->startTimeSec)
               << " duration_sec=" << formatSeconds(result->durationSec)
-              << " span_sec=" << formatSeconds(result->spanSec) << std::endl;
+              << " span_sec=" << formatSeconds(result->spanSec) << std::endl).str());
     return true;
 }
 
@@ -2478,13 +2478,13 @@ bool RecordRuntime::initialize()
     }
     if (options_.cameraCodec != "h264" && options_.cameraCodec != "h265")
     {
-        DM_LOG_WARN_STREAM() << "invalid CAMERA_CODEC, fallback to h264: " << options_.cameraCodec << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "invalid CAMERA_CODEC, fallback to h264: " << options_.cameraCodec << std::endl).str());
         options_.cameraCodec = "h264";
     }
 
     chestCameraEnabled_ = !isFalseLikeValue(readEnvValue(options_.envFile, kChestCameraEnvKey));
-    DM_LOG_INFO_STREAM() << kChestCameraEnvKey << "="
-                         << (chestCameraEnabled_ ? "true" : "false") << std::endl;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << kChestCameraEnvKey << "="
+                         << (chestCameraEnabled_ ? "true" : "false") << std::endl).str());
 
     if (options_.gripperPorts.empty())
     {
@@ -2513,14 +2513,14 @@ bool RecordRuntime::initialize()
 
     if (!episodeManager_->initialize())
     {
-        DM_LOG_ERROR_STREAM() << "failed to initialize episode manager for disk root: "
-                  << options_.diskRoot << std::endl;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "failed to initialize episode manager for disk root: "
+                  << options_.diskRoot << std::endl).str());
         return false;
     }
 
     if (!panelManager_.connect(options_.gripperPorts))
     {
-        DM_LOG_ERROR_STREAM() << "failed to connect any gripper HMI port" << std::endl;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "failed to connect any gripper HMI port" << std::endl).str());
         return false;
     }
 
@@ -2769,15 +2769,15 @@ bool RecordRuntime::initialize()
                 },
             .log_info =
                 [](const std::string& message) {
-                    DM_LOG_INFO_STREAM() << message << std::endl;
+                    DM_LOG_INFO("{}", (::DA::utils::LogString() << message << std::endl).str());
                 },
             .log_warn =
                 [](const std::string& message) {
-                    DM_LOG_WARN_STREAM() << message << std::endl;
+                    DM_LOG_WARN("{}", (::DA::utils::LogString() << message << std::endl).str());
                 },
             .log_error =
                 [](const std::string& message) {
-                    DM_LOG_ERROR_STREAM() << message << std::endl;
+                    DM_LOG_ERROR("{}", (::DA::utils::LogString() << message << std::endl).str());
                 },
             .sync_runtime_log =
                 [this](const std::string& reason) {
@@ -2817,9 +2817,9 @@ int RecordRuntime::run()
         return 1;
     }
 
-    DM_LOG_INFO_STREAM() << "record_runtime started" << std::endl;
-    DM_LOG_INFO_STREAM() << "device_sn=" << deviceSn_ << std::endl;
-    DM_LOG_INFO_STREAM() << "episode_root=" << episodeManager_->dataRoot() << std::endl;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "record_runtime started" << std::endl).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "device_sn=" << deviceSn_ << std::endl).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "episode_root=" << episodeManager_->dataRoot() << std::endl).str());
 
     while (!stopRequested_.load())
     {
@@ -2868,7 +2868,7 @@ bool RecordRuntime::startAudioPlayer()
 {
     if (!fs::exists(options_.audioPlayScript))
     {
-        DM_LOG_WARN_STREAM() << "audio play script not found: " << options_.audioPlayScript << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "audio play script not found: " << options_.audioPlayScript << std::endl).str());
         return false;
     }
     std::string errorMessage;
@@ -2907,9 +2907,9 @@ bool RecordRuntime::startStereoDaemon()
     const bool started = stereoSessionClient_ != nullptr && stereoSessionClient_->StartDaemon(&errorMessage);
     if (!started)
     {
-        DM_LOG_WARN_STREAM() << "failed to start stereo daemon"
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to start stereo daemon"
                              << (errorMessage.empty() ? "" : (": " + errorMessage))
-                             << std::endl;
+                             << std::endl).str());
     }
     return started;
 }
@@ -2950,7 +2950,7 @@ bool RecordRuntime::writeStereoControl(bool recording,
     }
     if (!ok)
     {
-        DM_LOG_WARN_STREAM() << "failed to write stereo control file: " << errorMessage << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write stereo control file: " << errorMessage << std::endl).str());
     }
     return ok;
 }
@@ -3134,15 +3134,15 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
 
     if (iterError)
     {
-        DM_LOG_WARN_STREAM() << "failed to scan runtime log directory for sync" << reasonSuffix
-                             << ": " << iterError.message();
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to scan runtime log directory for sync" << reasonSuffix
+                             << ": " << iterError.message()).str());
         return false;
     }
 
     if (!foundSource)
     {
-        DM_LOG_WARN_STREAM() << "no runtime log file found for sync" << reasonSuffix
-                             << ": prefix=" << filePrefix;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "no runtime log file found for sync" << reasonSuffix
+                             << ": prefix=" << filePrefix).str());
         return false;
     }
 
@@ -3150,8 +3150,8 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
     std::error_code diskRootError;
     if (!fs::exists(diskRoot, diskRootError) || !fs::is_directory(diskRoot, diskRootError))
     {
-        DM_LOG_WARN_STREAM() << "skip runtime log sync" << reasonSuffix
-                             << ": disk root unavailable: " << diskRoot;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "skip runtime log sync" << reasonSuffix
+                             << ": disk root unavailable: " << diskRoot).str());
         return false;
     }
 
@@ -3184,16 +3184,16 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
 
     if (!mounted)
     {
-        DM_LOG_WARN_STREAM() << "skip runtime log sync" << reasonSuffix
-                             << ": disk root is not mounted: " << diskRoot;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "skip runtime log sync" << reasonSuffix
+                             << ": disk root is not mounted: " << diskRoot).str());
         return false;
     }
 
     if (access(diskRoot.c_str(), W_OK) != 0)
     {
-        DM_LOG_WARN_STREAM() << "skip runtime log sync" << reasonSuffix
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "skip runtime log sync" << reasonSuffix
                              << ": disk root not writable: " << diskRoot
-                             << " error=" << std::strerror(errno);
+                             << " error=" << std::strerror(errno)).str());
         return false;
     }
 
@@ -3202,8 +3202,8 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
     fs::create_directories(destDir, mkdirError);
     if (mkdirError)
     {
-        DM_LOG_WARN_STREAM() << "failed to create runtime log directory" << reasonSuffix
-                             << ": " << destDir << " error=" << mkdirError.message();
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to create runtime log directory" << reasonSuffix
+                             << ": " << destDir << " error=" << mkdirError.message()).str());
         return false;
     }
 
@@ -3215,8 +3215,8 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
     const int lockFd = open(lockPath.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, 0644);
     if (lockFd < 0)
     {
-        DM_LOG_WARN_STREAM() << "failed to open runtime log sync lock" << reasonSuffix
-                             << ": " << lockPath << " error=" << std::strerror(errno);
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to open runtime log sync lock" << reasonSuffix
+                             << ": " << lockPath << " error=" << std::strerror(errno)).str());
         return false;
     }
 
@@ -3227,8 +3227,8 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
 
     if (flock(lockFd, LOCK_EX) != 0)
     {
-        DM_LOG_WARN_STREAM() << "failed to acquire runtime log sync lock" << reasonSuffix
-                             << ": " << lockPath << " error=" << std::strerror(errno);
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to acquire runtime log sync lock" << reasonSuffix
+                             << ": " << lockPath << " error=" << std::strerror(errno)).str());
         close(lockFd);
         return false;
     }
@@ -3253,8 +3253,8 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
     const int srcFd = open(sourcePath.c_str(), O_RDONLY | O_CLOEXEC);
     if (srcFd < 0)
     {
-        DM_LOG_WARN_STREAM() << "failed to open runtime log source" << reasonSuffix
-                             << ": " << sourcePath << " error=" << std::strerror(errno);
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to open runtime log source" << reasonSuffix
+                             << ": " << sourcePath << " error=" << std::strerror(errno)).str());
         closeLock();
         return false;
     }
@@ -3264,8 +3264,8 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
     };
     if (fstat(srcFd, &sourceStat) != 0)
     {
-        DM_LOG_WARN_STREAM() << "failed to stat runtime log source" << reasonSuffix
-                             << ": " << sourcePath << " error=" << std::strerror(errno);
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to stat runtime log source" << reasonSuffix
+                             << ": " << sourcePath << " error=" << std::strerror(errno)).str());
         close(srcFd);
         closeLock();
         return false;
@@ -3281,16 +3281,16 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
     {
         close(srcFd);
         closeLock();
-        DM_LOG_INFO_STREAM() << "runtime log already synced" << reasonSuffix
-                             << ": " << destPath;
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "runtime log already synced" << reasonSuffix
+                             << ": " << destPath).str());
         return true;
     }
 
     const int destFd = open(destPath.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (destFd < 0)
     {
-        DM_LOG_WARN_STREAM() << "failed to open runtime log destination" << reasonSuffix
-                             << ": " << destPath << " error=" << std::strerror(errno);
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to open runtime log destination" << reasonSuffix
+                             << ": " << destPath << " error=" << std::strerror(errno)).str());
         close(srcFd);
         closeLock();
         return false;
@@ -3298,8 +3298,8 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
 
     if (lseek(srcFd, static_cast<off_t>(lastPos), SEEK_SET) < 0)
     {
-        DM_LOG_WARN_STREAM() << "failed to seek runtime log source" << reasonSuffix
-                             << ": " << sourcePath << " error=" << std::strerror(errno);
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to seek runtime log source" << reasonSuffix
+                             << ": " << sourcePath << " error=" << std::strerror(errno)).str());
         close(destFd);
         close(srcFd);
         closeLock();
@@ -3314,8 +3314,8 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
         const ssize_t readSize = read(srcFd, buffer.data(), chunkSize);
         if (readSize < 0)
         {
-            DM_LOG_WARN_STREAM() << "failed to read runtime log source" << reasonSuffix
-                                 << ": " << sourcePath << " error=" << std::strerror(errno);
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to read runtime log source" << reasonSuffix
+                                 << ": " << sourcePath << " error=" << std::strerror(errno)).str());
             close(destFd);
             close(srcFd);
             closeLock();
@@ -3332,8 +3332,8 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
             const ssize_t written = write(destFd, buffer.data() + totalWritten, static_cast<size_t>(readSize - totalWritten));
             if (written <= 0)
             {
-                DM_LOG_WARN_STREAM() << "failed to append runtime log destination" << reasonSuffix
-                                     << ": " << destPath << " error=" << std::strerror(errno);
+                DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to append runtime log destination" << reasonSuffix
+                                     << ": " << destPath << " error=" << std::strerror(errno)).str());
                 close(destFd);
                 close(srcFd);
                 closeLock();
@@ -3347,8 +3347,8 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
 
     if (::fsync(destFd) != 0)
     {
-        DM_LOG_WARN_STREAM() << "failed to flush runtime log destination" << reasonSuffix
-                             << ": " << destPath << " error=" << std::strerror(errno);
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to flush runtime log destination" << reasonSuffix
+                             << ": " << destPath << " error=" << std::strerror(errno)).str());
         close(destFd);
         close(srcFd);
         closeLock();
@@ -3361,8 +3361,8 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
     std::string stateWriteError;
     if (!writeTextFileAtomically(statePath, std::to_string(currentSize), &stateWriteError))
     {
-        DM_LOG_WARN_STREAM() << "failed to update runtime log sync state" << reasonSuffix
-                             << ": " << stateWriteError;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to update runtime log sync state" << reasonSuffix
+                             << ": " << stateWriteError).str());
         closeLock();
         return false;
     }
@@ -3370,21 +3370,21 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
     std::error_code flushError;
     if (!flushDirectoryToDisk(destDir, &flushError))
     {
-        DM_LOG_WARN_STREAM() << "failed to flush runtime log directory" << reasonSuffix
-                             << ": " << destDir << " error=" << flushError.message();
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to flush runtime log directory" << reasonSuffix
+                             << ": " << destDir << " error=" << flushError.message()).str());
     }
     if (!flushDirectoryToDisk(diskRoot, &flushError))
     {
-        DM_LOG_WARN_STREAM() << "failed to flush disk root after runtime log sync" << reasonSuffix
-                             << ": " << diskRoot << " error=" << flushError.message();
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to flush disk root after runtime log sync" << reasonSuffix
+                             << ": " << diskRoot << " error=" << flushError.message()).str());
     }
 
     closeLock();
 
-    DM_LOG_INFO_STREAM() << "synced runtime log to disk" << reasonSuffix
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "synced runtime log to disk" << reasonSuffix
                          << ": src=" << sourcePath
                          << " dest=" << destPath
-                         << " bytes=" << (currentSize - lastPos);
+                         << " bytes=" << (currentSize - lastPos)).str());
     return true;
 }
 
@@ -3643,11 +3643,11 @@ void RecordRuntime::pollMotionAlertPipe()
         applyMotionAlertState(side, message.active != 0);
         if (message.active != 0)
         {
-            DM_LOG_WARN_STREAM() << "motion overspeed detected: side=" << side
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "motion overspeed detected: side=" << side
                                  << " reason=" << motionAlertReasonName(message.reason)
                                  << " gyro=" << std::fixed << std::setprecision(3) << message.gyroMagnitude
                                  << " accel_excess=" << std::fixed << std::setprecision(3) << message.accelExcess
-                                 << std::endl;
+                                 << std::endl).str());
         }
     }
 }
@@ -3743,13 +3743,13 @@ bool RecordRuntime::attachPendingPreAudio(const std::string &episodeDir)
     const fs::path target = fs::path(episodeDir) / "audio_pre.wav";
     if (!moveFileWithCrossDeviceFallback(pendingPreAudioFile_, target, &error))
     {
-        DM_LOG_WARN_STREAM() << "failed to move pre audio into episode: " << error.message() << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to move pre audio into episode: " << error.message() << std::endl).str());
         return false;
     }
 
     if (!flushFileToDisk(target, &error))
     {
-        DM_LOG_WARN_STREAM() << "failed to flush pre audio into episode: " << error.message() << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to flush pre audio into episode: " << error.message() << std::endl).str());
     }
 
     pendingPreAudioFile_.clear();
@@ -3760,7 +3760,7 @@ bool RecordRuntime::startRecording(bool resetRecording)
 {
     if (recordingOrchestrator_ == nullptr)
     {
-        DM_LOG_ERROR_STREAM() << "recording orchestrator not initialized" << std::endl;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "recording orchestrator not initialized" << std::endl).str());
         return false;
     }
     tactileTriggeredAudioCommand_.clear();
@@ -3771,7 +3771,7 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
 {
     if (recordingOrchestrator_ == nullptr)
     {
-        DM_LOG_ERROR_STREAM() << "recording orchestrator not initialized" << std::endl;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "recording orchestrator not initialized" << std::endl).str());
         return false;
     }
     const bool ok = recordingOrchestrator_->StopRecording(dueToError, reason, nullptr);
@@ -3794,12 +3794,12 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
 
 bool RecordRuntime::handleShortUpAction()
 {
-    DM_LOG_INFO_STREAM() << "BTN_UP short press" << std::endl;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "BTN_UP short press" << std::endl).str());
     if (!isRecordingActive())
     {
         if (healthState_.status == ugripper::runtime::HealthStatus::Error)
         {
-            DM_LOG_WARN_STREAM() << "ignore start recording while hardware health is in error state" << std::endl;
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "ignore start recording while hardware health is in error state" << std::endl).str());
             sendAudioCommand("error");
             return false;
         }
@@ -3810,18 +3810,18 @@ bool RecordRuntime::handleShortUpAction()
 
 bool RecordRuntime::handleShortDownAction()
 {
-    DM_LOG_INFO_STREAM() << "BTN_DOWN short press" << std::endl;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "BTN_DOWN short press" << std::endl).str());
     if (!isRecordingActive())
     {
         if (healthState_.status == ugripper::runtime::HealthStatus::Error)
         {
-            DM_LOG_WARN_STREAM() << "ignore reset recording while hardware health is in error state" << std::endl;
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "ignore reset recording while hardware health is in error state" << std::endl).str());
             sendAudioCommand("error");
             return false;
         }
         if (lastEpisodeDir().empty() || !fs::exists(lastEpisodeDir()))
         {
-            DM_LOG_INFO_STREAM() << "no previous episode, BTN_DOWN reset ignored" << std::endl;
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << "no previous episode, BTN_DOWN reset ignored" << std::endl).str());
             setAudioRecoveryCommand(tactileWarningActive_ ? "" : "ready");
             sendAudioCommand("no_reset_needed");
             applyIdleState();
@@ -3834,10 +3834,10 @@ bool RecordRuntime::handleShortDownAction()
 
 bool RecordRuntime::handleLongUpAction()
 {
-    DM_LOG_INFO_STREAM() << "BTN_UP long press" << std::endl;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "BTN_UP long press" << std::endl).str());
     if (isRecordingActive())
     {
-        DM_LOG_WARN_STREAM() << "ignore pre-audio while recording" << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "ignore pre-audio while recording" << std::endl).str());
         return false;
     }
     return recordAudioClip("pre", true);
@@ -3845,10 +3845,10 @@ bool RecordRuntime::handleLongUpAction()
 
 bool RecordRuntime::handleLongDownAction()
 {
-    DM_LOG_INFO_STREAM() << "BTN_DOWN long press" << std::endl;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "BTN_DOWN long press" << std::endl).str());
     if (isRecordingActive())
     {
-        DM_LOG_WARN_STREAM() << "ignore post-audio while recording" << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "ignore post-audio while recording" << std::endl).str());
         return false;
     }
     return recordAudioClip("post", false);
@@ -3856,7 +3856,7 @@ bool RecordRuntime::handleLongDownAction()
 
 void RecordRuntime::handleDualShutdownAction()
 {
-    DM_LOG_INFO_STREAM() << "dual-button shutdown requested" << std::endl;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "dual-button shutdown requested" << std::endl).str());
     if (isRecordingActive())
     {
         stopRecording(false, "dual-button shutdown");
@@ -3869,9 +3869,9 @@ void RecordRuntime::handleDualShutdownAction()
     if (shutdownRequestPort_ == nullptr ||
         !shutdownRequestPort_->RequestAction("shutdown", &errorMessage))
     {
-        DM_LOG_ERROR_STREAM() << "failed to request shutdown action: "
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "failed to request shutdown action: "
                               << options_.systemActionRequestFile
-                              << ", error=" << errorMessage << std::endl;
+                              << ", error=" << errorMessage << std::endl).str());
         setLedState(LedState::Error5);
         return;
     }
@@ -3880,10 +3880,10 @@ void RecordRuntime::handleDualShutdownAction()
 
 bool RecordRuntime::handleLeftDualUmountAction()
 {
-    DM_LOG_INFO_STREAM() << "left dual-button umount requested" << std::endl;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "left dual-button umount requested" << std::endl).str());
     if (isRecordingActive())
     {
-        DM_LOG_WARN_STREAM() << "ignore left dual-button umount while recording" << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "ignore left dual-button umount while recording" << std::endl).str());
         setAudioRecoveryCommand("recording");
         sendAudioCommand("error");
         return false;
@@ -3898,7 +3898,7 @@ bool RecordRuntime::handleLeftDualUmountAction()
     if (shutdownRequestPort_ == nullptr ||
         !shutdownRequestPort_->RequestAction("umount", &errorMessage))
     {
-        DM_LOG_ERROR_STREAM() << "failed to request umount: " << errorMessage << std::endl;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "failed to request umount: " << errorMessage << std::endl).str());
         setAudioRecoveryCommand(tactileWarningActive_ ? "" : "ready");
         applyIdleState();
         sendAudioCommand("error");
@@ -3911,7 +3911,7 @@ bool RecordRuntime::handleLeftDualUmountAction()
             static_cast<int>(kSystemActionResultWaitMs),
             &errorMessage))
     {
-        DM_LOG_ERROR_STREAM() << "failed to wait for umount result: " << errorMessage << std::endl;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "failed to wait for umount result: " << errorMessage << std::endl).str());
         setAudioRecoveryCommand(tactileWarningActive_ ? "" : "ready");
         applyIdleState();
         sendAudioCommand("error");
@@ -3927,7 +3927,7 @@ bool RecordRuntime::handleLeftDualUmountAction()
         return true;
     }
 
-    DM_LOG_ERROR_STREAM() << "umount request failed with result: " << result << std::endl;
+    DM_LOG_ERROR("{}", (::DA::utils::LogString() << "umount request failed with result: " << result << std::endl).str());
     setAudioRecoveryCommand(tactileWarningActive_ ? "" : "ready");
     applyIdleState();
     sendAudioCommand("error");
@@ -3938,7 +3938,7 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
 {
     if (!fs::exists(options_.audioRecordScript))
     {
-        DM_LOG_ERROR_STREAM() << "audio record script not found: " << options_.audioRecordScript << std::endl;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "audio record script not found: " << options_.audioRecordScript << std::endl).str());
         setAudioRecoveryCommand("error");
         sendAudioCommand("error");
         return false;
@@ -3960,7 +3960,7 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
     audioRecorderArgs.push_back(captureFile.string());
     if (!audioRecorder.Start(audioRecorderArgs))
     {
-        DM_LOG_ERROR_STREAM() << "failed to start audio recorder" << std::endl;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "failed to start audio recorder" << std::endl).str());
         sendAudioCommand("audio_recording_stop");
         return false;
     }
@@ -3991,7 +3991,7 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
 
     if (!fileExistsAndNotEmpty(captureFile.string()) || fs::file_size(captureFile) <= 44)
     {
-        DM_LOG_WARN_STREAM() << "audio capture is empty" << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "audio capture is empty" << std::endl).str());
         fs::remove(captureFile);
         return finishAudioRecording(false);
     }
@@ -4017,7 +4017,7 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
 
     if (!ok || !fileExistsAndNotEmpty(outputFile.string()))
     {
-        DM_LOG_ERROR_STREAM() << "failed to process audio clip" << std::endl;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "failed to process audio clip" << std::endl).str());
         fs::remove(outputFile);
         return finishAudioRecording(false);
     }
@@ -4025,7 +4025,7 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
     if (audioType == "pre")
     {
         pendingPreAudioFile_ = outputFile.string();
-        DM_LOG_INFO_STREAM() << "pre-audio prepared: " << pendingPreAudioFile_ << std::endl;
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "pre-audio prepared: " << pendingPreAudioFile_ << std::endl).str());
     }
     else
     {
@@ -4034,17 +4034,17 @@ bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUp
             std::error_code error;
             if (!moveFileWithCrossDeviceFallback(outputFile, fs::path(lastEpisodeDir()) / "audio_post.wav", &error))
             {
-                DM_LOG_ERROR_STREAM() << "failed to move post-audio into last episode: " << error.message() << std::endl;
+                DM_LOG_ERROR("{}", (::DA::utils::LogString() << "failed to move post-audio into last episode: " << error.message() << std::endl).str());
                 fs::remove(outputFile);
             }
             else if (!flushFileToDisk(fs::path(lastEpisodeDir()) / "audio_post.wav", &error))
             {
-                DM_LOG_WARN_STREAM() << "failed to flush post-audio into last episode: " << error.message() << std::endl;
+                DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to flush post-audio into last episode: " << error.message() << std::endl).str());
             }
         }
         else
         {
-            DM_LOG_WARN_STREAM() << "no previous episode for post-audio" << std::endl;
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "no previous episode for post-audio" << std::endl).str());
             fs::remove(outputFile);
         }
     }
@@ -4063,10 +4063,10 @@ void RecordRuntime::handleButtons(const ButtonSnapshot &buttons)
         lastLoggedButtons_.upPressed != buttons.upPressed ||
         lastLoggedButtons_.downPressed != buttons.downPressed)
     {
-        DM_LOG_INFO_STREAM()
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
             << "[HMI_DIAG] category=button_raw"
             << " up=" << boolText(buttons.upPressed)
-            << " down=" << boolText(buttons.downPressed);
+            << " down=" << boolText(buttons.downPressed)).str());
         lastLoggedButtons_ = buttons;
         hasLastLoggedButtons_ = true;
     }
@@ -4075,11 +4075,11 @@ void RecordRuntime::handleButtons(const ButtonSnapshot &buttons)
         ugripper::runtime::ButtonSnapshot{.up_pressed = buttons.upPressed, .down_pressed = buttons.downPressed});
     for (const auto &event : events)
     {
-        DM_LOG_INFO_STREAM()
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
             << "[HMI_DIAG] category=button_event"
             << " event=" << hmiEventName(event.type)
             << " up=" << boolText(buttons.upPressed)
-            << " down=" << boolText(buttons.downPressed);
+            << " down=" << boolText(buttons.downPressed)).str());
         switch (event.type)
         {
         case ugripper::runtime::HmiEventType::ShortUpPressed:
@@ -4095,7 +4095,7 @@ void RecordRuntime::handleButtons(const ButtonSnapshot &buttons)
             handleLongDownAction();
             break;
         case ugripper::runtime::HmiEventType::ShutdownPromptRequested:
-            DM_LOG_INFO_STREAM() << "dual-button chord armed" << std::endl;
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << "dual-button chord armed" << std::endl).str());
             sendAudioCommand("shutdown");
             break;
         case ugripper::runtime::HmiEventType::ShutdownRequested:
@@ -4111,10 +4111,10 @@ void RecordRuntime::handleLeftButtons(const ButtonSnapshot &buttons)
         lastLoggedLeftButtons_.upPressed != buttons.upPressed ||
         lastLoggedLeftButtons_.downPressed != buttons.downPressed)
     {
-        DM_LOG_INFO_STREAM()
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
             << "[HMI_DIAG] category=button_raw_left"
             << " up=" << boolText(buttons.upPressed)
-            << " down=" << boolText(buttons.downPressed);
+            << " down=" << boolText(buttons.downPressed)).str());
         lastLoggedLeftButtons_ = buttons;
         hasLastLoggedLeftButtons_ = true;
     }
@@ -4127,7 +4127,7 @@ void RecordRuntime::handleLeftButtons(const ButtonSnapshot &buttons)
             leftDualChordActive_ = true;
             leftBothPressedSinceMs_ = nowMs;
             leftDualLongHandled_ = false;
-            DM_LOG_INFO_STREAM() << "left dual-button chord armed" << std::endl;
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << "left dual-button chord armed" << std::endl).str());
         }
 
         const uint64_t dualHeldMs = nowMs - leftBothPressedSinceMs_;
@@ -4173,12 +4173,12 @@ void RecordRuntime::monitorHardwareHealth()
     {
         if (result.should_notify_fault)
         {
-            DM_LOG_ERROR_STREAM() << "hardware health fault (" << result.fault->key << "): "
-                                  << result.fault->detail << std::endl;
-            DM_LOG_INFO_STREAM()
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "hardware health fault (" << result.fault->key << "): "
+                                  << result.fault->detail << std::endl).str());
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
                 << "[HMI_DIAG] category=health_fault"
                 << " key=" << result.fault->key
-                << " led_state=" << ledStateName(toLedState(result.fault->led_state));
+                << " led_state=" << ledStateName(toLedState(result.fault->led_state))).str());
             setLedState(toLedState(result.fault->led_state));
             sendAudioCommand("error");
         }
@@ -4187,10 +4187,10 @@ void RecordRuntime::monitorHardwareHealth()
 
     if (result.recovered)
     {
-        DM_LOG_INFO_STREAM() << "hardware health recovered" << std::endl;
-        DM_LOG_INFO_STREAM()
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "hardware health recovered" << std::endl).str());
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
             << "[HMI_DIAG] category=health_recovered"
-            << " recording=" << boolText(isRecordingActive());
+            << " recording=" << boolText(isRecordingActive())).str());
         if (isRecordingActive())
         {
             setLedState(LedState::Recording);
@@ -4237,10 +4237,10 @@ void RecordRuntime::setLedState(LedState state, double progress)
         !hasLastLoggedLedState_ || std::fabs(lastLoggedLedProgress_ - progress) > 0.001;
     if (!hasLastLoggedLedState_ || lastLoggedLedState_ != state || progressChanged)
     {
-        DM_LOG_INFO_STREAM()
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
             << "[HMI_DIAG] category=led_target"
             << " state=" << ledStateName(state)
-            << " progress=" << std::fixed << std::setprecision(3) << progress;
+            << " progress=" << std::fixed << std::setprecision(3) << progress).str());
         lastLoggedLedState_ = state;
         lastLoggedLedProgress_ = progress;
         hasLastLoggedLedState_ = true;
@@ -4401,7 +4401,7 @@ bool RecordRuntime::GripperPanelManager::connect(const std::vector<std::string> 
         }
         if (!driver->connect())
         {
-            DM_LOG_WARN_STREAM() << "failed to connect HMI port: " << ports[index] << std::endl;
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to connect HMI port: " << ports[index] << std::endl).str());
         }
         drivers_.push_back(std::move(driver));
         reconnectAttemptMs_.push_back(0);
@@ -4563,7 +4563,7 @@ void RecordRuntime::GripperPanelManager::maybeReconnectDriver(size_t index)
         return;
     }
 
-    DM_LOG_INFO_STREAM() << "reconnected HMI port: " << drivers_[index]->getPort() << std::endl;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "reconnected HMI port: " << drivers_[index]->getPort() << std::endl).str());
     recordConnectionEventIfChanged(index, true);
     if (index < delayedStateRequestDueMs_.size())
     {
@@ -4941,24 +4941,24 @@ bool RecordRuntime::EpisodeManager::initialize()
     fs::create_directories(episodeRoot_, error);
     if (error)
     {
-        DM_LOG_ERROR_STREAM() << "create_directories failed for " << episodeRoot_
-                  << ": " << error.message() << std::endl;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "create_directories failed for " << episodeRoot_
+                  << ": " << error.message() << std::endl).str());
         return false;
     }
     fs::create_directories(tactileReferenceDir(tactileStateDir_), error);
     if (error)
     {
-        DM_LOG_ERROR_STREAM() << "create_directories failed for "
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "create_directories failed for "
                               << tactileReferenceDir(tactileStateDir_) << ": "
-                              << error.message() << std::endl;
+                              << error.message() << std::endl).str());
         return false;
     }
     fs::create_directories(tactilePersistentDir(tactileStateDir_), error);
     if (error)
     {
-        DM_LOG_ERROR_STREAM() << "create_directories failed for "
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "create_directories failed for "
                               << tactilePersistentDir(tactileStateDir_) << ": "
-                              << error.message() << std::endl;
+                              << error.message() << std::endl).str());
         return false;
     }
     return true;
@@ -5029,8 +5029,8 @@ void RecordRuntime::EpisodeManager::refreshTactileReferenceCacheForSide(
             }
             catch (const std::exception &ex)
             {
-                DM_LOG_WARN_STREAM() << "failed to parse tactile history, reset in-memory state: "
-                                     << ex.what() << std::endl;
+                DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to parse tactile history, reset in-memory state: "
+                                     << ex.what() << std::endl).str());
                 tactileHistory = json::object();
             }
         }
@@ -5056,10 +5056,10 @@ void RecordRuntime::EpisodeManager::refreshTactileReferenceCacheForSide(
         const auto serial = probeUsbSerialForDeviceNode(target.devicePath, &serialDetail);
         if (!serial.has_value() || serial->empty())
         {
-            DM_LOG_WARN_STREAM() << "tactile reference cache skipped: camera=" << target.cameraName
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile reference cache skipped: camera=" << target.cameraName
                                  << " reason="
                                  << (serialDetail.empty() ? "missing tactile serial" : serialDetail)
-                                 << std::endl;
+                                 << std::endl).str());
             continue;
         }
 
@@ -5081,18 +5081,18 @@ void RecordRuntime::EpisodeManager::refreshTactileReferenceCacheForSide(
             &captureError);
         if (!frame.has_value())
         {
-            DM_LOG_WARN_STREAM() << "tactile reference capture failed: camera=" << target.cameraName
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile reference capture failed: camera=" << target.cameraName
                                  << " serial=" << *serial
-                                 << " reason=" << captureError << std::endl;
+                                 << " reason=" << captureError << std::endl).str());
             continue;
         }
 
         std::string writeError;
         if (!writeBinaryFile(tactileReferenceRawPath(tactileStateDir_, *serial), *frame, &writeError))
         {
-            DM_LOG_WARN_STREAM() << "tactile reference write failed: camera=" << target.cameraName
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile reference write failed: camera=" << target.cameraName
                                  << " serial=" << *serial
-                                 << " reason=" << writeError << std::endl;
+                                 << " reason=" << writeError << std::endl).str());
             continue;
         }
 
@@ -5105,9 +5105,9 @@ void RecordRuntime::EpisodeManager::refreshTactileReferenceCacheForSide(
         if (!writeTextFileAtomically(
                 tactileReferenceMetaPath(tactileStateDir_, *serial), meta.dump(2) + "\n", &writeError))
         {
-            DM_LOG_WARN_STREAM() << "tactile reference meta write failed: camera=" << target.cameraName
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile reference meta write failed: camera=" << target.cameraName
                                  << " serial=" << *serial
-                                 << " reason=" << writeError << std::endl;
+                                 << " reason=" << writeError << std::endl).str());
         }
 
         json &cameraHistory = tactileHistory["cameras"][*serial];
@@ -5161,7 +5161,7 @@ void RecordRuntime::EpisodeManager::refreshTactileReferenceCacheForSide(
                                      tactileHistory.dump(2) + "\n",
                                      &writeError))
         {
-            DM_LOG_WARN_STREAM() << "failed to persist tactile history: " << writeError << std::endl;
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to persist tactile history: " << writeError << std::endl).str());
         }
     }
 }
@@ -5191,7 +5191,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                                                     std::vector<TactileValidationFinding> *tactileFindings) const
 {
     const int64_t validateStartMs = steadyNowMs();
-    DM_LOG_INFO_STREAM() << "[PERF] validateEpisode begin: episode_dir=" << episodeDir << std::endl;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] validateEpisode begin: episode_dir=" << episodeDir << std::endl).str());
     const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled_);
     const std::vector<std::string> requiredFiles = {
         "sensor_data_left.mcap",
@@ -5465,12 +5465,12 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
             return false;
         }
 
-        DM_LOG_INFO_STREAM() << "[PERF] encoder tail check pass:"
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] encoder tail check pass:"
                   << " side=" << target.side
                   << " encoder_count=" << encoderMessageCount
                   << " tail_video_end_ns=" << tailVideoEndNs
                   << " last_encoder_ns=" << lastEncoderLogTimeNs
-                  << " lag_ms=" << (lagNs / 1000000.0) << std::endl;
+                  << " lag_ms=" << (lagNs / 1000000.0) << std::endl).str());
     }
 
     json tactileHistory = json::object();
@@ -5484,8 +5484,8 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
             }
             catch (const std::exception &ex)
             {
-                DM_LOG_WARN_STREAM() << "failed to parse tactile history, reset in-memory state: "
-                                     << ex.what() << std::endl;
+                DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to parse tactile history, reset in-memory state: "
+                                     << ex.what() << std::endl).str());
                 tactileHistory = json::object();
             }
         }
@@ -5637,13 +5637,13 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                                      tactileHistory.dump(2) + "\n",
                                      &writeError))
         {
-            DM_LOG_WARN_STREAM() << "failed to persist tactile history: " << writeError << std::endl;
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to persist tactile history: " << writeError << std::endl).str());
         }
     }
 
-    DM_LOG_INFO_STREAM() << "[PERF] validateEpisode end: episode_dir=" << episodeDir
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] validateEpisode end: episode_dir=" << episodeDir
               << " elapsed_ms=" << (steadyNowMs() - validateStartMs)
-              << " reference_span_sec=" << formatSeconds(referenceSpanSec) << std::endl;
+              << " reference_span_sec=" << formatSeconds(referenceSpanSec) << std::endl).str());
     return true;
 }
 
@@ -5747,7 +5747,7 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
 
     if (sourceFile != persistCalibrationFile_ && fs::exists(persistCalibrationFile_))
     {
-        DM_LOG_WARN_STREAM() << "invalid persist calibration, fallback to " << sourceFile << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "invalid persist calibration, fallback to " << sourceFile << std::endl).str());
     }
 
     const std::string generationDate =
@@ -5870,7 +5870,7 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
 
     if (!commandExists("udevadm"))
     {
-        DM_LOG_WARN_STREAM() << "udevadm not found in PATH, skip runtime tactile serial injection" << std::endl;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "udevadm not found in PATH, skip runtime tactile serial injection" << std::endl).str());
     }
     else
     {
@@ -5881,10 +5881,10 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
             const auto serial = probeUsbSerialForDeviceNode(target.devicePath, &detail);
             if (!serial.has_value())
             {
-                DM_LOG_WARN_STREAM() << "failed to resolve runtime tactile serial for camera=" << target.cameraName
+                DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to resolve runtime tactile serial for camera=" << target.cameraName
                           << " device=" << target.devicePath
                           << " detail=" << detail
-                          << "; keep source calibration value" << std::endl;
+                          << "; keep source calibration value" << std::endl).str());
                 continue;
             }
 

@@ -34,6 +34,46 @@
 
 ## Entries
 
+### 2026-04-28 - remove-standalone-log-stream-compat-layer
+
+- 阶段：`A3 / logger API cleanup`
+- 范围：`src/utils`、`standalone/*Recorder`、`standalone/GripperHmiTool`、`standalone/UgripperRuntime`
+- 类型：`日志统一 / 兼容层收口`
+- 主要改动：
+  - 删除 `CameraRecorder`、`SensorRecorder`、`GripperHmiTool`、`UgripperRuntime` 下的 4 份 `logging_compat.h`
+  - 将全部 `DM_LOG_*_STREAM()` 调用统一改为 `DM_LOG_*("{}", ...)` 入口，消灭旧 stream 宏 API
+  - 新增 `DA::utils::LogString()` 作为无副作用字符串拼接 helper，仅用于保持旧流式日志文案不变
+  - 清理 `scripts/build_arm_deb_in_pp_arm_dev.sh` 中已不存在的 `main_camera_xu_tool` 旧目标，恢复统一 ARM 出包入口
+- 风险与行为等价说明：
+  - 本轮只改 C++ 日志调用形态，不改变录制状态机、进程管理、脚本日志同步或 U 盘落盘链路
+  - 旧 stream 日志现在通过 `DM_LOG_*` 宏直接记录，source location 回到业务调用点，不再显示 `LogStreamAdapter` 析构位置
+  - `LogString()` 仍使用 `ostringstream` 保持旧文案拼接语义；后续若要进一步提升可读性，可按模块逐步改成原生 fmt 参数
+- 已执行验证：
+  - `cmake -S . -B build/x86/logger_api_unify -DCMAKE_BUILD_TYPE=Release -G Ninja`
+  - `cmake --build build/x86/logger_api_unify --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime -j4`
+  - `./build/x86/logger_api_unify/standalone/CameraRecorder/CameraRecorder --dry-run --config-yaml standalone/CameraRecorder/config/camera_recorder.yaml --output-dir /tmp/ugripper_logger_api_unify --allow-missing`
+  - `./build/x86/logger_api_unify/standalone/{SensorRecorder/SensorRecorder,SensorRecorder/zeroing,GripperHmiTool/GripperHmiTool,UgripperRuntime/UgripperRuntime} --help`
+  - `./build/x86/logger_api_unify/standalone/UgripperRuntime/UgripperRuntime --unknown` 确认旧 stream 转换日志显示业务位置 `[main 75]`
+  - `rg -n "DM_LOG_(TRACE|DEBUG|INFO|WARN|ERROR|CRITICAL)_STREAM|logging_compat|LogStreamAdapter" standalone src` 无剩余引用
+  - `docker exec ugripper-arm bash -lc 'cd /home/songwl/swl_ws/ugripper && ./scripts/build_arm_deb_in_pp_arm_dev.sh'`
+  - `dpkg-deb -f ugripper_1.2.8_arm64.deb Package Version Architecture Depends`
+  - `file temp_build_deb/opt/ugripper/bin/{CameraRecorder/CameraRecorder,SensorRecorder/SensorRecorder,SensorRecorder/zeroing,GripperHmiTool/GripperHmiTool,UgripperRuntime/UgripperRuntime}`
+  - `readelf -d temp_build_deb/opt/ugripper/bin/*/* | grep NEEDED`
+  - 板端安装：
+    - `scp ugripper_1.2.8_arm64.deb ubuntu@192.168.2.240:/tmp/ugripper_1.2.8_log_api_unify_arm64.deb`
+    - `ssh ubuntu@192.168.2.240 'sudo dpkg -i /tmp/ugripper_1.2.8_log_api_unify_arm64.deb && sudo systemctl restart ugripper.service'`
+  - 板端基础检查：
+    - `dpkg -s ugripper libfmt8 libspdlog1`
+    - `ldd /opt/ugripper/bin/{CameraRecorder/CameraRecorder,SensorRecorder/SensorRecorder,GripperHmiTool/GripperHmiTool,UgripperRuntime/UgripperRuntime}`
+    - `journalctl -u ugripper.service --since '2026-04-28 16:45:14' --no-pager -l`
+  - 板端人工录制 smoke：
+    - 录制样本：`/mnt/data_disk/dap912263b000689/data/episode_20260428_0006`
+    - 运行日志显示 `validation phase end ... valid=true`
+    - 安装后新日志无 `LogStreamAdapter`，旧 stream 转换日志已显示业务调用点，例如 `SubprocessHandle.Start 410`、`RecordRuntime.run 2820`、`GripperHmiDriver.logIoSummaryLocked 245`
+    - `/tmp` 与 U 盘中本次 episode 日志行一致，运行日志已同步到 `/mnt/data_disk/logs`
+- 未执行测试与原因：
+  - 未执行完整 release gate、长时间稳定性、USB 升级、校准流程和深度视频/sensor packet 级校验；本轮只覆盖 logger API 收口、ARM 出包、板端安装、服务启动、人工短录、停录校验、日志格式与核心产物完整性
+
 ### 2026-04-28 - align-ugripper-logger-with-ppmain-spdlog
 
 - 阶段：`A3 / logger alignment`

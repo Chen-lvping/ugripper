@@ -1,5 +1,5 @@
 #include "encoder_driver.h"
-#include "sensor_recorder/logging_compat.h"
+#include "utils/logger.h"
 
 #include <atomic>
 #include <chrono>
@@ -31,7 +31,7 @@ std::string resolveEncoderLabel(const std::string &argument) {
 }
 
 void signalHandler(int signum) {
-    DM_LOG_INFO_STREAM() << "Interrupt signal (" << signum << ") received. Stopping...";
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "Interrupt signal (" << signum << ") received. Stopping...").str());
     g_stopFlag = true;
 }
 
@@ -165,8 +165,8 @@ int main(int argc, char *argv[]) {
         }
         std::cout << "--------------------------------" << std::endl;
     } else {
-        DM_LOG_ERROR_STREAM() << "[FAILED] Failed to set zero position for encoder side " << encoderLabel
-                              << "! (Or verify failed)";
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[FAILED] Failed to set zero position for encoder side " << encoderLabel
+                              << "! (Or verify failed)").str());
     }
 
     g_stopFlag = true;

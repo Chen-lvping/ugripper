@@ -1,7 +1,7 @@
 #include "im648_driver.h"
 #include "encoder_driver.h"
 #include "record_runtime/motion_alert_ipc.h"
-#include "sensor_recorder/logging_compat.h"
+#include "utils/logger.h"
 #include "sensor_recorder/sensor_domain.h"
 
 #include <mcap/writer.hpp>
@@ -131,7 +131,7 @@ struct MotionEventQueue {
                 queue.pop_front();
                 ++droppedSamples;
                 if (droppedSamples == 1 || (droppedSamples % 256) == 0) {
-                    DM_LOG_WARN_STREAM() << "[MotionAlertQueue] dropped oldest samples=" << droppedSamples;
+                    DM_LOG_WARN("{}", (::DA::utils::LogString() << "[MotionAlertQueue] dropped oldest samples=" << droppedSamples).str());
                 }
             }
             queue.push_back(std::move(sample));
@@ -209,8 +209,8 @@ struct PendingWriteQueue {
                 maxObservedBacklog = queue.size();
             }
             if (queue.size() >= nextBacklogWarnSize) {
-                DM_LOG_WARN_STREAM() << "[SensorWriteQueue-" << label
-                                     << "] backlog grew to " << queue.size();
+                DM_LOG_WARN("{}", (::DA::utils::LogString() << "[SensorWriteQueue-" << label
+                                     << "] backlog grew to " << queue.size()).str());
                 nextBacklogWarnSize = queue.size() + 4096;
             }
         }
@@ -246,7 +246,7 @@ static_assert(sizeof(ImuSample) == 40, "ImuSample layout changed");
 static_assert(sizeof(EncoderSample) == 8, "EncoderSample layout changed");
 
 void signalHandler(int signum) {
-    DM_LOG_INFO_STREAM() << "Interrupt signal (" << signum << ") received. Stopping...";
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "Interrupt signal (" << signum << ") received. Stopping...").str());
     g_stopFlag = true;
 }
 
@@ -357,8 +357,8 @@ void sideWriterThreadFunc(SideWriter *sideWriter, PendingWriteQueue *pendingQueu
         const auto writeStatus = sideWriter->writer.write(message);
         if (!writeStatus.ok()) {
             sideWriter->writeFailureCount.fetch_add(1, std::memory_order_relaxed);
-            DM_LOG_ERROR_STREAM() << "Failed to write " << pendingQueue->label
-                                  << " sensor frame: " << writeStatus.message;
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Failed to write " << pendingQueue->label
+                                  << " sensor frame: " << writeStatus.message).str());
             g_stopFlag = true;
             pendingQueue->stop();
             return;
@@ -388,7 +388,7 @@ void encoderReadThreadFunc(EncoderDriver *encoder, const std::string &label) {
             std::this_thread::sleep_for(std::chrono::microseconds(100));
         }
     }
-    DM_LOG_INFO_STREAM() << "Encoder read thread stopped for " << label;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "Encoder read thread stopped for " << label).str());
 }
 
 void encoderRequestThreadFunc(EncoderDriver *encoder, const std::string &label) {
@@ -405,7 +405,7 @@ void encoderRequestThreadFunc(EncoderDriver *encoder, const std::string &label) 
         encoder->requestState(false);
         std::this_thread::sleep_until(nextTime);
     }
-    DM_LOG_INFO_STREAM() << "Encoder request thread stopped for " << label;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "Encoder request thread stopped for " << label).str());
 }
 
 mcap::Schema buildImuSchema() {
@@ -448,13 +448,13 @@ bool openSideWriter(const fs::path &outputDir, const SensorSideConfig &config, S
 
     auto status = sideWriter->writer.open(sideWriter->outputFile.string(), options);
     if (!status.ok()) {
-        DM_LOG_ERROR_STREAM() << "Failed to open MCAP file for " << config.label << ": " << status.message;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Failed to open MCAP file for " << config.label << ": " << status.message).str());
         return false;
     }
 
     sideWriter->writer.addSchema(sideWriter->imuSchema);
     sideWriter->writer.addSchema(sideWriter->encoderSchema);
-    DM_LOG_INFO_STREAM() << "Recording " << config.label << " sensor data to " << sideWriter->outputFile;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "Recording " << config.label << " sensor data to " << sideWriter->outputFile).str());
     return true;
 }
 
@@ -463,20 +463,20 @@ bool connectEncoderWithFallback(EncoderRuntime &encoderRuntime) {
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
 
     if (connectStatus == ConnectStatus::SERIAL_FAIL) {
-        DM_LOG_ERROR_STREAM() << "Failed to connect encoder serial port: " << encoderRuntime.config.encoderPort;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Failed to connect encoder serial port: " << encoderRuntime.config.encoderPort).str());
         return false;
     }
 
     if (connectStatus == ConnectStatus::NO_RESPONSE) {
-        DM_LOG_WARN_STREAM() << encoderRuntime.config.label
-                             << " encoder not responding at 1Mbps, falling back to 115200...";
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << encoderRuntime.config.label
+                             << " encoder not responding at 1Mbps, falling back to 115200...").str());
         encoderRuntime.driver->disconnect();
         encoderRuntime.driver->resetBaudrate(115200);
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
         connectStatus = encoderRuntime.driver->connect();
         if (connectStatus == ConnectStatus::SUCCESS) {
-            DM_LOG_INFO_STREAM() << encoderRuntime.config.label
-                                 << " encoder ready at 115200, switching back to 1Mbps.";
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << encoderRuntime.config.label
+                                 << " encoder ready at 115200, switching back to 1Mbps.").str());
             encoderRuntime.driver->setBaudrate(1000000);
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             encoderRuntime.driver->disconnect();
@@ -485,12 +485,12 @@ bool connectEncoderWithFallback(EncoderRuntime &encoderRuntime) {
             connectStatus = encoderRuntime.driver->connect();
         }
         if (connectStatus != ConnectStatus::SUCCESS) {
-            DM_LOG_ERROR_STREAM() << encoderRuntime.config.label
-                                  << " encoder failed to respond after baudrate adjustments.";
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << encoderRuntime.config.label
+                                  << " encoder failed to respond after baudrate adjustments.").str());
             return false;
         }
     } else {
-        DM_LOG_INFO_STREAM() << encoderRuntime.config.label << " encoder ready at 1Mbps.";
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << encoderRuntime.config.label << " encoder ready at 1Mbps.").str());
     }
 
     return true;
@@ -527,7 +527,7 @@ int main(int argc, char *argv[]) {
                 << "Records left/right IMU and encoder streams into MCAP files.\n";
             return 0;
         }
-        DM_LOG_ERROR_STREAM() << "Unknown argument: " << argument;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Unknown argument: " << argument).str());
         return -1;
     }
     if (motionAlertFd >= 0) {
@@ -540,7 +540,7 @@ int main(int argc, char *argv[]) {
     if (!fs::exists(outputDir)) {
         fs::create_directories(outputDir, ec);
         if (ec) {
-            DM_LOG_ERROR_STREAM() << "Failed to create output directory: " << ec.message();
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Failed to create output directory: " << ec.message()).str());
             return -1;
         }
     }
@@ -638,9 +638,9 @@ int main(int argc, char *argv[]) {
         }
     });
 
-    DM_LOG_INFO_STREAM() << "Opening dual-arm sensors: "
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "Opening dual-arm sensors: "
                          << "right(imu=" << rightConfig.imuPort << ", encoder=" << rightConfig.encoderPort << ") "
-                         << "left(imu=" << leftConfig.imuPort << ", encoder=" << leftConfig.encoderPort << ")";
+                         << "left(imu=" << leftConfig.imuPort << ", encoder=" << leftConfig.encoderPort << ")").str());
 
     std::thread rightImuInitThread([&rightImu, &rightConfig]() {
         rightImu.driver = std::make_unique<dmbot_serial::Im648Driver>(rightConfig.imuPort, 115200);
@@ -715,11 +715,11 @@ int main(int argc, char *argv[]) {
                 wroteFrame = true;
 
                 if (!imuRuntime.firstSampleLogged) {
-                    DM_LOG_INFO_STREAM() << "[IMU-" << imuRuntime.config.label << "] First sample: "
+                    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[IMU-" << imuRuntime.config.label << "] First sample: "
                                          << "q=(" << sample.qx << "," << sample.qy << "," << sample.qz << "," << sample.qw << ") "
                                          << "g=(" << sample.gx << "," << sample.gy << "," << sample.gz << ") "
                                          << "a=(" << sample.ax << "," << sample.ay << "," << sample.az << ") "
-                                         << "ts_ns=" << frame.host_timestamp_ns;
+                                         << "ts_ns=" << frame.host_timestamp_ns).str());
                     imuRuntime.firstSampleLogged = true;
                 }
             }
@@ -740,8 +740,8 @@ int main(int argc, char *argv[]) {
             }
             if (!encoderRuntime.driver->isConnected()) {
                 encoderRuntime.connected = false;
-                DM_LOG_ERROR_STREAM() << encoderRuntime.config.label
-                                      << " encoder disconnected during recording; stopping encoder samples for this side.";
+                DM_LOG_ERROR("{}", (::DA::utils::LogString() << encoderRuntime.config.label
+                                      << " encoder disconnected during recording; stopping encoder samples for this side.").str());
                 return false;
             }
 
@@ -781,12 +781,12 @@ int main(int argc, char *argv[]) {
                 wroteFrame = true;
 
                 if (!encoderRuntime.firstSampleLogged) {
-                    DM_LOG_INFO_STREAM() << "[Encoder-" << encoderRuntime.config.label << "] First sample: "
+                    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[Encoder-" << encoderRuntime.config.label << "] First sample: "
                                          << "raw=" << state.currentPosition
                                          << ", rad=" << state.currentPositionRad
                                          << ", speed_raw=" << state.currentSpeed
                                          << ", speed_rad=" << state.currentSpeedRad
-                                         << ", ts_ns=" << queuedSample.hostTimestampNs;
+                                         << ", ts_ns=" << queuedSample.hostTimestampNs).str());
                     encoderRuntime.firstSampleLogged = true;
                 }
             }
@@ -926,45 +926,45 @@ int main(int argc, char *argv[]) {
 
     rightWriter.writer.close();
     leftWriter.writer.close();
-    DM_LOG_INFO_STREAM() << "[BatchTimestamp-imu_right] batches=" << rightImu.timestampSmoothing.smoothed_batch_count
-                         << ", frames=" << rightImu.timestampSmoothing.smoothed_frame_count;
-    DM_LOG_INFO_STREAM() << "[BatchTimestamp-imu_left] batches=" << leftImu.timestampSmoothing.smoothed_batch_count
-                         << ", frames=" << leftImu.timestampSmoothing.smoothed_frame_count;
-    DM_LOG_INFO_STREAM() << "[BatchTimestamp-encoder_right] batches=" << rightEncoder.timestampSmoothing.smoothed_batch_count
-                         << ", frames=" << rightEncoder.timestampSmoothing.smoothed_frame_count;
-    DM_LOG_INFO_STREAM() << "[BatchTimestamp-encoder_left] batches=" << leftEncoder.timestampSmoothing.smoothed_batch_count
-                         << ", frames=" << leftEncoder.timestampSmoothing.smoothed_frame_count;
-    DM_LOG_INFO_STREAM() << "[SensorStats-imu_right] received_samples=" << rightImu.receivedSampleCount
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[BatchTimestamp-imu_right] batches=" << rightImu.timestampSmoothing.smoothed_batch_count
+                         << ", frames=" << rightImu.timestampSmoothing.smoothed_frame_count).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[BatchTimestamp-imu_left] batches=" << leftImu.timestampSmoothing.smoothed_batch_count
+                         << ", frames=" << leftImu.timestampSmoothing.smoothed_frame_count).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[BatchTimestamp-encoder_right] batches=" << rightEncoder.timestampSmoothing.smoothed_batch_count
+                         << ", frames=" << rightEncoder.timestampSmoothing.smoothed_frame_count).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[BatchTimestamp-encoder_left] batches=" << leftEncoder.timestampSmoothing.smoothed_batch_count
+                         << ", frames=" << leftEncoder.timestampSmoothing.smoothed_frame_count).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[SensorStats-imu_right] received_samples=" << rightImu.receivedSampleCount
                          << ", emitted_messages=" << rightImu.emittedMessageCount
                          << ", last_sequence=" << rightImu.lastEmittedSequence
-                         << ", last_timestamp_ns=" << rightImu.lastEmittedTimestampNs;
-    DM_LOG_INFO_STREAM() << "[SensorStats-imu_left] received_samples=" << leftImu.receivedSampleCount
+                         << ", last_timestamp_ns=" << rightImu.lastEmittedTimestampNs).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[SensorStats-imu_left] received_samples=" << leftImu.receivedSampleCount
                          << ", emitted_messages=" << leftImu.emittedMessageCount
                          << ", last_sequence=" << leftImu.lastEmittedSequence
-                         << ", last_timestamp_ns=" << leftImu.lastEmittedTimestampNs;
-    DM_LOG_INFO_STREAM() << "[SensorStats-encoder_right] received_samples=" << rightEncoder.receivedSampleCount
+                         << ", last_timestamp_ns=" << leftImu.lastEmittedTimestampNs).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[SensorStats-encoder_right] received_samples=" << rightEncoder.receivedSampleCount
                          << ", emitted_messages=" << rightEncoder.emittedMessageCount
                          << ", last_sequence=" << rightEncoder.lastEmittedSequence
-                         << ", last_timestamp_ns=" << rightEncoder.lastEmittedTimestampNs;
-    DM_LOG_INFO_STREAM() << "[SensorStats-encoder_left] received_samples=" << leftEncoder.receivedSampleCount
+                         << ", last_timestamp_ns=" << rightEncoder.lastEmittedTimestampNs).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[SensorStats-encoder_left] received_samples=" << leftEncoder.receivedSampleCount
                          << ", emitted_messages=" << leftEncoder.emittedMessageCount
                          << ", last_sequence=" << leftEncoder.lastEmittedSequence
-                         << ", last_timestamp_ns=" << leftEncoder.lastEmittedTimestampNs;
-    DM_LOG_INFO_STREAM() << "[SensorWriteQueue-right] max_backlog=" << rightPendingWrites.maxObservedBacklog;
-    DM_LOG_INFO_STREAM() << "[SensorWriteQueue-left] max_backlog=" << leftPendingWrites.maxObservedBacklog;
-    DM_LOG_INFO_STREAM() << "[SensorWriter-right] written_messages="
+                         << ", last_timestamp_ns=" << leftEncoder.lastEmittedTimestampNs).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[SensorWriteQueue-right] max_backlog=" << rightPendingWrites.maxObservedBacklog).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[SensorWriteQueue-left] max_backlog=" << leftPendingWrites.maxObservedBacklog).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[SensorWriter-right] written_messages="
                          << rightWriter.writtenMessageCount.load(std::memory_order_relaxed)
                          << ", write_failures=" << rightWriter.writeFailureCount.load(std::memory_order_relaxed)
                          << ", last_written_sequence=" << rightWriter.lastWrittenSequence.load(std::memory_order_relaxed)
                          << ", last_written_log_time_ns=" << rightWriter.lastWrittenLogTimeNs.load(std::memory_order_relaxed)
-                         << ", last_write_system_time_ns=" << rightWriter.lastWriteSystemTimeNs.load(std::memory_order_relaxed);
-    DM_LOG_INFO_STREAM() << "[SensorWriter-left] written_messages="
+                         << ", last_write_system_time_ns=" << rightWriter.lastWriteSystemTimeNs.load(std::memory_order_relaxed)).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[SensorWriter-left] written_messages="
                          << leftWriter.writtenMessageCount.load(std::memory_order_relaxed)
                          << ", write_failures=" << leftWriter.writeFailureCount.load(std::memory_order_relaxed)
                          << ", last_written_sequence=" << leftWriter.lastWrittenSequence.load(std::memory_order_relaxed)
                          << ", last_written_log_time_ns=" << leftWriter.lastWrittenLogTimeNs.load(std::memory_order_relaxed)
-                         << ", last_write_system_time_ns=" << leftWriter.lastWriteSystemTimeNs.load(std::memory_order_relaxed);
-    DM_LOG_INFO_STREAM() << "Right MCAP log saved to " << rightWriter.outputFile;
-    DM_LOG_INFO_STREAM() << "Left MCAP log saved to " << leftWriter.outputFile;
+                         << ", last_write_system_time_ns=" << leftWriter.lastWriteSystemTimeNs.load(std::memory_order_relaxed)).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "Right MCAP log saved to " << rightWriter.outputFile).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "Left MCAP log saved to " << leftWriter.outputFile).str());
     return 0;
 }

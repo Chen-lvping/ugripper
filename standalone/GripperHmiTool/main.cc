@@ -1,6 +1,6 @@
 #include "gripper_hmi_driver.h"
 #include "gripper_hmi_led_effects.h"
-#include "gripper_hmi/logging_compat.h"
+#include "utils/logger.h"
 
 #include <array>
 #include <atomic>

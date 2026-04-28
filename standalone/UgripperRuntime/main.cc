@@ -1,5 +1,4 @@
 #include "record_runtime.h"
-#include "record_runtime/logging_compat.h"
 #include "utils/logger.h"
 
 #include <csignal>
@@ -73,7 +72,7 @@ int main(int argc, char **argv)
             continue;
         }
 
-        DM_LOG_ERROR_STREAM() << "Unknown argument: " << argument;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Unknown argument: " << argument).str());
         printUsage(argv[0]);
         return 1;
     }

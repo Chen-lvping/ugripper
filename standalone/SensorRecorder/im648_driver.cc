@@ -1,5 +1,5 @@
 #include "im648_driver.h"
-#include "sensor_recorder/logging_compat.h"
+#include "utils/logger.h"
 
 #include <cstdlib>
 #include <chrono>
@@ -103,14 +103,14 @@ void Im648Driver::initSerial() {
 
     enum sp_return rc = sp_get_port_by_name(resolved_port.c_str(), &port_);
     if (rc != SP_OK) {
-        DM_LOG_ERROR_STREAM() << "Cannot find serial port " << port_name_
-                              << " (resolved=" << resolved_port << ")";
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Cannot find serial port " << port_name_
+                              << " (resolved=" << resolved_port << ")").str());
         std::exit(1);
     }
 
     if (sp_open(port_, SP_MODE_READ_WRITE) != SP_OK) {
-        DM_LOG_ERROR_STREAM() << "Cannot open port " << port_name_
-                              << " (resolved=" << resolved_port << ")";
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Cannot open port " << port_name_
+                              << " (resolved=" << resolved_port << ")").str());
         std::exit(1);
     }
 
@@ -120,7 +120,7 @@ void Im648Driver::initSerial() {
     sp_set_stopbits(port_, 1);
     sp_set_flowcontrol(port_, SP_FLOWCONTROL_NONE);
 
-    DM_LOG_INFO_STREAM() << "IM648 serial port " << port_name_ << " opened successfully";
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "IM648 serial port " << port_name_ << " opened successfully").str());
 }
 
 void Im648Driver::configureDevice() {
@@ -143,9 +143,9 @@ void Im648Driver::handleParsedSample(const IM648_Data &sample) {
         pending_samples_.pop_front();
         ++dropped_samples_;
         if (dropped_samples_ == 1 || (dropped_samples_ % 256) == 0) {
-            DM_LOG_WARN_STREAM() << "[IM648] " << port_name_
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "[IM648] " << port_name_
                                  << " pending sample queue full, dropped oldest samples="
-                                 << dropped_samples_;
+                                 << dropped_samples_).str());
         }
     }
     pending_samples_.push_back(sample);
@@ -164,7 +164,7 @@ void Im648Driver::readThread() {
                 im648_Cmd_GetPkt(&protocol_ctx_, tmpdata[i]);
             }
         } else if (n < 0) {
-            DM_LOG_ERROR_STREAM() << "Error reading from IM648 serial port " << port_name_;
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Error reading from IM648 serial port " << port_name_).str());
         }
 
         std::this_thread::sleep_for(std::chrono::microseconds(100));

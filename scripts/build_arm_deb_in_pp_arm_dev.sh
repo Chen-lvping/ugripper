@@ -135,7 +135,7 @@ else
     "${UGRIPPER_ARM_CMAKE_ARGS[@]}"
 
   cmake --build "${PACKAGED_BUILD_DIR}" \
-    --target CameraRecorder main_camera_xu_tool SensorRecorder zeroing GripperHmiTool UgripperRuntime \
+    --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime \
     --parallel "${PARALLEL}"
 fi
 

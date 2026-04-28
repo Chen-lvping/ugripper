@@ -1,5 +1,5 @@
 #include "encoder_driver.h"
-#include "sensor_recorder/logging_compat.h"
+#include "utils/logger.h"
 #include <chrono>
 #include <filesystem>
 #include <iomanip>
@@ -55,8 +55,8 @@ void EncoderDriver::markDisconnected(const std::string &operation)
 
     if (wasConnected)
     {
-        DM_LOG_WARN_STREAM() << "EncoderDriver: " << operation << " failed on " << port_
-                             << ", marking encoder disconnected until next reconnect.";
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "EncoderDriver: " << operation << " failed on " << port_
+                             << ", marking encoder disconnected until next reconnect.").str());
     }
 }
 
@@ -70,16 +70,16 @@ ConnectStatus EncoderDriver::connect()
     sp_return result = sp_get_port_by_name(resolvedPort.c_str(), &serialPort_);
     if (result != SP_OK)
     {
-        DM_LOG_ERROR_STREAM() << "EncoderDriver: Cannot find port " << port_
-                              << " (resolved=" << resolvedPort << ")";
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "EncoderDriver: Cannot find port " << port_
+                              << " (resolved=" << resolvedPort << ")").str());
         return ConnectStatus::SERIAL_FAIL;
     }
 
     result = sp_open(serialPort_, SP_MODE_READ_WRITE);
     if (result != SP_OK)
     {
-        DM_LOG_ERROR_STREAM() << "EncoderDriver: Cannot open port " << port_
-                              << " (resolved=" << resolvedPort << ")";
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "EncoderDriver: Cannot open port " << port_
+                              << " (resolved=" << resolvedPort << ")").str());
         sp_free_port(serialPort_);
         serialPort_ = nullptr;
         return ConnectStatus::SERIAL_FAIL;
@@ -95,7 +95,7 @@ ConnectStatus EncoderDriver::connect()
     isConnected_ = true;
     isActive_ = true;
 
-    DM_LOG_INFO_STREAM() << "EncoderDriver: Serial port opened at " << baudrate_ << " baud. Verifying encoder...";
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "EncoderDriver: Serial port opened at " << baudrate_ << " baud. Verifying encoder...").str());
 
     // --- 验证编码器是否有响应 ---
     uint8_t buf[256];
@@ -286,9 +286,9 @@ int EncoderDriver::parseReceivedData(uint8_t *data, size_t size)
                     ++droppedSamples_;
                     if (droppedSamples_ == 1 || (droppedSamples_ % 256) == 0)
                     {
-                        DM_LOG_WARN_STREAM() << "[EncoderDriver] " << port_
+                        DM_LOG_WARN("{}", (::DA::utils::LogString() << "[EncoderDriver] " << port_
                                              << " pending sample queue full, dropped oldest samples="
-                                             << droppedSamples_;
+                                             << droppedSamples_).str());
                     }
                 }
 
@@ -320,7 +320,7 @@ int EncoderDriver::parseReceivedData(uint8_t *data, size_t size)
                 stream << ' ' << std::uppercase << std::hex << std::setw(2)
                        << std::setfill('0') << static_cast<int>(rxBuffer_[i]);
             }
-            DM_LOG_INFO_STREAM() << stream.str();
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << stream.str()).str());
         }
 
         // 解析成功 → 计数 +1
@@ -454,7 +454,7 @@ bool EncoderDriver::setBaudrate(uint32_t baudrate)
         type = 0x07;
         break;
     default:
-        DM_LOG_ERROR_STREAM() << "Unsupported baudrate: " << baudrate;
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Unsupported baudrate: " << baudrate).str());
         return false;
     }
 

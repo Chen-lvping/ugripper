@@ -1,5 +1,5 @@
 #include "camera_recorder/camera_recorder.h"
-#include "camera_recorder/logging_compat.h"
+#include "utils/logger.h"
 
 #include <filesystem>
 #include <system_error>

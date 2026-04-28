@@ -1,6 +1,7 @@
 #pragma once
 
 #include "file_logger.h"
+#include "log_string.h"
 
 #ifdef ROS1_APP
 #  warning "Compiling with ROS1_APP"

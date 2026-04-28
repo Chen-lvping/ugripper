@@ -1,6 +1,6 @@
 #include "gripper_hmi_driver.h"
 #include "gripper_hmi_driver_logic.h"
-#include "gripper_hmi/logging_compat.h"
+#include "utils/logger.h"
 
 #include <algorithm>
 #include <cctype>
@@ -96,7 +96,7 @@ void logCommandSummary(const std::string &name,
                        bool success,
                        const std::string &reason)
 {
-    DM_LOG_INFO_STREAM()
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
         << "[GRIPPER_DIAG] category=command_summary"
         << " port=" << sanitizeDiagValue(port)
         << " name=" << sanitizeDiagValue(name)
@@ -108,7 +108,7 @@ void logCommandSummary(const std::string &name,
         << " retries=" << stats.retries
         << " recoveries=" << stats.recoveries
         << " status=" << (success ? "success" : "failure")
-        << " reason=" << sanitizeDiagValue(reason.empty() ? "none" : reason);
+        << " reason=" << sanitizeDiagValue(reason.empty() ? "none" : reason)).str());
 }
 
 bool isValidEightByteRecvFrame(const uint8_t *frame)
@@ -242,7 +242,7 @@ uint64_t GripperHmiDriver::allocateCommandIdLocked()
 void GripperHmiDriver::logIoSummaryLocked(const char *reason, uint64_t nowMs)
 {
     lastIoSummaryLogAtMs_ = nowMs;
-    DM_LOG_INFO_STREAM()
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
         << "[GRIPPER_DIAG] category=io_summary"
         << " port=" << sanitizeDiagValue(port_)
         << " name=" << sanitizeDiagValue(name_)
@@ -261,7 +261,7 @@ void GripperHmiDriver::logIoSummaryLocked(const char *reason, uint64_t nowMs)
         << " exclusive_timeouts=" << exclusiveTimeoutCount_.load()
         << " exclusive_retries=" << exclusiveRetryCount_.load()
         << " exclusive_failures=" << exclusiveFailureCount_.load()
-        << " exclusive_recoveries=" << exclusiveRecoveryCount_.load();
+        << " exclusive_recoveries=" << exclusiveRecoveryCount_.load()).str());
 }
 
 void GripperHmiDriver::logConnectFailureLocked(const std::string &message)
@@ -284,13 +284,13 @@ void GripperHmiDriver::logConnectFailureLocked(const std::string &message)
             firstConnectFailureAtMs_ == 0 || nowMs < firstConnectFailureAtMs_
                 ? 0
                 : (nowMs - firstConnectFailureAtMs_);
-        DM_LOG_WARN_STREAM() << name_ << ": " << message
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << name_ << ": " << message
                              << " (suppressed " << suppressedConnectFailureCount_
-                             << " repeated attempts over " << (suppressedWindowMs / 1000) << "s)";
+                             << " repeated attempts over " << (suppressedWindowMs / 1000) << "s)").str());
     }
     else
     {
-        DM_LOG_WARN_STREAM() << name_ << ": " << message;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << name_ << ": " << message).str());
     }
 
     lastConnectFailureMessage_ = message;
@@ -313,10 +313,10 @@ void GripperHmiDriver::resetConnectFailureLogLocked(const std::string &resolvedP
             : (nowMs - firstConnectFailureAtMs_);
     const uint32_t totalAttempts = suppressedConnectFailureCount_ + 1;
 
-    DM_LOG_INFO_STREAM() << name_ << ": reconnected port " << port_
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << name_ << ": reconnected port " << port_
                          << " (resolved=" << resolvedPort << ") after " << totalAttempts
                          << " failed attempt" << (totalAttempts == 1 ? "" : "s")
-                         << " over " << (outageMs / 1000) << "s";
+                         << " over " << (outageMs / 1000) << "s").str());
 
     lastConnectFailureMessage_.clear();
     lastConnectFailureLogAtMs_ = 0;
@@ -471,7 +471,7 @@ void GripperHmiDriver::handleIoFailureLocked(const char *operation)
 {
     ++ioFailureCount_;
     logIoSummaryLocked(operation != nullptr ? operation : "io_failure", currentSteadyMs());
-    DM_LOG_WARN_STREAM() << name_ << ": " << operation << " failed on " << port_;
+    DM_LOG_WARN("{}", (::DA::utils::LogString() << name_ << ": " << operation << " failed on " << port_).str());
     pendingStateRequest_ = false;
     pendingLedUpdate_ = false;
     pendingBeepUpdate_ = false;
@@ -747,7 +747,7 @@ bool GripperHmiDriver::abortCalibrationWriteStateLocked(const std::string &reaso
 
     sp_flush(serialPort_, SP_BUF_INPUT);
     std::this_thread::sleep_for(std::chrono::milliseconds(kCalibrationAbortSettleMs));
-    DM_LOG_WARN_STREAM() << name_ << ": abort calibration write state: " << reason;
+    DM_LOG_WARN("{}", (::DA::utils::LogString() << name_ << ": abort calibration write state: " << reason).str());
     return true;
 }
 
@@ -1039,9 +1039,9 @@ bool GripperHmiDriver::writeSerialNumber(const std::string &serialNumber)
     gripper_hmi::GripperSerialNumber encoded{};
     if (!gripper_hmi::encodeSerialNumber(serialNumber, &encoded))
     {
-        DM_LOG_ERROR_STREAM() << name_ << ": invalid serial number, expected 1.."
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << name_ << ": invalid serial number, expected 1.."
                               << gripper_hmi::kSerialNumberFieldLength
-                              << " printable ASCII characters (32-byte field, zero-padded)";
+                              << " printable ASCII characters (32-byte field, zero-padded)").str());
         return false;
     }
 
@@ -1213,7 +1213,7 @@ bool GripperHmiDriver::writeSerialNumber(const std::string &serialNumber)
             }
 
             lastCommandError_ = "serial number write preamble failed: " + describeStatusFrame(responseToken, statusCode);
-            DM_LOG_ERROR_STREAM() << name_ << ": " << lastCommandError_;
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << name_ << ": " << lastCommandError_).str());
             return finish(false, lastCommandError_);
         }
 
@@ -1227,7 +1227,7 @@ bool GripperHmiDriver::writeSerialNumber(const std::string &serialNumber)
 
         if (!writeChunkWithRetry(0, reinterpret_cast<const uint8_t *>(encoded.data())))
         {
-            DM_LOG_ERROR_STREAM() << name_ << ": " << lastCommandError_;
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << name_ << ": " << lastCommandError_).str());
             return finish(false, lastCommandError_);
         }
 
@@ -1235,7 +1235,7 @@ bool GripperHmiDriver::writeSerialNumber(const std::string &serialNumber)
                                  reinterpret_cast<const uint8_t *>(encoded.data()) +
                                      GripperHmiProtocol::kSerialNumberChunkSize))
         {
-            DM_LOG_ERROR_STREAM() << name_ << ": " << lastCommandError_;
+            DM_LOG_ERROR("{}", (::DA::utils::LogString() << name_ << ": " << lastCommandError_).str());
             return finish(false, lastCommandError_);
         }
 
