@@ -28,6 +28,11 @@ struct RecordRuntimeOptions
     std::vector<std::string> gripperPorts;
     std::string cameraRecorderBin = "./bin/CameraRecorder/CameraRecorder";
     std::string sensorRecorderBin = "./bin/SensorRecorder/SensorRecorder";
+    std::string faysStereoDaemonScript = "./bin/FaysStereoRecorder/scripts/run_fays_stereo_daemon.sh";
+    std::string leftFaysConfig = "./bin/FaysStereoRecorder/config/fays_vikit_left.yaml";
+    std::string rightFaysConfig = "./bin/FaysStereoRecorder/config/fays_vikit_right.yaml";
+    std::string leftFaysControlFifo = "/tmp/umi_left_fays_cmd";
+    std::string rightFaysControlFifo = "/tmp/umi_right_fays_cmd";
     std::string audioPlayScript = "./bin/UgripperRuntime/audio/audio_play.py";
     std::string audioRecordScript = "./bin/UgripperRuntime/audio/record_usb_audio.py";
     std::string audioPipe = "/tmp/umi_audio_pipe";
@@ -200,6 +205,7 @@ private:
                        std::string persistCalibrationFile,
                        std::string exampleCalibrationFile,
                        std::string fallbackCalibrationFile,
+                       std::string stereoStatusFile,
                        std::string packageVersion,
                        std::string updaterVersion);
 
@@ -235,6 +241,7 @@ private:
         std::string persistCalibrationFile_;
         std::string exampleCalibrationFile_;
         std::string fallbackCalibrationFile_;
+        std::string stereoStatusFile_;
         std::string packageVersion_;
         std::string updaterVersion_;
         std::string dataRoot_;

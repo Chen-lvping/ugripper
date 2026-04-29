@@ -13,7 +13,7 @@
 #   * 左侧主摄 / tactile `l` 优先按设备类型识别（27c2:0530 = main, 0bda:5846 = tactile），
 #     USB2 口位只用于限定“属于左侧链路”，不再假设固定落在 .4.2 / .4.4
 #   * 左侧 tactile `r` 同时兼容旧 hub 的 `.4.1` 和新 hub 的 `.3`
-#   * .1/.2 -> stereo (USB3 路径；允许两个内部端口互换，节点命名不绑定厂家)
+#   * Fays stereo 使用 USB3 路径，只按左右 USB3 根口区分侧别，不绑定 hub 内部端口
 # 摄像头通常会生成两个节点 (videoN, videoN+1)，这里只取 index=0 的主节点。
 
 # ========================
@@ -141,26 +141,32 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1:1.0", \
   ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
   SYMLINK+="chest_cam_main"
 
-# ---- Right stereo camera ----
-# 允许 USB3 hub 内部端口 .1/.2 互换，不把厂家名写进节点命名。
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.1", ATTR{index}=="0", \
-  SYMLINK+="right_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.2", ATTR{index}=="0", \
-  SYMLINK+="right_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.1", ATTR{index}=="0", \
-  SYMLINK+="right_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.2", ATTR{index}=="0", \
-  SYMLINK+="right_stereo"
+# ---- Fays stereo cameras (FTDI Superspeed Video Bridge, 0403:602e) ----
+# Interface 00 is the stereo image stream and interface 02 is the IMU stream.
+# Keep logical left_stereo/right_stereo names for runtime health and episode
+# schema, and expose *_fays_stereo aliases for the vendor SDK configs.
+SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="602e", \
+  MODE:="0777", GROUP:="plugdev", TAG+="uaccess"
+SUBSYSTEM=="video4linux", KERNEL=="video*", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", \
+  MODE:="0777", GROUP:="video", TAG+="uaccess"
 
-# ---- Left stereo camera ----
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.1", ATTR{index}=="0", \
-  SYMLINK+="left_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.2", ATTR{index}=="0", \
-  SYMLINK+="left_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.1", ATTR{index}=="0", \
-  SYMLINK+="left_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.2", ATTR{index}=="0", \
-  SYMLINK+="left_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="right_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="right_fays_imu"
+
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="left_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="left_fays_imu"
 
 
 # ========================

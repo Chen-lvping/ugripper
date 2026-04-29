@@ -4,7 +4,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ================= 变量定义区域 =================
 APP_NAME="ugripper"
-BASE_VERSION="${BASE_VERSION:-1.2.8}"
+BASE_VERSION="${BASE_VERSION:-2.0.0}"
 VERSION_SUFFIX="${VERSION_SUFFIX:-}"
 VERSION="${VERSION:-${BASE_VERSION}${VERSION_SUFFIX}}"
 ARCH="arm64"
@@ -117,6 +117,7 @@ validate_packaged_binaries() {
     validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/SensorRecorder/zeroing" "SensorRecorder zeroing"
     validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/GripperHmiTool/GripperHmiTool" "GripperHmiTool"
     validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/UgripperRuntime/UgripperRuntime" "UgripperRuntime"
+    validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/fays_record_example" "Fays stereo recorder"
 }
 
 ensure_dir() {
@@ -392,7 +393,7 @@ else
         -DBUILD_TESTING=OFF \
         -DUGRIPPER_ENABLE_MCAP_BUILDER=OFF
     cmake --build "$PACKAGED_BUILD_DIR" \
-        --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime \
+        --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime fays_record_example \
         --parallel "$(nproc)"
     validate_packaged_binaries
 fi
@@ -421,8 +422,16 @@ copy_first_existing "$TARGET_INSTALL_ROOT/bin/GripperHmiTool/GripperHmiTool" \
     "$PACKAGED_BUILD_DIR/standalone/GripperHmiTool/GripperHmiTool"
 copy_first_existing "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/UgripperRuntime" \
     "$PACKAGED_BUILD_DIR/standalone/UgripperRuntime/UgripperRuntime"
+copy_first_existing "$TARGET_INSTALL_ROOT/bin/FaysStereoRecorder/fays_record_example" \
+    "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/fays_record_example"
 
 copy_if_exists "standalone/CameraRecorder/config" "$TARGET_INSTALL_ROOT/bin/CameraRecorder/config"
+copy_if_exists "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/config" \
+    "$TARGET_INSTALL_ROOT/bin/FaysStereoRecorder/config"
+copy_if_exists "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/scripts" \
+    "$TARGET_INSTALL_ROOT/bin/FaysStereoRecorder/scripts"
+copy_if_exists "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/lib" \
+    "$TARGET_INSTALL_ROOT/bin/FaysStereoRecorder/lib"
 copy_if_exists "standalone/UgripperRuntime/audio" "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/audio"
 copy_if_exists "standalone/UgripperRuntime/audio_en" "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/audio_en"
 copy_if_exists "standalone/UgripperRuntime/config/fakeCamCalib.json" \
@@ -432,6 +441,7 @@ copy_if_exists "standalone/UgripperRuntime/config/fakeCamCalib.json" \
 copy_if_exists "py_script/usb_audio_play_test.py" "$TARGET_INSTALL_ROOT/py_script/usb_audio_play_test.py"
 copy_if_exists "py_script/usb_audio_mic_test.py" "$TARGET_INSTALL_ROOT/py_script/usb_audio_mic_test.py"
 copy_if_exists "py_script/usb_audio_noise_profile.py" "$TARGET_INSTALL_ROOT/py_script/usb_audio_noise_profile.py"
+copy_if_exists "py_script/fays_tail_imu_check.py" "$TARGET_INSTALL_ROOT/py_script/fays_tail_imu_check.py"
 
 # 4. 部署 Udev 规则
 copy_if_exists "config/99-fixed-usb-map.rules" "$BUILD_ROOT/etc/udev/rules.d/99-fixed-usb-map.rules"

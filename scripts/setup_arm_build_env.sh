@@ -17,6 +17,8 @@
 #   libspdlog-dev:arm64=1:1.9.2+ds-0.2
 #   libgstreamer1.0-dev:arm64=1.20.3-0ubuntu1.1
 #   libgstreamer-plugins-base1.0-dev:arm64=1.20.1-1ubuntu0.6
+#   libopencv-core-dev:arm64=4.5.4+dfsg-9ubuntu4
+#   libopencv-imgproc-dev:arm64=4.5.4+dfsg-9ubuntu4
 #
 # The private apt root resolves transitive ARM64 dependencies from the same
 # Jammy ports repositories and extracts them into .local-deps/sysroot-arm64.
@@ -130,6 +132,8 @@ ARM_PACKAGES=(
     libspdlog-dev:arm64=1:1.9.2+ds-0.2
     libgstreamer1.0-dev:arm64=1.20.3-0ubuntu1.1
     libgstreamer-plugins-base1.0-dev:arm64=1.20.1-1ubuntu0.6
+    libopencv-core-dev:arm64=4.5.4+dfsg-9ubuntu4
+    libopencv-imgproc-dev:arm64=4.5.4+dfsg-9ubuntu4
 )
 
 install_host_tools() {
@@ -268,6 +272,14 @@ validate_sysroot() {
         echo "Missing GStreamer library in ${SYSROOT}" >&2
         exit 1
     }
+    test -f "${SYSROOT}/usr/lib/aarch64-linux-gnu/libopencv_core.so" || {
+        echo "Missing OpenCV core library in ${SYSROOT}" >&2
+        exit 1
+    }
+    test -f "${SYSROOT}/usr/lib/aarch64-linux-gnu/libopencv_imgproc.so" || {
+        echo "Missing OpenCV imgproc library in ${SYSROOT}" >&2
+        exit 1
+    }
 }
 
 cat_summary() {
@@ -287,7 +299,7 @@ To build manually:
     -DCMAKE_TOOLCHAIN_FILE="\${PWD}/cmake/arm-linux-toolchain.cmake" \\
     "\${UGRIPPER_ARM_CMAKE_ARGS[@]}"
   cmake --build build/arm_container_release \\
-    --target CameraRecorder main_camera_xu_tool SensorRecorder zeroing GripperHmiTool UgripperRuntime \\
+    --target CameraRecorder main_camera_xu_tool SensorRecorder zeroing GripperHmiTool UgripperRuntime fays_record_example \\
     --parallel 8
   ./scripts/build_arm_deb_in_pp_arm_dev.sh
 EOF

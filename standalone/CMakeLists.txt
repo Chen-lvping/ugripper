@@ -1,4 +1,5 @@
 add_subdirectory(GripperHmiTool)
 add_subdirectory(CameraRecorder)
 add_subdirectory(SensorRecorder)
+add_subdirectory(FaysStereoRecorder)
 add_subdirectory(UgripperRuntime)

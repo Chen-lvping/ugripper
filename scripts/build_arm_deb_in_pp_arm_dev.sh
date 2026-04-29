@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 APP_NAME="ugripper"
 ARCH="arm64"
-BASE_VERSION="${BASE_VERSION:-1.2.8}"
+BASE_VERSION="${BASE_VERSION:-2.0.0}"
 VERSION_SUFFIX="${VERSION_SUFFIX:-}"
 VERSION="${VERSION:-${BASE_VERSION}${VERSION_SUFFIX}}"
 PACKAGE_DEB_NAME="${APP_NAME}_${VERSION}_${ARCH}.deb"
@@ -124,6 +124,26 @@ else
   fi
   source ".local-deps/arm-build-env.sh"
 
+  NEED_SYSROOT_REFRESH=false
+  for module in fmt spdlog gstreamer-1.0 gstreamer-app-1.0 gstreamer-base-1.0; do
+      if ! pkg-config --exists "${module}"; then
+          echo "Missing ARM sysroot pkg-config module: ${module}"
+          NEED_SYSROOT_REFRESH=true
+      fi
+  done
+  for lib in \
+      "${UGRIPPER_ARM_SYSROOT}/usr/lib/aarch64-linux-gnu/libopencv_core.so" \
+      "${UGRIPPER_ARM_SYSROOT}/usr/lib/aarch64-linux-gnu/libopencv_imgproc.so"; do
+      if [[ ! -f "${lib}" ]]; then
+          echo "Missing ARM sysroot library: ${lib}"
+          NEED_SYSROOT_REFRESH=true
+      fi
+  done
+  if [[ "${NEED_SYSROOT_REFRESH}" == true ]]; then
+      ./scripts/setup_arm_build_env.sh --skip-host-install --skip-arm-index-update
+      source ".local-deps/arm-build-env.sh"
+  fi
+
   if [[ "${CLEAN_BUILD}" == true ]]; then
       rm -rf "${PACKAGED_BUILD_DIR}"
   fi
@@ -135,7 +155,7 @@ else
     "${UGRIPPER_ARM_CMAKE_ARGS[@]}"
 
   cmake --build "${PACKAGED_BUILD_DIR}" \
-    --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime \
+    --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime fays_record_example \
     --parallel "${PARALLEL}"
 fi
 

@@ -17,35 +17,13 @@ cameras:
     fps: 60
     output_files: [right_cam_main.mkv]
 
-  - name: left_stereo
-    device: /dev/left_stereo
-    mode: stereo-hybrid-decode-encode
-    width: 1280
-    height: 400
+  - name: chest_cam_main
+    device: /dev/chest_cam_main
+    mode: direct-copy-h265
+    width: 1920
+    height: 1080
     fps: 60
-    output_fps: 30
-    output_files: [left_stereo.mkv]
-    input_thread_queue_size: 128
-    qp_init: 31
-    qp_max: 38
-    qp_min: 24
-    qp_max_i: 38
-    qp_min_i: 20
-
-  - name: right_stereo
-    device: /dev/right_stereo
-    mode: stereo-hybrid-decode-encode
-    width: 1280
-    height: 400
-    fps: 60
-    output_fps: 30
-    output_files: [right_stereo.mkv]
-    input_thread_queue_size: 128
-    qp_init: 31
-    qp_max: 38
-    qp_min: 24
-    qp_max_i: 38
-    qp_min_i: 20
+    output_files: [chest_cam_main.mkv]
 
   - name: left_tcam_l
     device: /dev/left_tcam_l

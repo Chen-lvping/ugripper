@@ -1,0 +1,48 @@
+%YAML:1.0
+# Rgb device number
+rgb_dev_port: NULL
+# auto white balance [true/false]
+awb: false
+# White balance coefficients
+rgb_white_balance_r: 1.3
+rgb_white_balance_g: 0.8
+rgb_white_balance_b: 2.1
+# RGB image rotation angle, currently only 0/180 degree rotation is supported.
+rgb_rotate: 0
+# Image format of middle camera [0: bayer image, 1: RGB image]
+mid_img_fmt: 1
+# Image size of middle camera [1920x1080 or 960x540]
+rgb_cam_width: 1920
+rgb_cam_height: 1080
+
+# Stereo device number
+stereo_dev_port: /dev/left_fays_stereo
+# The width of the stereo camera image[640/1280]
+stereo_single_cam_width: 640
+# The width of the stereo camera image[400/800]
+stereo_single_cam_height: 400
+
+stereo_fps: 25
+# Only support color sensors. Output: [0: raw image, 1: RGB image]
+stereo_color_mode: 0
+# auto white balance for stereo rgb sensor only
+stereo_awb: 1
+# rgb digital gains for stereo rgb sensor only (works when awb-mode is off)
+stereo_R_gain: 1.
+stereo_G_gain: 0.6
+stereo_B_gain: 1.3
+# -1: auto initial exposure
+stereo_init_exposure: -1
+# Stereo gain control [ 1.0 ~ 15.0 is manual : -1 auto gain ]
+stereo_gain_value: -1
+# Left camera rotation control [0: no rotation, 1: rotate 180 degrees]
+left_cam_rotate_180: 0
+# Right camera rotation control [0: no rotation, 1: rotate 180 degrees]
+right_cam_rotate_180: 1
+# Swap the left and right images [0: do not swap, 1: swap]
+stereo_swap_lr: 0
+
+# Imu device number
+imu_dev_port: /dev/left_fays_imu
+# The gravity acceleration value of the device location
+gravity: 9.7946
