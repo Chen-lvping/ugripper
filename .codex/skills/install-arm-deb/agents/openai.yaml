@@ -1,0 +1,4 @@
+interface:
+  display_name: "Install ARM Deb"
+  short_description: "把指定 UGripper arm64 deb 通过 SSH 安装到 3588/ARM 目标机"
+  default_prompt: "Use $install-arm-deb to install the specified deb onto 3588ether with host 192.168.1.110, user ubuntu, password ubuntu via scripts/install_deb_to_arm_target.sh, then report the installed package version and service status."

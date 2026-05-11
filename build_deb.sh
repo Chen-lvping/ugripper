@@ -113,6 +113,7 @@ validate_binary_arch() {
 
 validate_packaged_binaries() {
     validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/CameraRecorder/CameraRecorder" "CameraRecorder"
+    validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/CameraRecorder/main_camera_xu_tool" "CameraRecorder main_camera_xu_tool"
     validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/SensorRecorder/SensorRecorder" "SensorRecorder"
     validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/SensorRecorder/zeroing" "SensorRecorder zeroing"
     validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/GripperHmiTool/GripperHmiTool" "GripperHmiTool"
@@ -393,7 +394,7 @@ else
         -DBUILD_TESTING=OFF \
         -DUGRIPPER_ENABLE_MCAP_BUILDER=OFF
     cmake --build "$PACKAGED_BUILD_DIR" \
-        --target CameraRecorder SensorRecorder zeroing GripperHmiTool UgripperRuntime fays_record_example \
+        --target CameraRecorder main_camera_xu_tool SensorRecorder zeroing GripperHmiTool UgripperRuntime fays_record_example \
         --parallel "$(nproc)"
     validate_packaged_binaries
 fi
@@ -418,6 +419,8 @@ copy_first_existing "$TARGET_INSTALL_ROOT/bin/SensorRecorder/99-serial.rules" \
     "standalone/SensorRecorder/99-serial.rules"
 copy_first_existing "$TARGET_INSTALL_ROOT/bin/CameraRecorder/CameraRecorder" \
     "$PACKAGED_BUILD_DIR/standalone/CameraRecorder/CameraRecorder"
+copy_first_existing "$TARGET_INSTALL_ROOT/bin/CameraRecorder/main_camera_xu_tool" \
+    "$PACKAGED_BUILD_DIR/standalone/CameraRecorder/main_camera_xu_tool"
 copy_first_existing "$TARGET_INSTALL_ROOT/bin/GripperHmiTool/GripperHmiTool" \
     "$PACKAGED_BUILD_DIR/standalone/GripperHmiTool/GripperHmiTool"
 copy_first_existing "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/UgripperRuntime" \
@@ -432,6 +435,8 @@ copy_if_exists "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/scripts" \
     "$TARGET_INSTALL_ROOT/bin/FaysStereoRecorder/scripts"
 copy_if_exists "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/lib" \
     "$TARGET_INSTALL_ROOT/bin/FaysStereoRecorder/lib"
+copy_if_exists "config/ensure_main_camera_packet_size_once.sh" \
+    "$TARGET_INSTALL_ROOT/config/ensure_main_camera_packet_size_once.sh"
 copy_if_exists "standalone/UgripperRuntime/audio" "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/audio"
 copy_if_exists "standalone/UgripperRuntime/audio_en" "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/audio_en"
 copy_if_exists "standalone/UgripperRuntime/config/fakeCamCalib.json" \

@@ -149,7 +149,7 @@
 - 主相机模式是压缩码流直封装：主摄始终走相机原生 `H.264/H.265` 码流，不做二次编码；当前实现已收口为 `camera_recorder` 进程内的 `V4L2 MMAP capture -> appsrc -> h26xparse -> matroskamux -> filesink`。
 - 主相机时间戳当前优先取 `VIDIOC_DQBUF` 返回的 `v4l2_buffer.timestamp`，若驱动标记为 monotonic 则在进程内通过 `boot_time_offset_us` 转成 unix 时间；这样 `system_time_us` 的打点位置尽量前移到内核缓冲出队附近，而不是依赖后置日志解析。
 - 主相机 `PTS/DTS` 当前按“相对首帧 system time 的增量”在进程内生成，并做单调钳制；`<camera>_record_time_offset_us` 的语义保持为 `first_frame_unix_time_us - first_frame_pts_us`，不再允许额外回退值混入 `info.json`。
-- 主相机链路当前仍保留约 `5s` 的 `leaky downstream` 保护窗口，用于吸收短时 `matroskamux/filesink` 背压，减少因极小缓冲触发的编码包丢失与花屏。
+- 主相机链路当前使用更深的 V4L2 压缩缓冲池，并让 `appsrc`/queue 在背压时阻塞等待，避免下游繁忙时主动丢弃编码包。
 - 主摄 YAML 不再支持 `uvc_roll_absolute`。右主摄厂商扩展控制工具 `main_camera_xu_tool` 与 `ensure_main_camera_packet_size_once.sh` 当前随包保留，但 udev 自动触发暂时停用；普通录制阶段不做 UVC 控制写入。
 - 触觉 / 双目模式保留 `hybrid-decode-encode` / `stereo-hybrid-decode-encode`。
 - stereo 当前默认按设备 `1280x400@60` 常驻采集 MJPEG，session writer 按 `30fps` 抽帧后再编码成 `H.265` 写入 `mkv`；当前不再依赖后台 live encode + UDP relay。

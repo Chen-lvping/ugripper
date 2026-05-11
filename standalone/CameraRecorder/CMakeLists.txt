@@ -64,7 +64,24 @@ if(CAMERA_RECORDER_HAS_GSTREAMER)
     )
 endif()
 
-install(TARGETS ${APP_NAME}
+add_executable(main_camera_xu_tool
+    main_camera_xu_tool.cpp
+)
+set_target_properties(main_camera_xu_tool PROPERTIES
+    CXX_STANDARD 20
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
+)
+target_include_directories(main_camera_xu_tool
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(main_camera_xu_tool
+    PRIVATE
+        Threads::Threads
+)
+
+install(TARGETS ${APP_NAME} main_camera_xu_tool
     RUNTIME DESTINATION bin/CameraRecorder
     LIBRARY DESTINATION lib
 )
