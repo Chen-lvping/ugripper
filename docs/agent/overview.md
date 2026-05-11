@@ -167,11 +167,10 @@
 
 ### 6.3 传感器链路
 - `sensor_recorder` 固定录制：
-  - 右手：`/dev/right_imu`、`/dev/right_encoder`
-  - 左手：`/dev/left_imu`、`/dev/left_encoder`
-- 启动阶段会并发初始化左右 IMU 和左右 encoder，减少首样本被串行初始化链路拉长。
-- IMU 配置阶段保留固定 settle wait，但已从旧的长等待收敛到更短窗口，优先压缩起录前空转时间。
-- IMU 与 encoder 当前都会先按“解析/读取后入本地队列 -> 主循环批量消费 -> 每侧写线程落 MCAP”的方式输出；主循环不再直接同步阻塞 `McapWriter::write`。
+  - 右手：`/dev/right_encoder`
+  - 左手：`/dev/left_encoder`
+- 新版不再接板载 IM648，因此 `sensor_recorder` 不再打开 `/dev/left_imu` / `/dev/right_imu`，也不再写 `imu_left` / `imu_right` topic。
+- encoder 当前按“解析/读取后入本地队列 -> 主循环批量消费 -> 每侧写线程落 MCAP”的方式输出；主循环不再直接同步阻塞 `McapWriter::write`。
 - 左右 `sensor_data_*.mcap` 现各自由单独写线程落盘，降低 chunk 压缩或磁盘抖动对采样节奏的反压影响；若写队列持续堆积，日志会输出 backlog warning 便于现场判断是否存在写盘瓶颈。
 - 录制态的 IMU 超阈值检测当前直接下沉在 `sensor_recorder`：复用其现有 IMU 消费路径完成左右手独立的 `gyro`/`accel` 阈值、去抖、cooldown 与最短保持时长判定，不再把原始 IMU 样本转发给 `record_runtime`。
 - `sensor_recorder` 与 `record_runtime` 当前只通过单向本地 `pipe` 交换轻量告警状态消息；`record_runtime` 不接收原始 IMU 流，只在收到“进入告警”状态变化时写一次 warning，并统一控制左右夹爪 HMI 蜂鸣。
@@ -405,8 +404,6 @@ tail -n 200 /mnt/data_disk/logs/umi_sys_<device_sn_lower>_$(date +%Y%m%d).log
 - `/dev/left_tcam_r`
 - `/dev/right_tcam_l`
 - `/dev/right_tcam_r`
-- `/dev/left_imu`
-- `/dev/right_imu`
 - `/dev/left_encoder`
 - `/dev/right_encoder`
 - `/dev/left_gripper`

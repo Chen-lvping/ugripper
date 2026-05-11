@@ -1,6 +1,4 @@
-#include "im648_driver.h"
 #include "encoder_driver.h"
-#include "record_runtime/motion_alert_ipc.h"
 #include "utils/logger.h"
 #include "sensor_recorder/sensor_domain.h"
 
@@ -16,7 +14,6 @@
 #include <cstdint>
 #include <deque>
 #include <filesystem>
-#include <fcntl.h>
 #include <iostream>
 #include <memory>
 #include <string>
@@ -28,28 +25,7 @@ namespace fs = std::filesystem;
 
 std::atomic<bool> g_stopFlag(false);
 
-constexpr uint64_t kNanosecondsPerMicrosecond = 1000ULL;
-constexpr uint64_t kImuNominalPeriodNs = 5'000'000ULL;
 constexpr uint64_t kEncoderNominalPeriodNs = 1'000'000ULL;
-constexpr double kGravityMps2 = 9.80665;
-constexpr double kMotionAccelThresholdMps2 = 8.0;
-constexpr double kMotionGyroThresholdRadps = 1.6;
-constexpr uint64_t kMotionDebounceMs = 50;
-constexpr uint64_t kMotionCooldownMs = 100;
-constexpr uint64_t kMotionMinAlertDurationMs = 500;
-
-struct ImuSample {
-    float qx;
-    float qy;
-    float qz;
-    float qw;
-    float gx;
-    float gy;
-    float gz;
-    float ax;
-    float ay;
-    float az;
-};
 
 struct EncoderSample {
     int32_t raw;
@@ -58,7 +34,6 @@ struct EncoderSample {
 
 struct SensorSideConfig {
     std::string label;
-    std::string imuPort;
     std::string encoderPort;
 };
 
@@ -66,7 +41,6 @@ struct SideWriter {
     SensorSideConfig config;
     fs::path outputFile;
     mcap::McapWriter writer;
-    mcap::Schema imuSchema;
     mcap::Schema encoderSchema;
     std::atomic<uint64_t> writtenMessageCount{0};
     std::atomic<uint64_t> writeFailureCount{0};
@@ -80,89 +54,6 @@ using ugripper::sensor::CreateBatchTimestampSmoothingState;
 using ugripper::sensor::CurrentSystemTimeNs;
 using ugripper::sensor::SmoothTimestampedBatch;
 using ugripper::sensor::TimestampedPayloadFrame;
-
-struct ImuRuntime {
-    SensorSideConfig config;
-    std::unique_ptr<dmbot_serial::Im648Driver> driver;
-    mcap::Channel channel;
-    BatchTimestampSmoothingState timestampSmoothing;
-    uint32_t sequence = 0;
-    bool firstSampleLogged = false;
-    uint64_t receivedSampleCount = 0;
-    uint64_t emittedMessageCount = 0;
-    uint32_t lastEmittedSequence = 0;
-    uint64_t lastEmittedTimestampNs = 0;
-};
-
-struct MotionSample {
-    uint64_t steadyTimeMs = 0;
-    double gyroMagnitude = 0.0;
-    double accelExcess = 0.0;
-    bool overGyro = false;
-    bool overAccel = false;
-};
-
-struct MotionAlertState {
-    bool alertActive = false;
-    uint64_t overThresholdSinceMs = 0;
-    uint64_t lastTransitionMs = 0;
-};
-
-struct MotionQueuedSample {
-    std::string label;
-    dmbot_serial::IM648_Data imuData;
-};
-
-struct MotionEventQueue {
-    std::mutex mutex;
-    std::condition_variable cv;
-    std::deque<MotionQueuedSample> queue;
-    bool stopped = false;
-    size_t droppedSamples = 0;
-    static constexpr size_t kMaxQueueSize = 4096;
-
-    void push(MotionQueuedSample &&sample) {
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            if (stopped) {
-                return;
-            }
-            if (queue.size() >= kMaxQueueSize) {
-                queue.pop_front();
-                ++droppedSamples;
-                if (droppedSamples == 1 || (droppedSamples % 256) == 0) {
-                    DM_LOG_WARN("{}", (::DA::utils::LogString() << "[MotionAlertQueue] dropped oldest samples=" << droppedSamples).str());
-                }
-            }
-            queue.push_back(std::move(sample));
-        }
-        cv.notify_one();
-    }
-
-    bool pop(MotionQueuedSample *sample) {
-        if (sample == nullptr) {
-            return false;
-        }
-
-        std::unique_lock<std::mutex> lock(mutex);
-        cv.wait(lock, [this] { return stopped || !queue.empty(); });
-        if (queue.empty()) {
-            return false;
-        }
-
-        *sample = std::move(queue.front());
-        queue.pop_front();
-        return true;
-    }
-
-    void stop() {
-        {
-            std::lock_guard<std::mutex> lock(mutex);
-            stopped = true;
-        }
-        cv.notify_all();
-    }
-};
 
 struct EncoderRuntime {
     SensorSideConfig config;
@@ -242,80 +133,11 @@ struct PendingWriteQueue {
     }
 };
 
-static_assert(sizeof(ImuSample) == 40, "ImuSample layout changed");
 static_assert(sizeof(EncoderSample) == 8, "EncoderSample layout changed");
 
 void signalHandler(int signum) {
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "Interrupt signal (" << signum << ") received. Stopping...").str());
     g_stopFlag = true;
-}
-
-uint64_t CurrentSteadyMs() {
-    return static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch())
-            .count());
-}
-
-ugripper::MotionAlertReasonCode MotionAlertReasonCode(bool overAccel, bool overGyro) {
-    if (overAccel && overGyro) {
-        return ugripper::MotionAlertReasonCode::AccelAndGyro;
-    }
-    if (overAccel) {
-        return ugripper::MotionAlertReasonCode::Accel;
-    }
-    if (overGyro) {
-        return ugripper::MotionAlertReasonCode::Gyro;
-    }
-    return ugripper::MotionAlertReasonCode::None;
-}
-
-ugripper::MotionAlertSide MotionAlertSideForLabel(const std::string &label) {
-    if (label == "left") {
-        return ugripper::MotionAlertSide::Left;
-    }
-    if (label == "right") {
-        return ugripper::MotionAlertSide::Right;
-    }
-    return ugripper::MotionAlertSide::Unknown;
-}
-
-void EmitMotionAlertStateChange(int motionAlertFd,
-                                const std::string &label,
-                                const MotionSample &sample,
-                                bool active,
-                                ugripper::MotionAlertReasonCode reason) {
-    if (motionAlertFd < 0) {
-        return;
-    }
-
-    ugripper::MotionAlertMessage message;
-    message.side = static_cast<uint8_t>(MotionAlertSideForLabel(label));
-    message.reason = static_cast<uint8_t>(reason);
-    message.active = active ? 1 : 0;
-    message.gyroMagnitude = static_cast<float>(sample.gyroMagnitude);
-    message.accelExcess = static_cast<float>(sample.accelExcess);
-    message.steadyTimeMs = sample.steadyTimeMs;
-
-    const ssize_t bytesWritten = write(motionAlertFd, &message, sizeof(message));
-    if (bytesWritten < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        close(motionAlertFd);
-    }
-}
-
-ImuSample create_imu_sample(const dmbot_serial::IM648_Data &d) {
-    ImuSample sample{};
-    sample.qx = d.quat_x;
-    sample.qy = d.quat_y;
-    sample.qz = d.quat_z;
-    sample.qw = d.quat_w;
-    sample.gx = d.gyrox;
-    sample.gy = d.gyroy;
-    sample.gz = d.gyroz;
-    sample.ax = d.accx;
-    sample.ay = d.accy;
-    sample.az = d.accz;
-    return sample;
 }
 
 EncoderSample create_encoder_sample(const EncoderData &d) {
@@ -408,14 +230,6 @@ void encoderRequestThreadFunc(EncoderDriver *encoder, const std::string &label) 
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "Encoder request thread stopped for " << label).str());
 }
 
-mcap::Schema buildImuSchema() {
-    return mcap::Schema("foxglove.Imu", "jsonschema", R"({
-        "type": "object",
-        "title": "ImuSampleBinary",
-        "description": "little-endian float32[10]: qx,qy,qz,qw,gx,gy,gz,ax,ay,az"
-    })");
-}
-
 mcap::Schema buildEncoderSchema() {
     return mcap::Schema("EncoderFrame", "json", R"({
         "type": "object",
@@ -431,7 +245,6 @@ bool openSideWriter(const fs::path &outputDir, const SensorSideConfig &config, S
 
     sideWriter->config = config;
     sideWriter->outputFile = outputDir / ("sensor_data_" + config.label + ".mcap");
-    sideWriter->imuSchema = buildImuSchema();
     sideWriter->encoderSchema = buildEncoderSchema();
 
     mcap::McapWriterOptions options("sensor_recorder_" + config.label);
@@ -441,7 +254,7 @@ bool openSideWriter(const fs::path &outputDir, const SensorSideConfig &config, S
     options.compressionLevel = mcap::CompressionLevel::Default;
     options.forceCompression = false;
     // Keep schema/channel metadata readable by downstream validation so topic-based
-    // checks can resolve encoder and IMU channels reliably.
+    // checks can resolve encoder channels reliably.
     options.noRepeatedSchemas = false;
     options.noRepeatedChannels = false;
     options.noMessageIndex = true;
@@ -452,7 +265,6 @@ bool openSideWriter(const fs::path &outputDir, const SensorSideConfig &config, S
         return false;
     }
 
-    sideWriter->writer.addSchema(sideWriter->imuSchema);
     sideWriter->writer.addSchema(sideWriter->encoderSchema);
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "Recording " << config.label << " sensor data to " << sideWriter->outputFile).str());
     return true;
@@ -508,14 +320,9 @@ int main(int argc, char *argv[]) {
     std::signal(SIGTERM, signalHandler);
 
     fs::path outputDir = ".";
-    int motionAlertFd = -1;
     bool outputDirSet = false;
     for (int index = 1; index < argc; ++index) {
         const std::string argument = argv[index];
-        if (argument == "--motion-alert-fd" && index + 1 < argc) {
-            motionAlertFd = std::stoi(argv[++index]);
-            continue;
-        }
         if (!outputDirSet && !argument.empty() && argument[0] != '-') {
             outputDir = fs::path(argument);
             outputDirSet = true;
@@ -524,17 +331,11 @@ int main(int argc, char *argv[]) {
         if (argument == "-h" || argument == "--help") {
             std::cout
                 << "Usage: SensorRecorder [OUTPUT_DIR]\n"
-                << "Records left/right IMU and encoder streams into MCAP files.\n";
+                << "Records left/right encoder streams into MCAP files.\n";
             return 0;
         }
         DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Unknown argument: " << argument).str());
         return -1;
-    }
-    if (motionAlertFd >= 0) {
-        const int flags = fcntl(motionAlertFd, F_GETFL, 0);
-        if (flags >= 0) {
-            fcntl(motionAlertFd, F_SETFL, flags | O_NONBLOCK);
-        }
     }
     std::error_code ec;
     if (!fs::exists(outputDir)) {
@@ -545,8 +346,8 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    const SensorSideConfig rightConfig{"right", "/dev/right_imu", "/dev/right_encoder"};
-    const SensorSideConfig leftConfig{"left", "/dev/left_imu", "/dev/left_encoder"};
+    const SensorSideConfig rightConfig{"right", "/dev/right_encoder"};
+    const SensorSideConfig leftConfig{"left", "/dev/left_encoder"};
 
     SideWriter rightWriter;
     SideWriter leftWriter;
@@ -554,105 +355,22 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    ImuRuntime rightImu{rightConfig, nullptr, mcap::Channel("imu_right", "binary", rightWriter.imuSchema.id)};
-    ImuRuntime leftImu{leftConfig, nullptr, mcap::Channel("imu_left", "binary", leftWriter.imuSchema.id)};
     EncoderRuntime rightEncoder{rightConfig, nullptr, mcap::Channel("encoder_right", "binary", rightWriter.encoderSchema.id)};
     EncoderRuntime leftEncoder{leftConfig, nullptr, mcap::Channel("encoder_left", "binary", leftWriter.encoderSchema.id)};
-    MotionAlertState rightMotionAlert;
-    MotionAlertState leftMotionAlert;
-    MotionEventQueue motionEventQueue;
-    rightImu.timestampSmoothing = CreateBatchTimestampSmoothingState("imu_right", kImuNominalPeriodNs);
-    leftImu.timestampSmoothing = CreateBatchTimestampSmoothingState("imu_left", kImuNominalPeriodNs);
     rightEncoder.timestampSmoothing = CreateBatchTimestampSmoothingState("encoder_right", kEncoderNominalPeriodNs);
     leftEncoder.timestampSmoothing = CreateBatchTimestampSmoothingState("encoder_left", kEncoderNominalPeriodNs);
     PendingWriteQueue rightPendingWrites{rightConfig.label};
     PendingWriteQueue leftPendingWrites{leftConfig.label};
 
-    rightWriter.writer.addChannel(rightImu.channel);
     rightWriter.writer.addChannel(rightEncoder.channel);
-    leftWriter.writer.addChannel(leftImu.channel);
     leftWriter.writer.addChannel(leftEncoder.channel);
 
     std::thread rightWriterThread(sideWriterThreadFunc, &rightWriter, &rightPendingWrites);
     std::thread leftWriterThread(sideWriterThreadFunc, &leftWriter, &leftPendingWrites);
-    std::thread motionWorkerThread([&]() {
-        const auto processMotionSample = [&](const std::string &label,
-                                             const dmbot_serial::IM648_Data &imuData,
-                                             MotionAlertState *alertState) {
-            if (alertState == nullptr) {
-                return;
-            }
-
-            MotionSample sample;
-            sample.steadyTimeMs = CurrentSteadyMs();
-            sample.gyroMagnitude = std::sqrt(
-                static_cast<double>(imuData.gyrox) * imuData.gyrox +
-                static_cast<double>(imuData.gyroy) * imuData.gyroy +
-                static_cast<double>(imuData.gyroz) * imuData.gyroz);
-            const double accelMagnitude = std::sqrt(
-                static_cast<double>(imuData.accx) * imuData.accx +
-                static_cast<double>(imuData.accy) * imuData.accy +
-                static_cast<double>(imuData.accz) * imuData.accz);
-            sample.accelExcess = std::fabs(accelMagnitude - kGravityMps2);
-            sample.overGyro = sample.gyroMagnitude >= kMotionGyroThresholdRadps;
-            sample.overAccel = sample.accelExcess >= kMotionAccelThresholdMps2;
-
-            const bool overThreshold = sample.overGyro || sample.overAccel;
-            const auto reason = MotionAlertReasonCode(sample.overAccel, sample.overGyro);
-
-            if (overThreshold) {
-                if (alertState->overThresholdSinceMs == 0) {
-                    alertState->overThresholdSinceMs = sample.steadyTimeMs;
-                }
-                if (!alertState->alertActive &&
-                    (sample.steadyTimeMs - alertState->overThresholdSinceMs) >= kMotionDebounceMs &&
-                    (alertState->lastTransitionMs == 0 ||
-                     (sample.steadyTimeMs - alertState->lastTransitionMs) >= kMotionCooldownMs)) {
-                    alertState->alertActive = true;
-                    alertState->lastTransitionMs = sample.steadyTimeMs;
-                    EmitMotionAlertStateChange(motionAlertFd, label, sample, true, reason);
-                }
-                return;
-            }
-
-            alertState->overThresholdSinceMs = 0;
-            if (alertState->alertActive &&
-                (sample.steadyTimeMs - alertState->lastTransitionMs) >= kMotionMinAlertDurationMs) {
-                alertState->alertActive = false;
-                alertState->lastTransitionMs = sample.steadyTimeMs;
-                EmitMotionAlertStateChange(
-                    motionAlertFd,
-                    label,
-                    sample,
-                    false,
-                    ugripper::MotionAlertReasonCode::Recovered);
-            }
-        };
-
-        MotionQueuedSample queuedSample;
-        while (motionEventQueue.pop(&queuedSample)) {
-            processMotionSample(
-                queuedSample.label,
-                queuedSample.imuData,
-                queuedSample.label == "left" ? &leftMotionAlert : &rightMotionAlert);
-        }
-    });
 
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "Opening dual-arm sensors: "
-                         << "right(imu=" << rightConfig.imuPort << ", encoder=" << rightConfig.encoderPort << ") "
-                         << "left(imu=" << leftConfig.imuPort << ", encoder=" << leftConfig.encoderPort << ")").str());
-
-    std::thread rightImuInitThread([&rightImu, &rightConfig]() {
-        rightImu.driver = std::make_unique<dmbot_serial::Im648Driver>(rightConfig.imuPort, 115200);
-        rightImu.driver->start();
-    });
-    std::thread leftImuInitThread([&leftImu, &leftConfig]() {
-        leftImu.driver = std::make_unique<dmbot_serial::Im648Driver>(leftConfig.imuPort, 115200);
-        leftImu.driver->start();
-    });
-    rightImuInitThread.join();
-    leftImuInitThread.join();
-    DM_LOG_INFO("Both IM648 devices initialized.");
+                         << "right(encoder=" << rightConfig.encoderPort << ") "
+                         << "left(encoder=" << leftConfig.encoderPort << ")").str());
 
     std::thread rightEncoderInitThread([&rightEncoder, &rightConfig]() {
         rightEncoder.driver = std::make_unique<EncoderDriver>(1, rightConfig.encoderPort, 1000000, "Right_Encoder");
@@ -681,58 +399,6 @@ int main(int argc, char *argv[]) {
 
     while (!g_stopFlag.load()) {
         bool wroteData = false;
-
-        const auto handleImu = [&](ImuRuntime &imuRuntime, PendingWriteQueue &pendingWrites) {
-            bool wroteFrame = false;
-            const auto emitFrame = [&](uint64_t timestampNs, std::vector<std::byte> &&payload) {
-                const uint32_t sequence = imuRuntime.sequence++;
-                auto message = buildQueuedMessage(
-                    imuRuntime.channel.id,
-                    sequence,
-                    timestampNs,
-                    payload.data(),
-                    payload.size());
-                pendingWrites.push(std::move(message));
-                imuRuntime.lastEmittedSequence = sequence;
-                imuRuntime.lastEmittedTimestampNs = timestampNs;
-                ++imuRuntime.emittedMessageCount;
-            };
-
-            std::vector<TimestampedPayloadFrame> batchFrames;
-            dmbot_serial::IM648_Data imuData;
-            while (imuRuntime.driver->tryConsumeData(&imuData)) {
-                ++imuRuntime.receivedSampleCount;
-                const auto sample = create_imu_sample(imuData);
-                motionEventQueue.push(MotionQueuedSample{imuRuntime.config.label, imuData});
-                TimestampedPayloadFrame frame;
-                frame.host_timestamp_ns = imuData.timestamp * kNanosecondsPerMicrosecond;
-                if (frame.host_timestamp_ns == 0) {
-                    frame.host_timestamp_ns = CurrentSystemTimeNs();
-                }
-                const auto *sampleBytes = reinterpret_cast<const std::byte *>(&sample);
-                frame.payload.assign(sampleBytes, sampleBytes + sizeof(sample));
-                batchFrames.push_back(std::move(frame));
-                wroteFrame = true;
-
-                if (!imuRuntime.firstSampleLogged) {
-                    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[IMU-" << imuRuntime.config.label << "] First sample: "
-                                         << "q=(" << sample.qx << "," << sample.qy << "," << sample.qz << "," << sample.qw << ") "
-                                         << "g=(" << sample.gx << "," << sample.gy << "," << sample.gz << ") "
-                                         << "a=(" << sample.ax << "," << sample.ay << "," << sample.az << ") "
-                                         << "ts_ns=" << frame.host_timestamp_ns).str());
-                    imuRuntime.firstSampleLogged = true;
-                }
-            }
-            auto smoothedFrames =
-                SmoothTimestampedBatch(&imuRuntime.timestampSmoothing, std::move(batchFrames));
-            for (auto &frame : smoothedFrames) {
-                emitFrame(frame.host_timestamp_ns, std::move(frame.payload));
-            }
-            return wroteFrame;
-        };
-
-        wroteData = handleImu(rightImu, rightPendingWrites) || wroteData;
-        wroteData = handleImu(leftImu, leftPendingWrites) || wroteData;
 
         const auto handleEncoder = [&](EncoderRuntime &encoderRuntime, PendingWriteQueue &pendingWrites) {
             if (!encoderRuntime.connected) {
@@ -808,10 +474,7 @@ int main(int argc, char *argv[]) {
 
     g_stopFlag = true;
     DM_LOG_INFO("Stopping sensors...");
-    motionEventQueue.stop();
 
-    rightImu.driver->stop();
-    leftImu.driver->stop();
     if (rightEncoder.driver) {
         rightEncoder.driver->disconnect();
     }
@@ -831,45 +494,6 @@ int main(int argc, char *argv[]) {
     if (leftEncoder.requestThread.joinable()) {
         leftEncoder.requestThread.join();
     }
-    if (motionWorkerThread.joinable()) {
-        motionWorkerThread.join();
-    }
-
-    const auto drainImuRuntime = [](ImuRuntime &imuRuntime, PendingWriteQueue &pendingWrites) {
-        const auto emitFrame = [&](uint64_t timestampNs, std::vector<std::byte> &&payload) {
-            const uint32_t sequence = imuRuntime.sequence++;
-            auto message = buildQueuedMessage(
-                imuRuntime.channel.id,
-                sequence,
-                timestampNs,
-                payload.data(),
-                payload.size());
-            pendingWrites.push(std::move(message));
-            imuRuntime.lastEmittedSequence = sequence;
-            imuRuntime.lastEmittedTimestampNs = timestampNs;
-            ++imuRuntime.emittedMessageCount;
-        };
-        std::vector<TimestampedPayloadFrame> batchFrames;
-        dmbot_serial::IM648_Data imuData;
-        while (imuRuntime.driver && imuRuntime.driver->tryConsumeData(&imuData)) {
-            ++imuRuntime.receivedSampleCount;
-            const auto sample = create_imu_sample(imuData);
-            TimestampedPayloadFrame frame;
-            frame.host_timestamp_ns = imuData.timestamp * kNanosecondsPerMicrosecond;
-            if (frame.host_timestamp_ns == 0) {
-                frame.host_timestamp_ns = CurrentSystemTimeNs();
-            }
-            const auto *sampleBytes = reinterpret_cast<const std::byte *>(&sample);
-            frame.payload.assign(sampleBytes, sampleBytes + sizeof(sample));
-            batchFrames.push_back(std::move(frame));
-        }
-        auto smoothedFrames =
-            SmoothTimestampedBatch(&imuRuntime.timestampSmoothing, std::move(batchFrames));
-        for (auto &frame : smoothedFrames) {
-            emitFrame(frame.host_timestamp_ns, std::move(frame.payload));
-        }
-    };
-
     const auto drainEncoderRuntime = [](EncoderRuntime &encoderRuntime, PendingWriteQueue &pendingWrites) {
         const auto emitFrame = [&](uint64_t timestampNs, std::vector<std::byte> &&payload) {
             const uint32_t sequence = encoderRuntime.sequence++;
@@ -910,8 +534,6 @@ int main(int argc, char *argv[]) {
         }
     };
 
-    drainImuRuntime(rightImu, rightPendingWrites);
-    drainImuRuntime(leftImu, leftPendingWrites);
     drainEncoderRuntime(rightEncoder, rightPendingWrites);
     drainEncoderRuntime(leftEncoder, leftPendingWrites);
 
@@ -926,22 +548,10 @@ int main(int argc, char *argv[]) {
 
     rightWriter.writer.close();
     leftWriter.writer.close();
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[BatchTimestamp-imu_right] batches=" << rightImu.timestampSmoothing.smoothed_batch_count
-                         << ", frames=" << rightImu.timestampSmoothing.smoothed_frame_count).str());
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[BatchTimestamp-imu_left] batches=" << leftImu.timestampSmoothing.smoothed_batch_count
-                         << ", frames=" << leftImu.timestampSmoothing.smoothed_frame_count).str());
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "[BatchTimestamp-encoder_right] batches=" << rightEncoder.timestampSmoothing.smoothed_batch_count
                          << ", frames=" << rightEncoder.timestampSmoothing.smoothed_frame_count).str());
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "[BatchTimestamp-encoder_left] batches=" << leftEncoder.timestampSmoothing.smoothed_batch_count
                          << ", frames=" << leftEncoder.timestampSmoothing.smoothed_frame_count).str());
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[SensorStats-imu_right] received_samples=" << rightImu.receivedSampleCount
-                         << ", emitted_messages=" << rightImu.emittedMessageCount
-                         << ", last_sequence=" << rightImu.lastEmittedSequence
-                         << ", last_timestamp_ns=" << rightImu.lastEmittedTimestampNs).str());
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[SensorStats-imu_left] received_samples=" << leftImu.receivedSampleCount
-                         << ", emitted_messages=" << leftImu.emittedMessageCount
-                         << ", last_sequence=" << leftImu.lastEmittedSequence
-                         << ", last_timestamp_ns=" << leftImu.lastEmittedTimestampNs).str());
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "[SensorStats-encoder_right] received_samples=" << rightEncoder.receivedSampleCount
                          << ", emitted_messages=" << rightEncoder.emittedMessageCount
                          << ", last_sequence=" << rightEncoder.lastEmittedSequence

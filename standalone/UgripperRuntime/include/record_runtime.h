@@ -249,12 +249,6 @@ private:
         std::array<GripperRuntimeState, 2> gripperRuntimeStates_{};
     };
 
-    struct MotionAlertOutputState
-    {
-        bool leftAlertActive = false;
-        bool rightAlertActive = false;
-    };
-
     static GripperLedEffect makeLedEffect(LedState state, double progress = 0.0);
     static std::string readEnvValue(const std::string &envFile, const std::string &key);
     static std::string queryPackageVersion(const std::string &packageName);
@@ -268,11 +262,6 @@ private:
     static const char *ledStateName(LedState state);
     static const char *hmiEventName(ugripper::runtime::HmiEventType event_type);
 
-    bool startMotionAlertPipe(int *writeFd);
-    void stopMotionAlertPipe();
-    void clearMotionAlertOutputs();
-    void pollMotionAlertPipe();
-    void applyMotionAlertState(const std::string &side, bool active);
     void handleGripperConnectionEvents();
     void processPendingGripperRefreshes();
     void refreshGripperRuntimeStateForSide(const std::string &side);
@@ -346,11 +335,6 @@ private:
     std::unique_ptr<EpisodeManager> episodeManager_;
     std::array<EpisodeManager::GripperRuntimeState, 2> gripperRuntimeStates_{};
     std::array<bool, 2> pendingGripperRefresh_{};
-    int motionAlertReadFd_ = -1;
-    int motionAlertWriteFd_ = -1;
-    bool leftMotionAlertActive_ = false;
-    bool rightMotionAlertActive_ = false;
-    MotionAlertOutputState motionAlertOutputState_{};
     GripperPanelManager panelManager_;
     std::unique_ptr<HmiLedController> ledController_;
     mutable ugripper::runtime::ProcessSupervisor processSupervisor_{};

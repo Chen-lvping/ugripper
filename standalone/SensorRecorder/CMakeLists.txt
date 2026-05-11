@@ -96,8 +96,6 @@ target_include_directories(sensor_domain
 )
 
 set(SENSORRECORDER_COMMON_SOURCES
-    im648_CMD.cc
-    im648_driver.cc
     encoder_driver.cc
 )
 

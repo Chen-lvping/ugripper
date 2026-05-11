@@ -120,7 +120,6 @@ RIGHT_MCAP="${OUTPUT_DIR}/sensor_data_right.mcap"
 
 print_section "Check Left MCAP"
 "${CHECKER_BIN}" \
-    --expect-topic imu_left \
     --expect-topic encoder_left \
     --min-message-count 2 \
     --json-out "${OUTPUT_DIR}/sensor_report_left.json" \
@@ -128,7 +127,6 @@ print_section "Check Left MCAP"
 
 print_section "Check Right MCAP"
 "${CHECKER_BIN}" \
-    --expect-topic imu_right \
     --expect-topic encoder_right \
     --min-message-count 2 \
     --json-out "${OUTPUT_DIR}/sensor_report_right.json" \

@@ -90,11 +90,11 @@ struct RecordingHarness
                  },
              .prepare_sensor_start =
                  [this](std::vector<std::string>* extra_args, std::vector<int>* inherited_fds) {
-                     if (extra_args != nullptr)
-                     {
-                         extra_args->push_back("--motion-alert-fd");
-                         extra_args->push_back("99");
-                     }
+                    if (extra_args != nullptr)
+                    {
+                        extra_args->push_back("--extra-test-fd");
+                        extra_args->push_back("99");
+                    }
                      if (inherited_fds != nullptr)
                      {
                          inherited_fds->push_back(99);
@@ -244,7 +244,7 @@ TEST(RecordingOrchestratorTest, StartRecordingUpdatesStateAndSignalsReadyFlow)
               (std::vector<std::string>{
                   "/tmp/sensor_recorder",
                   "/tmp/episode_0001",
-                  "--motion-alert-fd",
+                  "--extra-test-fd",
                   "99",
               }));
     EXPECT_EQ(harness.sensor_inherited_fds, (std::vector<int>{99}));

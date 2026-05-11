@@ -1,7 +1,6 @@
 #include "record_runtime.h"
 #include "utils/logger.h"
 #include "record_runtime/gripper_refresh_logic.h"
-#include "record_runtime/motion_alert_ipc.h"
 #include "utils/env_utils.h"
 #include "utils/file_utils.hpp"
 #include "utils/time_utils.h"
@@ -90,7 +89,7 @@ constexpr std::array<EpisodeVideoArtifact, 9> kAllEpisodeVideoArtifacts = {{
     {"right_tcam_r", "right_tcam_r.mkv"},
 }};
 
-constexpr std::array<const char *, 15> kAllCriticalDevicePaths = {{
+constexpr std::array<const char *, 13> kAllCriticalDevicePaths = {{
     "/dev/right_cam_main",
     "/dev/left_cam_main",
     "/dev/chest_cam_main",
@@ -104,28 +103,24 @@ constexpr std::array<const char *, 15> kAllCriticalDevicePaths = {{
     "/dev/left_tcam_r",
     "/dev/right_encoder",
     "/dev/left_encoder",
-    "/dev/right_imu",
-    "/dev/left_imu",
 }};
 
-constexpr std::array<const char *, 7> kLeftCriticalDevicePaths = {{
+constexpr std::array<const char *, 6> kLeftCriticalDevicePaths = {{
     "/dev/left_cam_main",
     "/dev/left_stereo",
     "/dev/left_fays_imu",
     "/dev/left_tcam_l",
     "/dev/left_tcam_r",
     "/dev/left_encoder",
-    "/dev/left_imu",
 }};
 
-constexpr std::array<const char *, 7> kRightCriticalDevicePaths = {{
+constexpr std::array<const char *, 6> kRightCriticalDevicePaths = {{
     "/dev/right_cam_main",
     "/dev/right_stereo",
     "/dev/right_fays_imu",
     "/dev/right_tcam_l",
     "/dev/right_tcam_r",
     "/dev/right_encoder",
-    "/dev/right_imu",
 }};
 
 struct VideoProbeResult
@@ -2539,7 +2534,8 @@ bool loadLastTopicLogTimeFromTailChunks(const std::string &mcapPath,
     }
     return true;
 }
-}
+
+
 
 GripperLedEffect RecordRuntime::makeLedEffect(LedState state, double progress)
 {
@@ -2892,29 +2888,8 @@ bool RecordRuntime::initialize()
                     }
                     return valid;
                 },
-            .prepare_sensor_start =
-                [this](std::vector<std::string>* extra_args, std::vector<int>* inherited_fds) {
-                    if (extra_args == nullptr || inherited_fds == nullptr)
-                    {
-                        return;
-                    }
-                    motionAlertWriteFd_ = -1;
-                    if (!startMotionAlertPipe(&motionAlertWriteFd_))
-                    {
-                        return;
-                    }
-                    extra_args->push_back("--motion-alert-fd");
-                    extra_args->push_back(std::to_string(motionAlertWriteFd_));
-                    inherited_fds->push_back(motionAlertWriteFd_);
-                },
-            .finalize_sensor_start =
-                [this]() {
-                    if (motionAlertWriteFd_ >= 0)
-                    {
-                        close(motionAlertWriteFd_);
-                        motionAlertWriteFd_ = -1;
-                    }
-                },
+            .prepare_sensor_start = nullptr,
+            .finalize_sensor_start = nullptr,
             .attach_pending_pre_audio =
                 [this](const std::string& episode_dir) {
                     return attachPendingPreAudio(episode_dir);
@@ -3052,7 +3027,6 @@ int RecordRuntime::run()
         const uint64_t loopStartMs = currentSteadyMs();
         maintainAudioPlayer();
         maintainStereoDaemon();
-        pollMotionAlertPipe();
         monitorHardwareHealth();
 
         ButtonSnapshot buttons;
@@ -3079,7 +3053,6 @@ int RecordRuntime::run()
     }
 
     stopRecording(false, "shutdown");
-    stopMotionAlertPipe();
     stopStereoDaemon();
     setLedState(LedState::Exit);
     return 0;
@@ -3613,78 +3586,6 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
     return true;
 }
 
-bool RecordRuntime::startMotionAlertPipe(int *writeFd)
-{
-    stopMotionAlertPipe();
-
-    int pipefd[2] = {-1, -1};
-    if (pipe(pipefd) != 0)
-    {
-        return false;
-    }
-    fcntl(pipefd[0], F_SETFD, FD_CLOEXEC);
-    fcntl(pipefd[1], F_SETFD, FD_CLOEXEC);
-    fcntl(pipefd[0], F_SETFL, fcntl(pipefd[0], F_GETFL, 0) | O_NONBLOCK);
-    fcntl(pipefd[1], F_SETFL, fcntl(pipefd[1], F_GETFL, 0) | O_NONBLOCK);
-
-    motionAlertReadFd_ = pipefd[0];
-    if (writeFd != nullptr)
-    {
-        *writeFd = pipefd[1];
-    }
-    else
-    {
-        close(pipefd[1]);
-    }
-    return true;
-}
-
-void RecordRuntime::stopMotionAlertPipe()
-{
-    if (motionAlertReadFd_ >= 0)
-    {
-        close(motionAlertReadFd_);
-        motionAlertReadFd_ = -1;
-    }
-    if (motionAlertWriteFd_ >= 0)
-    {
-        close(motionAlertWriteFd_);
-        motionAlertWriteFd_ = -1;
-    }
-    clearMotionAlertOutputs();
-}
-
-void RecordRuntime::clearMotionAlertOutputs()
-{
-    leftMotionAlertActive_ = false;
-    rightMotionAlertActive_ = false;
-    panelManager_.silenceBeep();
-}
-
-void RecordRuntime::applyMotionAlertState(const std::string &side, bool active)
-{
-    bool *currentState = nullptr;
-    if (side == "left")
-    {
-        currentState = &leftMotionAlertActive_;
-    }
-    else if (side == "right")
-    {
-        currentState = &rightMotionAlertActive_;
-    }
-    if (currentState == nullptr || *currentState == active)
-    {
-        return;
-    }
-
-    const bool applied = active ? panelManager_.setBeepEnabledForSide(side, true)
-                                : panelManager_.silenceBeepForSide(side);
-    if (applied)
-    {
-        *currentState = active;
-    }
-}
-
 void RecordRuntime::handleGripperConnectionEvents()
 {
     bool updatedAny = false;
@@ -3798,83 +3699,6 @@ void RecordRuntime::clearGripperRuntimeStateForSide(const std::string &side,
     state.lastError = errorMessage;
     state.calibrationPayloadCached = false;
     state.calibrationPayload = {};
-}
-
-void RecordRuntime::pollMotionAlertPipe()
-{
-    if (motionAlertReadFd_ < 0)
-    {
-        return;
-    }
-
-    const auto motionAlertSideName = [](uint8_t side) {
-        switch (static_cast<ugripper::MotionAlertSide>(side))
-        {
-        case ugripper::MotionAlertSide::Left:
-            return "left";
-        case ugripper::MotionAlertSide::Right:
-            return "right";
-        default:
-            return "unknown";
-        }
-    };
-    const auto motionAlertReasonName = [](uint8_t reason) {
-        switch (static_cast<ugripper::MotionAlertReasonCode>(reason))
-        {
-        case ugripper::MotionAlertReasonCode::Gyro:
-            return "gyro";
-        case ugripper::MotionAlertReasonCode::Accel:
-            return "accel";
-        case ugripper::MotionAlertReasonCode::AccelAndGyro:
-            return "accel+gyro";
-        case ugripper::MotionAlertReasonCode::Recovered:
-            return "recovered";
-        default:
-            return "none";
-        }
-    };
-
-    while (true)
-    {
-        ugripper::MotionAlertMessage message{};
-        const ssize_t bytesRead = read(motionAlertReadFd_, &message, sizeof(message));
-        if (bytesRead == 0)
-        {
-            stopMotionAlertPipe();
-            return;
-        }
-        if (bytesRead < 0)
-        {
-            if (errno == EAGAIN || errno == EWOULDBLOCK)
-            {
-                return;
-            }
-            stopMotionAlertPipe();
-            return;
-        }
-        if (static_cast<size_t>(bytesRead) != sizeof(message) ||
-            message.magic != ugripper::kMotionAlertMessageMagic ||
-            message.version != ugripper::kMotionAlertMessageVersion)
-        {
-            continue;
-        }
-
-        const std::string side = motionAlertSideName(message.side);
-        if (side == "unknown")
-        {
-            continue;
-        }
-
-        applyMotionAlertState(side, message.active != 0);
-        if (message.active != 0)
-        {
-            DM_LOG_WARN("{}", (::DA::utils::LogString() << "motion overspeed detected: side=" << side
-                                 << " reason=" << motionAlertReasonName(message.reason)
-                                 << " gyro=" << std::fixed << std::setprecision(3) << message.gyroMagnitude
-                                 << " accel_excess=" << std::fixed << std::setprecision(3) << message.accelExcess
-                                 << std::endl).str());
-        }
-    }
 }
 
 void RecordRuntime::refreshGripperRuntimeStateForSide(const std::string &side)
@@ -4000,7 +3824,6 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
         return false;
     }
     const bool ok = recordingOrchestrator_->StopRecording(dueToError, reason, nullptr);
-    stopMotionAlertPipe();
     if (ok && !dueToError)
     {
         if (!tactileTriggeredAudioCommand_.empty())

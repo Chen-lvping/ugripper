@@ -251,13 +251,11 @@ done
 if [[ "${SKIP_SENSOR_CHECK}" != "1" ]]; then
     print_section "Check Sensor MCAP"
     "${CHECKER_BIN}" \
-        --expect-topic imu_left \
         --expect-topic encoder_left \
         --min-message-count 2 \
         --json-out "${OUTPUT_DIR}/sensor_report_left.json" \
         "${EPISODE_DIR}/sensor_data_left.mcap"
     "${CHECKER_BIN}" \
-        --expect-topic imu_right \
         --expect-topic encoder_right \
         --min-message-count 2 \
         --json-out "${OUTPUT_DIR}/sensor_report_right.json" \

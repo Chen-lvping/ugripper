@@ -97,23 +97,23 @@ TEST(SensorMcapCheckerTest, PassesForContiguousExpectedTopics)
     ASSERT_TRUE(WriteSyntheticMcap(
         input,
         {
-            {"imu_left", 10, 100},
-            {"imu_left", 11, 200},
-            {"encoder_left", 20, 120},
-            {"encoder_left", 21, 220},
+            {"encoder_left", 10, 100},
+            {"encoder_left", 11, 200},
+            {"encoder_right", 20, 120},
+            {"encoder_right", 21, 220},
         },
         &error))
         << error;
 
     ugripper::sensor::testing::Options options;
-    options.expect_topics = {"imu_left", "encoder_left"};
+    options.expect_topics = {"encoder_left", "encoder_right"};
     const auto result = ugripper::sensor::testing::CheckFile(input, options);
 
     EXPECT_TRUE(result.ok);
     EXPECT_TRUE(result.failures.empty());
-    ASSERT_TRUE(result.topics.contains("imu_left"));
-    EXPECT_EQ(result.topics.at("imu_left").message_count, 2U);
-    EXPECT_EQ(result.topics.at("imu_left").sequence_gap_count, 0U);
+    ASSERT_TRUE(result.topics.contains("encoder_left"));
+    EXPECT_EQ(result.topics.at("encoder_left").message_count, 2U);
+    EXPECT_EQ(result.topics.at("encoder_left").sequence_gap_count, 0U);
 
     fs::remove_all(temp_dir);
 }
@@ -126,21 +126,21 @@ TEST(SensorMcapCheckerTest, DetectsSequenceGap)
     ASSERT_TRUE(WriteSyntheticMcap(
         input,
         {
-            {"imu_left", 1, 100},
-            {"imu_left", 3, 200},
+            {"encoder_left", 1, 100},
+            {"encoder_left", 3, 200},
         },
         &error))
         << error;
 
     ugripper::sensor::testing::Options options;
-    options.expect_topics = {"imu_left"};
+    options.expect_topics = {"encoder_left"};
     const auto result = ugripper::sensor::testing::CheckFile(input, options);
 
     EXPECT_FALSE(result.ok);
-    ASSERT_TRUE(result.topics.contains("imu_left"));
-    EXPECT_EQ(result.topics.at("imu_left").sequence_gap_count, 1U);
+    ASSERT_TRUE(result.topics.contains("encoder_left"));
+    EXPECT_EQ(result.topics.at("encoder_left").sequence_gap_count, 1U);
     ASSERT_EQ(result.failures.size(), 1U);
-    EXPECT_EQ(result.failures.front(), "imu_left: sequence gap: expected 2, got 3");
+    EXPECT_EQ(result.failures.front(), "encoder_left: sequence gap: expected 2, got 3");
 
     fs::remove_all(temp_dir);
 }
@@ -180,22 +180,22 @@ TEST(SensorMcapCheckerTest, DetectsGapLargerThanConfiguredThreshold)
     ASSERT_TRUE(WriteSyntheticMcap(
         input,
         {
-            {"imu_left", 1, 100},
-            {"imu_left", 2, 500},
+            {"encoder_left", 1, 100},
+            {"encoder_left", 2, 500},
         },
         &error))
         << error;
 
     ugripper::sensor::testing::Options options;
-    options.expect_topics = {"imu_left"};
+    options.expect_topics = {"encoder_left"};
     options.max_allowed_gap_ns = 200;
     const auto result = ugripper::sensor::testing::CheckFile(input, options);
 
     EXPECT_FALSE(result.ok);
-    ASSERT_TRUE(result.topics.contains("imu_left"));
-    EXPECT_EQ(result.topics.at("imu_left").max_gap_ns, 400U);
+    ASSERT_TRUE(result.topics.contains("encoder_left"));
+    EXPECT_EQ(result.topics.at("encoder_left").max_gap_ns, 400U);
     ASSERT_EQ(result.failures.size(), 1U);
-    EXPECT_EQ(result.failures.front(), "imu_left: gap too large: 400ns > 200ns");
+    EXPECT_EQ(result.failures.front(), "encoder_left: gap too large: 400ns > 200ns");
 
     fs::remove_all(temp_dir);
 }
@@ -208,19 +208,19 @@ TEST(SensorMcapCheckerTest, FailsWhenExpectedTopicMissing)
     ASSERT_TRUE(WriteSyntheticMcap(
         input,
         {
-            {"imu_left", 1, 100},
-            {"imu_left", 2, 200},
+            {"encoder_left", 1, 100},
+            {"encoder_left", 2, 200},
         },
         &error))
         << error;
 
     ugripper::sensor::testing::Options options;
-    options.expect_topics = {"imu_left", "encoder_left"};
+    options.expect_topics = {"encoder_left", "encoder_right"};
     const auto result = ugripper::sensor::testing::CheckFile(input, options);
 
     EXPECT_FALSE(result.ok);
     ASSERT_EQ(result.failures.size(), 1U);
-    EXPECT_EQ(result.failures.front(), "missing topic or zero messages: encoder_left");
+    EXPECT_EQ(result.failures.front(), "missing topic or zero messages: encoder_right");
 
     fs::remove_all(temp_dir);
 }
@@ -233,19 +233,19 @@ TEST(SensorMcapCheckerTest, AllowsLargeGapWhenThresholdNotConfigured)
     ASSERT_TRUE(WriteSyntheticMcap(
         input,
         {
-            {"imu_left", 1, 100},
-            {"imu_left", 2, 1000},
+            {"encoder_left", 1, 100},
+            {"encoder_left", 2, 1000},
         },
         &error))
         << error;
 
     ugripper::sensor::testing::Options options;
-    options.expect_topics = {"imu_left"};
+    options.expect_topics = {"encoder_left"};
     const auto result = ugripper::sensor::testing::CheckFile(input, options);
 
     EXPECT_TRUE(result.ok);
-    ASSERT_TRUE(result.topics.contains("imu_left"));
-    EXPECT_EQ(result.topics.at("imu_left").max_gap_ns, 900U);
+    ASSERT_TRUE(result.topics.contains("encoder_left"));
+    EXPECT_EQ(result.topics.at("encoder_left").max_gap_ns, 900U);
     EXPECT_TRUE(result.failures.empty());
 
     fs::remove_all(temp_dir);
@@ -259,21 +259,21 @@ TEST(SensorMcapCheckerTest, DetectsMessageCountBelowConfiguredThreshold)
     ASSERT_TRUE(WriteSyntheticMcap(
         input,
         {
-            {"imu_left", 1, 100},
+            {"encoder_left", 1, 100},
         },
         &error))
         << error;
 
     ugripper::sensor::testing::Options options;
-    options.expect_topics = {"imu_left"};
+    options.expect_topics = {"encoder_left"};
     options.min_message_count = 2;
     const auto result = ugripper::sensor::testing::CheckFile(input, options);
 
     EXPECT_FALSE(result.ok);
-    ASSERT_TRUE(result.topics.contains("imu_left"));
-    EXPECT_EQ(result.topics.at("imu_left").message_count, 1U);
+    ASSERT_TRUE(result.topics.contains("encoder_left"));
+    EXPECT_EQ(result.topics.at("encoder_left").message_count, 1U);
     ASSERT_EQ(result.failures.size(), 1U);
-    EXPECT_EQ(result.failures.front(), "imu_left: message count too low: 1 < 2");
+    EXPECT_EQ(result.failures.front(), "encoder_left: message count too low: 1 < 2");
 
     fs::remove_all(temp_dir);
 }
@@ -286,22 +286,22 @@ TEST(SensorMcapCheckerTest, DetectsSpanShorterThanConfiguredThreshold)
     ASSERT_TRUE(WriteSyntheticMcap(
         input,
         {
-            {"imu_left", 1, 100},
-            {"imu_left", 2, 150},
+            {"encoder_left", 1, 100},
+            {"encoder_left", 2, 150},
         },
         &error))
         << error;
 
     ugripper::sensor::testing::Options options;
-    options.expect_topics = {"imu_left"};
+    options.expect_topics = {"encoder_left"};
     options.min_span_ns = 100;
     const auto result = ugripper::sensor::testing::CheckFile(input, options);
 
     EXPECT_FALSE(result.ok);
-    ASSERT_TRUE(result.topics.contains("imu_left"));
-    EXPECT_EQ(result.topics.at("imu_left").span_ns, 50U);
+    ASSERT_TRUE(result.topics.contains("encoder_left"));
+    EXPECT_EQ(result.topics.at("encoder_left").span_ns, 50U);
     ASSERT_EQ(result.failures.size(), 1U);
-    EXPECT_EQ(result.failures.front(), "imu_left: span too short: 50ns < 100ns");
+    EXPECT_EQ(result.failures.front(), "encoder_left: span too short: 50ns < 100ns");
 
     fs::remove_all(temp_dir);
 }
@@ -314,30 +314,30 @@ TEST(SensorMcapCheckerTest, DetectsSpanGapBetweenExpectedTopics)
     ASSERT_TRUE(WriteSyntheticMcap(
         input,
         {
-            {"imu_left", 1, 100},
-            {"encoder_left", 10, 100},
-            {"imu_left", 2, 300},
-            {"encoder_left", 11, 250},
-            {"imu_left", 3, 500},
+            {"encoder_left", 1, 100},
+            {"encoder_right", 10, 100},
+            {"encoder_left", 2, 300},
+            {"encoder_right", 11, 250},
+            {"encoder_left", 3, 500},
         },
         &error))
         << error;
 
     ugripper::sensor::testing::Options options;
-    options.expect_topics = {"imu_left", "encoder_left"};
+    options.expect_topics = {"encoder_left", "encoder_right"};
     options.max_span_gap_ns = 100;
     const auto result = ugripper::sensor::testing::CheckFile(input, options);
 
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(result.reference_span_ns, 400U);
-    ASSERT_TRUE(result.topics.contains("imu_left"));
     ASSERT_TRUE(result.topics.contains("encoder_left"));
-    EXPECT_EQ(result.topics.at("imu_left").span_ns, 400U);
-    EXPECT_EQ(result.topics.at("encoder_left").span_ns, 150U);
+    ASSERT_TRUE(result.topics.contains("encoder_right"));
+    EXPECT_EQ(result.topics.at("encoder_left").span_ns, 400U);
+    EXPECT_EQ(result.topics.at("encoder_right").span_ns, 150U);
     ASSERT_EQ(result.failures.size(), 1U);
     EXPECT_EQ(
         result.failures.front(),
-        "encoder_left: span gap too large: span=150ns, reference=400ns, gap=250ns > 100ns");
+        "encoder_right: span gap too large: span=150ns, reference=400ns, gap=250ns > 100ns");
 
     fs::remove_all(temp_dir);
 }
@@ -350,18 +350,18 @@ TEST(SensorMcapCheckerTest, AllowsExpectedTopicsWhenSpanGapWithinThreshold)
     ASSERT_TRUE(WriteSyntheticMcap(
         input,
         {
-            {"imu_left", 1, 100},
-            {"encoder_left", 10, 100},
-            {"imu_left", 2, 300},
-            {"encoder_left", 11, 260},
-            {"imu_left", 3, 500},
-            {"encoder_left", 12, 460},
+            {"encoder_left", 1, 100},
+            {"encoder_right", 10, 100},
+            {"encoder_left", 2, 300},
+            {"encoder_right", 11, 260},
+            {"encoder_left", 3, 500},
+            {"encoder_right", 12, 460},
         },
         &error))
         << error;
 
     ugripper::sensor::testing::Options options;
-    options.expect_topics = {"imu_left", "encoder_left"};
+    options.expect_topics = {"encoder_left", "encoder_right"};
     options.max_span_gap_ns = 100;
     const auto result = ugripper::sensor::testing::CheckFile(input, options);
 

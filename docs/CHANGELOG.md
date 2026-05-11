@@ -5,6 +5,8 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- 新版取消板载 IM648 链路：`sensor_recorder` 只采集左右 encoder，不再打开 `/dev/left_imu` / `/dev/right_imu`，episode 校验和板端 smoke/integration check 不再要求 `imu_left` / `imu_right` topic；Fays stereo 自带 IMU 链路保持不变。
+- `config/99-fixed-usb-map.rules` 不再生成板载 `left_imu` / `right_imu` symlink；运行时输出 `calibration.json` 时会清理旧版本遗留的 `observation.imu.left_imu/right_imu`。
 - 出包链路继续收口到“当前仓库可独立稳定出包”口径：
   - 顶层 `CMakeLists.txt` 默认关闭可选 `src/third_party/mcap_builder`，避免普通主包构建被私有 SSH 拉仓阻塞
   - `build_deb.sh` 标准模式改为只编译主包必需目标，并新增 `.venv` 与 5 个核心二进制的 ELF 架构校验

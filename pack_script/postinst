@@ -272,7 +272,7 @@ udevadm trigger --subsystem-match=video4linux
 udevadm trigger --subsystem-match=sound
 udevadm trigger --subsystem-match=input
 # 对已枚举完成的 CH9344 多串口桥，reload-rules 不会补跑 tty add 事件；
-# 若安装时设备已插好，会导致 left/right_gripper、*_encoder、*_imu symlink 不回填。
+# 若安装时设备已插好，会导致 left/right_gripper、*_encoder symlink 不回填。
 # 这里定向对现有 ttyCH9344USB* 回放 add，避免误触发其他 tty 设备。
 for tty_path in /sys/class/tty/ttyCH9344USB*; do
     [ -e "$tty_path" ] || break
