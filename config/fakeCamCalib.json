@@ -310,34 +310,6 @@
                     3
                 ]
             }
-        },
-        "imu": {
-            "left_imu": {
-                "accelerometer": {
-                    "noise_density_discrete": 0.0,
-                    "random_walk": 0.0
-                },
-                "dtype": "imu",
-                "gyroscope": {
-                    "noise_density_discrete": 0.0,
-                    "random_walk": 0.0
-                },
-                "model": "calibrated",
-                "update_rate_hz": 0.0
-            },
-            "right_imu": {
-                "accelerometer": {
-                    "noise_density_discrete": 0.0,
-                    "random_walk": 0.0
-                },
-                "dtype": "imu",
-                "gyroscope": {
-                    "noise_density_discrete": 0.0,
-                    "random_walk": 0.0
-                },
-                "model": "calibrated",
-                "update_rate_hz": 0.0
-            }
         }
     }
 }

@@ -1416,25 +1416,6 @@ json makeStereoCalibrationEntryFromPayload(const std::string &side,
     });
 }
 
-json makeImuCalibrationEntryFromPayload(const gripper_hmi::GripperCalibrationDataV1 &payload)
-{
-    return json::object({
-        {"dtype", "imu"},
-        {"model", "calibrated"},
-        {"update_rate_hz", payload.imu0.updateRate},
-        {"accelerometer",
-         json::object({
-             {"noise_density_discrete", payload.imu0.accelerometerNoiseDensityDiscrete},
-             {"random_walk", payload.imu0.accelerometerRandomWalk},
-         })},
-        {"gyroscope",
-         json::object({
-             {"noise_density_discrete", payload.imu0.gyroscopeNoiseDensityDiscrete},
-             {"random_walk", payload.imu0.gyroscopeRandomWalk},
-         })},
-    });
-}
-
 json makeLockedCalibrationMetadata(const std::string &generationDate,
                                    const std::string &calibrationStatus)
 {
@@ -1505,10 +1486,6 @@ void applySideCalibrationPayload(json *calibrationJson,
     if (json *stereo = findJsonPath(calibrationJson, stereoJsonPathForSide(side), true))
     {
         *stereo = makeStereoCalibrationEntryFromPayload(side, payload);
-    }
-    if (json *imu = findJsonPath(calibrationJson, imuJsonPathForSide(side), true))
-    {
-        *imu = makeImuCalibrationEntryFromPayload(payload);
     }
 }
 
@@ -6072,6 +6049,8 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
     removeIfPresent(&calibrationJson, "observation.images.fays_cam0");
     removeIfPresent(&calibrationJson, "observation.images.fays_cam1");
     removeIfPresent(&calibrationJson, "observation.imu.fays_imu0");
+    removeIfPresent(&calibrationJson, "observation.imu.left_imu");
+    removeIfPresent(&calibrationJson, "observation.imu.right_imu");
 
     if (json *leftStereo = findJsonPath(&calibrationJson, "observation.images.left_stereo", true))
     {

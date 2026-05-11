@@ -110,14 +110,14 @@
    - 禁止重新引入 `serial_number_valid`、`calibration_valid`、`connected`、`source`、错误信息等临时或重复字段
 3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `bin/UgripperRuntime/config/fakeCamCalib.json`。`calibration.json` 的输出格式当前已锁定：
    - 这是锁定格式，顶层字段集合不得增加，已有字段的职责不得漂移；若必须调整，必须先更新本节文档，再同步修改生成代码、持久化刷新逻辑与 episode 校验口径。
-   - 顶层只保留 `metadata/calibration_info/observation`；主摄、stereo、tactile、IMU 按字段白名单输出，fallback 只补缺不覆盖合法数据。
+   - 顶层只保留 `metadata/calibration_info/observation`；主摄、stereo、tactile 按字段白名单输出，fallback 只补缺不覆盖合法数据。
    - `metadata.format_version=3.0`
    - `metadata` 只保留 `format_version/generation_date/description/calibration_status`
    - `calibration_info` 只保留 `calibration_date/calibration_status/notes`
    - tactile 只保留 4 路 `left_tcam_l/left_tcam_r/right_tcam_l/right_tcam_r`
    - 可选胸部主摄启用时保留 `observation.images.chest_cam_main`，关闭时不写该项。
    - 不再写入 gripper 连接态、SN、valid/source 等重复字段
-   - 左右主摄、左右 stereo、左右 imu 的标定参数都由 gripper payload 自动填充；即使无 SN 或未标定，也允许继续录制
+   - 左右主摄与左右 stereo 的标定参数由 gripper payload 自动填充；即使无 SN 或未标定，也允许继续录制
 4. `record_runtime` 不再预写 `info.json`；最终 `info.json` 由 `camera_recorder` 统一生成，且当前只保留旧版 offset 字段：
    - 这是锁定格式，顶层只允许保留下面这些字段；禁止再回填 `stereo_session`、`paired_master_sn` 或其他临时调试字段。
    - `boot_time_offset`
