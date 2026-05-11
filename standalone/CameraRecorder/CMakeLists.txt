@@ -3,11 +3,8 @@ set(APP_NAME CameraRecorder)
 find_package(Threads REQUIRED)
 find_package(PkgConfig REQUIRED)
 
-pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
 pkg_check_modules(GSTREAMER REQUIRED IMPORTED_TARGET gstreamer-1.0 gstreamer-app-1.0 gstreamer-base-1.0)
-set(CAMERA_RECORDER_HAS_LIBUSB ON)
 set(CAMERA_RECORDER_HAS_GSTREAMER ON)
-message(STATUS "CameraRecorder: enabling libusb-backed UVC roll control")
 message(STATUS "CameraRecorder: enabling internal main-camera appsrc pipeline")
 
 set(CAMERA_RECORDER_SOURCES
@@ -57,16 +54,8 @@ target_link_libraries(${APP_NAME}
 )
 target_compile_definitions(${APP_NAME}
     PRIVATE
-        CAMERA_RECORDER_HAS_LIBUSB=$<BOOL:${CAMERA_RECORDER_HAS_LIBUSB}>
         CAMERA_RECORDER_HAS_GSTREAMER=$<BOOL:${CAMERA_RECORDER_HAS_GSTREAMER}>
 )
-
-if(CAMERA_RECORDER_HAS_LIBUSB)
-    target_link_libraries(${APP_NAME}
-        PRIVATE
-            PkgConfig::LIBUSB
-    )
-endif()
 
 if(CAMERA_RECORDER_HAS_GSTREAMER)
     target_link_libraries(${APP_NAME}

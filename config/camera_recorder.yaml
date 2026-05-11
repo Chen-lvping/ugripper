@@ -2,7 +2,6 @@ cameras:
   - name: left_cam_main
     device: /dev/left_cam_main
     mode: direct-copy-h265
-    uvc_roll_absolute: 4
     width: 1920
     height: 1080
     fps: 60
@@ -11,7 +10,6 @@ cameras:
   - name: right_cam_main
     device: /dev/right_cam_main
     mode: direct-copy-h265
-    uvc_roll_absolute: 4
     width: 1920
     height: 1080
     fps: 60

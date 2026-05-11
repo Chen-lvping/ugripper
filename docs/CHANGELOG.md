@@ -14,7 +14,7 @@
 - `build_deb.sh` 新增可选 `PACKAGED_VENV_URL` 入口：支持在打包前从 Nexus raw 仓库下载并解压归档好的 `.venv` 压缩包，再复用现有 `.venv` 架构校验与 staging 同步流程；未设置时保持原本的本地 `PACKAGED_VENV_SOURCE` 行为不变。
 - `pp_main` 合并后继续补齐 `v2` 最新 HMI/runtime 修复：`GripperHmiTool` 读 SN + 读标定改为单次独占事务，串口连接增加 `TIOCEXCL` 独占锁，降低读标定时被后台轮询打断或多进程竞争串口导致的失败概率。
 - `UgripperRuntime` 补回 gripper 重连刷新链路：HMI 断开后会清空对应侧 runtime 状态；重连后等待本侧 camera/imu/encoder 设备和 HMI 活跃态恢复，再重新拉取 SN/标定缓存，避免 episode `metadata/calibration` 长时间保留断开前的旧状态。
-- `ugripper`/`pp_main` 合并后同步 `v2` 最新修复：主摄 `UVC roll` 从“每次起录时处理”改为由 `udev + apply_main_camera_roll_once.sh` 在设备枚举后单次处理，降低主摄启动抖动和重复控制带来的风险。
+- 3588 侧主摄控制改为独立 `main_camera_xu_tool`：工具与 `ensure_main_camera_packet_size_once.sh` 先随包保留，自动 udev 触发暂时停用；录制器内置 `UVC roll` 配置和 `--apply-uvc-roll-only` 入口已移除。
 - 双键系统动作链路从单一 `shutdown` 扩展为 `shutdown / umount`：`trigger_shutdown.sh`、`umi-shutdown-trigger.path` 和安装脚本统一切到 `/tmp/umi_system_action_request|result`。
 - USB 自动安装允许同版本包重装：当 U 盘上的 `deb` 版本与已安装版本相同，不再直接跳过，而是显式执行“重装”，便于现场覆盖损坏安装或补齐缺失文件。
 - HMI SN 写入补强重试和 abort recovery：`GripperHmiTool` 在串口返回 `missing data / checksum` 等状态时，会按 chunk/preamble 级别重试并尝试退出残留写入态，降低现场写 SN 偶发失败。
@@ -29,8 +29,8 @@
 - 同一 tactile `serial` 最近 `3` 个 episode 都异常时，空闲态改为黄灯闪烁 `WARNING`，并播放对应的 `left/right_tcam_*_damaged.wav` 提示音；该能力属于软告警，不会把当前 episode 升级为 `validation_failed`。
 - 运行时触觉轻量阈值进一步收紧为 `mean_abs_diff >= 3.0`、`mask_ratio >= 0.05`、`correlation <= 0.94`，降低明显异常被漏报的概率。
 - 新增按 tactile `serial` 绑定的 `12h` 持久化 baseline：插爪阶段和停录阶段都会与上一份持久化 baseline 比较；若超阈值则同样触发 damaged 软告警，并冻结该 `serial` 的持久化 baseline，只有服务重启后下一次插爪才允许刷新。
-- 主摄 `uvc_roll_absolute` 从录制启动链路解耦：改为在主摄 `video4linux` 主节点插入时由 `udev` 触发独立 helper 执行，同一次插入只处理一次，重新插拔后再重新检查。
-- `camera_recorder` 新增 `--apply-uvc-roll-only` 模式，供插入事件单独执行主摄 roll 检测/设置；普通录制阶段不再主动执行主摄 roll 检测。
+- 主摄 packet size 从录制启动链路解耦：独立 helper 已保留，但右主摄 `video4linux` 主节点插入时的 `udev` 自动触发暂时关闭，待板端调通后再启用。
+- `camera_recorder` 移除 `--apply-uvc-roll-only` 模式；主摄厂商扩展控制由 `main_camera_xu_tool` 承担，普通录制阶段不再做 UVC 控制写入。
 - 主摄 `video4linux` udev 规则改为显式补齐 `MODE/GROUP/TAG`，降低主摄节点在驱动重绑后的权限漂移风险。
 - 新增左手双键长按卸载数据盘：仅在停止录制时允许触发；运行时会先刷运行日志，再通过统一 system action helper 请求卸载 `/mnt/data_disk`，成功后播放 `umount.wav`，失败播放 `error.wav`；原右手双键长按关机继续沿用同一 helper 分流执行。
 - 补齐左手新 hub 下 `left_tcam_r` 的 `udev` 映射：左侧 `left_tcam_r` 现同时接受旧 hub 的 `.4.1` 与新 hub 的 `.3` 端口，保证新旧左手 hub 规则共存。

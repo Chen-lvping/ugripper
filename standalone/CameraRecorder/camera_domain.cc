@@ -305,19 +305,6 @@ CameraConfig ParseLegacyCameraConfig(const YAML::Node& camera_node, size_t index
     config.name = RequireString(camera_node, "name", context);
     config.device = RequireString(camera_node, "device", context);
     config.mode = ParseModeText(RequireString(camera_node, "mode", context));
-    if (const YAML::Node roll_node = camera_node["uvc_roll_absolute"])
-    {
-        if (!roll_node.IsScalar())
-        {
-            throw std::runtime_error("field 'uvc_roll_absolute' must be a scalar in " + context);
-        }
-        const int roll_value = roll_node.as<int>();
-        if (roll_value <= 0 || roll_value > std::numeric_limits<uint16_t>::max())
-        {
-            throw std::runtime_error("field 'uvc_roll_absolute' must be in range [1, 65535] in " + context);
-        }
-        config.uvc_roll_absolute = roll_value;
-    }
     config.input_format = OptionalString(camera_node, "input_format", "", context);
     config.capture_width = OptionalInt(camera_node, "capture_width", 0, context);
     config.capture_height = OptionalInt(camera_node, "capture_height", 0, context);
@@ -405,28 +392,6 @@ CameraConfig ParseSchemaV1CameraConfig(const YAML::Node& camera_node, size_t ind
     }
 
     config.output_files.push_back(RequireString(output_node, "file_name", context + ".output"));
-
-    if (const YAML::Node uvc_node = device_node["uvc"])
-    {
-        if (!uvc_node.IsMap())
-        {
-            throw std::runtime_error("field 'uvc' must be a map in " + context + ".device");
-        }
-        if (const YAML::Node roll_node = uvc_node["roll_absolute"])
-        {
-            if (!roll_node.IsScalar())
-            {
-                throw std::runtime_error("field 'roll_absolute' must be a scalar in " + context + ".device.uvc");
-            }
-            const int roll_value = roll_node.as<int>();
-            if (roll_value <= 0 || roll_value > std::numeric_limits<uint16_t>::max())
-            {
-                throw std::runtime_error(
-                    "field 'roll_absolute' must be in range [1, 65535] in " + context + ".device.uvc");
-            }
-            config.uvc_roll_absolute = roll_value;
-        }
-    }
 
     ValidateNonNegativeFields(config, context);
     return config;

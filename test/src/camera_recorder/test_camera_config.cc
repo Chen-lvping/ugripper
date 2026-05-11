@@ -41,39 +41,11 @@ TEST(CameraConfigTest, LoadsSchemaV1Sample)
     EXPECT_EQ(ugripper::camera::PrimaryOutputFileName(configs[0]), "step4_demo_camera.mkv");
 }
 
-TEST(CameraConfigTest, LoadsLegacySampleWithUvcRollAbsolute)
-{
-    const auto configs =
-        ugripper::camera::LoadCameraConfigList(CameraSampleDir() / "legacy_flat_uvc_roll_valid.yaml");
-
-    ASSERT_EQ(configs.size(), 1U);
-    ASSERT_TRUE(configs[0].uvc_roll_absolute.has_value());
-    EXPECT_EQ(*configs[0].uvc_roll_absolute, 4);
-}
-
-TEST(CameraConfigTest, LoadsSchemaV1SampleWithUvcRollAbsolute)
-{
-    const auto configs =
-        ugripper::camera::LoadCameraConfigList(CameraSampleDir() / "schema_v1_uvc_roll_valid.yaml");
-
-    ASSERT_EQ(configs.size(), 1U);
-    ASSERT_TRUE(configs[0].uvc_roll_absolute.has_value());
-    EXPECT_EQ(*configs[0].uvc_roll_absolute, 7);
-}
-
 TEST(CameraConfigTest, RejectsLegacySampleWithoutOutputFiles)
 {
     EXPECT_THROW(
         ugripper::camera::LoadCameraConfigList(
             CameraSampleDir() / "legacy_flat_invalid_missing_output_files.yaml"),
-        std::runtime_error);
-}
-
-TEST(CameraConfigTest, RejectsSchemaV1SampleWithOutOfRangeUvcRollAbsolute)
-{
-    EXPECT_THROW(
-        ugripper::camera::LoadCameraConfigList(
-            CameraSampleDir() / "schema_v1_invalid_uvc_roll.yaml"),
         std::runtime_error);
 }
 

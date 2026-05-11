@@ -24,7 +24,6 @@ struct Options {
     bool dry_run = false;
     bool allow_missing = false;
     bool stereo_daemon = false;
-    bool apply_uvc_roll_only = false;
     std::string ffmpeg_bin = "ffmpeg";
     std::string gst_bin = "gst-launch-1.0";
     fs::path config_yaml = "config/camera_recorder.yaml";
@@ -80,6 +79,5 @@ std::vector<CameraConfig> LoadCameraConfigList(const fs::path& yaml_path);
 std::string ModeName(CameraRecordMode mode);
 void InstallSignalHandlers();
 bool RunStereoDaemon(const Options& options, const std::vector<CameraConfig>& configs);
-bool ApplyUvcRollForSelectedCameras(const Options& options, const std::vector<CameraConfig>& configs);
 
 }  // namespace camera_recorder

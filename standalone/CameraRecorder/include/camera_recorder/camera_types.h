@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <optional>
 #include <string>
 #include <vector>
 
@@ -38,7 +37,6 @@ struct CameraConfig {
     std::string name;
     std::string device;
     CameraRecordMode mode = CameraRecordMode::HybridDecodeEncode;
-    std::optional<int> uvc_roll_absolute;
     std::string input_format;
     int capture_width = 0;
     int capture_height = 0;

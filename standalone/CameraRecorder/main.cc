@@ -73,10 +73,6 @@ int main(int argc, char** argv) {
             return RunStereoDaemon(options, configs) ? 0 : 1;
         }
 
-        if (options.apply_uvc_roll_only) {
-            return ApplyUvcRollForSelectedCameras(options, configs) ? 0 : 1;
-        }
-
         std::filesystem::create_directories(options.output_dir);
 
         CameraRecorderManager manager(options);
