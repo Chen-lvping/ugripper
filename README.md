@@ -21,6 +21,9 @@
 - 持久化标定：`/etc/ugripper/config/calibration/calibration.json`
 - U 盘入口：`auto_update/usb_auto_update.sh`
 
+## 时钟同步
+`ugripper-ntp-sync.service` 每次开机和安装后触发一次，最多等待网络 `45s`。脚本先检查 `/tmp/umi_recording.lock`：录制中直接跳过；空闲时优先用 `sntp -S` 一次性校时，再 fallback 到 `ntpd -q -g` / `timedatectl`。同步结束、失败或检测到录制开始后都会停止常驻 NTP 服务，避免录制时间轴跳变。
+
 ## 常用命令
 ```bash
 sudo systemctl status ugripper.service

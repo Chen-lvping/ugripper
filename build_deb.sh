@@ -461,6 +461,8 @@ copy_if_exists "auto_calibration/ugripper-calibration.service" "$BUILD_ROOT/etc/
 copy_if_exists "auto_calibration/ugripper-network-monitor.service" "$BUILD_ROOT/etc/systemd/system/ugripper-network-monitor.service"
 copy_if_exists "auto_update/umi-shutdown-trigger.service" "$BUILD_ROOT/etc/systemd/system/umi-shutdown-trigger.service"
 copy_if_exists "auto_update/umi-shutdown-trigger.path" "$BUILD_ROOT/etc/systemd/system/umi-shutdown-trigger.path"
+copy_if_exists "time_sync/ugripper-ntp-sync.service" "$BUILD_ROOT/etc/systemd/system/ugripper-ntp-sync.service"
+copy_if_exists "time_sync/safe_ntp_sync.sh" "$TARGET_INSTALL_ROOT/time_sync/safe_ntp_sync.sh"
 
 # 2. 拷贝 DEBIAN 控制文件
 copy_if_exists "$PACK_SCRIPT_DIR/control"  "$BUILD_ROOT/DEBIAN/control"
@@ -472,6 +474,7 @@ copy_if_exists "$PACK_SCRIPT_DIR/postrm"   "$BUILD_ROOT/DEBIAN/postrm"
 chmod 755 "$BUILD_ROOT/DEBIAN/postinst"
 chmod 755 "$BUILD_ROOT/DEBIAN/prerm"
 chmod 755 "$BUILD_ROOT/DEBIAN/postrm"
+chmod 755 "$TARGET_INSTALL_ROOT/time_sync/safe_ntp_sync.sh"
 
 # 4. 执行变量替换
 echo "--> Injecting variables into scripts..."

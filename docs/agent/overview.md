@@ -27,6 +27,7 @@
 | systemd 主服务 | `pack_script/ugripper.service` | 以 `ubuntu` 用户拉起录制服务 | `/opt/ugripper/run_record.sh` |
 | 薄壳启动脚本 | `run_record.sh` | 切到安装目录、等待 `/mnt/data_disk` 可写、维护本地 `/tmp` 到 `/mnt/data_disk/logs` 的增量日志同步，再拉起 `record_runtime` | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/umi_sys_<sn>_<date>.log` |
 | 主运行时 | `bin/UgripperRuntime/UgripperRuntime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
+| 安全 NTP 同步 | `time_sync/safe_ntp_sync.sh` / `ugripper-ntp-sync.service` | 开机或安装后只在非录制态执行一次性时间同步，优先使用板端现有 `sntp -S`，再 fallback 到 `ntpd -q -g` / `timedatectl`；同步完成、超时或录制开始后停止常驻 NTP 服务 | `/tmp/umi_recording.lock`、`sntp`/`ntp` |
 | 相机录制 | `bin/CameraRecorder/CameraRecorder` | 普通录制模式下负责主摄/触觉会话录制；`--stereo-daemon` 模式下负责双目常驻预热、热插拔恢复与 session finalize | 8 路 `mkv`（默认） |
 | 传感器录制 | `bin/SensorRecorder/SensorRecorder` | 录制左右 IMU/encoder，按“采样入队 + 每侧独立 MCAP 写线程”分别输出 MCAP | `sensor_data_left.mcap`、`sensor_data_right.mcap` |
 | HMI 类库 | `standalone/GripperHmiTool` | 读取夹爪按键，并在驱动内部以单线程 owner 线程完成状态查询、灯效生成与 RGB 指令发送；默认由状态机切灯效，必要时仍可直接下发 RGB；当前也提供 SN 与 1024-byte 标定参数读写 API | 按键快照、RGB 指令、SN/标定参数读写 |
@@ -56,6 +57,7 @@
 11. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
 12. `record_runtime` 初始化阶段会额外拉起一个常驻 warmup daemon；当前由 `camera_recorder --stereo-daemon` 入口维护左右双目的预热状态，并通过 `/tmp/umi_stereo_camera_status.json` 暴露 `ready/not-ready` 状态。
 13. `record_runtime` 当前按 recorder 进程组而不是单一父 PID 回收 `camera_recorder` / `sensor_recorder`；当停录或异常收尾时，会向整组发送退出信号，降低内部 `ffmpeg`/`gst` 子进程残留导致后续卡死的概率。
+14. `ugripper-ntp-sync.service` 属于独立 oneshot 辅助服务：安装后和开机后异步启动，不阻塞 `ugripper.service` 主链路；脚本先停止 `ntp.service` / `chrony.service` / `systemd-timesyncd.service` 这类常驻校时服务，再检查 `/tmp/umi_recording.lock`，录制中直接跳过，空闲时优先用 `sntp -S` 做一次性校时，再 fallback 到 `ntpd -q -g` 或 `timedatectl`。同步完成、超时、失败或检测到录制开始后都会再次停止常驻 NTP 服务，避免录制时间轴被系统时间校准跳变影响。
 
 ## 5. 状态机与按键行为
 ### 5.1 空闲态与阈值
@@ -108,7 +110,8 @@
    - `gripper_right.calibration_status`
    - `gripper_left` / `gripper_right` 子字段顺序固定为：`serial_number -> calibration_status`
    - 禁止重新引入 `serial_number_valid`、`calibration_valid`、`connected`、`source`、错误信息等临时或重复字段
-3. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `bin/UgripperRuntime/config/fakeCamCalib.json`。`calibration.json` 的输出格式当前已锁定：
+3. 一进入起录流程就写入 `/tmp/umi_recording.lock`，内容包含 `record_runtime` 的 `pid`、episode 目录（创建前可为空）与起录时间；episode 目录创建后会更新锁内容。该锁会覆盖 episode 准备、recorder 启动、录制、停录写盘和校验阶段，供 NTP 同步等系统级辅助动作避让录制窗口。若准备或启动失败会立即清锁；停录收尾完成后清锁。
+4. 写入 `calibration.json`：当前优先使用持久化标定 `/etc/ugripper/config/calibration/calibration.json`；若该文件缺失、为空、非法 JSON 或顶层不是 object，则回退仓库根目录样例 `calibration.json`，再缺失时回退 `bin/UgripperRuntime/config/fakeCamCalib.json`。`calibration.json` 的输出格式当前已锁定：
    - 这是锁定格式，顶层字段集合不得增加，已有字段的职责不得漂移；若必须调整，必须先更新本节文档，再同步修改生成代码、持久化刷新逻辑与 episode 校验口径。
    - 顶层只保留 `metadata/calibration_info/observation`；主摄、stereo、tactile 按字段白名单输出，fallback 只补缺不覆盖合法数据。
    - `metadata.format_version=3.0`

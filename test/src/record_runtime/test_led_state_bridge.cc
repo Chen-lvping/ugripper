@@ -102,6 +102,12 @@ struct LedBridgeHarness
                  [](const std::string&, const char*) {},
              .write_validation_error_log =
                  [](const std::string&, const std::string&) {},
+             .write_recording_lock =
+                 [](const std::string&) {
+                     return true;
+                 },
+             .remove_recording_lock =
+                 []() {},
              .start_worker =
                  [](WorkerName worker, const ProcessSpec& spec, std::string*) {
                      (void)worker;

@@ -9,6 +9,8 @@ SERVICE_USER_OVERRIDE_FILE="/etc/ugripper/service_user_override"
 SHUTDOWN_TRIGGER_SCRIPT="${APP_DIR}/auto_update/trigger_shutdown.sh"
 SHUTDOWN_TRIGGER_SERVICE="umi-shutdown-trigger.service"
 SHUTDOWN_TRIGGER_PATH="umi-shutdown-trigger.path"
+NTP_SYNC_SERVICE="ugripper-ntp-sync.service"
+CONTINUOUS_NTP_SERVICES=(ntp.service chrony.service systemd-timesyncd.service)
 NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 CALIB_PERSIST_DIR="/etc/ugripper/config/calibration"
 CALIB_PERSIST_FILE="${CALIB_PERSIST_DIR}/calibration.json"
@@ -105,6 +107,14 @@ stop_service_fast() {
         echo "Warning: $service_name stop timeout, force killing..."
         systemctl kill "$service_name" >/dev/null 2>&1 || true
     fi
+}
+
+disable_continuous_ntp_services() {
+    local service_name=""
+    for service_name in "${CONTINUOUS_NTP_SERVICES[@]}"; do
+        stop_service_fast "$service_name" 4
+        systemctl disable "$service_name" >/dev/null 2>&1 || true
+    done
 }
 
 force_cleanup_recording_processes() {
@@ -235,6 +245,7 @@ force_cleanup_recording_processes
 # 3) 配置应用服务权限及启动
 # --------------------------------------------------
 chmod +x "$APP_DIR/run_record.sh"
+chmod +x "$APP_DIR/time_sync/safe_ntp_sync.sh" 2>/dev/null || true
 chmod +x "$SHUTDOWN_TRIGGER_SCRIPT"
 chmod -R 777 "$APP_DIR"
 
@@ -287,6 +298,11 @@ systemctl enable "$SHUTDOWN_TRIGGER_SERVICE" "$SHUTDOWN_TRIGGER_PATH"
 if ! systemctl restart "$SHUTDOWN_TRIGGER_PATH"; then
     echo "Warning: failed to restart $SHUTDOWN_TRIGGER_PATH (will not block install)"
 fi
+
+# 安全 NTP 同步服务：只在非录制态启用 NTP，完成或被录制打断后立即关闭。
+disable_continuous_ntp_services
+systemctl enable "$NTP_SYNC_SERVICE" || true
+systemctl start --no-block "$NTP_SYNC_SERVICE" || echo "Warning: failed to start $NTP_SYNC_SERVICE (will not block install)"
 
 # 主应用服务
 systemctl enable "$SERVICE_NAME"

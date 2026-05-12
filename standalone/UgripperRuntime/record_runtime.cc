@@ -2952,6 +2952,14 @@ bool RecordRuntime::initialize()
                 [](const std::string& episode_dir, const std::string& error_message) {
                     writeValidationErrorLog(fs::path(episode_dir), error_message);
                 },
+            .write_recording_lock =
+                [this](const std::string& episode_dir) {
+                    return writeRecordingLock(episode_dir);
+                },
+            .remove_recording_lock =
+                [this]() {
+                    removeRecordingLock();
+                },
             .start_worker =
                 [this](ugripper::runtime::WorkerName worker,
                        const ugripper::runtime::ProcessSpec& spec,
@@ -3803,6 +3811,36 @@ bool RecordRuntime::attachPendingPreAudio(const std::string &episodeDir)
 
     pendingPreAudioFile_.clear();
     return true;
+}
+
+bool RecordRuntime::writeRecordingLock(const std::string &episodeDir)
+{
+    json lock = {
+        {"pid", static_cast<int>(getpid())},
+        {"episode_dir", episodeDir},
+        {"started_at_ms", currentEpochMs()},
+    };
+    std::string errorMessage;
+    if (!writeTextFileAtomically(options_.recordingLockFile, lock.dump(2) + "\n", &errorMessage))
+    {
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "failed to write recording lock "
+                                                   << options_.recordingLockFile << ": "
+                                                   << errorMessage << std::endl).str());
+        return false;
+    }
+    return true;
+}
+
+void RecordRuntime::removeRecordingLock()
+{
+    std::error_code error;
+    fs::remove(options_.recordingLockFile, error);
+    if (error)
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to remove recording lock "
+                                                  << options_.recordingLockFile << ": "
+                                                  << error.message() << std::endl).str());
+    }
 }
 
 bool RecordRuntime::startRecording(bool resetRecording)

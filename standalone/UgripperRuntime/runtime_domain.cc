@@ -352,6 +352,33 @@ RecordingOrchestrator::RecordingOrchestrator(RecordingOrchestratorOptions option
 
 bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* error_message)
 {
+    if (dependencies_.remove_recording_lock != nullptr)
+    {
+        dependencies_.remove_recording_lock();
+    }
+    if (dependencies_.write_recording_lock != nullptr &&
+        !dependencies_.write_recording_lock(""))
+    {
+        CallLog(dependencies_.log_error, "failed to write recording lock before episode setup");
+        if (dependencies_.set_led_state != nullptr)
+        {
+            dependencies_.set_led_state(RuntimeLedState::Error5, 0.0);
+        }
+        if (dependencies_.set_audio_recovery_command != nullptr)
+        {
+            dependencies_.set_audio_recovery_command("error");
+        }
+        if (dependencies_.send_audio_command != nullptr)
+        {
+            dependencies_.send_audio_command("error");
+        }
+        if (error_message != nullptr)
+        {
+            *error_message = "failed to write recording lock";
+        }
+        return false;
+    }
+
     state_.current_episode_dir =
         dependencies_.create_next_episode_dir != nullptr ? dependencies_.create_next_episode_dir() : std::string();
     if (state_.current_episode_dir.empty())
@@ -368,6 +395,10 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
         if (dependencies_.send_audio_command != nullptr)
         {
             dependencies_.send_audio_command("error");
+        }
+        if (dependencies_.remove_recording_lock != nullptr)
+        {
+            dependencies_.remove_recording_lock();
         }
         if (error_message != nullptr)
         {
@@ -393,6 +424,10 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
         if (dependencies_.send_audio_command != nullptr)
         {
             dependencies_.send_audio_command("error");
+        }
+        if (dependencies_.remove_recording_lock != nullptr)
+        {
+            dependencies_.remove_recording_lock();
         }
         if (error_message != nullptr)
         {
@@ -421,6 +456,10 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
         {
             dependencies_.send_audio_command("error");
         }
+        if (dependencies_.remove_recording_lock != nullptr)
+        {
+            dependencies_.remove_recording_lock();
+        }
         if (error_message != nullptr)
         {
             *error_message = "camera recorder binary not found";
@@ -443,9 +482,41 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
         {
             dependencies_.send_audio_command("error");
         }
+        if (dependencies_.remove_recording_lock != nullptr)
+        {
+            dependencies_.remove_recording_lock();
+        }
         if (error_message != nullptr)
         {
             *error_message = "sensor recorder binary not found";
+        }
+        return false;
+    }
+
+    if (dependencies_.write_recording_lock != nullptr &&
+        !dependencies_.write_recording_lock(state_.current_episode_dir))
+    {
+        CallLog(dependencies_.log_error,
+                "failed to update recording lock for episode " + state_.current_episode_dir);
+        if (dependencies_.remove_recording_lock != nullptr)
+        {
+            dependencies_.remove_recording_lock();
+        }
+        if (dependencies_.set_led_state != nullptr)
+        {
+            dependencies_.set_led_state(RuntimeLedState::Error5, 0.0);
+        }
+        if (dependencies_.set_audio_recovery_command != nullptr)
+        {
+            dependencies_.set_audio_recovery_command("error");
+        }
+        if (dependencies_.send_audio_command != nullptr)
+        {
+            dependencies_.send_audio_command("error");
+        }
+        if (error_message != nullptr)
+        {
+            *error_message = "failed to update recording lock";
         }
         return false;
     }
@@ -529,6 +600,10 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
         {
             dependencies_.stop_worker(WorkerName::SensorRecorder, "startup rollback", nullptr);
         }
+        if (dependencies_.remove_recording_lock != nullptr)
+        {
+            dependencies_.remove_recording_lock();
+        }
         if (dependencies_.set_led_state != nullptr)
         {
             dependencies_.set_led_state(RuntimeLedState::Error5, 0.0);
@@ -557,6 +632,10 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
         {
             dependencies_.stop_worker(WorkerName::CameraRecorder, "stereo session start failed", nullptr);
             dependencies_.stop_worker(WorkerName::SensorRecorder, "stereo session start failed", nullptr);
+        }
+        if (dependencies_.remove_recording_lock != nullptr)
+        {
+            dependencies_.remove_recording_lock();
         }
         if (dependencies_.set_led_state != nullptr)
         {
@@ -600,6 +679,10 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
 {
     if (!state_.is_recording)
     {
+        if (dependencies_.remove_recording_lock != nullptr)
+        {
+            dependencies_.remove_recording_lock();
+        }
         if (due_to_error)
         {
             if (dependencies_.set_led_state != nullptr)
@@ -759,6 +842,10 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     }
 
     state_.current_episode_dir.clear();
+    if (dependencies_.remove_recording_lock != nullptr)
+    {
+        dependencies_.remove_recording_lock();
+    }
 
     if (due_to_error)
     {

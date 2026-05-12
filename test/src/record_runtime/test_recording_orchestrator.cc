@@ -39,6 +39,7 @@ struct RecordingHarness
     std::vector<std::string> flushed_stages;
     std::vector<std::string> stop_reasons;
     std::vector<std::string> logs;
+    std::vector<std::string> lock_events;
     std::vector<std::string> sensor_args;
     std::vector<int> sensor_inherited_fds;
     std::string last_validation_log;
@@ -54,6 +55,7 @@ struct RecordingHarness
     bool sensor_bin_exists = true;
     bool camera_start_ok = true;
     bool sensor_start_ok = true;
+    bool write_lock_ok = true;
     std::string prepare_error = "prepare episode failed";
     std::string merge_error = "merge episode info failed";
     std::string stereo_start_error = "stereo session start failed";
@@ -166,6 +168,15 @@ struct RecordingHarness
                  [this](const std::string&, const std::string& error_message) {
                      last_validation_log = error_message;
                  },
+             .write_recording_lock =
+                 [this](const std::string& episode_dir) {
+                     lock_events.push_back("write:" + episode_dir);
+                     return write_lock_ok;
+                 },
+             .remove_recording_lock =
+                 [this]() {
+                     lock_events.push_back("remove");
+                 },
              .start_worker =
                  [this](WorkerName worker, const ProcessSpec& spec, std::string*) {
                      started_specs[worker] = spec;
@@ -248,6 +259,8 @@ TEST(RecordingOrchestratorTest, StartRecordingUpdatesStateAndSignalsReadyFlow)
                   "99",
               }));
     EXPECT_EQ(harness.sensor_inherited_fds, (std::vector<int>{99}));
+    EXPECT_EQ(harness.lock_events,
+              (std::vector<std::string>{"remove", "write:", "write:/tmp/episode_0001"}));
     ASSERT_TRUE(harness.started_specs.count(WorkerName::CameraRecorder) > 0);
     EXPECT_EQ(harness.started_specs[WorkerName::CameraRecorder].stop_mode,
               ugripper::runtime::ProcessStopMode::SigTermThenKill);
@@ -314,6 +327,23 @@ TEST(RecordingOrchestratorTest, StopRecordingSuccessSignalsWritingThenReady)
                   RuntimeLedState::Ready,
               }));
     EXPECT_EQ(harness.sync_reason, "video stop");
+    EXPECT_EQ(harness.lock_events,
+              (std::vector<std::string>{"remove", "write:", "write:/tmp/episode_0001", "remove"}));
+}
+
+TEST(RecordingOrchestratorTest, StartRecordingLockFailureDoesNotLaunchWorkers)
+{
+    RecordingHarness harness;
+    harness.write_lock_ok = false;
+    auto orchestrator = harness.Make();
+
+    ASSERT_FALSE(orchestrator.StartRecording(false));
+    EXPECT_FALSE(orchestrator.state().is_recording);
+    EXPECT_TRUE(harness.started_specs.empty());
+    EXPECT_EQ(harness.lock_events,
+              (std::vector<std::string>{"remove", "write:"}));
+    ASSERT_FALSE(harness.audio_commands.empty());
+    EXPECT_EQ(harness.audio_commands.back(), "error");
 }
 
 TEST(RecordingOrchestratorTest, StopRecordingStereoFinalizeFailureMapsToValidationFailed)

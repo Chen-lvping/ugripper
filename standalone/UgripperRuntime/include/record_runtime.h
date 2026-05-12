@@ -38,6 +38,7 @@ struct RecordRuntimeOptions
     std::string audioPipe = "/tmp/umi_audio_pipe";
     std::string audioReadyFile = "/tmp/umi_audio_ready";
     std::string audioTempDir = "/tmp/umi_audio";
+    std::string recordingLockFile = "/tmp/umi_recording.lock";
     std::string noiseProfile = "./bin/UgripperRuntime/audio/noise.prof";
     std::string systemActionRequestFile = "/tmp/umi_system_action_request";
     std::string systemActionResultFile = "/tmp/umi_system_action_result";
@@ -283,6 +284,8 @@ private:
     void handleLeftButtons(const ButtonSnapshot &buttons);
     bool recordAudioClip(const std::string &audioType, bool monitorUpButton);
     bool attachPendingPreAudio(const std::string &episodeDir);
+    bool writeRecordingLock(const std::string &episodeDir);
+    void removeRecordingLock();
     bool checkRecorderProcesses();
     void monitorHardwareHealth();
     bool startAudioPlayer();

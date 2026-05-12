@@ -7,6 +7,7 @@ SERVICE_NAME="{{APP_NAME}}.service"
 NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 SHUTDOWN_TRIGGER_SERVICE="umi-shutdown-trigger.service"
 SHUTDOWN_TRIGGER_PATH="umi-shutdown-trigger.path"
+NTP_SYNC_SERVICE="ugripper-ntp-sync.service"
 
 stop_service_fast() {
     local service_name="$1"
@@ -51,6 +52,7 @@ echo "Removing {{APP_NAME}} configuration..."
 # --------------------------------------------------
 stop_service_fast "$SERVICE_NAME" 6
 stop_service_fast "$NETWORK_MONITOR_SERVICE" 4
+stop_service_fast "$NTP_SYNC_SERVICE" 4
 force_cleanup_recording_processes
 
 # --------------------------------------------------
@@ -58,6 +60,7 @@ force_cleanup_recording_processes
 # --------------------------------------------------
 systemctl disable "$SERVICE_NAME" || true
 systemctl disable "$NETWORK_MONITOR_SERVICE" || true
+systemctl disable "$NTP_SYNC_SERVICE" || true
 systemctl disable "$SHUTDOWN_TRIGGER_PATH" || true
 systemctl disable "$SHUTDOWN_TRIGGER_SERVICE" || true
 # --------------------------------------------------

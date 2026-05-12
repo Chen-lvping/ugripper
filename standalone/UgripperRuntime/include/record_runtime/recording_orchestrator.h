@@ -39,6 +39,8 @@ public:
     using WaitForFinalizeFn = std::function<bool(const std::string&, int, std::string*)>;
     using FlushEpisodeArtifactsFn = std::function<void(const std::string&, const char*)>;
     using WriteValidationErrorLogFn = std::function<void(const std::string&, const std::string&)>;
+    using WriteRecordingLockFn = std::function<bool(const std::string&)>;
+    using RemoveRecordingLockFn = std::function<void()>;
     using StartWorkerFn = std::function<bool(WorkerName, const ProcessSpec&, std::string*)>;
     using StopWorkerFn = std::function<bool(WorkerName, const std::string&, std::string*)>;
     using GetWorkerStatusFn = std::function<ProcessStatus(WorkerName)>;
@@ -63,6 +65,8 @@ public:
         WaitForFinalizeFn wait_for_stereo_finalize;
         FlushEpisodeArtifactsFn flush_episode_artifacts;
         WriteValidationErrorLogFn write_validation_error_log;
+        WriteRecordingLockFn write_recording_lock;
+        RemoveRecordingLockFn remove_recording_lock;
         StartWorkerFn start_worker;
         StopWorkerFn stop_worker;
         GetWorkerStatusFn get_worker_status;
