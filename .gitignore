@@ -36,6 +36,14 @@ docs/todo_dashboard.md
 checks.json
 .python-version
 
+# graphify local graph/cache outputs
+AGENTS.md
+.codex/hooks.json
+graphify-out/
+.graphify_*.json
+.graphify_*.txt
+.graphify_python
+
 #模型及数据集文件
 ASR/model/
 ASR/audio/
