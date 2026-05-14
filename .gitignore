@@ -23,6 +23,7 @@ htmlcov/
 # IDE 配置
 .idea/
 .vscode/
+.githooks/
 *.swp
 *.swo
 .worktrees
@@ -36,13 +37,18 @@ docs/todo_dashboard.md
 checks.json
 .python-version
 
-# graphify local graph/cache outputs
+# graphify team graph outputs
 AGENTS.md
 .codex/hooks.json
-graphify-out/
-.graphify_*.json
-.graphify_*.txt
-.graphify_python
+graphify-out/manifest.json
+graphify-out/cost.json
+graphify-out/cache/
+graphify-out/.graphify_python
+graphify-out/.graphify_root
+graphify-out/.rebuild.lock
+/.graphify_*.json
+/.graphify_*.txt
+/.graphify_python
 
 #模型及数据集文件
 ASR/model/

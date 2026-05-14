@@ -1,0 +1,70 @@
+# Local graphify outputs and caches
+graphify-out/
+.graphify_*.json
+.graphify_*.txt
+.graphify_python
+
+# Build outputs and package artifacts
+build/
+*/build/
+dist/
+*.egg-info/
+*.deb
+*.rpm
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+/temp_build_deb/
+/temp_build_usb_updater/
+
+# Local environments, caches, and editor state
+.venv/
+.uv/
+.local-deps/
+__pycache__/
+*.py[cod]
+*$py.class
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.idea/
+.vscode/
+*.swp
+*.swo
+tmp/
+
+# Runtime/generated local metadata
+.env
+.python-version
+checks.json
+docs/_site/
+docs/todo_dashboard.md
+.codex/todo-hub/runtime.json
+.codex/todo-hub/tasks/
+
+# Binary/audio/model resources. Keep surrounding dirs visible so source,
+# config, and docs in the same areas can still be indexed.
+*.wav
+*.mp3
+*.mp4
+*.mkv
+*.avi
+*.bag
+*.mcap
+*.prof
+*.so
+*.so.*
+*.a
+*.o
+*.bin
+*.generated.py
+ASR/model/
+ASR/audio/
+
+# Third-party archives and vendor runtime binaries
+src/third_party/hand_master1.1.0.tgz
+src/third_party/hand_master/hand_master/bin/
+
