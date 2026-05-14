@@ -8,7 +8,7 @@
 - 主控制链路当前以 `run_record.sh -> /opt/ugripper/bin/UgripperRuntime/UgripperRuntime` 作为安装入口。
 - 默认录制产物为 **2 路主相机 + 2 路 stereo + 4 路触觉相机 + 左右两份传感器 MCAP**。
 - HMI 按键、RGB 灯效、提示音、pre/post 音频录制、停录校验，以及右手双键关机/左手双键卸载数据盘请求都已纳入当前运行时。
-- U 盘流程统一负责 `deb` 升级/重装、`config.txt` 导入、标定数据导入和 encoder 零位校准触发；当前自动安装名单已覆盖 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint` 与 `device-ota-mender`，并会在整批安装完成后通过 PulseAudio 播放 `upgrade_completed.wav`。
+- U 盘流程统一负责 `deb` 升级/重装、`config.txt` 导入、标定数据导入和 encoder 零位校准触发；当前自动安装名单已覆盖 `das-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint` 与 `device-ota-mender`，并会在整批安装完成后通过 PulseAudio 播放 `upgrade_completed.wav`。
 
 ## 2. 安装布局与入口
 - 安装目录：`/opt/ugripper`
@@ -34,7 +34,7 @@
 | 音频播放 | `bin/UgripperRuntime/audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 优先从受支持 USB 耳机麦克风录音，无耳机时回退系统默认 source，供 pre/post 处理链路使用 | 临时 wav 文件 |
 | 数据盘挂载 | `config/99-fixed-usb-map.rules` | 限定允许物理 USB 口，使用独立 mount helper 将数据盘挂到 `/mnt/data_disk`；主包只负责挂载/卸载，不再直接拉起 updater | `/mnt/data_disk` |
-| USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级/重装、配置导入、标定数据导入、encoder 校准触发；当前会按固定名单自动安装 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`，只要 U 盘根目录存在名单内包就执行安装，同版本也会强制重装；全部安装完成后再通过 PulseAudio 播放 `upgrade_completed.wav`；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload。该脚本及其 `/usr/local/bin` + systemd unit 触发链归属可选独立包 `ugripper-usb-updater` | `/etc/environment`、`calibration.json`、夹爪 HMI |
+| USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级/重装、配置导入、标定数据导入、encoder 校准触发；当前会按固定名单自动安装 `das-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`，只要 U 盘根目录存在名单内包就执行安装，同版本也会强制重装；全部安装完成后再通过 PulseAudio 播放 `upgrade_completed.wav`；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload。该脚本及其 `/usr/local/bin` + systemd unit 触发链归属可选独立包 `das-usb-updater` | `/etc/environment`、`calibration.json`、夹爪 HMI |
 | 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、复用 `/mnt/data_disk` 触发左右编码器并行 zeroing、恢复服务 | `bin/SensorRecorder/zeroing` |
 
 ## 4. 启动链路
@@ -314,12 +314,12 @@
 
 ### 9.3 U 盘支持内容
 - 自动安装名单：
-  - `ugripper-usb-updater`
+  - `das-usb-updater`
   - `ugripper`
   - `bluetooth-gatt-server`
   - `databot-device-joint`
   - `device-ota-mender`
-- updater 自升级：根目录放置 `ugripper-usb-updater*.deb`；若本次先装的是新版 updater，安装后的新脚本会在同一次插盘流程里继续按最新名单扫描剩余 `.deb`。
+- updater 自升级：根目录放置 `das-usb-updater*.deb`；若本次先装的是新版 updater，安装后的新脚本会在同一次插盘流程里继续按最新名单扫描剩余 `.deb`。
 - 主包升级：根目录放置 `ugripper_*_arm64*.deb`。
 - 配置导入：根目录 `config.txt`。
 - 标定数据导入：`ugripper_calib/<DEVICE_SN>/`，通过文件名后缀 `_left` / `_right` 区分左右主相机 `camchain`；对应夹爪侧 RGB/stereo/IMU payload 则按现场读出的 gripper SN 文本在该目录下递归匹配，优先 `.bin`，其次包含 `summary/imucam` 关键词的 `.md` 或当前 raw 目录（`rgb_video_ros-camchain.yaml + output-results-imucam.txt`），并按 `rgb_video_ros_imucam_parameter_summary.md` 口径生成 `1024-byte` 对齐数据结构；当前固件写入时固定补满 `64 x 16B` 传输窗口。
@@ -333,7 +333,7 @@
 3. 只有当本次目标侧都完成 gripper SN 匹配后，才开始写入对应夹爪的整套 RGB/stereo/IMU 标定；任一侧匹配失败或写入失败时，本次不会把旧 persist calibration 当作成功结果继续保留
 4. U 盘导入当前负责“匹配并写入夹爪标定 + 保存导入归档”；主机侧持久化 `calibration.json` 由 `record_runtime` 在 gripper 后续插入/重连时按实际读回的 SN 与 calibration payload 刷新
 5. 若存在 `calibration.txt`，则跳过中间重启，直接进入左右编码器并行校准流程
-6. 若未触发 `calibration.txt`，则开始按固定名单依次处理 `ugripper-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender` 的 `.deb`；每个包都会先按 Debian 包名读取版本，U 盘内若存在多个候选文件则取最高版本；只要名单内包在 U 盘根目录存在，就执行安装，同版本也会强制重装
+6. 若未触发 `calibration.txt`，则开始按固定名单依次处理 `das-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender` 的 `.deb`；每个包都会先按 Debian 包名读取版本，U 盘内若存在多个候选文件则取最高版本；只要名单内包在 U 盘根目录存在，就执行安装，同版本也会强制重装
 7. 若 updater 在第 6 步先完成自升级，则安装后的新脚本会在同一次插盘流程里继续执行剩余自动安装名单，避免必须二次插盘才能让新名单生效
 8. 全部目标软件包安装完成后，若新主包已提供 `upgrade_completed.wav` 且现场存在可用 PulseAudio sink，则播放升级完成提示音
 9. 恢复 `ugripper.service`
@@ -355,7 +355,7 @@
 
 数据盘挂载当前行为：
 - `config/99-fixed-usb-map.rules` 会在允许的物理 USB 口上调用 `mount_data_disk.sh`，固定挂载点仍然是 `/mnt/data_disk`。
-- 主包规则现在只负责挂载/卸载；若额外安装了可选包 `ugripper-usb-updater`，则由 updater 包自己的 `99-usb-auto-update.rules` 通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@<dev>.service`。
+- 主包规则现在只负责挂载/卸载；若额外安装了可选包 `das-usb-updater`，则由 updater 包自己的 `99-usb-auto-update.rules` 通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@<dev>.service`。
 - 允许的 USB 分区在 `remove` 事件里会显式对 `/mnt/data_disk` 执行卸载清理；此外还保留了 USB block `remove` 的兜底触发，尽量覆盖 hub 断链或热插拔时分区级事件不完整的场景，避免拔盘后残留 stale mount。
 - `mount_data_disk.sh` 当前除了匹配挂载源设备节点，还会把“挂载点只读”“挂载源设备节点已不存在”或“挂载点已不可访问”视为脏状态并优先清理；它不再主动启动 updater service；`run_record.sh` 也会把这类状态视为未就绪。
 

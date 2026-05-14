@@ -2714,7 +2714,11 @@ bool RecordRuntime::initialize()
     fs::create_directories(options_.audioTempDir, error);
 
     packageVersion_ = queryPackageVersion("ugripper");
-    updaterVersion_ = queryPackageVersion("ugripper-usb-updater");
+    updaterVersion_ = queryPackageVersion("das-usb-updater");
+    if (updaterVersion_ == "unknown")
+    {
+        updaterVersion_ = queryPackageVersion("ugripper-usb-updater");
+    }
 
     episodeManager_ = std::make_unique<EpisodeManager>(
         options_.diskRoot,

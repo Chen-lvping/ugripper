@@ -217,7 +217,7 @@ VENV_VERSION_TAG=1.2.8+merge1-arm64 ./scripts/build_runtime_venv.sh
 - 恢复时优先回取服务器归档；只剩仓库时再按锁文件重建
 
 ## 可选 updater 包打包
-`ugripper-usb-updater` 现在是独立可选包，不属于主 `ugripper` 包安装主线。
+`das-usb-updater` 现在是独立可选包，不属于主 `ugripper` 包安装主线。
 
 默认打包命令：
 
@@ -234,7 +234,19 @@ PKG_VERSION_SUFFIX=+merge1 ./usb_updater_build.sh
 默认产物位置：
 
 ```bash
-build/package/updater/ugripper-usb-updater_1.2.2_all.deb
+build/package/updater/das-usb-updater_1.0.0_all.deb
+```
+
+已部署旧 `ugripper-usb-updater` 的板端可使用一次性过渡包完成同次插盘迁移。U 盘同时放入过渡包和 `das-usb-updater` 包后，旧 updater 会先安装过渡包，过渡包 postinst 会重新拉起本次 USB 流程，再安装 `das-usb-updater`：
+
+```bash
+./usb_updater_transition_build.sh
+```
+
+过渡包默认产物位置：
+
+```bash
+build/package/updater-transition/ugripper-usb-updater_1.2.5_all.deb
 ```
 
 和主包一样，可通过 `DPKG_DEB_COMPRESSOR`、`DPKG_DEB_LEVEL`、`DPKG_DEB_STRATEGY`、`DPKG_DEB_UNIFORM_COMPRESSION` 覆盖 `dpkg-deb` 压缩参数。

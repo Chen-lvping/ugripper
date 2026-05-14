@@ -221,5 +221,5 @@ SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="0023", ATTRS{idProduct}=
 # ========================
 # 4. Storage devices
 # ========================
-# 数据盘挂载/卸载和 USB 升级触发由独立 ugripper-usb-updater 包的
+# 数据盘挂载/卸载和 USB 升级触发由独立 das-usb-updater 包的
 # 99-usb-auto-update.rules 承载；主包只保留传感器、串口和音频映射。

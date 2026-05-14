@@ -5,6 +5,9 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- USB updater 收敛为独立 `standalone/DASUsbUpdater` / `das-usb-updater` 包：同一套 `usb_auto_update.sh`、`boot_check_install.sh`、udev rules 与 mount helper 通过产品 profile 适配 `uglove` / `ugripper`；新包只声明替换已部署的 `ugripper-usb-updater`。
+- 新增 UGripper 过渡包构建入口 `usb_updater_transition_build.sh`：生成旧包名 `ugripper-usb-updater` 的桥接 updater，自动安装名单会在旧包名后继续扫描 `das-usb-updater`，允许已部署旧 updater 的板端通过一次 U 盘升级流程迁移到 DAS updater。
+- `UgripperRuntime` 的 episode metadata 中 updater 版本查询改为优先 `das-usb-updater`，并兼容 fallback 到旧 `ugripper-usb-updater`。
 - 新增安全 NTP 同步链路：主包安装 `ugripper-ntp-sync.service` 与 `time_sync/safe_ntp_sync.sh`，只在非录制态执行一次性校时；脚本优先使用板端现有 `sntp -S`，再 fallback 到 `ntpd -q -g` / `timedatectl`，完成、失败、超时或检测到录制开始后立即停止常驻 NTP 服务，避免录制期间系统时间跳变。
 - `record_runtime` 现在在起录入口立即写入 `/tmp/umi_recording.lock`，停录写盘/校验完成后清理；NTP 脚本会识别该锁及其中的 runtime pid，遇到有效录制锁直接跳过，遇到 stale pid 锁则清理后再尝试同步。
 - 新版取消板载 IM648 链路：`sensor_recorder` 只采集左右 encoder，不再打开 `/dev/left_imu` / `/dev/right_imu`，episode 校验和板端 smoke/integration check 不再要求 `imu_left` / `imu_right` topic；Fays stereo 自带 IMU 链路保持不变。
