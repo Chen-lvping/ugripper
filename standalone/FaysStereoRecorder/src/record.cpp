@@ -300,6 +300,94 @@ bool WriteSdkResolvedConfig(const std::string& configPath,
     return true;
 }
 
+bool SameResolvedDevices(const FaysConfigDevices& lhs, const FaysConfigDevices& rhs) {
+    return lhs.stereoResolved == rhs.stereoResolved &&
+           lhs.imuResolved == rhs.imuResolved;
+}
+
+void CleanupSdkTempConfig(std::string* sdkConfigTempPath) {
+    if (sdkConfigTempPath != nullptr && !sdkConfigTempPath->empty()) {
+        unlink(sdkConfigTempPath->c_str());
+        sdkConfigTempPath->clear();
+    }
+}
+
+bool CreateStableFaysHandle(const std::string& configPath,
+                            void** outHandle,
+                            FaysConfigDevices* outDevices,
+                            std::string* outSdkConfigPath,
+                            std::string* outSdkConfigTempPath,
+                            std::string* errorMessage) {
+    if (outHandle == nullptr || outDevices == nullptr ||
+        outSdkConfigPath == nullptr || outSdkConfigTempPath == nullptr) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "CreateStableFaysHandle output pointer is null";
+        }
+        return false;
+    }
+
+    *outHandle = nullptr;
+    outSdkConfigPath->clear();
+    outSdkConfigTempPath->clear();
+
+    std::string lastError;
+    FaysConfigDevices devices;
+    if (!LoadAndValidateConfigDevices(configPath, &devices, &lastError)) {
+        if (errorMessage != nullptr) {
+            *errorMessage = lastError;
+        }
+        return false;
+    }
+
+    std::string sdkConfigPath;
+    std::string sdkConfigTempPath;
+    if (!WriteSdkResolvedConfig(configPath, devices, &sdkConfigPath, &sdkConfigTempPath, &lastError)) {
+        if (errorMessage != nullptr) {
+            *errorMessage = lastError;
+        }
+        return false;
+    }
+
+    void* handle = nullptr;
+    const int createRc = FAYS_VIK_CreateHandleWithConfig(&handle, sdkConfigPath.c_str());
+    if (createRc != EXIT_SUCCESS || handle == nullptr) {
+        CleanupSdkTempConfig(&sdkConfigTempPath);
+        std::ostringstream oss;
+        oss << "FAYS_VIK_CreateHandleWithConfig failed for config=" << configPath
+            << ", sdk_config=" << sdkConfigPath
+            << ", rc=" << createRc << ", handle=" << handle;
+        if (errorMessage != nullptr) {
+            *errorMessage = oss.str();
+        }
+        return false;
+    }
+
+    FaysConfigDevices currentDevices;
+    std::string currentError;
+    const bool currentOk = LoadAndValidateConfigDevices(configPath, &currentDevices, &currentError);
+    if (!currentOk || !SameResolvedDevices(devices, currentDevices)) {
+        std::ostringstream oss;
+        oss << "device node remapped during SDK handle creation: config=" << configPath
+            << ", stereo_before=" << devices.stereoResolved
+            << ", imu_before=" << devices.imuResolved
+            << ", stereo_after=" << (currentOk ? currentDevices.stereoResolved : "<unresolved>")
+            << ", imu_after=" << (currentOk ? currentDevices.imuResolved : "<unresolved>")
+            << ", error_after=" << (currentOk ? "" : currentError)
+            << ". Exit this process and let the outer daemon restart with current /dev/videoN.";
+        CleanupSdkTempConfig(&sdkConfigTempPath);
+        if (errorMessage != nullptr) {
+            *errorMessage = oss.str();
+        }
+        return false;
+    }
+
+    *outHandle = handle;
+    *outDevices = devices;
+    *outSdkConfigPath = sdkConfigPath;
+    *outSdkConfigTempPath = sdkConfigTempPath;
+    return true;
+}
+
 const char* CameraModelName(ATRAK_CAM_MODEL model) {
     switch (model) {
         case ACM_PINHOLE: return "pinhole";
@@ -544,36 +632,15 @@ bool DumpCalibrationJson(const std::string& configPath,
                          const std::string& outputPath,
                          std::string* errorMessage) {
     FaysConfigDevices devices;
-    if (!LoadAndValidateConfigDevices(configPath, &devices, errorMessage)) {
-        return false;
-    }
-
     std::string sdkConfigPath;
     std::string tempConfigPath;
-    if (!WriteSdkResolvedConfig(configPath, devices, &sdkConfigPath, &tempConfigPath, errorMessage)) {
-        return false;
-    }
-
     void* handle = nullptr;
-    const int createRc = FAYS_VIK_CreateHandleWithConfig(&handle, sdkConfigPath.c_str());
-    if (createRc != EXIT_SUCCESS || handle == nullptr) {
-        if (!tempConfigPath.empty()) {
-            unlink(tempConfigPath.c_str());
-        }
-        if (errorMessage != nullptr) {
-            std::ostringstream oss;
-            oss << "FAYS_VIK_CreateHandleWithConfig failed for config=" << configPath
-                << ", sdk_config=" << sdkConfigPath
-                << ", rc=" << createRc << ", handle=" << handle;
-            *errorMessage = oss.str();
-        }
+    if (!CreateStableFaysHandle(configPath, &handle, &devices, &sdkConfigPath, &tempConfigPath, errorMessage)) {
         return false;
     }
 
     const bool ok = WriteCalibrationJsonFromHandle(handle, configPath, outputPath, errorMessage);
-    if (!tempConfigPath.empty()) {
-        unlink(tempConfigPath.c_str());
-    }
+    CleanupSdkTempConfig(&tempConfigPath);
     // The vendor SDK can block in DestroyHandle when used as a short-lived
     // calibration probe without starting the streaming threads. Keep this dump
     // path one-shot and let process teardown release the device after JSON is
@@ -1050,7 +1117,7 @@ struct VideoFrame {
 
 class VideoFrameQueue {
 public:
-    static constexpr size_t kDefaultCapacity = 8;
+    static constexpr size_t kDefaultCapacity = 128;
 
     explicit VideoFrameQueue(size_t capacity = kDefaultCapacity)
         : capacity_(capacity), stopped_(false), dropCount_(0) {}
@@ -1197,12 +1264,8 @@ public:
 
         FaysConfigDevices configDevices;
         std::string configError;
-        if (!LoadAndValidateConfigDevices(configPath, &configDevices, &configError)) {
-            delete[] mImgData_.data;
-            mImgData_.data = nullptr;
-            throw std::runtime_error(configError);
-        }
-        if (!WriteSdkResolvedConfig(configPath_, configDevices, &sdkConfigPath_, &sdkConfigTempPath_, &configError)) {
+        if (!CreateStableFaysHandle(
+                configPath_, &mptrHandle_, &configDevices, &sdkConfigPath_, &sdkConfigTempPath_, &configError)) {
             delete[] mImgData_.data;
             mImgData_.data = nullptr;
             throw std::runtime_error(configError);
@@ -1212,21 +1275,6 @@ public:
                   << " -> " << configDevices.stereoResolved << std::endl;
         std::cout << "[FaysConfig] imu_dev_port: " << configDevices.imuPath
                   << " -> " << configDevices.imuResolved << std::endl;
-
-        const int createRc = FAYS_VIK_CreateHandleWithConfig(&mptrHandle_, sdkConfigPath_.c_str());
-        if (createRc != EXIT_SUCCESS || mptrHandle_ == nullptr) {
-            if (!sdkConfigTempPath_.empty()) {
-                unlink(sdkConfigTempPath_.c_str());
-                sdkConfigTempPath_.clear();
-            }
-            delete[] mImgData_.data;
-            mImgData_.data = nullptr;
-            std::ostringstream oss;
-            oss << "FAYS_VIK_CreateHandleWithConfig failed: config=" << configPath
-                << ", sdk_config=" << sdkConfigPath_
-                << ", rc=" << createRc << ", handle=" << mptrHandle_;
-            throw std::runtime_error(oss.str());
-        }
         PrintDeviceInfo(mptrHandle_);
         PrintCalibrationInfo(mptrHandle_);
 
@@ -1290,10 +1338,7 @@ public:
 
         FAYS_VIK_DestroyHandle(mptrHandle_);
         std::cout << "[FaysRecorder] Destroyed handle" << std::endl;
-        if (!sdkConfigTempPath_.empty()) {
-            unlink(sdkConfigTempPath_.c_str());
-            sdkConfigTempPath_.clear();
-        }
+        CleanupSdkTempConfig(&sdkConfigTempPath_);
         delete[] mImgData_.data;
         std::cout << "[FaysRecorder] Deleted image data" << std::endl;
     }

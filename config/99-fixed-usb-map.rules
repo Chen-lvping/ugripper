@@ -8,12 +8,20 @@
 #   * .4.1 -> tcam_r
 #   * .4.2 -> tcam_l
 #   * .4.4 -> cam_main (YuZhuo, 27c2:0530)
+# - 新 hub (`1a86:80a0`/`1a86:80a1`) 内部端口约定：
+#   * USB2 .1 -> cam_main (YuZhuo, 27c2:0530)
+#   * 右侧 USB2 .3 -> tcam_l (0bda:5846)
+#   * 右侧 USB2 .4 -> tcam_r (0bda:5846)
+#   * 左侧 USB2 .3 -> tcam_r (0bda:5846)
+#   * 左侧 USB2 .4 -> tcam_l (0bda:5846)
+#   * USB3 .3/.4 -> Fays stereo (0403:602e)
+# - 部分左手旧特殊 hub (`05e3:0610` + 下游 `214b:7260`) 也会把 tcam_r 放在 USB2 .3。
 # - 左侧更换新 hub 后，主摄 / tactile 的内部端口不再与右侧保持同构：
 #   * tactile `l/r` 仍按左右侧固定节点命名，不做跨侧互换
 #   * 左侧主摄 / tactile `l` 优先按设备类型识别（27c2:0530 = main, 0bda:5846 = tactile），
 #     USB2 口位只用于限定“属于左侧链路”，不再假设固定落在 .4.2 / .4.4
 #   * 左侧 tactile `r` 同时兼容旧 hub 的 `.4.1` 和新 hub 的 `.3`
-#   * Fays stereo 使用 USB3 路径，只按左右 USB3 根口区分侧别，不绑定 hub 内部端口
+#   * Fays stereo 使用 USB3 路径；旧 hub 允许 `.1/.2` 互换，新 hub `1a86:80a1` 兼容 `.3/.4`
 # 摄像头通常会生成两个节点 (videoN, videoN+1)，这里只取 index=0 的主节点。
 
 # ========================
@@ -26,12 +34,28 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.2", \
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.2", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="right_tcam_l"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.3", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
+  SYMLINK+="right_tcam_l"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.3", \
+  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
+  SYMLINK+="right_tcam_l"
 
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="right_tcam_r"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  SYMLINK+="right_tcam_r"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4:1.0", \
+  ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
+  SYMLINK+="right_tcam_r"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4:1.0", \
+  ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
   SYMLINK+="right_tcam_r"
 
 # ---- Left tactile cameras ----
@@ -47,26 +71,40 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="left_tcam_l"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4:1.0", \
+  ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
+  SYMLINK+="left_tcam_l"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4:1.0", \
+  ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
+  SYMLINK+="left_tcam_l"
 
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="left_tcam_r"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.3", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; id=\"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\"; [ \"$$id\" = \"1a86:80a0\" ] || [ \"$$id\" = \"05e3:0610\" ]'", \
   SYMLINK+="left_tcam_r"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   SYMLINK+="left_tcam_r"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.3", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; id=\"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\"; [ \"$$id\" = \"1a86:80a0\" ] || [ \"$$id\" = \"05e3:0610\" ]'", \
   SYMLINK+="left_tcam_r"
 
 # ---- Right main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
-# 主摄 Roll Absolute 由独立 helper 在设备插入时处理，而不是在每次开始录制时处理。
-# helper 会通过 libusb 访问 /dev/bus/usb/*，因此对应 usb_device 节点本身也必须稳定可写。
+# 右主摄 packet size helper 仍在包内保留，但自动触发尚未调通，暂不由 udev 执行。
+# 这里仅保留固定节点映射和权限。
 ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="1-1.4.4", \
   ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
 ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="5-1.4.4", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="1-1.1", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="5-1.1", \
   ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.4", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
@@ -74,12 +112,14 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.4", \
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.4", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
   SYMLINK+="right_cam_main"
-ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.4", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
-  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-main-roll-right-%k /opt/ugripper/config/apply_main_camera_roll_once.sh right_cam_main 1-1.4.4'"
-ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.4", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
-  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-main-roll-right-%k /opt/ugripper/config/apply_main_camera_roll_once.sh right_cam_main 5-1.4.4'"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.1", \
+  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
+  SYMLINK+="right_cam_main"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.1", \
+  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
+  SYMLINK+="right_cam_main"
 
 # ---- Left main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
 ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="9-1.4.2", \
@@ -89,6 +129,10 @@ ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="9-
 ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="11-1.4.2", \
   ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
 ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="11-1.4.4", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="9-1.1", \
+  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="11-1.1", \
   ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.2", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
@@ -102,19 +146,14 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
   SYMLINK+="left_cam_main"
-ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.2", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
-  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-main-roll-left-%k /opt/ugripper/config/apply_main_camera_roll_once.sh left_cam_main 9-1.4.2'"
-ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.4", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
-  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-main-roll-left-%k /opt/ugripper/config/apply_main_camera_roll_once.sh left_cam_main 9-1.4.4'"
-ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
-  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-main-roll-left-%k /opt/ugripper/config/apply_main_camera_roll_once.sh left_cam_main 11-1.4.2'"
-ACTION=="add", SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", \
-  RUN+="/bin/sh -c '/usr/bin/systemd-run --no-block --collect --unit=ugripper-main-roll-left-%k /opt/ugripper/config/apply_main_camera_roll_once.sh left_cam_main 11-1.4.4'"
-
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.1", \
+  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
+  SYMLINK+="left_cam_main"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.1", \
+  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
+  SYMLINK+="left_cam_main"
 # ---- Chest main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
 # 胸部主摄插在板载 4 个 USB 口任意一个都允许，但必须是直连，不允许落在 hub 下。
 # 因此这里按直连 usb interface 路径 `X-1:1.0` 匹配 video 节点；
@@ -150,22 +189,86 @@ SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="602e", \
 SUBSYSTEM=="video4linux", KERNEL=="video*", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", \
   MODE:="0777", GROUP:="video", TAG+="uaccess"
 
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
   SYMLINK+="right_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="right_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="right_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="right_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="right_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="right_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="right_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
   SYMLINK+="right_fays_imu"
 
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
   SYMLINK+="left_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.*", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="left_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="left_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  SYMLINK+="left_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="left_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="left_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
+  SYMLINK+="left_fays_imu"
+SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
+  PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
   SYMLINK+="left_fays_imu"
 
 
@@ -176,15 +279,15 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.*", ENV{ID_VENDOR_ID}
 # 这里统一放开 tty 节点权限，便于现场脚本直接探测；不绑定固定端口号。
 SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9",   MODE:="0666", TAG+="uaccess"
 
-# CH9344 gripper HMI 固定口映射：只依赖左右 USB2 hub 路径 + 同组 tty 的内核顺序，不依赖全局 ttyCH9344USB<num> 号。
-# 允许同侧 USB2 hub 的内部端口 .1/.2 互换。
-# 规则含义：在同一个 CH9344 设备组下，组内排序第 1 路 = gripper HMI，第 2 路 = encoder。
+# CH9344 gripper HMI 固定口映射：旧 hub 只依赖左右 USB2 hub 路径 + 同组 tty 的内核顺序，
+# 不依赖全局 ttyCH9344USB<num> 号。允许同侧 USB2 hub 的内部端口 .1/.2 互换。
+# 在同一个 CH9344 设备组下，组内排序第 1 路 = gripper HMI，第 2 路 = encoder。
 # 新版不再接板载 IM648，因此不生成 left_imu / right_imu。
 # 通过 PROGRAM 的退出码判断“当前 tty 是否为组内第 N 路”，不依赖额外 role probe。
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.2",   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ] || exit 1; pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="left_gripper"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="left_gripper"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="left_gripper"
@@ -192,12 +295,11 @@ ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
+ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.2",   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ] || exit 1; pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
 ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
-
 # ========================
 # 3. USB audio headset
 # ========================

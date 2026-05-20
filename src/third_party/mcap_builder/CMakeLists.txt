@@ -19,12 +19,18 @@ else()
   set(DOWNLOAD_EXTRACT_TIMESTAMP_ARG "")
 endif()
 set(MCAP_TAG "releases/cpp/v${VERSION}")
-FetchContent_Declare(
-  mcap
-  GIT_REPOSITORY  ssh://git@gitlab.dmrobot.com:2222/data-acquisition/third-party/mcap.git
-  GIT_TAG         main
-)
-FetchContent_MakeAvailable(mcap)
+set(MCAP_LOCAL_SOURCE_DIR "${CMAKE_SOURCE_DIR}/.third_party_cache/mcap-src")
+if(EXISTS "${MCAP_LOCAL_SOURCE_DIR}/cpp/mcap/CMakeLists.txt")
+  add_subdirectory("${MCAP_LOCAL_SOURCE_DIR}/cpp/mcap" "${CMAKE_BINARY_DIR}/_deps/mcap-build")
+  set(mcap_SOURCE_DIR "${MCAP_LOCAL_SOURCE_DIR}")
+else()
+  FetchContent_Declare(
+    mcap
+    GIT_REPOSITORY  ssh://git@gitlab.dmrobot.com:2222/data-acquisition/third-party/mcap.git
+    GIT_TAG         main
+  )
+  FetchContent_MakeAvailable(mcap)
+endif()
 set(MCAP_INCLUDE_DIR ${mcap_SOURCE_DIR}/cpp/mcap/include/)
 
 add_subdirectory(src)

@@ -427,6 +427,7 @@ copy_first_existing "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/UgripperRuntime" \
     "$PACKAGED_BUILD_DIR/standalone/UgripperRuntime/UgripperRuntime"
 copy_first_existing "$TARGET_INSTALL_ROOT/bin/FaysStereoRecorder/fays_record_example" \
     "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/fays_record_example"
+copy_if_exists "scripts/hws" "$BUILD_ROOT/usr/local/bin/hws"
 
 copy_if_exists "standalone/CameraRecorder/config" "$TARGET_INSTALL_ROOT/bin/CameraRecorder/config"
 copy_if_exists "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/config" \
@@ -474,6 +475,7 @@ copy_if_exists "$PACK_SCRIPT_DIR/postrm"   "$BUILD_ROOT/DEBIAN/postrm"
 chmod 755 "$BUILD_ROOT/DEBIAN/postinst"
 chmod 755 "$BUILD_ROOT/DEBIAN/prerm"
 chmod 755 "$BUILD_ROOT/DEBIAN/postrm"
+chmod 755 "$BUILD_ROOT/usr/local/bin/hws"
 chmod 755 "$TARGET_INSTALL_ROOT/time_sync/safe_ntp_sync.sh"
 
 # 4. 执行变量替换

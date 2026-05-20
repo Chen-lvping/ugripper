@@ -58,6 +58,12 @@ constexpr double kMaxVideoSpanGapSec = 5.0;
 constexpr int64_t kEncoderTailWindowNs = 1000LL * 1000LL * 1000LL;
 constexpr int64_t kEncoderTailMaxLagNs = 1000LL * 1000LL * 1000LL;
 constexpr size_t kEncoderTailChunkScanLimit = 4;
+constexpr int64_t kFaysImuTailMaxLagNs = 1000LL * 1000LL * 1000LL;
+constexpr size_t kFaysTailChunkScanLimit = 4;
+constexpr mcap::ChannelId kFaysImuChannelId = 1;
+constexpr mcap::ChannelId kFaysCameraChannelId = 2;
+constexpr uint64_t kFaysImuPayloadBytes = sizeof(double) * 6;
+constexpr uint64_t kFaysCameraPayloadBytes = sizeof(uint32_t);
 constexpr int kVideoProbeTimeoutMs = 1500;
 constexpr int kUdevadmProbeTimeoutMs = 2000;
 constexpr int kTactileFrameWidth = 160;
@@ -149,6 +155,19 @@ constexpr std::array<EncoderTailCheckTarget, 2> kEncoderTailCheckTargets = {{
      "sensor_data_right.mcap",
      "encoder_right",
      {"right_cam_main", "right_stereo", "right_tcam_l", "right_tcam_r"}},
+}};
+
+struct FaysTailCheckTarget
+{
+    const char *side;
+    const char *mcapFileName;
+    const char *imuTopic;
+    const char *cameraTopic;
+};
+
+constexpr std::array<FaysTailCheckTarget, 2> kFaysTailCheckTargets = {{
+    {"left", "left_fays_data.mcap", "i", "c"},
+    {"right", "right_fays_data.mcap", "i", "c"},
 }};
 
 struct CommandCaptureResult
@@ -2535,7 +2554,168 @@ bool loadLastTopicLogTimeFromTailChunks(const std::string &mcapPath,
     return true;
 }
 
+bool loadFaysMcapTailTimes(const std::string &mcapPath,
+                           const std::string &imuTopic,
+                           const std::string &cameraTopic,
+                           uint64_t *lastImuLogTimeNs,
+                           uint64_t *lastCameraLogTimeNs,
+                           uint64_t *imuMessageCount,
+                           uint64_t *cameraMessageCount,
+                           std::string *errorMessage)
+{
+    (void)imuTopic;
+    (void)cameraTopic;
+    if (lastImuLogTimeNs == nullptr || lastCameraLogTimeNs == nullptr ||
+        imuMessageCount == nullptr || cameraMessageCount == nullptr)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "internal error: missing Fays tail result slot";
+        }
+        return false;
+    }
 
+    *lastImuLogTimeNs = 0;
+    *lastCameraLogTimeNs = 0;
+    *imuMessageCount = 0;
+    *cameraMessageCount = 0;
+
+    mcap::McapReader reader;
+    const auto openStatus = reader.open(mcapPath);
+    if (!openStatus.ok())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to open mcap: " + openStatus.message;
+        }
+        return false;
+    }
+
+    std::string summaryProblem;
+    const auto summaryStatus = reader.readSummary(
+        mcap::ReadSummaryMethod::AllowFallbackScan,
+        [&summaryProblem](const mcap::Status &status) {
+            if (summaryProblem.empty())
+            {
+                summaryProblem = status.message;
+            }
+        });
+    if (!summaryStatus.ok())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to read mcap summary: " + summaryStatus.message;
+            if (!summaryProblem.empty())
+            {
+                *errorMessage += " (" + summaryProblem + ")";
+            }
+        }
+        return false;
+    }
+
+    if (reader.statistics().has_value())
+    {
+        const auto imuCountIt = reader.statistics()->channelMessageCounts.find(kFaysImuChannelId);
+        if (imuCountIt != reader.statistics()->channelMessageCounts.end())
+        {
+            *imuMessageCount = imuCountIt->second;
+        }
+        const auto cameraCountIt = reader.statistics()->channelMessageCounts.find(kFaysCameraChannelId);
+        if (cameraCountIt != reader.statistics()->channelMessageCounts.end())
+        {
+            *cameraMessageCount = cameraCountIt->second;
+        }
+    }
+
+    const auto classifyFaysMessage = [](const mcap::Message &message) {
+        if (message.channelId == kFaysImuChannelId || message.dataSize == kFaysImuPayloadBytes)
+        {
+            return 'i';
+        }
+        if (message.channelId == kFaysCameraChannelId || message.dataSize == kFaysCameraPayloadBytes)
+        {
+            return 'c';
+        }
+        return '\0';
+    };
+    bool foundImu = false;
+    bool foundCamera = false;
+    auto *dataSource = reader.dataSource();
+    const auto &chunkIndexes = reader.chunkIndexes();
+    if (dataSource != nullptr && !chunkIndexes.empty())
+    {
+        size_t scannedChunks = 0;
+        for (auto it = chunkIndexes.rbegin();
+             it != chunkIndexes.rend() && scannedChunks < kFaysTailChunkScanLimit && !(foundImu && foundCamera);
+             ++it, ++scannedChunks)
+        {
+            mcap::TypedRecordReader recordReader(
+                *dataSource,
+                it->chunkStartOffset,
+                it->chunkStartOffset + it->chunkLength);
+            recordReader.onMessage = [&](const mcap::Message &message,
+                                         mcap::ByteOffset,
+                                         std::optional<mcap::ByteOffset>) {
+                const char kind = classifyFaysMessage(message);
+                if (kind == 'i')
+                {
+                    if (!foundImu || message.logTime > *lastImuLogTimeNs)
+                    {
+                        *lastImuLogTimeNs = message.logTime;
+                        foundImu = true;
+                    }
+                }
+                else if (kind == 'c')
+                {
+                    if (!foundCamera || message.logTime > *lastCameraLogTimeNs)
+                    {
+                        *lastCameraLogTimeNs = message.logTime;
+                        foundCamera = true;
+                    }
+                }
+            };
+
+            while (recordReader.next())
+            {
+            }
+
+            if (!recordReader.status().ok() && errorMessage != nullptr && errorMessage->empty())
+            {
+                *errorMessage = "failed to read Fays tail chunk: " + recordReader.status().message;
+            }
+        }
+    }
+    else
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "missing Fays chunk indexes";
+        }
+        return false;
+    }
+    if (!foundImu || !foundCamera)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "Fays topic has zero messages: imu=" +
+                            std::string(foundImu ? "present" : "zero") +
+                            ", camera=" +
+                            std::string(foundCamera ? "present" : "zero");
+        }
+        return false;
+    }
+
+    if (*imuMessageCount == 0)
+    {
+        *imuMessageCount = foundImu ? 1 : 0;
+    }
+    if (*cameraMessageCount == 0)
+    {
+        *cameraMessageCount = foundCamera ? 1 : 0;
+    }
+    return true;
+}
+}
 
 GripperLedEffect RecordRuntime::makeLedEffect(LedState state, double progress)
 {
@@ -5548,6 +5728,59 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                   << " encoder_count=" << encoderMessageCount
                   << " tail_video_end_ns=" << tailVideoEndNs
                   << " last_encoder_ns=" << lastEncoderLogTimeNs
+                  << " lag_ms=" << (lagNs / 1000000.0) << std::endl).str());
+    }
+
+    for (const auto &target : kFaysTailCheckTargets)
+    {
+        uint64_t lastImuLogTimeNs = 0;
+        uint64_t lastCameraLogTimeNs = 0;
+        uint64_t imuMessageCount = 0;
+        uint64_t cameraMessageCount = 0;
+        std::string faysTailError;
+        if (!loadFaysMcapTailTimes(
+                episodeDir + "/" + target.mcapFileName,
+                target.imuTopic,
+                target.cameraTopic,
+                &lastImuLogTimeNs,
+                &lastCameraLogTimeNs,
+                &imuMessageCount,
+                &cameraMessageCount,
+                &faysTailError))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = std::string("Fays MCAP tail check failed for side=") + target.side +
+                                ": " + faysTailError;
+            }
+            return false;
+        }
+
+        int64_t lagNs = static_cast<int64_t>(lastCameraLogTimeNs) -
+                        static_cast<int64_t>(lastImuLogTimeNs);
+        if (lagNs < 0)
+        {
+            lagNs = 0;
+        }
+        if (lagNs > kFaysImuTailMaxLagNs)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = std::string("Fays IMU tail lag too large for side=") + target.side +
+                                " (lag_ns=" + std::to_string(lagNs) +
+                                ", threshold_ns=" + std::to_string(kFaysImuTailMaxLagNs) +
+                                ", last_camera_ns=" + std::to_string(lastCameraLogTimeNs) +
+                                ", last_imu_ns=" + std::to_string(lastImuLogTimeNs) + ")";
+            }
+            return false;
+        }
+
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] Fays MCAP tail check pass:"
+                  << " side=" << target.side
+                  << " imu_count=" << imuMessageCount
+                  << " camera_count=" << cameraMessageCount
+                  << " last_camera_ns=" << lastCameraLogTimeNs
+                  << " last_imu_ns=" << lastImuLogTimeNs
                   << " lag_ms=" << (lagNs / 1000000.0) << std::endl).str());
     }
 

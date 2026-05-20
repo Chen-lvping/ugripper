@@ -279,6 +279,10 @@ systemctl daemon-reload
 
 udevadm control --reload-rules
 # 仅重触发视频/声音设备，应用相机与 USB 音频相关 udev 规则；避免触发 block add 导致升级期间重复执行 usb-auto-update
+# Fays SDK 读取 serial/calibration 时还会打开 /dev/bus/usb 下的 FTDI
+# usb_device 节点；已插设备需要定向回放 usb 事件，否则只会更新 videoN
+# 权限，导致后台 daemon 能拉流但 GetDeviceInfo/GetCalibrationParam 失败。
+udevadm trigger --subsystem-match=usb --attr-match=idVendor=0403 --attr-match=idProduct=602e || true
 udevadm trigger --subsystem-match=video4linux
 udevadm trigger --subsystem-match=sound
 udevadm trigger --subsystem-match=input

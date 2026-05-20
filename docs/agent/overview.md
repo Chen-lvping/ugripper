@@ -19,6 +19,7 @@
 - 持久化标定目录：`/etc/ugripper/config/calibration`
 - 日志目录：`/var/log/ugripper`
 - 运行日志镜像目录：`/mnt/data_disk/logs`
+- 终端硬件检查：`/usr/local/bin/hws`
 - U 盘升级入口：`auto_update/usb_auto_update.sh`
 
 ## 3. 模块总览
@@ -34,6 +35,7 @@
 | 音频播放 | `bin/UgripperRuntime/audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 优先从受支持 USB 耳机麦克风录音，无耳机时回退系统默认 source，供 pre/post 处理链路使用 | 临时 wav 文件 |
 | 数据盘挂载 | `config/99-fixed-usb-map.rules` | 限定允许物理 USB 口，使用独立 mount helper 将数据盘挂到 `/mnt/data_disk`；主包只负责挂载/卸载，不再直接拉起 updater | `/mnt/data_disk` |
+| 硬件健康检查 | `scripts/hws` / `/usr/local/bin/hws` | 一行命令列出左右手全部传感器、胸部相机与数据盘 symlink 的在线状态，便于现场快速确认是否全部在线 | 终端状态表 |
 | USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级/重装、配置导入、标定数据导入、encoder 校准触发；当前会按固定名单自动安装 `das-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`，只要 U 盘根目录存在名单内包就执行安装，同版本也会强制重装；全部安装完成后再通过 PulseAudio 播放 `upgrade_completed.wav`；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload。该脚本及其 `/usr/local/bin` + systemd unit 触发链归属可选独立包 `das-usb-updater` | `/etc/environment`、`calibration.json`、夹爪 HMI |
 | 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、复用 `/mnt/data_disk` 触发左右编码器并行 zeroing、恢复服务 | `bin/SensorRecorder/zeroing` |
 
@@ -55,7 +57,7 @@
 - `standalone/GripperHmiTool` 当前新增了 UMI SN / 标定参数协议封装：SN 固定为 32-byte 字段（当前现场 SN 文本示例为 16-char，尾部补 `0x00`），标定参数固定为 `1024 byte` 严格对齐结构；当前 payload 已覆盖 RGB 主相机、双目 `cam0/cam1`、`cam->imu` 外参、IMU 离散噪声/随机游走与残差统计，其中 header 会保留内部有效数据长度，但当前 `V1.1` 固件写入时仍必须补满 `64 x 16B` 数据包，具体协议见 `docs/umi_calibration_protocol.md`。
 - UMI 标定写入当前增加了异常恢复口径：若写入阶段收到 `0xFE`（当前 chunk 零数据校验错误），驱动会优先重发当前 chunk；若连续出现 `0xFE`，或后续读 SN / 读标定返回 `0xF3/0xFE`，则会发送一次 `AbortWriteInData` 清理固件残留写入状态后再重试。
 11. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
-12. `record_runtime` 初始化阶段会额外拉起一个常驻 warmup daemon；当前由 `camera_recorder --stereo-daemon` 入口维护左右双目的预热状态，并通过 `/tmp/umi_stereo_camera_status.json` 暴露 `ready/not-ready` 状态。
+12. `record_runtime` 初始化阶段会额外拉起一个常驻 Fays stereo daemon；该 daemon 分别以左右配置启动两份 Fays recorder，通过 `/tmp/umi_stereo_camera_status.json` 暴露 `ready/not-ready` 状态。当前 `ready=true` 需要左右 recorder 进程/FIFO 在线、左右 calibration 有效、左右 SDK serial 非空且不同、左右 stereo/IMU symlink 实时存在；Fays SDK 仍按其限制使用启动时解析出的 `/dev/videoN` 端口，但 handle 创建后会复查 symlink 目标，若初始化期间 videoN 漂移则让当前 recorder 失败退出并由外层 daemon 重启。左右 calibration JSON 由对应的常驻 recorder handle 写出，不在外层脚本中额外创建短生命周期 SDK probe。Fays `VideoFrameQueue` 默认容量为 128，用于吸收录制切换和编码启动期间的短时背压。
 13. `record_runtime` 当前按 recorder 进程组而不是单一父 PID 回收 `camera_recorder` / `sensor_recorder`；当停录或异常收尾时，会向整组发送退出信号，降低内部 `ffmpeg`/`gst` 子进程残留导致后续卡死的概率。
 14. `ugripper-ntp-sync.service` 属于独立 oneshot 辅助服务：安装后和开机后异步启动，不阻塞 `ugripper.service` 主链路；脚本先停止 `ntp.service` / `chrony.service` / `systemd-timesyncd.service` 这类常驻校时服务，再检查 `/tmp/umi_recording.lock`，录制中直接跳过，空闲时优先用 `sntp -S` 做一次性校时，再 fallback 到 `ntpd -q -g` 或 `timedatectl`。同步完成、超时、失败或检测到录制开始后都会再次停止常驻 NTP 服务，避免录制时间轴被系统时间校准跳变影响。
 

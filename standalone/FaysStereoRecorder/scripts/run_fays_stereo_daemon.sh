@@ -116,26 +116,14 @@ PY
 }
 
 write_status() {
-    local left_ready=false
-    local right_ready=false
-    local ready=false
-    local service_state="warming"
+    local left_process_ready=false
+    local right_process_ready=false
 
     if [ -n "$LEFT_PID" ] && kill -0 "$LEFT_PID" 2>/dev/null && [ -p "$LEFT_FIFO" ]; then
-        left_ready=true
+        left_process_ready=true
     fi
     if [ -n "$RIGHT_PID" ] && kill -0 "$RIGHT_PID" 2>/dev/null && [ -p "$RIGHT_FIFO" ]; then
-        right_ready=true
-    fi
-    if [ "$left_ready" = true ] && [ "$right_ready" = true ]; then
-        ready=true
-    fi
-    if [ "$FINALIZE_PENDING" = true ]; then
-        service_state="finalizing"
-    elif [ "$RECORDING" = true ]; then
-        service_state="recording"
-    elif [ "$ready" = true ]; then
-        service_state="ready"
+        right_process_ready=true
     fi
 
     STATUS_FILE="$STATUS_FILE" \
@@ -145,10 +133,8 @@ write_status() {
     LAST_FINALIZED_EPISODE_DIR="$LAST_FINALIZED_EPISODE_DIR" \
     LAST_FINALIZE_ERROR="$LAST_FINALIZE_ERROR" \
     LAST_SESSION_JSON="$LAST_SESSION_JSON" \
-    READY="$ready" \
-    SERVICE_STATE="$service_state" \
-    LEFT_READY="$left_ready" \
-    RIGHT_READY="$right_ready" \
+    LEFT_PROCESS_READY="$left_process_ready" \
+    RIGHT_PROCESS_READY="$right_process_ready" \
     LEFT_CONFIG="$LEFT_CONFIG" \
     RIGHT_CONFIG="$RIGHT_CONFIG" \
     LEFT_CALIB_JSON="$LEFT_CALIB_JSON" \
@@ -161,11 +147,16 @@ import tempfile
 def as_bool(name):
     return os.environ.get(name, "false") == "true"
 
+def path_exists(path):
+    return bool(path) and os.path.exists(path)
+
 def calibration_state(path):
     root = {
         "path": path,
         "valid": False,
         "status": "missing",
+        "serial_number": "",
+        "devices": {},
     }
     if not path:
         root["status"] = "disabled"
@@ -179,19 +170,104 @@ def calibration_state(path):
         root["status"] = f"invalid_json:{exc}"
         return root
     if isinstance(data, dict) and data.get("valid") is True:
+        device_info = data.get("device_info", {})
         root["valid"] = True
         root["status"] = "ready"
         root["schema"] = data.get("schema", "")
-        root["sdk_version"] = data.get("device_info", {}).get("sdk_version", "")
+        root["sdk_version"] = device_info.get("sdk_version", "")
+        root["serial_number"] = device_info.get("serial_number", "")
+        root["device_model"] = device_info.get("device_model", "")
+        root["firmware_version"] = device_info.get("firmware_version", "")
+        if isinstance(data.get("devices"), dict):
+            root["devices"] = data["devices"]
     else:
         root["status"] = "invalid_payload"
     return root
+
+def camera_state(name, process_ready, config_path, calibration):
+    serial = calibration.get("serial_number", "")
+    devices = calibration.get("devices", {})
+    stereo_path = devices.get("stereo_dev_port", "") if isinstance(devices, dict) else ""
+    imu_path = devices.get("imu_dev_port", "") if isinstance(devices, dict) else ""
+    stereo_online = path_exists(stereo_path)
+    imu_online = path_exists(imu_path)
+    ready = bool(
+        process_ready and
+        calibration.get("valid") and
+        serial and
+        stereo_online and
+        imu_online
+    )
+    state = "ready" if ready else "not-ready"
+    if process_ready and calibration.get("valid") and serial and not stereo_online:
+        state = "stereo-symlink-missing"
+    elif process_ready and calibration.get("valid") and serial and not imu_online:
+        state = "imu-symlink-missing"
+    elif process_ready and calibration.get("valid") and not serial:
+        state = "serial-missing"
+    elif process_ready and not calibration.get("valid"):
+        state = "calibration-" + str(calibration.get("status", "invalid"))
+    elif not process_ready:
+        state = "process-not-ready"
+    return {
+        "state": state,
+        "device": config_path,
+        "ready": ready,
+        "process_ready": process_ready,
+        "session_recording": as_bool("RECORDING"),
+        "serial_number": serial,
+        "stereo_symlink_online": stereo_online,
+        "imu_symlink_online": imu_online,
+        "calibration": calibration,
+    }
 
 status_file = os.environ["STATUS_FILE"]
 try:
     last_session = json.loads(os.environ.get("LAST_SESSION_JSON", "{}") or "{}")
 except Exception:
     last_session = {}
+
+left_calibration = calibration_state(os.environ.get("LEFT_CALIB_JSON", ""))
+right_calibration = calibration_state(os.environ.get("RIGHT_CALIB_JSON", ""))
+left_process_ready = as_bool("LEFT_PROCESS_READY")
+right_process_ready = as_bool("RIGHT_PROCESS_READY")
+left_camera = camera_state(
+    "left_stereo",
+    left_process_ready,
+    os.environ.get("LEFT_CONFIG", ""),
+    left_calibration,
+)
+right_camera = camera_state(
+    "right_stereo",
+    right_process_ready,
+    os.environ.get("RIGHT_CONFIG", ""),
+    right_calibration,
+)
+
+multi_device_error = ""
+left_serial = left_camera.get("serial_number", "")
+right_serial = right_camera.get("serial_number", "")
+if left_process_ready and right_process_ready:
+    if not left_serial or not right_serial:
+        multi_device_error = "missing_fays_serial"
+    elif left_serial == right_serial:
+        multi_device_error = f"duplicate_fays_serial:{left_serial}"
+
+if multi_device_error:
+    left_camera["ready"] = False
+    right_camera["ready"] = False
+    left_camera["state"] = multi_device_error
+    right_camera["state"] = multi_device_error
+
+ready = bool(left_camera["ready"] and right_camera["ready"] and not multi_device_error)
+if as_bool("FINALIZE_PENDING"):
+    service_state = "finalizing"
+elif as_bool("RECORDING"):
+    service_state = "recording"
+elif ready:
+    service_state = "ready"
+else:
+    service_state = "not-ready"
 
 root = {
     "recording": as_bool("RECORDING"),
@@ -200,23 +276,12 @@ root = {
     "last_finalized_episode_dir": os.environ.get("LAST_FINALIZED_EPISODE_DIR", ""),
     "last_finalize_error": os.environ.get("LAST_FINALIZE_ERROR", ""),
     "last_session": last_session,
-    "ready": as_bool("READY"),
-    "service_state": os.environ.get("SERVICE_STATE", "warming"),
+    "ready": ready,
+    "service_state": service_state,
+    "multi_device_error": multi_device_error,
     "cameras": {
-        "left_stereo": {
-            "state": os.environ.get("SERVICE_STATE", "warming"),
-            "device": os.environ.get("LEFT_CONFIG", ""),
-            "ready": as_bool("LEFT_READY"),
-            "session_recording": as_bool("RECORDING"),
-            "calibration": calibration_state(os.environ.get("LEFT_CALIB_JSON", "")),
-        },
-        "right_stereo": {
-            "state": os.environ.get("SERVICE_STATE", "warming"),
-            "device": os.environ.get("RIGHT_CONFIG", ""),
-            "ready": as_bool("RIGHT_READY"),
-            "session_recording": as_bool("RECORDING"),
-            "calibration": calibration_state(os.environ.get("RIGHT_CALIB_JSON", "")),
-        },
+        "left_stereo": left_camera,
+        "right_stereo": right_camera,
     },
 }
 
@@ -295,8 +360,11 @@ start_side_daemon() {
 
 start_daemons() {
     rm -f "$LEFT_CALIB_JSON" "$RIGHT_CALIB_JSON"
-    dump_side_calibration left "$LEFT_CONFIG" "$LEFT_CALIB_JSON" || true
-    dump_side_calibration right "$RIGHT_CONFIG" "$RIGHT_CALIB_JSON" || true
+    # Avoid creating extra short-lived SDK handles before the warmup daemons.
+    # The vendor SDK can cross-bind or re-enumerate devices when calibration
+    # probes are opened immediately before the long-lived recorder handles.
+    # Each recorder daemon writes its own calibration JSON after its stable
+    # handle is created.
     start_side_daemon left "$LEFT_CONFIG" "$LEFT_FIFO" left_stereo.mkv left_fays_data.mcap "$LEFT_CALIB_JSON"
     start_side_daemon right "$RIGHT_CONFIG" "$RIGHT_FIFO" right_stereo.mkv right_fays_data.mcap "$RIGHT_CALIB_JSON"
 }
@@ -318,6 +386,35 @@ wait_for_file_nonempty() {
     local deadline=$((SECONDS + FINALIZE_TIMEOUT_SEC))
     while [ "$SECONDS" -le "$deadline" ]; do
         [ -s "$path" ] && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
+wait_for_mcap_complete() {
+    local path="$1"
+    local deadline=$((SECONDS + FINALIZE_TIMEOUT_SEC))
+    while [ "$SECONDS" -le "$deadline" ]; do
+        if [ -s "$path" ]; then
+            python3 - "$path" <<'PY' && return 0
+import os
+import sys
+
+path = sys.argv[1]
+magic = b"\x89MCAP0\r\n"
+try:
+    size = os.path.getsize(path)
+    if size < len(magic) * 2:
+        sys.exit(1)
+    with open(path, "rb") as fh:
+        head = fh.read(len(magic))
+        fh.seek(-len(magic), os.SEEK_END)
+        tail = fh.read(len(magic))
+    sys.exit(0 if head == magic and tail == magic else 1)
+except Exception:
+    sys.exit(1)
+PY
+        fi
         sleep 0.1
     done
     return 1
@@ -395,10 +492,10 @@ handle_stop() {
         wait_for_file_nonempty "$episode_dir/right_stereo.mkv" || LAST_FINALIZE_ERROR="right_stereo.mkv missing or empty"
     fi
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        wait_for_file_nonempty "$episode_dir/left_fays_data.mcap" || LAST_FINALIZE_ERROR="left_fays_data.mcap missing or empty"
+        wait_for_mcap_complete "$episode_dir/left_fays_data.mcap" || LAST_FINALIZE_ERROR="left_fays_data.mcap missing or incomplete"
     fi
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        wait_for_file_nonempty "$episode_dir/right_fays_data.mcap" || LAST_FINALIZE_ERROR="right_fays_data.mcap missing or empty"
+        wait_for_mcap_complete "$episode_dir/right_fays_data.mcap" || LAST_FINALIZE_ERROR="right_fays_data.mcap missing or incomplete"
     fi
 
     if [ -z "$LAST_FINALIZE_ERROR" ]; then

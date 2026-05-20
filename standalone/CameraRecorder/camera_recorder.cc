@@ -1078,7 +1078,9 @@ private:
         RetryIoctl(fd_, VIDIOC_S_PARM, &streamparm);
 
         v4l2_requestbuffers request{};
-        request.count = 8;
+        // Keep a deeper V4L2 compressed buffer pool so short user-space stalls
+        // under multi-camera contention are less likely to drop reference units.
+        request.count = 32;
         request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         request.memory = V4L2_MEMORY_MMAP;
         if (!RetryIoctl(fd_, VIDIOC_REQBUFS, &request) || request.count < 2) {
@@ -1150,11 +1152,11 @@ private:
                      "is-live", TRUE,
                      "format", GST_FORMAT_TIME,
                      "do-timestamp", FALSE,
-                     "block", FALSE,
+                     "block", TRUE,
                      "stream-type", GST_APP_STREAM_TYPE_STREAM,
                      nullptr);
         g_object_set(G_OBJECT(queue),
-                     "leaky", 2,
+                     "leaky", 0,
                      "max-size-buffers", 0,
                      "max-size-bytes", 0,
                      "max-size-time", kMainCameraLeakyQueueMaxTimeNs,
@@ -1930,7 +1932,7 @@ std::unique_ptr<CameraRecorder> CreateRecorder(const CameraConfig& config, const
 }
 
 struct StereoCapturedFrame {
-    std::vector<uint8_t> jpeg_bytes;
+    std::vector<uint8_t> frame_bytes;
     int64_t system_time_us = 0;
     uint64_t sequence = 0;
 };
@@ -1961,7 +1963,7 @@ public:
         }
         frame_sequence_ = 0;
 
-        if (!OpenDevice(error_message)) {
+        if (!OpenCaptureSource(error_message)) {
             CleanupDevice();
             return false;
         }
@@ -2014,6 +2016,10 @@ private:
         void* data = nullptr;
         size_t length = 0;
     };
+
+    bool OpenCaptureSource(std::string* error_message) {
+        return OpenDevice(error_message);
+    }
 
     static bool RetryIoctl(int fd, unsigned long request, void* arg) {
         while (true) {
@@ -2136,6 +2142,10 @@ private:
     }
 
     void CaptureLoop() {
+        V4l2CaptureLoop();
+    }
+
+    void V4l2CaptureLoop() {
         while (!stop_requested_.load(std::memory_order_relaxed)) {
             pollfd poll_fd{};
             poll_fd.fd = fd_;
@@ -2186,8 +2196,8 @@ private:
                 StereoCapturedFrame frame;
                 frame.system_time_us = now_us;
                 frame.sequence = frame_sequence_++;
-                frame.jpeg_bytes.resize(buffer.bytesused);
-                std::memcpy(frame.jpeg_bytes.data(), buffers_[buffer.index].data, buffer.bytesused);
+                frame.frame_bytes.resize(buffer.bytesused);
+                std::memcpy(frame.frame_bytes.data(), buffers_[buffer.index].data, buffer.bytesused);
                 frame_handler_(std::move(frame));
             }
 
@@ -2459,7 +2469,7 @@ public:
         return last_frame_system_time_us_;
     }
 
-    bool PushFrame(std::vector<uint8_t> jpeg_bytes, int64_t system_time_us) {
+    bool PushFrame(std::vector<uint8_t> frame_bytes, int64_t system_time_us) {
         std::unique_lock<std::mutex> lock(queue_mutex_);
         if (!running_ || stop_requested_ || failure_) {
             return false;
@@ -2470,7 +2480,7 @@ public:
         if (!running_ || writer_stop_requested_ || failure_) {
             return false;
         }
-        frame_queue_.push_back({std::move(jpeg_bytes), system_time_us});
+        frame_queue_.push_back({std::move(frame_bytes), system_time_us});
         if (frame_queue_.size() > max_queue_backlog_) {
             max_queue_backlog_ = frame_queue_.size();
         }
@@ -2513,7 +2523,7 @@ public:
 
 private:
     struct QueuedFrame {
-        std::vector<uint8_t> jpeg_bytes;
+        std::vector<uint8_t> frame_bytes;
         int64_t system_time_us = 0;
     };
 
@@ -2551,8 +2561,8 @@ private:
                 break;
             }
             if (!WriteAll(write_fd_,
-                          reinterpret_cast<const uint8_t*>(frame.jpeg_bytes.data()),
-                          frame.jpeg_bytes.size())) {
+                          reinterpret_cast<const uint8_t*>(frame.frame_bytes.data()),
+                          frame.frame_bytes.size())) {
                 if (!stop_requested_) {
                     failure_ = true;
                     DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] failed to write stereo frame to ffmpeg stdin: "
@@ -3133,7 +3143,7 @@ private:
         if (!session_recorder_ || !session_recorder_->IsRunning()) {
             return;
         }
-        if (!session_recorder_->PushFrame(std::move(frame.jpeg_bytes), frame.system_time_us) &&
+        if (!session_recorder_->PushFrame(std::move(frame.frame_bytes), frame.system_time_us) &&
             !stop_requested_by_control_) {
             session_failed_ = true;
             last_error_ = "failed to queue stereo frame for " + config_.name;

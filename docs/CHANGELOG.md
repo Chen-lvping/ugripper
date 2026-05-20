@@ -42,6 +42,11 @@
 - 新增左手双键长按卸载数据盘：仅在停止录制时允许触发；运行时会先刷运行日志，再通过统一 system action helper 请求卸载 `/mnt/data_disk`，成功后播放 `umount.wav`，失败播放 `error.wav`；原右手双键长按关机继续沿用同一 helper 分流执行。
 - 补齐左手新 hub 下 `left_tcam_r` 的 `udev` 映射：左侧 `left_tcam_r` 现同时接受旧 hub 的 `.4.1` 与新 hub 的 `.3` 端口，保证新旧左手 hub 规则共存。
 - 修正左手更换新 hub 后的 `udev` 视频映射：左侧 `left_cam_main` / `left_tcam_l` 改为“设备类型优先 + 左侧链路约束”匹配，不再只依赖 `.4.2/.4.4` 固定内部端口，避免左主摄与左触觉因 hub 内部端口变化而丢失 `/dev/left_cam_main`、`/dev/left_tcam_l`。
+- 新增 `hws` 终端硬件检查命令：一次性列出左右手全部传感器、胸部相机与数据盘 symlink 的在线状态，并安装到 `/usr/local/bin/hws`，方便现场直接输入检查设备是否全部在线。
+- Fays stereo daemon 的 `ready` 判定增加多设备自检：状态文件会暴露左右 Fays SDK serial、实时 symlink 在线状态与 resolved 端口；只有左右 recorder 进程/FIFO 在线、左右 calibration 有效、左右 SDK serial 非空且不同、左右 stereo/IMU symlink 实时存在时，`/tmp/umi_stereo_camera_status.json.ready` 才会为 true，避免两个 side 误指同一台 Fays 或旧 calibration 缓存导致误报 ready。
+- 将 Fays `VideoFrameQueue` 默认容量从 8 提升到 128，吸收录制开始、编码器启动或短时写入背压期间的帧堆积，降低 session 切换瞬间丢帧或误触发异常退出的概率。
+- Fays SDK handle 创建增加 video 节点稳定性校验：SDK 仍按限制使用 `/dev/videoN`，但每次创建 handle 后会重新解析左右 Fays symlink；若 SDK 初始化期间触发重枚举导致 videoN 漂移，当前 recorder 会失败退出并交由外层 daemon 重新拉起，避免后台进程存活但正式录制时拿着旧端口无帧输出。
+- Fays stereo daemon 启动时不再先运行额外的 `dump-calib-json` 短生命周期 SDK probe；左右 calibration JSON 改为由对应的常驻 recorder handle 启动后自行写出，避免正式 warmup 前额外创建 SDK handle 导致左右设备串号或左侧重枚举。
 - 修复 `camera_recorder` 的 ffmpeg 子进程生命周期：统一改为“逐路启动 recorder 对象 + 子进程独立进程组 + 父死子亡保护”的正确口径，既避免 `camera_recorder` 异常退出后遗留孤儿 `ffmpeg` 持续占用 tactile 设备，也避免从短生命周期启动线程里 `fork()` 触发 `PR_SET_PDEATHSIG` 误杀子进程，现场表现为 `Device or resource busy`、触觉 recorder `exit_code=137` 或输出 mkv 缺失。
 - 主摄 `direct-copy-h26x` 录制链路改为 `camera_recorder` 进程内 `V4L2 MMAP capture -> appsrc -> h26xparse -> matroskamux -> filesink`，`record_time_offset_us` 的 system time 打点前移到 `VIDIOC_DQBUF` / `v4l2_buffer.timestamp` 附近，减少 shell 管线日志解析带来的软件延迟。
 - 主摄容器时间轴改为在进程内显式写入单调 `PTS/DTS`，降低 `non_monotonic_dts_count` 这类由后置时间戳链路引入的异常概率。

@@ -1,0 +1,224 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_ROOT="/opt/ugripper"
+if [ -n "${UGRIPPER_ROOT:-}" ]; then
+    ROOT_DIR="${UGRIPPER_ROOT}"
+elif [ -d "${DEFAULT_ROOT}/scripts" ]; then
+    ROOT_DIR="${DEFAULT_ROOT}"
+elif [ -f "${SCRIPT_DIR}/../run_record.sh" ]; then
+    ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+else
+    ROOT_DIR="${DEFAULT_ROOT}"
+fi
+
+if [ -t 1 ]; then
+    GREEN=$'\033[32m'
+    RED=$'\033[31m'
+    YELLOW=$'\033[33m'
+    RESET=$'\033[0m'
+else
+    GREEN=""
+    RED=""
+    YELLOW=""
+    RESET=""
+fi
+
+color_ok() { printf '%sOK%s' "$GREEN" "$RESET"; }
+color_off() { printf '%sOFF%s' "$RED" "$RESET"; }
+color_warn() { printf '%sWARN%s' "$YELLOW" "$RESET"; }
+
+resolve_path() {
+    local path="$1"
+    if [ -e "$path" ] || [ -L "$path" ]; then
+        readlink -f "$path" 2>/dev/null || readlink "$path" 2>/dev/null || printf '%s' "$path"
+    else
+        printf '%s' ""
+    fi
+}
+
+is_online() {
+    local path="$1"
+    if [ -e "$path" ]; then
+        return 0
+    fi
+    return 1
+}
+
+print_state() {
+    local state="$1"
+    if [ "$state" = "OK" ]; then
+        printf '%s%-5s%s' "$GREEN" "$state" "$RESET"
+    else
+        printf '%s%-5s%s' "$RED" "$state" "$RESET"
+    fi
+}
+
+state_for_path() {
+    local path="$1"
+    if is_online "$path"; then
+        printf 'OK'
+    else
+        printf 'OFF'
+    fi
+}
+
+target_for_path() {
+    local path="$1"
+    local resolved=""
+    resolved="$(resolve_path "$path")"
+    if [ -n "$resolved" ]; then
+        printf '%s' "$resolved"
+    else
+        printf '<missing>'
+    fi
+}
+
+entry_label() {
+    printf '%s' "${1#*|}"
+}
+
+entry_path() {
+    printf '%s' "${1%%|*}"
+}
+
+count_online() {
+    local count=0 entry path
+    for entry in "$@"; do
+        path="$(entry_path "$entry")"
+        if is_online "$path"; then
+            count=$((count + 1))
+        fi
+    done
+    printf '%s' "$count"
+}
+
+print_rule() {
+    printf '%s\n' '-------------------- ----- ------------------------ | -------------------- ----- ------------------------'
+}
+
+print_hand_row() {
+    local left_entry="$1"
+    local right_entry="$2"
+    local left_path left_label left_state left_target
+    local right_path right_label right_state right_target
+
+    left_path="$(entry_path "$left_entry")"
+    left_label="$(entry_label "$left_entry")"
+    left_state="$(state_for_path "$left_path")"
+    left_target="$(target_for_path "$left_path")"
+
+    right_path="$(entry_path "$right_entry")"
+    right_label="$(entry_label "$right_entry")"
+    right_state="$(state_for_path "$right_path")"
+    right_target="$(target_for_path "$right_path")"
+
+    printf '%-20s ' "$left_label"
+    print_state "$left_state"
+    printf ' %-24s | %-20s ' "$left_target" "$right_label"
+    print_state "$right_state"
+    printf ' %-24s\n' "$right_target"
+}
+
+print_other_rule() {
+    printf '%s\n' '-------------------- ----- ------------------------'
+}
+
+print_other_row() {
+    local entry="$1"
+    local path label state target
+    path="$(entry_path "$entry")"
+    label="$(entry_label "$entry")"
+    state="$(state_for_path "$path")"
+    target="$(target_for_path "$path")"
+
+    printf '%-20s ' "$label"
+    print_state "$state"
+    printf ' %-24s\n' "$target"
+}
+
+left_items=(
+    "/dev/left_gripper|left_gripper"
+    "/dev/left_encoder|left_encoder"
+    "/dev/left_tcam_l|left_tcam_l"
+    "/dev/left_tcam_r|left_tcam_r"
+    "/dev/left_cam_main|left_cam_main"
+    "/dev/left_stereo|left_stereo"
+    "/dev/left_fays_stereo|left_fays_stereo"
+    "/dev/left_fays_imu|left_fays_imu"
+)
+
+right_items=(
+    "/dev/right_gripper|right_gripper"
+    "/dev/right_encoder|right_encoder"
+    "/dev/right_tcam_l|right_tcam_l"
+    "/dev/right_tcam_r|right_tcam_r"
+    "/dev/right_cam_main|right_cam_main"
+    "/dev/right_stereo|right_stereo"
+    "/dev/right_fays_stereo|right_fays_stereo"
+    "/dev/right_fays_imu|right_fays_imu"
+)
+
+camera_items=(
+    "/dev/chest_cam_main|chest_cam_main"
+)
+
+usb_items=(
+    "/mnt/data_disk|data_disk"
+)
+
+all_count=0
+online_count=0
+for path_label in "${left_items[@]}" "${right_items[@]}" "${camera_items[@]}" "${usb_items[@]}"; do
+    if [ -e "${path_label%%|*}" ]; then
+        online_count=$((online_count + 1))
+    fi
+    all_count=$((all_count + 1))
+done
+
+if [ "$online_count" -eq "$all_count" ]; then
+    printf 'Hardware Status: %s  %s/%s online\n' "$(color_ok)" "$online_count" "$all_count"
+else
+    printf 'Hardware Status: %s  %s/%s online\n' "$(color_off)" "$online_count" "$all_count"
+fi
+printf '\n'
+
+printf '%s\n' 'Hands'
+printf '%-20s %-5s %-24s | %-20s %-5s %-24s\n' \
+    'Left device' 'State' 'Target' 'Right device' 'State' 'Target'
+print_rule
+for index in "${!left_items[@]}"; do
+    print_hand_row "${left_items[$index]}" "${right_items[$index]}"
+done
+print_rule
+printf 'Left:  %s/%s online%41sRight: %s/%s online\n' \
+    "$(count_online "${left_items[@]}")" "${#left_items[@]}" "" \
+    "$(count_online "${right_items[@]}")" "${#right_items[@]}"
+printf '\n'
+
+printf '%s\n' 'Other'
+printf '%-20s %-5s %-24s\n' 'Device' 'State' 'Target'
+print_other_rule
+for item in "${camera_items[@]}" "${usb_items[@]}"; do
+    print_other_row "$item"
+done
+print_other_rule
+printf 'Other: %s/%s online\n' \
+    "$(count_online "${camera_items[@]}" "${usb_items[@]}")" \
+    "$((${#camera_items[@]} + ${#usb_items[@]}))"
+
+missing_list=()
+for path_label in "${left_items[@]}" "${right_items[@]}" "${camera_items[@]}" "${usb_items[@]}"; do
+    path="${path_label%%|*}"
+    label="${path_label#*|}"
+    [ -e "$path" ] && continue
+    missing_list+=("$label")
+done
+
+if [ "${#missing_list[@]}" -gt 0 ]; then
+    printf '\n%sMissing%s\n' "$RED" "$RESET"
+    for item in "${missing_list[@]}"; do
+        printf '  - %s\n' "$item"
+    done
+fi
