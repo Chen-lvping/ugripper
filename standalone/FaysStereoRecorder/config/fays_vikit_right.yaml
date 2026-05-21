@@ -16,7 +16,7 @@ rgb_cam_width: 1920
 rgb_cam_height: 1080
 
 # Stereo device number
-stereo_dev_port: /dev/right_fays_stereo
+stereo_dev_port: /dev/stereo_right
 # The width of the stereo camera image[640/1280]
 stereo_single_cam_width: 640
 # The width of the stereo camera image[400/800]

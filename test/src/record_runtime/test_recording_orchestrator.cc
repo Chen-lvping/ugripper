@@ -44,6 +44,7 @@ struct RecordingHarness
     std::vector<int> sensor_inherited_fds;
     std::string last_validation_log;
     std::string sync_reason;
+    int validate_calls = 0;
     bool prepare_ok = true;
     bool validate_ok = true;
     bool merge_ok = true;
@@ -88,6 +89,7 @@ struct RecordingHarness
                  },
              .validate_episode =
                  [this](const std::string&, std::string*) {
+                     ++validate_calls;
                      return validate_ok;
                  },
              .prepare_sensor_start =
@@ -363,6 +365,7 @@ TEST(RecordingOrchestratorTest, StopRecordingStereoFinalizeFailureMapsToValidati
     EXPECT_EQ(harness.audio_commands.back(), "validation_failed");
     EXPECT_EQ(harness.recovery_commands.back(), "validation_failed");
     EXPECT_EQ(harness.last_validation_log, "stereo finalize timeout");
+    EXPECT_EQ(harness.validate_calls, 0);
     EXPECT_EQ(harness.sync_reason, "video stop");
 }
 

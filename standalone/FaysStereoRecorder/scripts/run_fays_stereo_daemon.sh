@@ -15,9 +15,13 @@ LEFT_CALIB_JSON="/tmp/umi_left_fays_calibration.json"
 RIGHT_CALIB_JSON="/tmp/umi_right_fays_calibration.json"
 POLL_INTERVAL_SEC="${FAYS_STEREO_POLL_INTERVAL_SEC:-0.2}"
 FINALIZE_TIMEOUT_SEC="${FAYS_STEREO_FINALIZE_TIMEOUT_SEC:-10}"
+START_DELAY_SEC="${FAYS_STEREO_START_DELAY_SEC:-1.5}"
+HEALTH_GRACE_SEC="${FAYS_STEREO_HEALTH_GRACE_SEC:-3}"
 
 LEFT_PID=""
 RIGHT_PID=""
+LEFT_STARTED_AT=0
+RIGHT_STARTED_AT=0
 LAST_COMMAND_SEQ=0
 ACTIVE_EPISODE_DIR=""
 ACTIVE_START_US=0
@@ -27,6 +31,15 @@ LAST_FINALIZE_ERROR=""
 LAST_SESSION_JSON="{}"
 RECORDING=false
 FINALIZE_PENDING=false
+
+mark_session_error() {
+    local message="$1"
+    if [ "$RECORDING" = "true" ] || [ "$FINALIZE_PENDING" = "true" ]; then
+        if [ -z "$LAST_FINALIZE_ERROR" ]; then
+            LAST_FINALIZE_ERROR="$message"
+        fi
+    fi
+}
 
 usage() {
     cat <<'EOF'
@@ -305,6 +318,108 @@ wait_for_fifo() {
     return 1
 }
 
+config_value() {
+    local config="$1"
+    local key="$2"
+    awk -F: -v key="$key" '
+        $1 ~ "^[[:space:]]*" key "[[:space:]]*$" {
+            sub(/^[^:]*:[[:space:]]*/, "", $0)
+            sub(/[[:space:]]+#.*/, "", $0)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", $0)
+            print
+            exit
+        }
+    ' "$config"
+}
+
+check_side_device_paths() {
+    local side="$1"
+    local config="$2"
+    local fifo="$3"
+    local require_fifo="${4:-false}"
+    local quiet="${5:-false}"
+    local stereo_path imu_path
+    stereo_path="$(config_value "$config" stereo_dev_port)"
+    imu_path="$(config_value "$config" imu_dev_port)"
+
+    if [ -z "$stereo_path" ] || [ "$stereo_path" = "NULL" ] || [ ! -e "$stereo_path" ]; then
+        [ "$quiet" = "true" ] || echo "$side Fays stereo symlink missing: ${stereo_path:-<empty>}" >&2
+        return 1
+    fi
+    if [ -z "$imu_path" ] || [ "$imu_path" = "NULL" ] || [ ! -e "$imu_path" ]; then
+        [ "$quiet" = "true" ] || echo "$side Fays IMU symlink missing: ${imu_path:-<empty>}" >&2
+        return 1
+    fi
+    if [ "$require_fifo" = "true" ] && [ ! -p "$fifo" ]; then
+        [ "$quiet" = "true" ] || echo "$side Fays FIFO missing: $fifo" >&2
+        return 1
+    fi
+    return 0
+}
+
+side_started_at() {
+    local side="$1"
+    if [ "$side" = "left" ]; then
+        echo "$LEFT_STARTED_AT"
+    else
+        echo "$RIGHT_STARTED_AT"
+    fi
+}
+
+side_in_health_grace() {
+    local side="$1"
+    local started_at
+    started_at="$(side_started_at "$side")"
+    [ "$started_at" -gt 0 ] && [ $((SECONDS - started_at)) -lt "$HEALTH_GRACE_SEC" ]
+}
+
+calibration_serial() {
+    local calib_json="$1"
+    python3 - "$calib_json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        root = json.load(f)
+    if not isinstance(root, dict) or root.get("valid") is not True:
+        sys.exit(1)
+    device_info = root.get("device_info", {})
+    serial = device_info.get("serial_number", "") if isinstance(device_info, dict) else ""
+    if not serial:
+        sys.exit(1)
+    print(serial)
+except Exception:
+    sys.exit(1)
+PY
+}
+
+check_side_working_state() {
+    local side="$1"
+    local config="$2"
+    local fifo="$3"
+    local calib_json="$4"
+    local pid="$5"
+    local quiet="${6:-false}"
+
+    if ! check_side_device_paths "$side" "$config" "$fifo" true "$quiet"; then
+        return 1
+    fi
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        [ "$quiet" = "true" ] || echo "$side Fays process not running" >&2
+        return 1
+    fi
+    if calibration_serial "$calib_json" >/dev/null 2>&1; then
+        return 0
+    fi
+    if side_in_health_grace "$side"; then
+        return 0
+    fi
+    [ "$quiet" = "true" ] || echo "$side Fays calibration/serial not ready after ${HEALTH_GRACE_SEC}s: $calib_json" >&2
+    return 1
+}
+
 dump_side_calibration() {
     local side="$1"
     local config="$2"
@@ -335,6 +450,7 @@ start_side_daemon() {
         return 1
     fi
 
+    sleep "$START_DELAY_SEC"
     rm -f "$fifo"
     "$RUN_FAYS_RECORD" \
         --config "$config" \
@@ -353,20 +469,120 @@ start_side_daemon() {
 
     if [ "$side" = "left" ]; then
         LEFT_PID="$pid"
+        LEFT_STARTED_AT="$SECONDS"
     else
         RIGHT_PID="$pid"
+        RIGHT_STARTED_AT="$SECONDS"
+    fi
+}
+
+stop_side_daemon() {
+    local side="$1"
+    local fifo="$2"
+    local pid="$3"
+
+    if [ -p "$fifo" ]; then
+        send_side_command "$fifo" exit >/dev/null 2>&1 || true
+    fi
+    if [ -n "$pid" ]; then
+        kill "$pid" 2>/dev/null || true
+        wait "$pid" 2>/dev/null || true
+    fi
+    rm -f "$fifo"
+
+    if [ "$side" = "left" ]; then
+        LEFT_PID=""
+        LEFT_STARTED_AT=0
+    else
+        RIGHT_PID=""
+        RIGHT_STARTED_AT=0
+    fi
+}
+
+maintain_side_daemon() {
+    local side="$1"
+    local config="$2"
+    local fifo="$3"
+    local video_name="$4"
+    local mcap_name="$5"
+    local calib_json="$6"
+    local pid="$7"
+
+    if ! check_side_device_paths "$side" "$config" "$fifo" false true; then
+        if [ -n "$pid" ] || [ -p "$fifo" ]; then
+            echo "$side Fays devices disappeared; stopping only $side recorder" >&2
+            stop_side_daemon "$side" "$fifo" "$pid"
+        fi
+        mark_session_error "$side Fays devices missing"
+        return 0
+    fi
+
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -p "$fifo" ] &&
+       check_side_working_state "$side" "$config" "$fifo" "$calib_json" "$pid" true; then
+        return 0
+    fi
+
+    if [ -n "$pid" ] || [ -p "$fifo" ]; then
+        echo "$side Fays recorder is not healthy; restarting only $side recorder" >&2
+        mark_session_error "$side Fays recorder unhealthy during session"
+        stop_side_daemon "$side" "$fifo" "$pid"
+    fi
+
+    if start_side_daemon "$side" "$config" "$fifo" "$video_name" "$mcap_name" "$calib_json"; then
+        echo "$side Fays recorder started" >&2
+        return 0
+    fi
+
+    mark_session_error "failed to start $side Fays daemon"
+    stop_side_daemon "$side" "$fifo" "$pid"
+    return 0
+}
+
+handle_multi_device_health() {
+    local left_serial right_serial
+
+    if ! check_side_working_state left "$LEFT_CONFIG" "$LEFT_FIFO" "$LEFT_CALIB_JSON" "$LEFT_PID" true; then
+        return 0
+    fi
+    if ! check_side_working_state right "$RIGHT_CONFIG" "$RIGHT_FIFO" "$RIGHT_CALIB_JSON" "$RIGHT_PID" true; then
+        return 0
+    fi
+
+    left_serial="$(calibration_serial "$LEFT_CALIB_JSON" 2>/dev/null || true)"
+    right_serial="$(calibration_serial "$RIGHT_CALIB_JSON" 2>/dev/null || true)"
+    if [ -n "$left_serial" ] && [ "$left_serial" = "$right_serial" ]; then
+        echo "Fays serial collision detected; restarting both recorders: $left_serial" >&2
+        mark_session_error "duplicate Fays serial detected during session: $left_serial"
+        stop_side_daemon left "$LEFT_FIFO" "$LEFT_PID"
+        stop_side_daemon right "$RIGHT_FIFO" "$RIGHT_PID"
+    fi
+}
+
+clear_recovery_error_if_ready() {
+    if [ "$RECORDING" = "true" ] || [ "$FINALIZE_PENDING" = "true" ]; then
+        return 0
+    fi
+    if [ -n "$LEFT_PID" ] && kill -0 "$LEFT_PID" 2>/dev/null &&
+       [ -n "$RIGHT_PID" ] && kill -0 "$RIGHT_PID" 2>/dev/null &&
+       [ -p "$LEFT_FIFO" ] && [ -p "$RIGHT_FIFO" ]; then
+        case "$LAST_FINALIZE_ERROR" in
+            *"Fays devices missing"|*"Fays recorder unhealthy"*|*"duplicate Fays serial"*|*"failed to start "*|"")
+                LAST_FINALIZE_ERROR=""
+                ;;
+        esac
     fi
 }
 
 start_daemons() {
     rm -f "$LEFT_CALIB_JSON" "$RIGHT_CALIB_JSON"
+
     # Avoid creating extra short-lived SDK handles before the warmup daemons.
     # The vendor SDK can cross-bind or re-enumerate devices when calibration
     # probes are opened immediately before the long-lived recorder handles.
     # Each recorder daemon writes its own calibration JSON after its stable
     # handle is created.
-    start_side_daemon left "$LEFT_CONFIG" "$LEFT_FIFO" left_stereo.mkv left_fays_data.mcap "$LEFT_CALIB_JSON"
-    start_side_daemon right "$RIGHT_CONFIG" "$RIGHT_FIFO" right_stereo.mkv right_fays_data.mcap "$RIGHT_CALIB_JSON"
+    maintain_side_daemon left "$LEFT_CONFIG" "$LEFT_FIFO" stereo_left.mkv fays_data_left.mcap "$LEFT_CALIB_JSON" "$LEFT_PID"
+    maintain_side_daemon right "$RIGHT_CONFIG" "$RIGHT_FIFO" stereo_right.mkv fays_data_right.mcap "$RIGHT_CALIB_JSON" "$RIGHT_PID"
 }
 
 send_side_command() {
@@ -461,8 +677,21 @@ handle_start() {
     LAST_FINALIZE_ERROR=""
     LAST_SESSION_JSON="{}"
     FINALIZE_PENDING=false
-    send_side_start "$LEFT_FIFO" "$episode_dir"
-    send_side_start "$RIGHT_FIFO" "$episode_dir"
+    if [ ! -p "$LEFT_FIFO" ] || [ ! -p "$RIGHT_FIFO" ]; then
+        LAST_FINALIZE_ERROR="cannot start stereo session before both Fays recorders are ready"
+        write_status
+        return 1
+    fi
+    send_side_start "$LEFT_FIFO" "$episode_dir" || {
+        LAST_FINALIZE_ERROR="failed to start left Fays session"
+        write_status
+        return 1
+    }
+    send_side_start "$RIGHT_FIFO" "$episode_dir" || {
+        LAST_FINALIZE_ERROR="failed to start right Fays session"
+        write_status
+        return 1
+    }
     ACTIVE_EPISODE_DIR="$episode_dir"
     ACTIVE_START_US="$start_us"
     ACTIVE_STOP_US=0
@@ -482,24 +711,35 @@ handle_stop() {
     ACTIVE_STOP_US="$stop_us"
     write_status
 
-    send_side_command "$LEFT_FIFO" stop || LAST_FINALIZE_ERROR="failed to stop left Fays recorder"
-    send_side_command "$RIGHT_FIFO" stop || LAST_FINALIZE_ERROR="failed to stop right Fays recorder"
+    if [ -z "$LAST_FINALIZE_ERROR" ]; then
+        send_side_command "$LEFT_FIFO" stop || LAST_FINALIZE_ERROR="failed to stop left Fays recorder"
+    else
+        send_side_command "$LEFT_FIFO" stop >/dev/null 2>&1 || true
+    fi
+    if [ -z "$LAST_FINALIZE_ERROR" ]; then
+        send_side_command "$RIGHT_FIFO" stop || LAST_FINALIZE_ERROR="failed to stop right Fays recorder"
+    else
+        send_side_command "$RIGHT_FIFO" stop >/dev/null 2>&1 || true
+    fi
 
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        wait_for_file_nonempty "$episode_dir/left_stereo.mkv" || LAST_FINALIZE_ERROR="left_stereo.mkv missing or empty"
+        wait_for_file_nonempty "$episode_dir/stereo_left.mkv" || LAST_FINALIZE_ERROR="stereo_left.mkv missing or empty"
     fi
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        wait_for_file_nonempty "$episode_dir/right_stereo.mkv" || LAST_FINALIZE_ERROR="right_stereo.mkv missing or empty"
+        wait_for_file_nonempty "$episode_dir/stereo_right.mkv" || LAST_FINALIZE_ERROR="stereo_right.mkv missing or empty"
     fi
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        wait_for_mcap_complete "$episode_dir/left_fays_data.mcap" || LAST_FINALIZE_ERROR="left_fays_data.mcap missing or incomplete"
+        wait_for_mcap_complete "$episode_dir/fays_data_left.mcap" || LAST_FINALIZE_ERROR="fays_data_left.mcap missing or incomplete"
     fi
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        wait_for_mcap_complete "$episode_dir/right_fays_data.mcap" || LAST_FINALIZE_ERROR="right_fays_data.mcap missing or incomplete"
+        wait_for_mcap_complete "$episode_dir/fays_data_right.mcap" || LAST_FINALIZE_ERROR="fays_data_right.mcap missing or incomplete"
     fi
 
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
         LAST_SESSION_JSON="$(build_last_session_json "$episode_dir" "$ACTIVE_START_US" "$stop_us")"
+        LAST_FINALIZED_EPISODE_DIR="$episode_dir"
+    else
+        LAST_SESSION_JSON="{}"
         LAST_FINALIZED_EPISODE_DIR="$episode_dir"
     fi
 
@@ -507,37 +747,27 @@ handle_stop() {
     ACTIVE_EPISODE_DIR=""
     ACTIVE_START_US=0
     ACTIVE_STOP_US=0
+    write_status
 }
 
 cleanup() {
     set +e
-    if [ -p "$LEFT_FIFO" ]; then
-        send_side_command "$LEFT_FIFO" exit >/dev/null 2>&1 || true
-    fi
-    if [ -p "$RIGHT_FIFO" ]; then
-        send_side_command "$RIGHT_FIFO" exit >/dev/null 2>&1 || true
-    fi
-    [ -n "$LEFT_PID" ] && wait "$LEFT_PID" 2>/dev/null || true
-    [ -n "$RIGHT_PID" ] && wait "$RIGHT_PID" 2>/dev/null || true
+    stop_side_daemon left "$LEFT_FIFO" "$LEFT_PID"
+    stop_side_daemon right "$RIGHT_FIFO" "$RIGHT_PID"
 }
 
 trap cleanup EXIT
 trap 'cleanup; exit 0' INT TERM
 
 start_daemons
+clear_recovery_error_if_ready
 write_status
 
 while true; do
-    if [ -n "$LEFT_PID" ] && ! kill -0 "$LEFT_PID" 2>/dev/null; then
-        LAST_FINALIZE_ERROR="left Fays daemon exited"
-        write_status
-        exit 1
-    fi
-    if [ -n "$RIGHT_PID" ] && ! kill -0 "$RIGHT_PID" 2>/dev/null; then
-        LAST_FINALIZE_ERROR="right Fays daemon exited"
-        write_status
-        exit 1
-    fi
+    maintain_side_daemon left "$LEFT_CONFIG" "$LEFT_FIFO" stereo_left.mkv fays_data_left.mcap "$LEFT_CALIB_JSON" "$LEFT_PID"
+    maintain_side_daemon right "$RIGHT_CONFIG" "$RIGHT_FIFO" stereo_right.mkv fays_data_right.mcap "$RIGHT_CALIB_JSON" "$RIGHT_PID"
+    handle_multi_device_health
+    clear_recovery_error_if_ready
 
     if command_line="$(json_read_command 2>/dev/null)"; then
         IFS="$(printf '\t')" read -r command_seq command_recording command_episode command_start_us command_stop_us <<EOF

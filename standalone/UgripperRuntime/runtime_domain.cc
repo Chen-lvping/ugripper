@@ -795,10 +795,6 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
 
     std::string episode_validation_error;
     std::string final_error_message;
-    const int64_t validate_phase_start_ms = steady_ms_fn_ != nullptr ? steady_ms_fn_() : 0;
-    CallLog(dependencies_.log_info, "[PERF] validation phase begin: episode_dir=" + state_.current_episode_dir);
-    const bool episode_valid = dependencies_.validate_episode != nullptr &&
-                               dependencies_.validate_episode(state_.current_episode_dir, &episode_validation_error);
     if (!stereo_stop_ok)
     {
         if (!stereo_finalize_error.empty())
@@ -814,6 +810,18 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
             final_error_message = "stereo session finalize failed";
         }
     }
+    const int64_t validate_phase_start_ms = steady_ms_fn_ != nullptr ? steady_ms_fn_() : 0;
+    CallLog(dependencies_.log_info, "[PERF] validation phase begin: episode_dir=" + state_.current_episode_dir);
+    const bool skip_episode_validation = !stereo_stop_ok;
+    if (skip_episode_validation)
+    {
+        CallLog(dependencies_.log_warn,
+                "skip episode validation because stereo finalize already failed: " + final_error_message);
+    }
+    const bool episode_valid =
+        skip_episode_validation ||
+        (dependencies_.validate_episode != nullptr &&
+         dependencies_.validate_episode(state_.current_episode_dir, &episode_validation_error));
     if (!episode_valid)
     {
         if (final_error_message.empty())
@@ -832,6 +840,10 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
                 " valid=" + std::string(valid ? "true" : "false") + " elapsed_ms=" +
                 std::to_string((steady_ms_fn_ != nullptr ? steady_ms_fn_() : validate_phase_start_ms) -
                                validate_phase_start_ms));
+    if (dependencies_.write_episode_metadata != nullptr)
+    {
+        dependencies_.write_episode_metadata(state_.current_episode_dir, valid, final_error_message);
+    }
     if (!valid)
     {
         CallLog(dependencies_.log_error, "episode validation failed: " + final_error_message);
