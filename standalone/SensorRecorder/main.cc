@@ -244,7 +244,7 @@ bool openSideWriter(const fs::path &outputDir, const SensorSideConfig &config, S
     }
 
     sideWriter->config = config;
-    sideWriter->outputFile = outputDir / ("sensor_data_" + config.label + ".mcap");
+    sideWriter->outputFile = outputDir / ("sensor_" + config.label + ".mcap");
     sideWriter->encoderSchema = buildEncoderSchema();
 
     mcap::McapWriterOptions options("sensor_recorder_" + config.label);

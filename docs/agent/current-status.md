@@ -102,7 +102,7 @@
 | 薄壳启动脚本 | `run_record.sh` | 等待 `/mnt/data_disk` 可写、维护日志同步、拉起 runtime | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/...` |
 | 主运行时 | `bin/UgripperRuntime/UgripperRuntime` | HMI 状态机、LED、提示音、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
 | 相机录制 | `bin/CameraRecorder/CameraRecorder` | 主摄/触觉录制；`--stereo-daemon` 常驻预热、热插拔恢复与 session finalize | 8 路 `mkv` |
-| 传感器录制 | `bin/SensorRecorder/SensorRecorder` | 左右 IMU/encoder 录制并分别输出 MCAP | `sensor_data_left.mcap`、`sensor_data_right.mcap` |
+| 传感器录制 | `bin/SensorRecorder/SensorRecorder` | 左右 IMU/encoder 录制并分别输出 MCAP | `sensor_left.mcap`、`sensor_right.mcap` |
 | HMI 类库/工具 | `standalone/GripperHmiTool` | 按键读取、灯效生成、RGB 指令发送、SN/标定参数读写 | 按键快照、RGB 指令、SN/标定参数 |
 | 音频播放 | `bin/UgripperRuntime/audio/audio_play.py` | 绑定 USB 耳机或回退默认声卡，播放提示音 | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | pre/post 音频录制 | 临时 wav 文件 |

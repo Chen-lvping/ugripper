@@ -30,70 +30,70 @@
 # ---- Right tactile cameras ----
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.2", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="right_tcam_l"
+  SYMLINK+="tcam_right_l"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.2", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="right_tcam_l"
+  SYMLINK+="tcam_right_l"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.3", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
-  SYMLINK+="right_tcam_l"
+  SYMLINK+="tcam_right_l"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.3", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
-  SYMLINK+="right_tcam_l"
+  SYMLINK+="tcam_right_l"
 
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="right_tcam_r"
+  SYMLINK+="tcam_right_r"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="right_tcam_r"
+  SYMLINK+="tcam_right_r"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4:1.0", \
   ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
-  SYMLINK+="right_tcam_r"
+  SYMLINK+="tcam_right_r"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4:1.0", \
   ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
-  SYMLINK+="right_tcam_r"
+  SYMLINK+="tcam_right_r"
 
 # ---- Left tactile cameras ----
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.2", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="left_tcam_l"
+  SYMLINK+="tcam_left_l"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.4", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="left_tcam_l"
+  SYMLINK+="tcam_left_l"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="left_tcam_l"
+  SYMLINK+="tcam_left_l"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="left_tcam_l"
+  SYMLINK+="tcam_left_l"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4:1.0", \
   ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
-  SYMLINK+="left_tcam_l"
+  SYMLINK+="tcam_left_l"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4:1.0", \
   ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
-  SYMLINK+="left_tcam_l"
+  SYMLINK+="tcam_left_l"
 
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="left_tcam_r"
+  SYMLINK+="tcam_left_r"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.3", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; id=\"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\"; [ \"$$id\" = \"1a86:80a0\" ] || [ \"$$id\" = \"05e3:0610\" ]'", \
-  SYMLINK+="left_tcam_r"
+  SYMLINK+="tcam_left_r"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.1", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="left_tcam_r"
+  SYMLINK+="tcam_left_r"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.3", \
   ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; id=\"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\"; [ \"$$id\" = \"1a86:80a0\" ] || [ \"$$id\" = \"05e3:0610\" ]'", \
-  SYMLINK+="left_tcam_r"
+  SYMLINK+="tcam_left_r"
 
 # ---- Right main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
 # 右主摄 packet size helper 仍在包内保留，但自动触发尚未调通，暂不由 udev 执行。
@@ -108,18 +108,18 @@ ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="5-
   ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.4", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="right_cam_main"
+  SYMLINK+="cam_right"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.4", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="right_cam_main"
+  SYMLINK+="cam_right"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.1", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
-  SYMLINK+="right_cam_main"
+  SYMLINK+="cam_right"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.1", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
-  SYMLINK+="right_cam_main"
+  SYMLINK+="cam_right"
 
 # ---- Left main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
 ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="9-1.4.2", \
@@ -136,24 +136,24 @@ ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="11
   ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.2", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="left_cam_main"
+  SYMLINK+="cam_left"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.4", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="left_cam_main"
+  SYMLINK+="cam_left"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="left_cam_main"
+  SYMLINK+="cam_left"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="left_cam_main"
+  SYMLINK+="cam_left"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.1", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
-  SYMLINK+="left_cam_main"
+  SYMLINK+="cam_left"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.1", \
   ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a0\" ]'", \
-  SYMLINK+="left_cam_main"
+  SYMLINK+="cam_left"
 # ---- Chest main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
 # 胸部主摄插在板载 4 个 USB 口任意一个都允许，但必须是直连，不允许落在 hub 下。
 # 因此这里按直连 usb interface 路径 `X-1:1.0` 匹配 video 节点；
@@ -169,20 +169,20 @@ ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNEL=="11-
   ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1:1.0", \
   ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="chest_cam_main"
+  SYMLINK+="cam_chest"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1:1.0", \
   ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="chest_cam_main"
+  SYMLINK+="cam_chest"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1:1.0", \
   ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="chest_cam_main"
+  SYMLINK+="cam_chest"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1:1.0", \
   ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="chest_cam_main"
+  SYMLINK+="cam_chest"
 
 # ---- Fays stereo cameras (FTDI Superspeed Video Bridge, 0403:602e) ----
 # Interface 00 is the stereo image stream and interface 02 is the IMU stream.
-# Keep logical left_stereo/right_stereo names for runtime health and episode
+# Keep logical stereo_left/stereo_right names for runtime health and episode
 # schema, and expose *_fays_stereo aliases for the vendor SDK configs.
 SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="602e", \
   MODE:="0777", GROUP:="plugdev", TAG+="uaccess"
@@ -190,25 +190,25 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", ATTRS{idVendor}=="0403", ATTRS{idPro
   MODE:="0777", GROUP:="video", TAG+="uaccess"
 
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
-  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
-  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
-  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
-  SYMLINK+="right_stereo", SYMLINK+="right_fays_stereo"
+  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
   SYMLINK+="right_fays_imu"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
@@ -231,25 +231,25 @@ SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.4", ATTRS{idVendor}=="
   SYMLINK+="right_fays_imu"
 
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
-  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
-  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
-  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
   PROGRAM=="/bin/sh -c 'hub=/sys%p/../../../..; [ \"$$(cat $$hub/idVendor 2>/dev/null):$$(cat $$hub/idProduct 2>/dev/null)\" = \"1a86:80a1\" ]'", \
-  SYMLINK+="left_stereo", SYMLINK+="left_fays_stereo"
+  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
   SYMLINK+="left_fays_imu"
 SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \

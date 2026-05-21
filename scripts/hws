@@ -141,27 +141,25 @@ print_other_row() {
 left_items=(
     "/dev/left_gripper|left_gripper"
     "/dev/left_encoder|left_encoder"
-    "/dev/left_tcam_l|left_tcam_l"
-    "/dev/left_tcam_r|left_tcam_r"
-    "/dev/left_cam_main|left_cam_main"
-    "/dev/left_stereo|left_stereo"
-    "/dev/left_fays_stereo|left_fays_stereo"
+    "/dev/tcam_left_l|tcam_left_l"
+    "/dev/tcam_left_r|tcam_left_r"
+    "/dev/cam_left|cam_left"
+    "/dev/stereo_left|stereo_left"
     "/dev/left_fays_imu|left_fays_imu"
 )
 
 right_items=(
     "/dev/right_gripper|right_gripper"
     "/dev/right_encoder|right_encoder"
-    "/dev/right_tcam_l|right_tcam_l"
-    "/dev/right_tcam_r|right_tcam_r"
-    "/dev/right_cam_main|right_cam_main"
-    "/dev/right_stereo|right_stereo"
-    "/dev/right_fays_stereo|right_fays_stereo"
+    "/dev/tcam_right_l|tcam_right_l"
+    "/dev/tcam_right_r|tcam_right_r"
+    "/dev/cam_right|cam_right"
+    "/dev/stereo_right|stereo_right"
     "/dev/right_fays_imu|right_fays_imu"
 )
 
 camera_items=(
-    "/dev/chest_cam_main|chest_cam_main"
+    "/dev/cam_chest|cam_chest"
 )
 
 usb_items=(

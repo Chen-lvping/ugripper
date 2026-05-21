@@ -5,6 +5,13 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- 主摄/胸部相机 SN 与标定读取改为设备插入/目标变化时异步维护运行时缓存，拔出即清空；`metadata.json` 和 `calibration.json` 只消费缓存，停录路径不再同步读取 XU。若在线主摄缺少合法 `FE...` SN 或 `MCAL` 标定，episode 停录校验失败并写 `quality_check_err_type=calibration_error`；`main_camera_xu_tool` 增加快速 `--read-sn`、`--read-calib`、`--validate` 验证口径。
+- `metadata.json` 输出改用 `nlohmann::ordered_json` 固定范本字段顺序；UUID fallback 改为 `libuuid`，无音频时允许 `audio_uuid` 为空；主摄/胸部相机 SN 只读取 Yuzhou UVC XU flash，失败写空；gripper SN 复用插入 refresh 后的运行时缓存，拔出后清理，不在写 metadata 时额外同步读串口。
+- Fays stereo daemon 增加工作状态 watchdog：除进程/FIFO/symlink 外，还会持续检查 calibration/serial；单侧异常只重启单侧，左右 serial 重复时重启两侧，录制中异常会写入当前 session 的 `last_finalize_error`。
+- 停录阶段若 stereo daemon 已明确 finalize/session 失败，`record_runtime` 现在直接写失败 metadata 与 `validation_error.log`，跳过后续完整性强校验，避免对已知缺失的 stereo 文件重复等待；`quality_check_err_type` 新增 `finalize_error`。
+- `metadata.json` 切到新 3.0 协议：停录校验完成后再写最终文件，新增 `hardware_list`、`require_files`、`video_details`、`collection_duration_s` 与质量检查结果字段；时长/FPS 保留 1 位小数，视频时长写为 `duration_s`，视频起始偏移统一写为 `start_offset_us`。
+- 修复 `SensorRecorder` 仍生成旧传感器 MCAP 文件名的问题：当前输出改为 `sensor_left.mcap` 与 `sensor_right.mcap`，与 2.0.1 episode 校验口径一致。
+- 数据产物与设备别名统一切到新命名：episode 视频/传感器/Fays 文件改为 `cam_left/cam_right/cam_chest`、`stereo_left/stereo_right`、`tcam_left_*`、`tcam_right_*`、`sensor_left/sensor_right`、`fays_data_left/fays_data_right`；`config/99-fixed-usb-map.rules`、`hws`、CameraRecorder/Fays/SensorRecorder 相关配置与校验脚本同步改为新 symlink / 文件名口径。
 - USB updater 收敛为独立 `standalone/DASUsbUpdater` / `das-usb-updater` 包：同一套 `usb_auto_update.sh`、`boot_check_install.sh`、udev rules 与 mount helper 通过产品 profile 适配 `uglove` / `ugripper`；新包只声明替换已部署的 `ugripper-usb-updater`。
 - 新增 UGripper 过渡包构建入口 `usb_updater_transition_build.sh`：生成旧包名 `ugripper-usb-updater` 的桥接 updater，自动安装名单会在旧包名后继续扫描 `das-usb-updater`，允许已部署旧 updater 的板端通过一次 U 盘升级流程迁移到 DAS updater。
 - `UgripperRuntime` 的 episode metadata 中 updater 版本查询改为优先 `das-usb-updater`，并兼容 fallback 到旧 `ugripper-usb-updater`。
@@ -44,6 +51,8 @@
 - 修正左手更换新 hub 后的 `udev` 视频映射：左侧 `left_cam_main` / `left_tcam_l` 改为“设备类型优先 + 左侧链路约束”匹配，不再只依赖 `.4.2/.4.4` 固定内部端口，避免左主摄与左触觉因 hub 内部端口变化而丢失 `/dev/left_cam_main`、`/dev/left_tcam_l`。
 - 新增 `hws` 终端硬件检查命令：一次性列出左右手全部传感器、胸部相机与数据盘 symlink 的在线状态，并安装到 `/usr/local/bin/hws`，方便现场直接输入检查设备是否全部在线。
 - Fays stereo daemon 的 `ready` 判定增加多设备自检：状态文件会暴露左右 Fays SDK serial、实时 symlink 在线状态与 resolved 端口；只有左右 recorder 进程/FIFO 在线、左右 calibration 有效、左右 SDK serial 非空且不同、左右 stereo/IMU symlink 实时存在时，`/tmp/umi_stereo_camera_status.json.ready` 才会为 true，避免两个 side 误指同一台 Fays 或旧 calibration 缓存导致误报 ready。
+- Fays stereo daemon 热插拔恢复改为单侧维护：单侧设备掉线只停止该侧 recorder，设备回来后只重建该侧，避免整组退出并为后续单手模式保留扩展口径。
+- Fays stereo daemon 拉起单侧 recorder 前默认等待 `1.5s`，降低 USB 设备刚重枚举完成就被 SDK 过快打开导致再次掉线的风险。
 - 将 Fays `VideoFrameQueue` 默认容量从 8 提升到 128，吸收录制开始、编码器启动或短时写入背压期间的帧堆积，降低 session 切换瞬间丢帧或误触发异常退出的概率。
 - Fays SDK handle 创建增加 video 节点稳定性校验：SDK 仍按限制使用 `/dev/videoN`，但每次创建 handle 后会重新解析左右 Fays symlink；若 SDK 初始化期间触发重枚举导致 videoN 漂移，当前 recorder 会失败退出并交由外层 daemon 重新拉起，避免后台进程存活但正式录制时拿着旧端口无帧输出。
 - Fays stereo daemon 启动时不再先运行额外的 `dump-calib-json` 短生命周期 SDK probe；左右 calibration JSON 改为由对应的常驻 recorder handle 启动后自行写出，避免正式 warmup 前额外创建 SDK handle 导致左右设备串号或左侧重枚举。
@@ -149,7 +158,7 @@
 - `audio/audio_play.py` 改回 `pygame.mixer` 常驻播放方案：启动时强制绑定型号为 `0020:0b21` 的 USB 耳机 sink，预热 mixer 后通过 FIFO 播放提示音，并继续在同一进程中监听耳机 HID 音量键；`record_runtime` 与校准脚本优先使用 `.venv/bin/python3`，无本地虚拟环境时回退 `uv run python3`。
 - episode 输出收口到现场所需最小集合：保留 `info.json`、`metadata.json`、`calibration.json`、六路视频和左右传感器 MCAP，不再生成 `cam.mkv` / `tact_left.mkv` / `tact_right.mkv` 兼容 symlink。
 - `record_runtime` 补齐完整按键状态机：`BTN_UP/BTN_DOWN` 长短按、pre/post 音频录制与双键长按关机请求均已迁入 C++。
-- 录制触发时当前启动左右主摄 + 四路触觉相机，继续不录制左右 stereo；传感器数据拆为 `sensor_data_left.mcap` 与 `sensor_data_right.mcap`，episode 校验同步检查双文件。
+- 录制触发时当前启动左右主摄 + 四路触觉相机，继续不录制左右 stereo；传感器数据拆为 `sensor_left.mcap` 与 `sensor_right.mcap`，episode 校验同步检查双文件。
 - `src/camera_recorder` 重构为“`main.cpp` + config list + 录制类”模式：按配置选择主相机直录、触觉混合链路、双目混合链路，替代原来集中式命令拼接。
 - 主相机链路改为新相机直出 H.265：`camera_recorder` 直接用 GStreamer 把 `/dev/*_cam_main` 的 H.265 码流封装成 `mkv`，不再做二次编解码。
 - 修正触觉与双目录制链路：放弃 `gst 解码 -> rawvideo pipe -> ffmpeg` 方案，改为 `ffmpeg -f v4l2 -input_format mjpeg -> hevc_rkmpp` 直接链路；双目继续单文件输出，不再做左右拆分。

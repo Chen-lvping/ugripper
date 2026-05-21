@@ -3,8 +3,8 @@ set -euo pipefail
 
 camera_name="${1:-}"
 
-if [ "$camera_name" != "right_cam_main" ]; then
-    echo "[main_camera_packet] usage: $0 right_cam_main" >&2
+if [ "$camera_name" != "cam_right" ]; then
+    echo "[main_camera_packet] usage: $0 cam_right" >&2
     exit 2
 fi
 
