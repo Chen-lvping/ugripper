@@ -12,6 +12,28 @@ if(PkgConfig_FOUND)
     pkg_check_modules(LZ4 QUIET IMPORTED_TARGET liblz4)
 endif()
 
+set(UUID_SEARCH_DIRS)
+if(CMAKE_CROSSCOMPILING)
+    foreach(root IN LISTS CMAKE_FIND_ROOT_PATH)
+        list(APPEND UUID_SEARCH_DIRS
+            "${root}/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+            "${root}/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+        )
+    endforeach()
+else()
+    list(APPEND UUID_SEARCH_DIRS
+        "/usr/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+        "/lib/${CMAKE_LIBRARY_ARCHITECTURE}"
+    )
+endif()
+find_library(UUID_LIBRARY
+    NAMES uuid
+    REQUIRED
+    PATHS ${UUID_SEARCH_DIRS}
+    NO_DEFAULT_PATH
+)
+message(STATUS "UgripperRuntime: using libuuid at ${UUID_LIBRARY}")
+
 add_library(ugripperruntime_mcap STATIC ${UGRIPPERRUNTIME_MCAP_SOURCE})
 set_target_properties(ugripperruntime_mcap PROPERTIES
     CXX_STANDARD 20
@@ -97,6 +119,7 @@ set_target_properties(${APP_NAME} PROPERTIES
 target_include_directories(${APP_NAME}
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/../CameraRecorder/include
         ${CMAKE_CURRENT_SOURCE_DIR}/../GripperHmiTool/include
 )
 target_link_libraries(${APP_NAME}
@@ -109,6 +132,7 @@ target_link_libraries(${APP_NAME}
         PP::utils
         nlohmann_json::nlohmann_json
         Threads::Threads
+        ${UUID_LIBRARY}
 )
 
 install(TARGETS ${APP_NAME}

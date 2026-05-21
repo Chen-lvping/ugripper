@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -186,6 +187,18 @@ private:
             gripper_hmi::GripperCalibrationDataV1 calibrationPayload{};
         };
 
+        struct MainCameraRuntimeState
+        {
+            std::string cameraName;
+            std::string devicePath;
+            bool enabled = true;
+            bool present = false;
+            std::string serialNumber;
+            bool calibrationPayloadCached = false;
+            std::array<uint8_t, 1024> calibrationPayload{};
+            std::string lastError;
+        };
+
         struct TactileValidationFinding
         {
             std::string cameraName;
@@ -207,12 +220,14 @@ private:
                        std::string exampleCalibrationFile,
                        std::string fallbackCalibrationFile,
                        std::string stereoStatusFile,
+                       std::string hardwareVersion,
                        std::string packageVersion,
                        std::string updaterVersion);
 
         bool initialize();
         std::string createNextEpisodeDir();
         void setGripperRuntimeStates(const std::array<GripperRuntimeState, 2> &states);
+        void setMainCameraRuntimeStates(const std::array<MainCameraRuntimeState, 3> &states);
         void refreshTactileReferenceCacheForSide(const std::string &side,
                                                 std::vector<TactileValidationFinding> *findings = nullptr);
         bool prepareEpisode(const std::string &episodeDir,
@@ -222,13 +237,13 @@ private:
         bool validateEpisode(const std::string &episodeDir,
                              std::string *errorMessage,
                              std::vector<TactileValidationFinding> *tactileFindings = nullptr) const;
+        bool writeFinalMetadata(const std::string &episodeDir,
+                                bool qualityOk,
+                                const std::string &qualityErrorMessage,
+                                std::string *errorMessage) const;
         const std::string &dataRoot() const;
 
     private:
-        bool writeMetadata(const std::string &episodeDir,
-                           bool resetRecording,
-                           const std::string &resetSourceDir,
-                           std::string *errorMessage) const;
         bool writeFilteredCalibration(const std::string &episodeDir, std::string *errorMessage) const;
         bool prepareEpisodeOutputs(const std::string &episodeDir, std::string *errorMessage) const;
 
@@ -243,11 +258,13 @@ private:
         std::string exampleCalibrationFile_;
         std::string fallbackCalibrationFile_;
         std::string stereoStatusFile_;
+        std::string hardwareVersion_;
         std::string packageVersion_;
         std::string updaterVersion_;
         std::string dataRoot_;
         std::string episodeRoot_;
         std::array<GripperRuntimeState, 2> gripperRuntimeStates_{};
+        std::array<MainCameraRuntimeState, 3> mainCameraRuntimeStates_{};
     };
 
     static GripperLedEffect makeLedEffect(LedState state, double progress = 0.0);
@@ -272,6 +289,10 @@ private:
                                          const std::string &errorMessage);
     bool persistGripperCalibrationCache(std::string *errorMessage);
     bool areSideCriticalDevicesReady(const std::string &side) const;
+    void initializeMainCameraRuntimeStates();
+    void maintainMainCameraRuntimeStates();
+    void syncMainCameraRuntimeStatesToEpisodeManager();
+    void waitForMainCameraRefreshes();
     bool startRecording(bool resetRecording);
     bool stopRecording(bool dueToError, const std::string &reason);
     void handleButtons(const ButtonSnapshot &buttons);
@@ -317,6 +338,7 @@ private:
     std::string deviceSn_;
     std::string language_;
     bool chestCameraEnabled_ = true;
+    std::string hardwareVersion_;
     std::string packageVersion_;
     std::string updaterVersion_;
     std::string pendingPreAudioFile_;
@@ -338,6 +360,31 @@ private:
     std::unique_ptr<EpisodeManager> episodeManager_;
     std::array<EpisodeManager::GripperRuntimeState, 2> gripperRuntimeStates_{};
     std::array<bool, 2> pendingGripperRefresh_{};
+    struct MainCameraRefreshResult
+    {
+        std::string cameraName;
+        std::string devicePath;
+        std::string resolvedTarget;
+        std::string serialNumber;
+        bool calibrationPayloadCached = false;
+        std::array<uint8_t, 1024> calibrationPayload{};
+        std::string errorMessage;
+    };
+    struct MainCameraRuntimeCache
+    {
+        std::string cameraName;
+        std::string devicePath;
+        bool enabled = true;
+        bool present = false;
+        std::string resolvedTarget;
+        std::string serialNumber;
+        bool calibrationPayloadCached = false;
+        std::array<uint8_t, 1024> calibrationPayload{};
+        std::string lastError;
+        uint64_t nextRefreshAllowedMs = 0;
+        std::future<MainCameraRefreshResult> refreshFuture;
+    };
+    std::vector<MainCameraRuntimeCache> mainCameraRuntimeStates_;
     GripperPanelManager panelManager_;
     std::unique_ptr<HmiLedController> ledController_;
     mutable ugripper::runtime::ProcessSupervisor processSupervisor_{};

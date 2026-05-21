@@ -8,7 +8,9 @@
 #include <unistd.h>
 
 #include <array>
+#include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdint>
 #include <cstring>
 #include <fstream>
@@ -25,6 +27,9 @@ constexpr uint8_t kXuSelector = 0x17;
 constexpr uint16_t kXuPacketSize = 9;
 constexpr size_t kPayloadChunkSize = 8;
 constexpr size_t kPayloadChunkCount = main_camera::kCalibrationPayloadSize / kPayloadChunkSize;
+constexpr size_t kFastCalibrationChunkCount = 10;
+constexpr size_t kSnOffset = 0x010;
+constexpr size_t kSnLength = 16;
 
 enum class BandwidthMode : uint8_t
 {
@@ -34,9 +39,11 @@ enum class BandwidthMode : uint8_t
 
 struct Options
 {
-    std::string devicePath = "/dev/right_cam_main";
+    std::string devicePath = "/dev/cam_right";
     bool showHelp = false;
     bool readCalibration = false;
+    bool readSn = false;
+    bool validate = false;
     bool setBandwidth = false;
     bool dumpRaw = false;
     bool writeRaw = false;
@@ -76,23 +83,22 @@ public:
         xuSet(command);
     }
 
-    std::array<uint8_t, main_camera::kCalibrationPayloadSize> readCalibrationRaw()
+    std::array<uint8_t, main_camera::kCalibrationPayloadSize> readCalibrationRawFast()
     {
         std::array<uint8_t, main_camera::kCalibrationPayloadSize> payload = {};
-        std::array<uint8_t, kXuPacketSize> readIndexCommand = {0x97, 0x97, 0x97, 0x97, 0x97, 0x97, 0x97, 0x01, 0x00};
-        std::array<uint8_t, kXuPacketSize> response = {};
-
-        for (size_t chunkIndex = 0; chunkIndex < kPayloadChunkCount; ++chunkIndex)
+        for (size_t chunkIndex = 0; chunkIndex < kFastCalibrationChunkCount; ++chunkIndex)
         {
-            readIndexCommand[8] = static_cast<uint8_t>(chunkIndex);
-            xuSet(readIndexCommand);
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            response.fill(0);
-            xuGet(&response);
-            std::memcpy(payload.data() + chunkIndex * kPayloadChunkSize, response.data() + 1, kPayloadChunkSize);
+            readChunk(chunkIndex, payload.data() + chunkIndex * kPayloadChunkSize);
         }
-
         return payload;
+    }
+
+    std::string readSerialNumberFast()
+    {
+        std::array<uint8_t, main_camera::kCalibrationPayloadSize> payload = {};
+        readChunk(kSnOffset / kPayloadChunkSize, payload.data() + kSnOffset);
+        readChunk((kSnOffset / kPayloadChunkSize) + 1, payload.data() + kSnOffset + kPayloadChunkSize);
+        return std::string(reinterpret_cast<const char *>(payload.data() + kSnOffset), kSnLength);
     }
 
     void writeCalibrationRaw(const std::array<uint8_t, main_camera::kCalibrationPayloadSize> &payload)
@@ -114,6 +120,29 @@ public:
     }
 
 private:
+    void readChunk(size_t chunkIndex, uint8_t *chunkData)
+    {
+        if (chunkIndex >= kPayloadChunkCount)
+        {
+            throw std::runtime_error("chunk index out of range: " + std::to_string(chunkIndex));
+        }
+
+        std::array<uint8_t, kXuPacketSize> readIndexCommand = {
+            0x97, 0x97, 0x97, 0x97, 0x97, 0x97, 0x97, 0x01, static_cast<uint8_t>(chunkIndex)};
+        std::array<uint8_t, kXuPacketSize> response = {};
+        try
+        {
+            xuSet(readIndexCommand);
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            xuGet(&response);
+        }
+        catch (const std::exception &ex)
+        {
+            throw std::runtime_error(std::string(ex.what()) + " at chunk " + std::to_string(chunkIndex));
+        }
+        std::memcpy(chunkData, response.data() + 1, kPayloadChunkSize);
+    }
+
     void xuSet(std::array<uint8_t, kXuPacketSize> &buffer)
     {
         struct uvc_xu_control_query query = {};
@@ -173,6 +202,55 @@ deserialize(const std::array<uint8_t, main_camera::kCalibrationPayloadSize> &raw
     return data;
 }
 
+bool isYuzhouMainCameraSn(const std::string &sn)
+{
+    if (sn.size() != kSnLength || sn.rfind("FE", 0) != 0)
+    {
+        return false;
+    }
+    return std::all_of(sn.begin() + 2, sn.end(), [](unsigned char ch) {
+        return std::isdigit(ch) != 0;
+    });
+}
+
+void validateCalibrationPayload(const main_camera::MainCameraCalibrationDataV1 &data)
+{
+    if (std::memcmp(data.header.magic, "MCAL", 4) != 0)
+    {
+        throw std::runtime_error("invalid MCAL payload magic");
+    }
+    if (data.header.dataFormatVersion != main_camera::kCalibrationDataFormatVersion1)
+    {
+        throw std::runtime_error("unsupported MCAL data_format_version");
+    }
+    if (data.header.headerSize != sizeof(main_camera::MainCameraCalibrationHeader))
+    {
+        throw std::runtime_error("invalid MCAL header_size");
+    }
+    const uint16_t minimumPayloadSize =
+        static_cast<uint16_t>(sizeof(main_camera::MainCameraCalibrationHeader) +
+                              sizeof(main_camera::MainCameraIntrinsicsBlock));
+    if (data.header.payloadSize < minimumPayloadSize ||
+        data.header.payloadSize > main_camera::kCalibrationPayloadSize)
+    {
+        throw std::runtime_error("invalid MCAL payload_size");
+    }
+    constexpr uint32_t requiredFields =
+        main_camera::kCalibrationValidCameraModel |
+        main_camera::kCalibrationValidDistortion |
+        main_camera::kCalibrationValidIntrinsics |
+        main_camera::kCalibrationValidResolution;
+    if ((data.header.validFields & requiredFields) != requiredFields)
+    {
+        throw std::runtime_error("MCAL valid_fields missing required bits");
+    }
+    if (data.mainCamera.resolution[0] <= 0.0f || data.mainCamera.resolution[1] <= 0.0f ||
+        data.mainCamera.intrinsics[0] <= 0.0f || data.mainCamera.intrinsics[1] <= 0.0f)
+    {
+        throw std::runtime_error("MCAL intrinsics or resolution is empty");
+    }
+}
+
 void writeBinaryFile(const std::string &path,
                      const std::array<uint8_t, main_camera::kCalibrationPayloadSize> &payload)
 {
@@ -206,15 +284,14 @@ std::array<uint8_t, main_camera::kCalibrationPayloadSize> readBinaryFile(const s
 
 void printCalibrationSummary(const main_camera::MainCameraCalibrationDataV1 &data)
 {
-    const uint32_t checksum = fnv1a32(reinterpret_cast<const uint8_t *>(&data.mainCamera), sizeof(data.mainCamera));
-    uint32_t storedChecksum = 0;
-    std::memcpy(&storedChecksum, data.header.reserved, sizeof(storedChecksum));
+    const std::string sn(reinterpret_cast<const char *>(data.header.reserved), kSnLength);
 
     std::cout << "magic=" << std::string(data.header.magic, data.header.magic + 4) << '\n'
               << "data_format_version=0x" << std::hex << data.header.dataFormatVersion << std::dec << '\n'
               << "payload_size=" << data.header.payloadSize << '\n'
               << "header_size=" << data.header.headerSize << '\n'
               << "valid_fields=0x" << std::hex << data.header.validFields << std::dec << '\n'
+              << "serial_number=" << sn << '\n'
               << "camera_model_enum=" << data.mainCamera.cameraModelEnum << '\n'
               << "distortion_coeffs="
               << data.mainCamera.distortionCoefficients[0] << ','
@@ -228,17 +305,17 @@ void printCalibrationSummary(const main_camera::MainCameraCalibrationDataV1 &dat
               << data.mainCamera.intrinsics[3] << '\n'
               << "resolution="
               << data.mainCamera.resolution[0] << 'x'
-              << data.mainCamera.resolution[1] << '\n'
-              << "stored_checksum=0x" << std::hex << storedChecksum << std::dec << '\n'
-              << "computed_checksum=0x" << std::hex << checksum << std::dec << '\n';
+              << data.mainCamera.resolution[1] << '\n';
 }
 
 void printUsage(const char *program)
 {
     std::cout
         << "Usage: " << program << " [options]\n"
-        << "  --device /dev/right_cam_main\n"
+        << "  --device /dev/cam_right\n"
+        << "  --read-sn\n"
         << "  --read-calib\n"
+        << "  --validate\n"
         << "  --dump-raw /tmp/right_main_camera_calib.bin\n"
         << "  --write-raw /tmp/right_main_camera_calib.bin\n"
         << "  --set-bandwidth high|low\n";
@@ -262,6 +339,16 @@ bool parseOptions(int argc, char **argv, Options *options)
         if (arg == "--read-calib")
         {
             options->readCalibration = true;
+            continue;
+        }
+        if (arg == "--read-sn")
+        {
+            options->readSn = true;
+            continue;
+        }
+        if (arg == "--validate")
+        {
+            options->validate = true;
             continue;
         }
         if (arg == "--dump-raw" && index + 1 < argc)
@@ -338,9 +425,31 @@ int main(int argc, char **argv)
             std::cout << "write_raw=ok path=" << options.writeRawPath << std::endl;
         }
 
-        if (options.readCalibration || options.dumpRaw)
+        if (options.readSn && !options.readCalibration && !options.dumpRaw && !options.validate)
         {
-            const auto payload = device.readCalibrationRaw();
+            const std::string sn = device.readSerialNumberFast();
+            if (!isYuzhouMainCameraSn(sn))
+            {
+                throw std::runtime_error("invalid or empty Yuzhou SN field");
+            }
+            std::cout << "serial_number=" << sn << std::endl;
+            return 0;
+        }
+
+        if (options.readCalibration || options.dumpRaw || options.validate)
+        {
+            const auto payload = device.readCalibrationRawFast();
+            const auto data = deserialize(payload);
+            validateCalibrationPayload(data);
+            const std::string sn(reinterpret_cast<const char *>(data.header.reserved), kSnLength);
+            if (!isYuzhouMainCameraSn(sn))
+            {
+                throw std::runtime_error("invalid or empty Yuzhou SN field");
+            }
+            if (options.readSn)
+            {
+                std::cout << "serial_number=" << sn << std::endl;
+            }
             if (options.dumpRaw)
             {
                 writeBinaryFile(options.dumpPath, payload);
@@ -348,7 +457,11 @@ int main(int argc, char **argv)
             }
             if (options.readCalibration)
             {
-                printCalibrationSummary(deserialize(payload));
+                printCalibrationSummary(data);
+            }
+            if (options.validate)
+            {
+                std::cout << "validate=ok" << std::endl;
             }
         }
 

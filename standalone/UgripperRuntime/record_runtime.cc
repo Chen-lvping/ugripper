@@ -1,4 +1,5 @@
 #include "record_runtime.h"
+#include "main_camera_calibration_data.h"
 #include "utils/logger.h"
 #include "record_runtime/gripper_refresh_logic.h"
 #include "utils/env_utils.h"
@@ -7,8 +8,10 @@
 
 #include <mcap/reader.hpp>
 #include <nlohmann/json.hpp>
+#include <uuid/uuid.h>
 
 #include <algorithm>
+#include <array>
 #include <cerrno>
 #include <cmath>
 #include <cstdio>
@@ -22,21 +25,26 @@
 #include <iomanip>
 #include <initializer_list>
 #include <iostream>
+#include <linux/usb/video.h>
+#include <linux/uvcvideo.h>
 #include <limits>
 #include <map>
 #include <regex>
 #include <set>
 #include <sstream>
 #include <sys/file.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <unistd.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
+using ordered_json = nlohmann::ordered_json;
 
 namespace {
 constexpr const char *kChestCameraEnvKey = "ENABLE_CHEST_CAM_MAIN";
@@ -66,6 +74,16 @@ constexpr uint64_t kFaysImuPayloadBytes = sizeof(double) * 6;
 constexpr uint64_t kFaysCameraPayloadBytes = sizeof(uint32_t);
 constexpr int kVideoProbeTimeoutMs = 1500;
 constexpr int kUdevadmProbeTimeoutMs = 2000;
+constexpr uint8_t kYuzhouXuUnitId = 0x03;
+constexpr uint8_t kYuzhouXuSelector = 0x17;
+constexpr size_t kYuzhouXuPacketSize = 9;
+constexpr size_t kYuzhouPayloadChunkSize = 8;
+constexpr size_t kYuzhouPayloadSize = 1024;
+constexpr size_t kYuzhouPayloadChunkCount = kYuzhouPayloadSize / kYuzhouPayloadChunkSize;
+constexpr size_t kYuzhouSnOffset = 0x010;
+constexpr size_t kYuzhouSnLength = 16;
+constexpr uint64_t kMainCameraRefreshDelayMs = 1500;
+constexpr uint64_t kMainCameraRefreshRetryMs = 3000;
 constexpr int kTactileFrameWidth = 160;
 constexpr int kTactileFrameHeight = 120;
 constexpr size_t kTactileFrameBytes = static_cast<size_t>(kTactileFrameWidth * kTactileFrameHeight);
@@ -84,48 +102,48 @@ struct EpisodeVideoArtifact
 };
 
 constexpr std::array<EpisodeVideoArtifact, 9> kAllEpisodeVideoArtifacts = {{
-    {"left_cam_main", "left_cam_main.mkv"},
-    {"right_cam_main", "right_cam_main.mkv"},
-    {"chest_cam_main", "chest_cam_main.mkv"},
-    {"left_stereo", "left_stereo.mkv"},
-    {"right_stereo", "right_stereo.mkv"},
-    {"left_tcam_l", "left_tcam_l.mkv"},
-    {"left_tcam_r", "left_tcam_r.mkv"},
-    {"right_tcam_l", "right_tcam_l.mkv"},
-    {"right_tcam_r", "right_tcam_r.mkv"},
+    {"left_cam_main", "cam_left.mkv"},
+    {"right_cam_main", "cam_right.mkv"},
+    {"chest_cam_main", "cam_chest.mkv"},
+    {"left_stereo", "stereo_left.mkv"},
+    {"right_stereo", "stereo_right.mkv"},
+    {"left_tcam_l", "tcam_left_l.mkv"},
+    {"left_tcam_r", "tcam_left_r.mkv"},
+    {"right_tcam_l", "tcam_right_l.mkv"},
+    {"right_tcam_r", "tcam_right_r.mkv"},
 }};
 
 constexpr std::array<const char *, 13> kAllCriticalDevicePaths = {{
-    "/dev/right_cam_main",
-    "/dev/left_cam_main",
-    "/dev/chest_cam_main",
-    "/dev/right_stereo",
-    "/dev/left_stereo",
+    "/dev/cam_right",
+    "/dev/cam_left",
+    "/dev/cam_chest",
+    "/dev/stereo_right",
+    "/dev/stereo_left",
     "/dev/right_fays_imu",
     "/dev/left_fays_imu",
-    "/dev/right_tcam_l",
-    "/dev/right_tcam_r",
-    "/dev/left_tcam_l",
-    "/dev/left_tcam_r",
+    "/dev/tcam_right_l",
+    "/dev/tcam_right_r",
+    "/dev/tcam_left_l",
+    "/dev/tcam_left_r",
     "/dev/right_encoder",
     "/dev/left_encoder",
 }};
 
 constexpr std::array<const char *, 6> kLeftCriticalDevicePaths = {{
-    "/dev/left_cam_main",
-    "/dev/left_stereo",
+    "/dev/cam_left",
+    "/dev/stereo_left",
     "/dev/left_fays_imu",
-    "/dev/left_tcam_l",
-    "/dev/left_tcam_r",
+    "/dev/tcam_left_l",
+    "/dev/tcam_left_r",
     "/dev/left_encoder",
 }};
 
 constexpr std::array<const char *, 6> kRightCriticalDevicePaths = {{
-    "/dev/right_cam_main",
-    "/dev/right_stereo",
+    "/dev/cam_right",
+    "/dev/stereo_right",
     "/dev/right_fays_imu",
-    "/dev/right_tcam_l",
-    "/dev/right_tcam_r",
+    "/dev/tcam_right_l",
+    "/dev/tcam_right_r",
     "/dev/right_encoder",
 }};
 
@@ -148,11 +166,11 @@ struct EncoderTailCheckTarget
 
 constexpr std::array<EncoderTailCheckTarget, 2> kEncoderTailCheckTargets = {{
     {"left",
-     "sensor_data_left.mcap",
+     "sensor_left.mcap",
      "encoder_left",
      {"left_cam_main", "left_stereo", "left_tcam_l", "left_tcam_r"}},
     {"right",
-     "sensor_data_right.mcap",
+     "sensor_right.mcap",
      "encoder_right",
      {"right_cam_main", "right_stereo", "right_tcam_l", "right_tcam_r"}},
 }};
@@ -166,8 +184,8 @@ struct FaysTailCheckTarget
 };
 
 constexpr std::array<FaysTailCheckTarget, 2> kFaysTailCheckTargets = {{
-    {"left", "left_fays_data.mcap", "i", "c"},
-    {"right", "right_fays_data.mcap", "i", "c"},
+    {"left", "fays_data_left.mcap", "i", "c"},
+    {"right", "fays_data_right.mcap", "i", "c"},
 }};
 
 struct CommandCaptureResult
@@ -198,10 +216,10 @@ struct TactileCalibrationTarget
 };
 
 constexpr std::array<TactileCalibrationTarget, 4> kTactileCalibrationTargets = {{
-    {"left_tcam_l", "left", "/dev/left_tcam_l", "observation.images.left_tcam_l", "{{LEFT_TCAM_L_SERIAL}}"},
-    {"left_tcam_r", "left", "/dev/left_tcam_r", "observation.images.left_tcam_r", "{{LEFT_TCAM_R_SERIAL}}"},
-    {"right_tcam_l", "right", "/dev/right_tcam_l", "observation.images.right_tcam_l", "{{RIGHT_TCAM_L_SERIAL}}"},
-    {"right_tcam_r", "right", "/dev/right_tcam_r", "observation.images.right_tcam_r", "{{RIGHT_TCAM_R_SERIAL}}"},
+    {"left_tcam_l", "left", "/dev/tcam_left_l", "observation.images.left_tcam_l", "{{LEFT_TCAM_L_SERIAL}}"},
+    {"left_tcam_r", "left", "/dev/tcam_left_r", "observation.images.left_tcam_r", "{{LEFT_TCAM_R_SERIAL}}"},
+    {"right_tcam_l", "right", "/dev/tcam_right_l", "observation.images.right_tcam_l", "{{RIGHT_TCAM_L_SERIAL}}"},
+    {"right_tcam_r", "right", "/dev/tcam_right_r", "observation.images.right_tcam_r", "{{RIGHT_TCAM_R_SERIAL}}"},
 }};
 
 const char *boolText(bool value)
@@ -297,13 +315,25 @@ std::vector<EpisodeVideoArtifact> activeEpisodeVideoArtifacts(bool chestCameraEn
     return artifacts;
 }
 
+const char *episodeVideoFileNameForCamera(const char *cameraName)
+{
+    for (const auto &artifact : kAllEpisodeVideoArtifacts)
+    {
+        if (std::strcmp(artifact.cameraName, cameraName) == 0)
+        {
+            return artifact.fileName;
+        }
+    }
+    return nullptr;
+}
+
 std::vector<const char *> activeCriticalDevicePaths(bool chestCameraEnabled)
 {
     std::vector<const char *> paths;
     paths.reserve(kAllCriticalDevicePaths.size());
     for (const char *path : kAllCriticalDevicePaths)
     {
-        if (!chestCameraEnabled && std::strcmp(path, "/dev/chest_cam_main") == 0)
+        if (!chestCameraEnabled && std::strcmp(path, "/dev/cam_chest") == 0)
         {
             continue;
         }
@@ -1075,6 +1105,41 @@ json makeRgbCalibrationEntryFromPayload(const gripper_hmi::GripperCalibrationDat
     });
 }
 
+json makeMainCameraCalibrationEntryFromPayload(const std::array<uint8_t, kYuzhouPayloadSize> &payload)
+{
+    main_camera::MainCameraCalibrationDataV1 data{};
+    std::memcpy(&data, payload.data(), sizeof(data));
+    const int width = static_cast<int>(std::lround(data.mainCamera.resolution[0]));
+    const int height = static_cast<int>(std::lround(data.mainCamera.resolution[1]));
+    const int normalizedWidth = width > 0 ? width : 1920;
+    const int normalizedHeight = height > 0 ? height : 1080;
+    return json::object({
+        {"shape", json::array({normalizedHeight, normalizedWidth, 3})},
+        {"names", json::array({"height", "width", "channels"})},
+        {"info", nullptr},
+        {"intrinsics",
+         json::object({{std::to_string(normalizedWidth) + "x" +
+                             std::to_string(normalizedHeight),
+                         json::object({
+                             {"fx", data.mainCamera.intrinsics[0]},
+                             {"fy", data.mainCamera.intrinsics[1]},
+                             {"ppx", data.mainCamera.intrinsics[2]},
+                             {"ppy", data.mainCamera.intrinsics[3]},
+                         })}})},
+        {"camera_model", "pinhole"},
+        {"distortion_model", "equidistant"},
+        {"distortion_coeffs",
+         json::array({
+             data.mainCamera.distortionCoefficients[0],
+             data.mainCamera.distortionCoefficients[1],
+             data.mainCamera.distortionCoefficients[2],
+             data.mainCamera.distortionCoefficients[3],
+         })},
+        {"dtype", "video"},
+        {"fps", "unknown"},
+    });
+}
+
 json makeMainCameraPlaceholderFromTemplate(const json *templateEntry)
 {
     const json source = (templateEntry != nullptr && templateEntry->is_object()) ? *templateEntry : json::object();
@@ -1712,8 +1777,8 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
         paths.push_back(episodeDir / artifact.fileName);
     }
 
-    paths.push_back(episodeDir / "sensor_data_left.mcap");
-    paths.push_back(episodeDir / "sensor_data_right.mcap");
+    paths.push_back(episodeDir / "sensor_left.mcap");
+    paths.push_back(episodeDir / "sensor_right.mcap");
     paths.push_back(episodeDir / "metadata.json");
     paths.push_back(episodeDir / "calibration.json");
     paths.push_back(episodeDir / "info.json");
@@ -2198,6 +2263,258 @@ std::optional<std::string> probeUsbSerialForDeviceNode(const std::string &device
         *detail = "no parent usb ATTRS{serial} found";
     }
     return serial;
+}
+
+bool isYuzhouMainCameraSn(const std::string &sn)
+{
+    if (sn.size() != kYuzhouSnLength || sn.rfind("FE", 0) != 0)
+    {
+        return false;
+    }
+    return std::all_of(sn.begin() + 2, sn.end(), [](unsigned char ch) {
+        return std::isdigit(ch) != 0;
+    });
+}
+
+struct YuzhouMainCameraIdentity
+{
+    std::string cameraName;
+    std::string devicePath;
+    std::string resolvedTarget;
+    std::string serialNumber;
+    bool calibrationPayloadCached = false;
+    std::array<uint8_t, kYuzhouPayloadSize> calibrationPayload{};
+};
+
+bool readYuzhouXuChunk(int fd, size_t chunkIndex, uint8_t *chunkData, std::string *detail)
+{
+    if (chunkIndex >= kYuzhouPayloadChunkCount)
+    {
+        if (detail != nullptr)
+        {
+            *detail = "chunk index out of range: " + std::to_string(chunkIndex);
+        }
+        return false;
+    }
+
+    std::array<uint8_t, kYuzhouXuPacketSize> readIndexCommand = {
+        0x97, 0x97, 0x97, 0x97, 0x97, 0x97, 0x97, 0x01, static_cast<uint8_t>(chunkIndex)};
+    struct uvc_xu_control_query setQuery = {};
+    setQuery.unit = kYuzhouXuUnitId;
+    setQuery.selector = kYuzhouXuSelector;
+    setQuery.query = UVC_SET_CUR;
+    setQuery.size = kYuzhouXuPacketSize;
+    setQuery.data = readIndexCommand.data();
+    if (ioctl(fd, UVCIOC_CTRL_QUERY, &setQuery) < 0)
+    {
+        if (detail != nullptr)
+        {
+            *detail = "UVC SET_CUR failed at chunk " + std::to_string(chunkIndex) + ": " +
+                      std::strerror(errno);
+        }
+        return false;
+    }
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    std::array<uint8_t, kYuzhouXuPacketSize> response{};
+    struct uvc_xu_control_query getQuery = {};
+    getQuery.unit = kYuzhouXuUnitId;
+    getQuery.selector = kYuzhouXuSelector;
+    getQuery.query = UVC_GET_CUR;
+    getQuery.size = kYuzhouXuPacketSize;
+    getQuery.data = response.data();
+    if (ioctl(fd, UVCIOC_CTRL_QUERY, &getQuery) < 0)
+    {
+        if (detail != nullptr)
+        {
+            *detail = "UVC GET_CUR failed at chunk " + std::to_string(chunkIndex) + ": " +
+                      std::strerror(errno);
+        }
+        return false;
+    }
+
+    std::memcpy(chunkData, response.data() + 1, kYuzhouPayloadChunkSize);
+    return true;
+}
+
+bool validateYuzhouMainCameraCalibrationPayload(const std::array<uint8_t, kYuzhouPayloadSize> &payload,
+                                                std::string *detail)
+{
+    main_camera::MainCameraCalibrationDataV1 data{};
+    std::memcpy(&data, payload.data(), sizeof(data));
+    if (std::memcmp(data.header.magic, "MCAL", 4) != 0)
+    {
+        if (detail != nullptr)
+        {
+            *detail = "invalid MCAL payload magic";
+        }
+        return false;
+    }
+    if (data.header.dataFormatVersion != main_camera::kCalibrationDataFormatVersion1)
+    {
+        if (detail != nullptr)
+        {
+            *detail = "unsupported MCAL data_format_version=" +
+                      std::to_string(data.header.dataFormatVersion);
+        }
+        return false;
+    }
+    if (data.header.headerSize != sizeof(main_camera::MainCameraCalibrationHeader))
+    {
+        if (detail != nullptr)
+        {
+            *detail = "invalid MCAL header_size=" + std::to_string(data.header.headerSize);
+        }
+        return false;
+    }
+    const uint16_t minimumPayloadSize =
+        static_cast<uint16_t>(sizeof(main_camera::MainCameraCalibrationHeader) +
+                              sizeof(main_camera::MainCameraIntrinsicsBlock));
+    if (data.header.payloadSize < minimumPayloadSize ||
+        data.header.payloadSize > main_camera::kCalibrationPayloadSize)
+    {
+        if (detail != nullptr)
+        {
+            *detail = "invalid MCAL payload_size=" + std::to_string(data.header.payloadSize);
+        }
+        return false;
+    }
+
+    constexpr uint32_t requiredFields =
+        main_camera::kCalibrationValidCameraModel |
+        main_camera::kCalibrationValidDistortion |
+        main_camera::kCalibrationValidIntrinsics |
+        main_camera::kCalibrationValidResolution;
+    if ((data.header.validFields & requiredFields) != requiredFields)
+    {
+        if (detail != nullptr)
+        {
+            *detail = "MCAL valid_fields missing required bits";
+        }
+        return false;
+    }
+
+    if (data.mainCamera.resolution[0] <= 0.0f || data.mainCamera.resolution[1] <= 0.0f ||
+        data.mainCamera.intrinsics[0] <= 0.0f || data.mainCamera.intrinsics[1] <= 0.0f)
+    {
+        if (detail != nullptr)
+        {
+            *detail = "MCAL intrinsics or resolution is empty";
+        }
+        return false;
+    }
+    return true;
+}
+
+std::optional<YuzhouMainCameraIdentity> readYuzhouMainCameraIdentity(const std::string &cameraName,
+                                                                    const std::string &devicePath,
+                                                                    const std::string &resolvedTarget,
+                                                                    std::string *detail)
+{
+    if (!fs::exists(devicePath))
+    {
+        if (detail != nullptr)
+        {
+            *detail = "device node missing";
+        }
+        return std::nullopt;
+    }
+
+    const int fd = open(devicePath.c_str(), O_RDWR | O_NONBLOCK);
+    if (fd < 0)
+    {
+        if (detail != nullptr)
+        {
+            *detail = std::string("open failed: ") + std::strerror(errno);
+        }
+        return std::nullopt;
+    }
+
+    std::array<uint8_t, kYuzhouPayloadSize> payload{};
+    for (size_t chunkIndex = 0; chunkIndex < 10; ++chunkIndex)
+    {
+        if (!readYuzhouXuChunk(fd,
+                               chunkIndex,
+                               payload.data() + chunkIndex * kYuzhouPayloadChunkSize,
+                               detail))
+        {
+            close(fd);
+            return std::nullopt;
+        }
+    }
+
+    close(fd);
+
+    std::string calibrationDetail;
+    if (!validateYuzhouMainCameraCalibrationPayload(payload, &calibrationDetail))
+    {
+        if (detail != nullptr)
+        {
+            *detail = calibrationDetail;
+        }
+        return std::nullopt;
+    }
+
+    const std::string sn(reinterpret_cast<const char *>(payload.data() + kYuzhouSnOffset), kYuzhouSnLength);
+    if (!isYuzhouMainCameraSn(sn))
+    {
+        if (detail != nullptr)
+        {
+            *detail = "invalid or empty Yuzhou SN field";
+        }
+        return std::nullopt;
+    }
+    if (detail != nullptr)
+    {
+        *detail = "yuzhou_xu_fast";
+    }
+
+    YuzhouMainCameraIdentity result;
+    result.cameraName = cameraName;
+    result.devicePath = devicePath;
+    result.resolvedTarget = resolvedTarget;
+    result.serialNumber = sn;
+    result.calibrationPayloadCached = true;
+    result.calibrationPayload = payload;
+    return result;
+}
+
+std::string probeMainCameraSerialForDeviceNode(const std::string &devicePath)
+{
+    std::string detail;
+    const auto identity = readYuzhouMainCameraIdentity("", devicePath, "", &detail);
+    if (identity.has_value())
+    {
+        return identity->serialNumber;
+    }
+    DM_LOG_WARN("{}", (::DA::utils::LogString()
+                       << "failed to read Yuzhou XU SN from " << devicePath
+                       << ": " << detail << std::endl).str());
+    return "";
+}
+
+std::string resolveDeviceNodeTarget(const std::string &devicePath)
+{
+    std::error_code error;
+    fs::path target;
+    if (fs::is_symlink(devicePath, error))
+    {
+        target = fs::read_symlink(devicePath, error);
+        if (!error)
+        {
+            if (target.is_relative())
+            {
+                target = fs::path(devicePath).parent_path() / target;
+            }
+            return target.lexically_normal().string();
+        }
+    }
+    target = fs::canonical(devicePath, error);
+    if (!error)
+    {
+        return target.string();
+    }
+    return devicePath;
 }
 
 void injectRuntimeTactileSerial(json *calibrationJson,
@@ -2846,6 +3163,7 @@ RecordRuntime::~RecordRuntime()
 {
     requestStop();
     stopRecording(false, "shutdown");
+    waitForMainCameraRefreshes();
     stopAudioPlayer();
     if (ledController_)
     {
@@ -2884,6 +3202,12 @@ bool RecordRuntime::initialize()
     DM_LOG_INFO("{}", (::DA::utils::LogString() << kChestCameraEnvKey << "="
                          << (chestCameraEnabled_ ? "true" : "false") << std::endl).str());
 
+    hardwareVersion_ = readEnvValue(options_.envFile, "UGRIPPER_HARDWARE_VERSION");
+    if (hardwareVersion_.empty())
+    {
+        hardwareVersion_ = "v2.5";
+    }
+
     if (options_.gripperPorts.empty())
     {
         options_.gripperPorts.emplace_back("/dev/right_gripper");
@@ -2911,6 +3235,7 @@ bool RecordRuntime::initialize()
         options_.exampleCalibrationFile,
         options_.fallbackCalibrationFile,
         options_.stereoStatusFile,
+        hardwareVersion_,
         packageVersion_,
         updaterVersion_);
 
@@ -2920,6 +3245,7 @@ bool RecordRuntime::initialize()
                   << options_.diskRoot << std::endl).str());
         return false;
     }
+    initializeMainCameraRuntimeStates();
 
     if (!panelManager_.connect(options_.gripperPorts))
     {
@@ -3132,6 +3458,21 @@ bool RecordRuntime::initialize()
                 [this](const std::string& episode_dir, const char* stage) {
                     flushEpisodeArtifactsToDisk(fs::path(episode_dir), chestCameraEnabled_, stage);
                 },
+            .write_episode_metadata =
+                [this](const std::string& episode_dir, bool quality_ok, const std::string& error_message) {
+                    if (episodeManager_ == nullptr)
+                    {
+                        return;
+                    }
+                    std::string metadataError;
+                    if (!episodeManager_->writeFinalMetadata(episode_dir, quality_ok, error_message, &metadataError))
+                    {
+                        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write metadata.json: "
+                                      << metadataError << std::endl).str());
+                        return;
+                    }
+                    flushEpisodeArtifactsToDisk(fs::path(episode_dir), chestCameraEnabled_, "metadata_final");
+                },
             .write_validation_error_log =
                 [](const std::string& episode_dir, const std::string& error_message) {
                     writeValidationErrorLog(fs::path(episode_dir), error_message);
@@ -3217,6 +3558,7 @@ int RecordRuntime::run()
     while (!stopRequested_.load())
     {
         const uint64_t loopStartMs = currentSteadyMs();
+        maintainMainCameraRuntimeStates();
         maintainAudioPlayer();
         maintainStereoDaemon();
         monitorHardwareHealth();
@@ -3922,6 +4264,191 @@ void RecordRuntime::refreshGripperRuntimeStateForSide(const std::string &side)
     state.calibrationPayload = calibrationData;
     state.lastError.clear();
     refreshTactileReferenceCachesForSide(side);
+}
+
+void RecordRuntime::initializeMainCameraRuntimeStates()
+{
+    mainCameraRuntimeStates_.clear();
+    const std::array<std::tuple<const char *, const char *, bool>, 3> cameras = {{
+        {"right_cam_main", "/dev/cam_right", true},
+        {"left_cam_main", "/dev/cam_left", true},
+        {"chest_cam_main", "/dev/cam_chest", chestCameraEnabled_},
+    }};
+
+    const uint64_t nowMs = currentSteadyMs();
+    for (const auto &[cameraName, devicePath, enabled] : cameras)
+    {
+        MainCameraRuntimeCache state;
+        state.cameraName = cameraName;
+        state.devicePath = devicePath;
+        state.enabled = enabled;
+        state.nextRefreshAllowedMs = nowMs + kMainCameraRefreshDelayMs;
+        mainCameraRuntimeStates_.push_back(std::move(state));
+    }
+    syncMainCameraRuntimeStatesToEpisodeManager();
+}
+
+void RecordRuntime::maintainMainCameraRuntimeStates()
+{
+    bool updatedAny = false;
+    const uint64_t nowMs = currentSteadyMs();
+
+    for (auto &state : mainCameraRuntimeStates_)
+    {
+        if (!state.enabled)
+        {
+            continue;
+        }
+
+        if (state.refreshFuture.valid() &&
+            state.refreshFuture.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+        {
+            const auto result = state.refreshFuture.get();
+            if (state.present && result.resolvedTarget == state.resolvedTarget && result.errorMessage.empty())
+            {
+                state.serialNumber = result.serialNumber;
+                state.calibrationPayloadCached = result.calibrationPayloadCached;
+                state.calibrationPayload = result.calibrationPayload;
+                state.lastError.clear();
+                state.nextRefreshAllowedMs = std::numeric_limits<uint64_t>::max();
+                DM_LOG_INFO("{}", (::DA::utils::LogString()
+                    << "main camera runtime cache refreshed: camera=" << state.cameraName
+                    << " device=" << state.devicePath
+                    << " target=" << state.resolvedTarget
+                    << " sn=" << state.serialNumber << std::endl).str());
+            }
+            else if (state.present && result.resolvedTarget == state.resolvedTarget)
+            {
+                const bool shouldLogFailure =
+                    state.lastError.empty() ||
+                    state.lastError == "waiting for XU cache refresh" ||
+                    state.lastError == "refreshing";
+                state.serialNumber.clear();
+                state.calibrationPayloadCached = false;
+                state.calibrationPayload = {};
+                state.lastError = result.errorMessage.empty() ? "unknown XU read failure" : result.errorMessage;
+                state.nextRefreshAllowedMs = nowMs + kMainCameraRefreshRetryMs;
+                if (shouldLogFailure)
+                {
+                    DM_LOG_WARN("{}", (::DA::utils::LogString()
+                        << "main camera runtime cache refresh failed: camera=" << state.cameraName
+                        << " device=" << state.devicePath
+                        << " target=" << state.resolvedTarget
+                        << " detail=" << state.lastError << std::endl).str());
+                }
+            }
+            updatedAny = true;
+        }
+
+        const bool exists = fs::exists(state.devicePath);
+        if (!exists)
+        {
+            if (state.present || !state.serialNumber.empty() || state.calibrationPayloadCached || !state.lastError.empty())
+            {
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                    << "main camera device removed, clear runtime cache: camera=" << state.cameraName
+                    << " device=" << state.devicePath << std::endl).str());
+                state.present = false;
+                state.resolvedTarget.clear();
+                state.serialNumber.clear();
+                state.calibrationPayloadCached = false;
+                state.calibrationPayload = {};
+                state.lastError = "device node missing";
+                updatedAny = true;
+            }
+            continue;
+        }
+
+        const std::string resolvedTarget = resolveDeviceNodeTarget(state.devicePath);
+        if (!state.present || state.resolvedTarget != resolvedTarget)
+        {
+            state.present = true;
+            state.resolvedTarget = resolvedTarget;
+            state.serialNumber.clear();
+            state.calibrationPayloadCached = false;
+            state.calibrationPayload = {};
+            state.lastError = "waiting for XU cache refresh";
+            state.nextRefreshAllowedMs = nowMs + kMainCameraRefreshDelayMs;
+            updatedAny = true;
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "main camera device detected, schedule runtime cache refresh: camera=" << state.cameraName
+                << " device=" << state.devicePath
+                << " target=" << state.resolvedTarget << std::endl).str());
+        }
+
+        if (state.refreshFuture.valid() || nowMs < state.nextRefreshAllowedMs)
+        {
+            continue;
+        }
+
+        const std::string cameraName = state.cameraName;
+        const std::string devicePath = state.devicePath;
+        const std::string resolvedTargetForRead = state.resolvedTarget;
+        if (state.lastError.empty() || state.lastError == "waiting for XU cache refresh")
+        {
+            state.lastError = "refreshing";
+        }
+        state.refreshFuture = std::async(std::launch::async,
+            [cameraName, devicePath, resolvedTargetForRead]() {
+                MainCameraRefreshResult result;
+                result.cameraName = cameraName;
+                result.devicePath = devicePath;
+                result.resolvedTarget = resolvedTargetForRead;
+                std::string detail;
+                const auto identity =
+                    readYuzhouMainCameraIdentity(cameraName, devicePath, resolvedTargetForRead, &detail);
+                if (!identity.has_value())
+                {
+                    result.errorMessage = detail.empty() ? "failed to read Yuzhou XU identity" : detail;
+                    return result;
+                }
+                result.serialNumber = identity->serialNumber;
+                result.calibrationPayloadCached = identity->calibrationPayloadCached;
+                result.calibrationPayload = identity->calibrationPayload;
+                return result;
+            });
+        updatedAny = true;
+    }
+
+    if (updatedAny)
+    {
+        syncMainCameraRuntimeStatesToEpisodeManager();
+    }
+}
+
+void RecordRuntime::syncMainCameraRuntimeStatesToEpisodeManager()
+{
+    if (episodeManager_ == nullptr)
+    {
+        return;
+    }
+
+    std::array<EpisodeManager::MainCameraRuntimeState, 3> states{};
+    for (size_t index = 0; index < states.size() && index < mainCameraRuntimeStates_.size(); ++index)
+    {
+        const auto &source = mainCameraRuntimeStates_[index];
+        auto &target = states[index];
+        target.cameraName = source.cameraName;
+        target.devicePath = source.devicePath;
+        target.enabled = source.enabled;
+        target.present = source.present;
+        target.serialNumber = source.serialNumber;
+        target.calibrationPayloadCached = source.calibrationPayloadCached;
+        target.calibrationPayload = source.calibrationPayload;
+        target.lastError = source.lastError;
+    }
+    episodeManager_->setMainCameraRuntimeStates(states);
+}
+
+void RecordRuntime::waitForMainCameraRefreshes()
+{
+    for (auto &state : mainCameraRuntimeStates_)
+    {
+        if (state.refreshFuture.valid())
+        {
+            state.refreshFuture.wait();
+        }
+    }
 }
 
 void RecordRuntime::refreshTactileReferenceCachesForSide(const std::string &side)
@@ -5187,6 +5714,7 @@ RecordRuntime::EpisodeManager::EpisodeManager(std::string diskRoot,
                                               std::string exampleCalibrationFile,
                                               std::string fallbackCalibrationFile,
                                               std::string stereoStatusFile,
+                                              std::string hardwareVersion,
                                               std::string packageVersion,
                                               std::string updaterVersion)
     : diskRoot_(std::move(diskRoot)),
@@ -5200,6 +5728,7 @@ RecordRuntime::EpisodeManager::EpisodeManager(std::string diskRoot,
       exampleCalibrationFile_(std::move(exampleCalibrationFile)),
       fallbackCalibrationFile_(std::move(fallbackCalibrationFile)),
       stereoStatusFile_(std::move(stereoStatusFile)),
+      hardwareVersion_(std::move(hardwareVersion)),
       packageVersion_(std::move(packageVersion)),
       updaterVersion_(std::move(updaterVersion))
 {
@@ -5240,6 +5769,12 @@ void RecordRuntime::EpisodeManager::setGripperRuntimeStates(
     const std::array<GripperRuntimeState, 2> &states)
 {
     gripperRuntimeStates_ = states;
+}
+
+void RecordRuntime::EpisodeManager::setMainCameraRuntimeStates(
+    const std::array<MainCameraRuntimeState, 3> &states)
+{
+    mainCameraRuntimeStates_ = states;
 }
 
 std::string RecordRuntime::EpisodeManager::createNextEpisodeDir()
@@ -5443,10 +5978,6 @@ bool RecordRuntime::EpisodeManager::prepareEpisode(const std::string &episodeDir
                                                    const std::string &resetSourceDir,
                                                    std::string *errorMessage) const
 {
-    if (!writeMetadata(episodeDir, resetRecording, resetSourceDir, errorMessage))
-    {
-        return false;
-    }
     if (!writeFilteredCalibration(episodeDir, errorMessage))
     {
         return false;
@@ -5466,9 +5997,8 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] validateEpisode begin: episode_dir=" << episodeDir << std::endl).str());
     const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled_);
     const std::vector<std::string> requiredFiles = {
-        "sensor_data_left.mcap",
-        "sensor_data_right.mcap",
-        "metadata.json",
+        "sensor_left.mcap",
+        "sensor_right.mcap",
         "calibration.json",
         "info.json",
     };
@@ -5494,6 +6024,47 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
             if (errorMessage != nullptr)
             {
                 *errorMessage = "missing or empty file: " + path;
+            }
+            return false;
+        }
+    }
+
+    for (const auto &state : mainCameraRuntimeStates_)
+    {
+        if (!state.enabled)
+        {
+            continue;
+        }
+        if (!state.present)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "main camera calibration cache invalid: camera=" + state.cameraName +
+                                " device=" + state.devicePath + " missing";
+            }
+            return false;
+        }
+        if (!isYuzhouMainCameraSn(state.serialNumber))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "main camera SN cache invalid: camera=" + state.cameraName +
+                                " device=" + state.devicePath +
+                                " detail=" + (state.lastError.empty() ? "empty SN" : state.lastError);
+            }
+            return false;
+        }
+        std::string calibrationDetail;
+        if (!state.calibrationPayloadCached ||
+            !validateYuzhouMainCameraCalibrationPayload(state.calibrationPayload, &calibrationDetail))
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "main camera calibration cache invalid: camera=" + state.cameraName +
+                                " device=" + state.devicePath +
+                                " detail=" + (!calibrationDetail.empty()
+                                                   ? calibrationDetail
+                                                   : (state.lastError.empty() ? "empty calibration" : state.lastError));
             }
             return false;
         }
@@ -5841,8 +6412,14 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         }
 
         std::string frameError;
+        const char *fileName = episodeVideoFileNameForCamera(target.cameraName);
+        if (fileName == nullptr || *fileName == '\0')
+        {
+            continue;
+        }
+
         const auto currentFrame = captureTactileGrayFrame(
-            {"-i", episodeDir + "/" + std::string(target.cameraName) + ".mkv"},
+            {"-i", episodeDir + "/" + std::string(fileName)},
             kTactileEpisodeProbeSec,
             &frameError);
         if (!currentFrame.has_value())
@@ -5963,48 +6540,297 @@ const std::string &RecordRuntime::EpisodeManager::dataRoot() const
     return episodeRoot_;
 }
 
-bool RecordRuntime::EpisodeManager::writeMetadata(const std::string &episodeDir,
-                                                  bool resetRecording,
-                                                  const std::string &resetSourceDir,
-                                                  std::string *errorMessage) const
+namespace
 {
-    std::ofstream output(episodeDir + "/metadata.json");
-    if (!output.is_open())
+std::string toUpperAscii(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+    });
+    return value;
+}
+
+std::string addVersionPrefix(const std::string &version)
+{
+    if (version.empty() || version == "unknown" || version.front() == 'v' || version.front() == 'V')
     {
-        if (errorMessage != nullptr)
+        return version;
+    }
+    return "v" + version;
+}
+
+double roundToOneDecimal(double value)
+{
+    if (!std::isfinite(value))
+    {
+        return 0.0;
+    }
+    return std::round(value * 10.0) / 10.0;
+}
+
+std::string lowerCopy(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
+std::string generateUuid()
+{
+    std::ifstream input("/proc/sys/kernel/random/uuid");
+    std::string uuid;
+    if (input.is_open() && std::getline(input, uuid))
+    {
+        uuid = trim(uuid);
+        if (!uuid.empty())
         {
-            *errorMessage = "cannot open metadata.json for write";
+            return uuid;
         }
-        return false;
     }
 
-    const auto makeGripperMetadata = [this](const std::string &side) {
-        const auto &state = gripperRuntimeStates_[gripperStateIndexForSide(side)];
-        std::ostringstream stream;
-        stream << "{\n"
-               << "    \"serial_number\": " << json(state.serialNumber).dump() << ",\n"
-               << "    \"calibration_status\": " << json(state.calibrationStatus).dump() << "\n"
-               << "  }";
-        return stream.str();
-    };
+    uuid_t fallbackUuid;
+    char uuidString[37] = {0};
+    uuid_generate(fallbackUuid);
+    uuid_unparse(fallbackUuid, uuidString);
+    return std::string(uuidString);
+}
 
-    output << "{\n"
-           << "  \"device_type\": \"UMI\",\n"
-           << "  \"device_model\": \"ugripper\",\n"
-           << "  \"device_id\": " << json(deviceSn_).dump() << ",\n"
-           << "  \"collector\": \"default_user\",\n"
-           << "  \"data_path\": \"data/episode_{date:08d}_{episode_index:04d}\",\n"
-           << "  \"camera_codec\": " << json(cameraCodec_).dump() << ",\n"
-           << "  \"ugripper_lang\": " << json(language_).dump() << ",\n"
-           << "  \"ugripper_version\": " << json(packageVersion_).dump() << ",\n"
-           << "  \"ugripper_usb_updater_version\": " << json(updaterVersion_).dump() << ",\n"
-           << "  \"data_format_version\": \"3\",\n"
-           << "  \"record_runtime\": \"cpp\",\n"
-           << "  \"reset_recording\": " << (resetRecording ? "true" : "false") << ",\n"
-           << "  \"reset_source_episode_dir\": " << json(resetSourceDir).dump() << ",\n"
-           << "  \"gripper_left\": " << makeGripperMetadata("left") << ",\n"
-           << "  \"gripper_right\": " << makeGripperMetadata("right") << "\n"
-           << "}\n";
+std::string classifyQualityError(const std::string &message)
+{
+    const std::string lowered = lowerCopy(message);
+    if (lowered.find("finalize") != std::string::npos ||
+        lowered.find("stereo session") != std::string::npos ||
+        lowered.find("fays recorder unhealthy") != std::string::npos ||
+        lowered.find("fays devices missing") != std::string::npos ||
+        lowered.find("duplicate fays serial") != std::string::npos ||
+        lowered.find("failed to stop") != std::string::npos ||
+        lowered.find("failed to start") != std::string::npos)
+    {
+        return "finalize_error";
+    }
+    if (lowered.find("main camera") != std::string::npos ||
+        lowered.find("calibration") != std::string::npos ||
+        lowered.find("mcal") != std::string::npos ||
+        lowered.find("yuzhou") != std::string::npos ||
+        lowered.find(" xu ") != std::string::npos ||
+        lowered.find(" sn ") != std::string::npos)
+    {
+        return "calibration_error";
+    }
+    if (lowered.find("missing") != std::string::npos ||
+        lowered.find("cannot open") != std::string::npos)
+    {
+        return "missing_file";
+    }
+    if (lowered.find("span too short") != std::string::npos ||
+        lowered.find("duration too short") != std::string::npos)
+    {
+        return "collection_duration_too_short";
+    }
+    if (lowered.find("gap") != std::string::npos ||
+        lowered.find("tail") != std::string::npos ||
+        lowered.find("lag too large") != std::string::npos ||
+        lowered.find("no samples near episode end") != std::string::npos)
+    {
+        return "frame_loss";
+    }
+    return "unknown";
+}
+
+double nominalFpsForCamera(const std::string &cameraName)
+{
+    if (cameraName.find("tcam") != std::string::npos)
+    {
+        return 120.0;
+    }
+    if (cameraName.find("stereo") != std::string::npos)
+    {
+        return 25.0;
+    }
+    return 60.0;
+}
+
+std::vector<EpisodeVideoArtifact> metadataVideoArtifacts(bool chestCameraEnabled)
+{
+    std::vector<EpisodeVideoArtifact> artifacts = {
+        {"left_cam_main", "cam_left.mkv"},
+        {"left_tcam_l", "tcam_left_l.mkv"},
+        {"left_tcam_r", "tcam_left_r.mkv"},
+        {"left_stereo", "stereo_left.mkv"},
+        {"right_cam_main", "cam_right.mkv"},
+        {"right_tcam_l", "tcam_right_l.mkv"},
+        {"right_tcam_r", "tcam_right_r.mkv"},
+        {"right_stereo", "stereo_right.mkv"},
+    };
+    if (chestCameraEnabled)
+    {
+        artifacts.push_back({"chest_cam_main", "cam_chest.mkv"});
+    }
+    return artifacts;
+}
+
+std::string jsonStringPath(const json &root, const std::string &path)
+{
+    const json *value = findJsonPathConst(&root, path);
+    if (value != nullptr && value->is_string())
+    {
+        return value->get<std::string>();
+    }
+    return "";
+}
+}
+
+bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episodeDir,
+                                                       bool qualityOk,
+                                                       const std::string &qualityErrorMessage,
+                                                       std::string *errorMessage) const
+{
+    const fs::path episodePath(episodeDir);
+    json existingMetadata = json::object();
+    std::string ignoredError;
+    loadJsonFile((episodePath / "metadata.json").string(), &existingMetadata, &ignoredError);
+    if (!existingMetadata.is_object())
+    {
+        existingMetadata = json::object();
+    }
+
+    ordered_json hardwareList = ordered_json::object();
+    hardwareList["gripper_right_sn"] = gripperRuntimeStates_[gripperStateIndexForSide("right")].serialNumber;
+    hardwareList["gripper_left_sn"] = gripperRuntimeStates_[gripperStateIndexForSide("left")].serialNumber;
+
+    const auto probeSerial = [](const std::string &devicePath) {
+        std::string detail;
+        const auto serial = probeUsbSerialForDeviceNode(devicePath, &detail);
+        return serial.value_or(std::string());
+    };
+    const auto cachedMainCameraSn = [this](const std::string &cameraName) {
+        const auto it = std::find_if(
+            mainCameraRuntimeStates_.begin(),
+            mainCameraRuntimeStates_.end(),
+            [&cameraName](const MainCameraRuntimeState &state) {
+                return state.cameraName == cameraName;
+            });
+        return it != mainCameraRuntimeStates_.end() ? it->serialNumber : std::string();
+    };
+    hardwareList["cam_right_sn"] = cachedMainCameraSn("right_cam_main");
+    hardwareList["cam_left_sn"] = cachedMainCameraSn("left_cam_main");
+    hardwareList["cam_chest_sn"] = chestCameraEnabled_ ? cachedMainCameraSn("chest_cam_main") : "";
+    hardwareList["tactile_right_l_sn"] = probeSerial("/dev/tcam_right_l");
+    hardwareList["tactile_right_r_sn"] = probeSerial("/dev/tcam_right_r");
+    hardwareList["tactile_left_l_sn"] = probeSerial("/dev/tcam_left_l");
+    hardwareList["tactile_left_r_sn"] = probeSerial("/dev/tcam_left_r");
+
+    json stereoStatus = json::object();
+    loadJsonFile(stereoStatusFile_, &stereoStatus, &ignoredError);
+    hardwareList["stereo_right_sn"] = jsonStringPath(stereoStatus, "cameras.right_stereo.serial_number");
+    hardwareList["stereo_left_sn"] = jsonStringPath(stereoStatus, "cameras.left_stereo.serial_number");
+
+    json infoRoot = json::object();
+    loadJsonFile((episodePath / "info.json").string(), &infoRoot, &ignoredError);
+    std::map<std::string, int64_t> offsetByCamera;
+    int64_t minOffsetUs = std::numeric_limits<int64_t>::max();
+    for (const auto &artifact : metadataVideoArtifacts(chestCameraEnabled_))
+    {
+        const std::string key = std::string(artifact.cameraName) + "_record_time_offset_us";
+        if (infoRoot.contains(key) && infoRoot[key].is_number_integer())
+        {
+            const int64_t offsetUs = infoRoot[key].get<int64_t>();
+            if (offsetUs > 0)
+            {
+                offsetByCamera[artifact.cameraName] = offsetUs;
+                minOffsetUs = std::min(minOffsetUs, offsetUs);
+            }
+        }
+    }
+    if (minOffsetUs == std::numeric_limits<int64_t>::max())
+    {
+        minOffsetUs = 0;
+    }
+
+    ordered_json videoDetails = ordered_json::array();
+    double collectionDurationS = 0.0;
+    for (const auto &artifact : metadataVideoArtifacts(chestCameraEnabled_))
+    {
+        const fs::path videoPath = episodePath / artifact.fileName;
+        if (!RecordRuntime::fileExistsAndNotEmpty(videoPath.string()))
+        {
+            continue;
+        }
+
+        VideoProbeResult probe;
+        probe.cameraName = artifact.cameraName;
+        probe.fileName = artifact.fileName;
+        std::string probeError;
+        if (!probeVideoFile(videoPath.string(), &probe, &probeError))
+        {
+            continue;
+        }
+
+        const auto offsetIt = offsetByCamera.find(artifact.cameraName);
+        const int64_t startOffsetUs =
+            offsetIt != offsetByCamera.end() && minOffsetUs > 0
+                ? std::max<int64_t>(0, offsetIt->second - minOffsetUs)
+                : 0;
+
+        ordered_json detail = ordered_json::object();
+        detail["name"] = artifact.fileName;
+        detail["fps"] = roundToOneDecimal(nominalFpsForCamera(artifact.cameraName));
+        detail["duration_s"] = roundToOneDecimal(probe.durationSec);
+        detail["start_offset_us"] = startOffsetUs;
+        videoDetails.push_back(std::move(detail));
+        collectionDurationS = std::max(collectionDurationS, probe.durationSec);
+    }
+
+    ordered_json requiredFiles = ordered_json::array({
+        "metadata.json",
+        "calibration.json",
+        "info.json",
+        "cam_left.mkv",
+        "cam_right.mkv",
+        "stereo_left.mkv",
+        "stereo_right.mkv",
+        "tcam_left_l.mkv",
+        "tcam_left_r.mkv",
+        "tcam_right_l.mkv",
+        "tcam_right_r.mkv",
+        "sensor_left.mcap",
+        "sensor_right.mcap",
+        "fays_data_left.mcap",
+        "fays_data_right.mcap",
+    });
+    if (chestCameraEnabled_)
+    {
+        requiredFiles.push_back("cam_chest.mkv");
+    }
+
+    const bool hasAudio =
+        RecordRuntime::fileExistsAndNotEmpty((episodePath / "audio_pre.wav").string()) ||
+        RecordRuntime::fileExistsAndNotEmpty((episodePath / "audio_post.wav").string());
+
+    ordered_json metadata = ordered_json::object();
+    metadata["device_sn"] = toUpperAscii(deviceSn_);
+    metadata["device_type"] = "ugripper";
+    metadata["device_mode"] = "dual";
+    metadata["camera_codec"] = cameraCodec_;
+    metadata["hardware_version"] = hardwareVersion_;
+    metadata["software_version"] = addVersionPrefix(packageVersion_);
+    metadata["das_usb_updater_version"] = updaterVersion_;
+    metadata["data_version"] = "3.0";
+    metadata["hardware_list"] = std::move(hardwareList);
+    metadata["episode_name"] = episodePath.filename().string();
+    metadata["data_uuid"] = existingMetadata.value("data_uuid", generateUuid());
+    metadata["audio_uuid"] = hasAudio ? existingMetadata.value("audio_uuid", generateUuid()) : "";
+    metadata["quality_check_status"] = qualityOk ? "success" : "fail";
+    metadata["quality_check_err_type"] = qualityOk ? "" : classifyQualityError(qualityErrorMessage);
+    metadata["collection_duration_s"] = roundToOneDecimal(collectionDurationS);
+    metadata["require_files"] = std::move(requiredFiles);
+    metadata["video_details"] = std::move(videoDetails);
+
+    if (!writeTextFileAtomically(episodePath / "metadata.json", metadata.dump(2) + "\n", errorMessage))
+    {
+        return false;
+    }
     return true;
 }
 
@@ -6238,6 +7064,54 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
         }
     }
 
+    bool anyMainCameraCalibrationValid = false;
+    for (const auto &state : mainCameraRuntimeStates_)
+    {
+        if (!state.enabled)
+        {
+            continue;
+        }
+        std::string jsonPath;
+        if (state.cameraName == "left_cam_main")
+        {
+            jsonPath = "observation.images.left_cam_main";
+        }
+        else if (state.cameraName == "right_cam_main")
+        {
+            jsonPath = "observation.images.right_cam_main";
+        }
+        else if (state.cameraName == "chest_cam_main")
+        {
+            jsonPath = "observation.images.chest_cam_main";
+        }
+        if (jsonPath.empty())
+        {
+            continue;
+        }
+
+        std::string calibrationDetail;
+        if (state.present &&
+            isYuzhouMainCameraSn(state.serialNumber) &&
+            state.calibrationPayloadCached &&
+            validateYuzhouMainCameraCalibrationPayload(state.calibrationPayload, &calibrationDetail))
+        {
+            if (json *mainCamera = findJsonPath(&calibrationJson, jsonPath, true))
+            {
+                *mainCamera = makeMainCameraCalibrationEntryFromPayload(state.calibrationPayload);
+                anyMainCameraCalibrationValid = true;
+            }
+        }
+        else
+        {
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                << "main camera calibration cache unavailable for episode calibration: camera="
+                << state.cameraName
+                << " device=" << state.devicePath
+                << " detail=" << (state.lastError.empty() ? calibrationDetail : state.lastError)
+                << std::endl).str());
+        }
+    }
+
     bool anyFaysCalibrationValid = false;
     for (const auto &entry : std::vector<std::pair<std::string, std::string>>{
              {"left", "left_stereo"},
@@ -6266,7 +7140,7 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
                             << entry.second << ": " << faysStatus << std::endl).str());
     }
 
-    const std::string calibrationStatus = (anyCalibrationValid || anyFaysCalibrationValid)
+    const std::string calibrationStatus = (anyCalibrationValid || anyMainCameraCalibrationValid || anyFaysCalibrationValid)
                                              ? "calibrated"
                                              : "uncalibrated";
     calibrationJson["metadata"] =
