@@ -182,8 +182,8 @@ if ! accept_timeout_exit "${CAMERA_EXIT}"; then
     exit "${CAMERA_EXIT}"
 fi
 
-LEFT_MAIN="${OUTPUT_DIR}/left_cam_main.mkv"
-RIGHT_MAIN="${OUTPUT_DIR}/right_cam_main.mkv"
+LEFT_MAIN="${OUTPUT_DIR}/cam_left.mkv"
+RIGHT_MAIN="${OUTPUT_DIR}/cam_right.mkv"
 [[ -f "${LEFT_MAIN}" ]] || { echo "missing ${LEFT_MAIN}" >&2; exit 1; }
 [[ -f "${RIGHT_MAIN}" ]] || { echo "missing ${RIGHT_MAIN}" >&2; exit 1; }
 

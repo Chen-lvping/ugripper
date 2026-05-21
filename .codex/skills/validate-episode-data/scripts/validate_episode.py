@@ -20,48 +20,86 @@ MCAP_FALLBACK_ROOTS = [
 ]
 
 BASE_VIDEO_FILES = [
-    ("left_cam_main", "left_cam_main.mkv", "left"),
-    ("right_cam_main", "right_cam_main.mkv", "right"),
-    ("left_stereo", "left_stereo.mkv", "left"),
-    ("right_stereo", "right_stereo.mkv", "right"),
-    ("left_tcam_l", "left_tcam_l.mkv", "left"),
-    ("left_tcam_r", "left_tcam_r.mkv", "left"),
-    ("right_tcam_l", "right_tcam_l.mkv", "right"),
-    ("right_tcam_r", "right_tcam_r.mkv", "right"),
+    ("left_cam_main", "cam_left.mkv", "left"),
+    ("right_cam_main", "cam_right.mkv", "right"),
+    ("left_stereo", "stereo_left.mkv", "left"),
+    ("right_stereo", "stereo_right.mkv", "right"),
+    ("left_tcam_l", "tcam_left_l.mkv", "left"),
+    ("left_tcam_r", "tcam_left_r.mkv", "left"),
+    ("right_tcam_l", "tcam_right_l.mkv", "right"),
+    ("right_tcam_r", "tcam_right_r.mkv", "right"),
 ]
-CHEST_VIDEO_FILE = ("chest_cam_main", "chest_cam_main.mkv", "chest")
+CHEST_VIDEO_FILE = ("chest_cam_main", "cam_chest.mkv", "chest")
 MAIN_CAMERA_NAMES = {"left_cam_main", "right_cam_main", "chest_cam_main"}
 STEREO_CAMERA_NAMES = {"left_stereo", "right_stereo"}
 TACTILE_CAMERA_NAMES = {"left_tcam_l", "left_tcam_r", "right_tcam_l", "right_tcam_r"}
 SENSOR_FILES = [
-    ("left", "sensor_data_left.mcap", ["imu_left", "encoder_left"]),
-    ("right", "sensor_data_right.mcap", ["imu_right", "encoder_right"]),
+    ("left", "sensor_left.mcap", ["encoder_left"]),
+    ("right", "sensor_right.mcap", ["encoder_right"]),
+]
+EXPECTED_METADATA_KEY_ORDER = [
+    "device_sn",
+    "device_type",
+    "device_mode",
+    "camera_codec",
+    "hardware_version",
+    "software_version",
+    "das_usb_updater_version",
+    "data_version",
+    "hardware_list",
+    "episode_name",
+    "data_uuid",
+    "audio_uuid",
+    "quality_check_status",
+    "quality_check_err_type",
+    "collection_duration_s",
+    "require_files",
+    "video_details",
 ]
 REQUIRED_METADATA_FIELDS = [
-    "collector",
-    "data_path",
-    "camera_codec",
-    "ugripper_version",
-    "data_format_version",
-]
-REQUIRED_GRIPPER_KEYS = ["calibration_status", "serial_number"]
-EXPECTED_METADATA_KEYS = {
-    "camera_codec",
-    "collector",
-    "data_format_version",
-    "data_path",
-    "device_id",
-    "device_model",
+    "device_sn",
     "device_type",
-    "gripper_left",
-    "gripper_right",
-    "record_runtime",
-    "reset_recording",
-    "reset_source_episode_dir",
-    "ugripper_lang",
-    "ugripper_usb_updater_version",
-    "ugripper_version",
-}
+    "device_mode",
+    "camera_codec",
+    "hardware_version",
+    "software_version",
+    "das_usb_updater_version",
+    "data_version",
+    "hardware_list",
+    "episode_name",
+    "data_uuid",
+    "quality_check_status",
+    "collection_duration_s",
+    "require_files",
+    "video_details",
+]
+EXPECTED_HARDWARE_LIST_KEY_ORDER = [
+    "gripper_right_sn",
+    "gripper_left_sn",
+    "cam_right_sn",
+    "cam_left_sn",
+    "cam_chest_sn",
+    "tactile_right_l_sn",
+    "tactile_right_r_sn",
+    "tactile_left_l_sn",
+    "tactile_left_r_sn",
+    "stereo_right_sn",
+    "stereo_left_sn",
+]
+REQUIRED_HARDWARE_LIST_KEYS = set(EXPECTED_HARDWARE_LIST_KEY_ORDER)
+EXPECTED_METADATA_KEYS = set(EXPECTED_METADATA_KEY_ORDER)
+EXPECTED_VIDEO_DETAIL_KEY_ORDER = ["name", "fps", "duration_s", "start_offset_us"]
+EXPECTED_METADATA_VIDEO_DETAIL_NAMES = [
+    "cam_left.mkv",
+    "tcam_left_l.mkv",
+    "tcam_left_r.mkv",
+    "stereo_left.mkv",
+    "cam_right.mkv",
+    "tcam_right_l.mkv",
+    "tcam_right_r.mkv",
+    "stereo_right.mkv",
+    "cam_chest.mkv",
+]
 EXPECTED_INFO_KEYS = {
     "boot_time_offset",
     "boot_time_offset_us",
@@ -104,6 +142,8 @@ REQUIRED_FILES = [
     "info.json",
     *(file_name for _, file_name, _ in BASE_VIDEO_FILES),
     *(file_name for _, file_name, _ in SENSOR_FILES),
+    "fays_data_left.mcap",
+    "fays_data_right.mcap",
 ]
 
 
@@ -505,6 +545,15 @@ class EpisodeValidator:
         self.calibration = self.load_json_file("calibration.json")
 
     def validate_metadata_fields(self) -> None:
+        metadata_key_order = list(self.metadata.keys())
+        if metadata_key_order != EXPECTED_METADATA_KEY_ORDER:
+            self.add_finding(
+                "FAIL",
+                "metadata_schema_key_order",
+                "metadata.json 顶层字段顺序不符合标准范本",
+                actual_order=metadata_key_order,
+                expected_order=EXPECTED_METADATA_KEY_ORDER,
+            )
         metadata_keys = set(self.metadata.keys())
         missing_keys = sorted(EXPECTED_METADATA_KEYS - metadata_keys)
         unexpected_keys = sorted(metadata_keys - EXPECTED_METADATA_KEYS)
@@ -528,71 +577,89 @@ class EpisodeValidator:
                 self.add_finding("FAIL", "metadata_field", f"metadata.json 缺少字段: {field_name}")
         expected_types = {
             "camera_codec": str,
-            "collector": str,
-            "data_format_version": str,
-            "data_path": str,
-            "device_id": str,
-            "device_model": str,
+            "collection_duration_s": (int, float),
+            "audio_uuid": str,
+            "das_usb_updater_version": str,
+            "data_uuid": str,
+            "data_version": str,
+            "device_mode": str,
+            "device_sn": str,
             "device_type": str,
-            "gripper_left": dict,
-            "gripper_right": dict,
-            "record_runtime": str,
-            "reset_recording": bool,
-            "reset_source_episode_dir": str,
-            "ugripper_lang": str,
-            "ugripper_usb_updater_version": str,
-            "ugripper_version": str,
+            "episode_name": str,
+            "hardware_list": dict,
+            "hardware_version": str,
+            "quality_check_err_type": str,
+            "quality_check_status": str,
+            "require_files": list,
+            "software_version": str,
+            "video_details": list,
         }
         for field_name, expected_type in expected_types.items():
             if field_name not in self.metadata:
                 continue
             value = self.metadata[field_name]
             if not isinstance(value, expected_type):
+                if isinstance(expected_type, tuple):
+                    expected_type_name = "|".join(t.__name__ for t in expected_type)
+                else:
+                    expected_type_name = expected_type.__name__
                 self.add_finding(
                     "FAIL",
                     "metadata_schema_type",
                     f"metadata.json 字段类型异常: {field_name}",
-                    expected_type=expected_type.__name__,
+                    expected_type=expected_type_name,
                     actual_type=value_type_name(value),
                 )
-        for field_name in ("gripper_left", "gripper_right"):
-            value = self.metadata.get(field_name)
-            if not isinstance(value, dict):
-                continue
-            missing_keys = [key for key in REQUIRED_GRIPPER_KEYS if key not in value]
-            unexpected_keys = sorted(set(value.keys()) - set(REQUIRED_GRIPPER_KEYS))
+        hardware_list = self.metadata.get("hardware_list")
+        if isinstance(hardware_list, dict):
+            hardware_key_order = list(hardware_list.keys())
+            if hardware_key_order != EXPECTED_HARDWARE_LIST_KEY_ORDER:
+                self.add_finding(
+                    "FAIL",
+                    "metadata_schema_key_order",
+                    "metadata.json.hardware_list 字段顺序不符合标准范本",
+                    actual_order=hardware_key_order,
+                    expected_order=EXPECTED_HARDWARE_LIST_KEY_ORDER,
+                )
+            missing_keys = sorted(REQUIRED_HARDWARE_LIST_KEYS - set(hardware_list.keys()))
+            unexpected_keys = sorted(set(hardware_list.keys()) - REQUIRED_HARDWARE_LIST_KEYS)
             if missing_keys:
                 self.add_finding(
                     "FAIL",
                     "metadata_schema_missing_keys",
-                    f"metadata.json.{field_name} 缺少预期字段",
+                    "metadata.json.hardware_list 缺少预期字段",
                     missing_keys=missing_keys,
                 )
             if unexpected_keys:
                 self.add_finding(
                     "WARN",
                     "metadata_schema_unexpected_keys",
-                    f"metadata.json.{field_name} 出现未登记字段",
+                    "metadata.json.hardware_list 出现未登记字段",
                     unexpected_keys=unexpected_keys,
                 )
-            for key in REQUIRED_GRIPPER_KEYS:
-                nested_value = value.get(key)
+            for key, nested_value in hardware_list.items():
                 if nested_value is not None and not isinstance(nested_value, str):
                     self.add_finding(
                         "FAIL",
                         "metadata_schema_type",
-                        f"metadata.json.{field_name}.{key} 字段类型异常",
+                        f"metadata.json.hardware_list.{key} 字段类型异常",
                         expected_type="str",
                         actual_type=value_type_name(nested_value),
                     )
-        data_format_version = safe_str(self.metadata.get("data_format_version"))
-        if data_format_version is not None and data_format_version != "2":
+        data_version = safe_str(self.metadata.get("data_version"))
+        if data_version is not None and data_version != "3.0":
             self.add_finding(
                 "WARN",
-                "metadata_data_format_version",
-                "metadata.json 的 data_format_version 不是预期值 2",
-                data_format_version=data_format_version,
+                "metadata_data_version",
+                "metadata.json 的 data_version 不是预期值 3.0",
+                data_version=data_version,
             )
+        device_type = safe_str(self.metadata.get("device_type"))
+        if device_type is not None and device_type not in {"ugripper", "ego", "glove"}:
+            self.add_finding("WARN", "metadata_device_type", "metadata.json 的 device_type 不是常见值", device_type=device_type)
+        device_mode = safe_str(self.metadata.get("device_mode"))
+        if device_mode is not None and device_mode not in {"dual", "single_right", "single_left"}:
+            self.add_finding("WARN", "metadata_device_mode", "metadata.json 的 device_mode 不是常见值", device_mode=device_mode)
         camera_codec = safe_str(self.metadata.get("camera_codec"))
         if camera_codec is not None and camera_codec not in {"h264", "h265"}:
             self.add_finding(
@@ -601,14 +668,71 @@ class EpisodeValidator:
                 "metadata.json 的 camera_codec 不是常见值",
                 camera_codec=camera_codec,
             )
-        data_path = safe_str(self.metadata.get("data_path"))
-        if data_path is not None and data_path != "data/episode_{date:08d}_{episode_index:04d}":
+        quality_status = safe_str(self.metadata.get("quality_check_status"))
+        if quality_status is not None and quality_status not in {"", "success", "fail"}:
             self.add_finding(
                 "WARN",
-                "metadata_data_path_template",
-                "metadata.json 的 data_path 模板已变化",
-                data_path=data_path,
+                "metadata_quality_check_status",
+                "metadata.json 的 quality_check_status 不是约定值",
+                quality_check_status=quality_status,
             )
+        quality_err_type = safe_str(self.metadata.get("quality_check_err_type"))
+        if quality_err_type is not None and quality_err_type not in {"", "missing_file", "collection_duration_too_short", "frame_loss", "finalize_error", "unknown"}:
+            self.add_finding(
+                "WARN",
+                "metadata_quality_check_err_type",
+                "metadata.json 的 quality_check_err_type 不是约定值",
+                quality_check_err_type=quality_err_type,
+            )
+        require_files = self.metadata.get("require_files")
+        if isinstance(require_files, list):
+            missing_required_names = sorted(set(REQUIRED_FILES) - {str(name) for name in require_files})
+            if missing_required_names:
+                self.add_finding(
+                    "WARN",
+                    "metadata_require_files",
+                    "metadata.json.require_files 未覆盖校验脚本所需文件",
+                    missing_names=missing_required_names,
+                )
+        video_details = self.metadata.get("video_details")
+        if isinstance(video_details, list):
+            detail_names = [detail.get("name") for detail in video_details if isinstance(detail, dict)]
+            expected_detail_names = EXPECTED_METADATA_VIDEO_DETAIL_NAMES
+            if not self.chest_camera_enabled():
+                expected_detail_names = [name for name in expected_detail_names if name != "cam_chest.mkv"]
+            if detail_names != expected_detail_names:
+                self.add_finding(
+                    "FAIL",
+                    "metadata_video_details_order",
+                    "metadata.json.video_details 顺序不符合标准范本",
+                    actual_order=detail_names,
+                    expected_order=expected_detail_names,
+                )
+            for index, detail in enumerate(video_details):
+                if not isinstance(detail, dict):
+                    self.add_finding("FAIL", "metadata_video_details", f"video_details[{index}] 不是 object")
+                    continue
+                detail_key_order = list(detail.keys())
+                if detail_key_order != EXPECTED_VIDEO_DETAIL_KEY_ORDER:
+                    self.add_finding(
+                        "FAIL",
+                        "metadata_video_details_key_order",
+                        f"video_details[{index}] 字段顺序不符合标准范本",
+                        actual_order=detail_key_order,
+                        expected_order=EXPECTED_VIDEO_DETAIL_KEY_ORDER,
+                    )
+                for key in EXPECTED_VIDEO_DETAIL_KEY_ORDER:
+                    if key not in detail:
+                        self.add_finding("FAIL", "metadata_video_details", f"video_details[{index}] 缺少字段: {key}")
+                if "duration" in detail:
+                    self.add_finding("FAIL", "metadata_video_details", f"video_details[{index}] 应使用 duration_s，不应再写 duration")
+                if "serial" in detail:
+                    self.add_finding("FAIL", "metadata_video_details", f"video_details[{index}] 不应再写 serial 字段")
+                for key in ("fps", "duration_s"):
+                    if key in detail and not isinstance(detail.get(key), (int, float)):
+                        self.add_finding("FAIL", "metadata_video_details", f"video_details[{index}].{key} 类型异常")
+                if "start_offset_us" in detail and not isinstance(detail.get("start_offset_us"), int):
+                    self.add_finding("FAIL", "metadata_video_details", f"video_details[{index}].start_offset_us 类型异常")
 
     def validate_info_fields(self) -> None:
         info_keys = set(self.info.keys())

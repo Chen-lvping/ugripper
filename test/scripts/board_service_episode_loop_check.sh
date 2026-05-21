@@ -44,16 +44,16 @@ wait_for_episode_ready() {
         calibration.json
         info.json
         metadata.json
-        left_cam_main.mkv
-        right_cam_main.mkv
-        left_stereo.mkv
-        right_stereo.mkv
-        left_tcam_l.mkv
-        left_tcam_r.mkv
-        right_tcam_l.mkv
-        right_tcam_r.mkv
-        sensor_data_left.mcap
-        sensor_data_right.mcap
+        cam_left.mkv
+        cam_right.mkv
+        stereo_left.mkv
+        stereo_right.mkv
+        tcam_left_l.mkv
+        tcam_left_r.mkv
+        tcam_right_l.mkv
+        tcam_right_r.mkv
+        sensor_left.mcap
+        sensor_right.mcap
     )
 
     while (( waited < timeout_sec )); do

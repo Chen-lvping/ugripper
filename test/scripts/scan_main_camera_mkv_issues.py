@@ -2,8 +2,8 @@
 """Batch-scan left/right main camera MKV files for timestamp and decode issues.
 
 This script is intended for large-scale, read-only field diagnostics. It
-recursively walks one or more roots, finds `left_cam_main.mkv` and
-`right_cam_main.mkv`, performs a fast packet-level scan with ffprobe, and
+recursively walks one or more roots, finds `cam_left.mkv` and
+`cam_right.mkv`, performs a fast packet-level scan with ffprobe, and
 optionally escalates suspicious files to a full decode scan with ffmpeg.
 """
 
@@ -22,7 +22,7 @@ from pathlib import Path
 from typing import Iterable
 
 
-TARGET_FILE_NAMES = {"left_cam_main.mkv", "right_cam_main.mkv"}
+TARGET_FILE_NAMES = {"cam_left.mkv", "cam_right.mkv"}
 DEFAULT_ALIGN_WINDOW_SEC = 0.25
 DEFAULT_LARGE_GAP_SEC = 0.05
 DEFAULT_EVENT_LIMIT = 8

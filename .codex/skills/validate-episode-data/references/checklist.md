@@ -5,28 +5,32 @@
 - `metadata.json`
 - `calibration.json`
 - `info.json`
-- `left_cam_main.mkv`
-- `right_cam_main.mkv`
-- `left_stereo.mkv`
-- `right_stereo.mkv`
-- `left_tcam_l.mkv`
-- `left_tcam_r.mkv`
-- `right_tcam_l.mkv`
-- `right_tcam_r.mkv`
-- `sensor_data_left.mcap`
-- `sensor_data_right.mcap`
+- `cam_left.mkv`
+- `cam_right.mkv`
+- `stereo_left.mkv`
+- `stereo_right.mkv`
+- `tcam_left_l.mkv`
+- `tcam_left_r.mkv`
+- `tcam_right_l.mkv`
+- `tcam_right_r.mkv`
+- `sensor_left.mcap`
+- `sensor_right.mcap`
+- `fays_data_left.mcap`
+- `fays_data_right.mcap`
 
 ## 1.1 推荐附加检查
 
 - `validation_error.log` 是否存在
 - `audio_pre.wav` / `audio_post.wav` 是否按预期出现
-- `metadata.json` 是否包含 `collector` / `camera_codec` / `ugripper_version` / `data_format_version`
+- `metadata.json` 是否包含新 3.0 字段：`device_sn` / `hardware_list` / `require_files` / `video_details` / `collection_duration_s` / `quality_check_status`
+- `metadata.json` 顶层字段、`hardware_list` 字段和 `video_details[]` 字段顺序是否符合标准范本
 - `metadata.json` / `info.json` / `calibration.json` 的顶层 key 集合是否仍符合约定
 - 关键 JSON 字段类型是否仍符合约定，防止“有字段但类型偷偷变了”
+- `video_details` 是否不再重复写 `serial`，且使用 `duration_s` / `start_offset_us`
 - `calibration.json.observation.images` 是否覆盖 8 路图像
-- `calibration.json.observation.imu` 是否覆盖 `left_imu` / `right_imu`
+- Fays 侧 IMU 数据是否在 `fays_data_left.mcap` / `fays_data_right.mcap` 中可读
 - 主摄专项扫描是否发现 `backward_dts` / `decode_non_monotonic_dts` / `decode_error`
-- 是否输出统一的首帧对齐表，覆盖 8 路 `mkv` 和 4 个 sensor topic
+- 是否输出统一的首帧对齐表，覆盖 8 路 `mkv` 和左右 sensor topic
 
 ## 2. 默认阈值建议
 

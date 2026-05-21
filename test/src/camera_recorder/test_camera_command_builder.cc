@@ -96,7 +96,7 @@ TEST(CameraCommandBuilderTest, BuildsStereoSessionCommand)
 {
     auto config = MakeHybridCamera();
     config.mode = ugripper::camera::CameraRecordMode::StereoHybridDecodeEncode;
-    config.output_files = {"left_stereo.mkv"};
+    config.output_files = {"stereo_left.mkv"};
     const ugripper::camera::CommandBuildOptions options{
         .output_dir = "/tmp/ignored",
         .codec = "h264",
@@ -105,7 +105,7 @@ TEST(CameraCommandBuilderTest, BuildsStereoSessionCommand)
     };
 
     const std::string command = ugripper::camera::BuildStereoSessionCommand(
-        config, options, "/tmp/stereo_episode/left_stereo.mkv");
+        config, options, "/tmp/stereo_episode/stereo_left.mkv");
 
     EXPECT_NE(command.find("ffmpeg -hide_banner -loglevel warning -nostats -y"),
               std::string::npos);
@@ -113,7 +113,7 @@ TEST(CameraCommandBuilderTest, BuildsStereoSessionCommand)
     EXPECT_NE(command.find("-framerate 30"), std::string::npos);
     EXPECT_NE(command.find("-map 0:v:0 -an"), std::string::npos);
     EXPECT_NE(command.find("-profile:v main -level 5.1"), std::string::npos);
-    EXPECT_NE(command.find("'/tmp/stereo_episode/left_stereo.mkv'"), std::string::npos);
+    EXPECT_NE(command.find("'/tmp/stereo_episode/stereo_left.mkv'"), std::string::npos);
 }
 
 }  // namespace

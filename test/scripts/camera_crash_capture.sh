@@ -59,7 +59,7 @@ log_note "camera_test_script=$CAMERA_TEST_SCRIPT"
   echo '--- meminfo ---'; cat /proc/meminfo
   echo '--- lsusb -t ---'; lsusb -t || true
   echo '--- devices ---'
-  for n in left_stereo right_stereo left_tcam_l left_tcam_r right_tcam_l right_tcam_r; do
+  for n in stereo_left stereo_right tcam_left_l tcam_left_r tcam_right_l tcam_right_r; do
     ls -l "/dev/$n" || true
   done
 } > "$STATE_DIR/precheck.txt"

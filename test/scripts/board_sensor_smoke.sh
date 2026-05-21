@@ -113,8 +113,8 @@ if ! accept_timeout_exit "${SENSOR_EXIT}"; then
     exit "${SENSOR_EXIT}"
 fi
 
-LEFT_MCAP="${OUTPUT_DIR}/sensor_data_left.mcap"
-RIGHT_MCAP="${OUTPUT_DIR}/sensor_data_right.mcap"
+LEFT_MCAP="${OUTPUT_DIR}/sensor_left.mcap"
+RIGHT_MCAP="${OUTPUT_DIR}/sensor_right.mcap"
 [[ -f "${LEFT_MCAP}" ]] || { echo "missing ${LEFT_MCAP}" >&2; exit 1; }
 [[ -f "${RIGHT_MCAP}" ]] || { echo "missing ${RIGHT_MCAP}" >&2; exit 1; }
 

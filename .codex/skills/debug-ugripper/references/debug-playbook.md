@@ -24,7 +24,7 @@
 - 检查 `/tmp/umi_recording.lock`、`/tmp/umi_shutdown_request`
 - 确认 episode 根目录是否落在 `/mnt/data_disk/<device_sn>/data/episode_*`
 - 查看是否拉起 `camera_recorder`、`sensor_recorder`、`record_runtime` 相关进程
-- 若用户提供 episode 目录，检查目录内是否有 `left_cam_main.mkv`、`right_cam_main.mkv`、4 路 tact `mkv`、`sensor_data_left.mcap`、`sensor_data_right.mcap`、`metadata.json`、`calibration.json`
+- 若用户提供 episode 目录，检查目录内是否有 `cam_left.mkv`、`cam_right.mkv`、4 路 tact `mkv`、`sensor_left.mcap`、`sensor_right.mcap`、`metadata.json`、`calibration.json`
 
 ## 3. 网络 / 环境异常
 
@@ -45,12 +45,12 @@
 
 - 确认 `build/src/sensor_recorder/sensor_recorder` 是否存在
 - 从服务日志中搜索 encoder 首条样本打印，确认编码器链路是否正常
-- 若已有 episode，检查 `sensor_data_left.mcap`、`sensor_data_right.mcap` 是否存在且非空
+- 若已有 episode，检查 `sensor_left.mcap`、`sensor_right.mcap` 是否存在且非空
 
 ## 6. Episode 校验失败
 
 - 先读 episode 下 `validation_error.log`
-- 检查基础文件是否齐全：`left_cam_main.mkv`、`right_cam_main.mkv`、`left_tcam_l.mkv`、`left_tcam_r.mkv`、`right_tcam_l.mkv`、`right_tcam_r.mkv`、`sensor_data_left.mcap`、`sensor_data_right.mcap`、`metadata.json`、`calibration.json`
+- 检查基础文件是否齐全：`cam_left.mkv`、`cam_right.mkv`、`tcam_left_l.mkv`、`tcam_left_r.mkv`、`tcam_right_l.mkv`、`tcam_right_r.mkv`、`sensor_left.mcap`、`sensor_right.mcap`、`metadata.json`、`calibration.json`
 - 若是 tact 时长失败，重点关注双侧 tact 视频跨度与双份 MCAP 是否完整
 
 ## 7. USB 升级/标定导入失败

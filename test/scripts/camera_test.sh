@@ -193,22 +193,22 @@ run_sequence() {
 
 run_non_main() {
     local specs=(
-        'single|left_stereo|/dev/left_stereo||mjpeg|1280x800|120|60|30|128'
-        'single|right_stereo|/dev/right_stereo||mjpeg|1280x800|120|60|30|128'
-        'single|left_tcam_l|/dev/left_tcam_l||mjpeg|640x480|120|60|30|64'
-        'single|left_tcam_r|/dev/left_tcam_r||mjpeg|640x480|120|60|30|64'
-        'single|right_tcam_l|/dev/right_tcam_l||mjpeg|640x480|120|60|30|64'
-        'single|right_tcam_r|/dev/right_tcam_r||mjpeg|640x480|120|60|30|64'
+        'single|left_stereo|/dev/stereo_left||mjpeg|1280x800|120|60|30|128'
+        'single|right_stereo|/dev/stereo_right||mjpeg|1280x800|120|60|30|128'
+        'single|left_tcam_l|/dev/tcam_left_l||mjpeg|640x480|120|60|30|64'
+        'single|left_tcam_r|/dev/tcam_left_r||mjpeg|640x480|120|60|30|64'
+        'single|right_tcam_l|/dev/tcam_right_l||mjpeg|640x480|120|60|30|64'
+        'single|right_tcam_r|/dev/tcam_right_r||mjpeg|640x480|120|60|30|64'
     )
     run_sequence specs
 }
 
 run_non_main_merge_tactile() {
     local specs=(
-        'single|left_stereo|/dev/left_stereo||mjpeg|1280x800|120|60|30|128'
-        'single|right_stereo|/dev/right_stereo||mjpeg|1280x800|120|60|30|128'
-        'pair|left_tact_pair|/dev/left_tcam_l|/dev/left_tcam_r|mjpeg|640x480|120|60|30|64'
-        'pair|right_tact_pair|/dev/right_tcam_l|/dev/right_tcam_r|mjpeg|640x480|120|60|30|64'
+        'single|left_stereo|/dev/stereo_left||mjpeg|1280x800|120|60|30|128'
+        'single|right_stereo|/dev/stereo_right||mjpeg|1280x800|120|60|30|128'
+        'pair|left_tact_pair|/dev/tcam_left_l|/dev/tcam_left_r|mjpeg|640x480|120|60|30|64'
+        'pair|right_tact_pair|/dev/tcam_right_l|/dev/tcam_right_r|mjpeg|640x480|120|60|30|64'
     )
     run_sequence specs
 }

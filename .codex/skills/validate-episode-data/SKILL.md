@@ -7,7 +7,7 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
 
 ## 固定执行顺序
 
-1. 先阅读 `docs/agent/overview.md`，确认当前 episode 产物、`info.json` 时间字段语义、`stereo_session` 语义，以及默认视频 / sensor 输出结构。
+1. 先阅读 `docs/agent/overview.md`，确认当前 episode 产物、`info.json` 时间字段语义、`metadata.json` 3.0 结构，以及默认视频 / sensor / Fays 输出结构。
 2. 找到用户指定的 episode 目录；如果用户只给了父目录，可在其中定位最近一条 `episode_*`。
    - 若用户直接说“校验最新一条数据”，默认将这句话解释为“对指定数据父目录下最新的 `episode_*` 做校验”。
 3. 无需等待确认，直接执行只读分析脚本：
@@ -30,7 +30,7 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
 默认至少覆盖以下项目：
 
 - episode 关键文件是否存在、非空、可读。
-- `info.json` / `metadata.json` 结构与关键时间字段是否完整，是否发生 schema 漂移。
+- `info.json` / `metadata.json` 结构与关键时间字段是否完整，是否发生 schema 漂移；`metadata.json` 应为停录校验后写出的最终结构，使用 `collection_duration_s`、`video_details[].duration_s` 和 `video_details[].start_offset_us`。
 - `calibration.json` 结构是否完整，是否覆盖 8 路图像与左右 IMU 标定项。
 - `metadata.json` / `info.json` / `calibration.json` 是否出现未登记字段、缺失字段或字段类型变化，防止 JSON 格式被偷偷改动。
 - 若存在 `validation_error.log`，是否说明当前 episode 在停录时已有失败记录。
@@ -41,11 +41,11 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
 - 容器 `duration` 与包级 `span` 是否自洽。
 - 左右 main / stereo 成对视频的起止时间是否对齐。
 - 首帧同步误差是否超阈值，并列出所有 `mkv` 相对参考时刻的首帧偏移量。
-- 四个 sensor topic 的首样本是否彼此对齐，并列出 `imu_left` / `imu_right` / `encoder_left` / `encoder_right` 相对同一参考时刻的首帧偏移量。
-- 八路 `mkv` 与四个 sensor topic 是否应放到同一张首帧对齐表里统一比较；若视频与 sensor 整体错位，必须显式给出全部 12 路流的首帧偏移量、最大范围和高概率归因。
+- 左右 sensor topic 的首样本是否彼此对齐，并列出 `encoder_left` / `encoder_right` 相对同一参考时刻的首帧偏移量。
+- 八路 `mkv` 与左右 sensor topic 是否应放到同一张首帧对齐表里统一比较；若视频与 sensor 整体错位，必须显式给出全部 10 路流的首帧偏移量、最大范围和高概率归因。
 - `stereo_session` 中的首帧 / 结束时间与顶层 offset 语义是否自洽。
-- 左右 `sensor_data_*.mcap` 是否可读，topic 是否齐全。
-- IMU / encoder topic 是否存在 gap、长时间中断、样本数异常。
+- 左右 `sensor_*.mcap` 是否可读，topic 是否齐全。
+- encoder topic 是否存在 gap、长时间中断、样本数异常。
 - 左右 sensor 同类型 topic 是否明显不同步。
 - sensor 覆盖时长是否明显短于视频。
 - 每侧 sensor 的覆盖窗口与该侧视频窗口是否明显错位。
@@ -61,8 +61,8 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
 - 单路视频能播但时间轴回退，说明 mux 或时间戳可能异常。
 - 双目 `stereo_session` 与实际文件首尾不一致，说明 warmup/session 边界可能失配。
 - 左右同类 sensor 都正常，但视频与 sensor 整体错位，说明跨进程起录边界可能异常。
-- 四个 sensor topic 内部对齐正常，但整体相对视频偏移很大，说明更像跨链路时间基准不一致，而不是 sensor 自身起录抖动。
-- 只有某一侧 encoder 或 imu 尾部缺失，说明串口或写线程可能中途掉线。
+- 左右 sensor topic 内部对齐正常，但整体相对视频偏移很大，说明更像跨链路时间基准不一致，而不是 sensor 自身起录抖动。
+- 只有某一侧 encoder 尾部缺失，说明串口或写线程可能中途掉线。
 - 触觉相机与主相机 / stereo 普遍错开，说明该类设备独立启动或 stop 边界异常。
 - 所有流都存在相近时刻的大 gap，说明可能是系统调度 / 写盘抖动，而不是单设备掉流。
 - `metadata` / `calibration` 不完整但媒体文件存在，说明这条数据可能“录到了，但不适合直接入库”。
@@ -78,7 +78,7 @@ description: 为 ugripper 项目执行 episode 数据深度校验。用于用户
    - 文件或 topic
    - 时间点
    - gap / 偏差 / 时长差
-   - 若涉及首帧对齐，默认同时给出 8 路 `mkv` + 4 个 sensor topic 的首帧偏移列表，而不是只列视频
+   - 若涉及首帧对齐，默认同时给出 8 路 `mkv` + 左右 sensor topic 的首帧偏移列表，而不是只列视频
 4. 若能判断模式，明确写出高概率归因：
    - 单路掉流
    - 多路同时卡顿

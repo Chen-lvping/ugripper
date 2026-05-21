@@ -226,16 +226,16 @@ REQUIRED_FILES=(
     calibration.json
     info.json
     metadata.json
-    left_cam_main.mkv
-    right_cam_main.mkv
-    left_stereo.mkv
-    right_stereo.mkv
-    left_tcam_l.mkv
-    left_tcam_r.mkv
-    right_tcam_l.mkv
-    right_tcam_r.mkv
-    sensor_data_left.mcap
-    sensor_data_right.mcap
+    cam_left.mkv
+    cam_right.mkv
+    stereo_left.mkv
+    stereo_right.mkv
+    tcam_left_l.mkv
+    tcam_left_r.mkv
+    tcam_right_l.mkv
+    tcam_right_r.mkv
+    sensor_left.mcap
+    sensor_right.mcap
 )
 
 print_section "Check Episode Files"
@@ -254,23 +254,23 @@ if [[ "${SKIP_SENSOR_CHECK}" != "1" ]]; then
         --expect-topic encoder_left \
         --min-message-count 2 \
         --json-out "${OUTPUT_DIR}/sensor_report_left.json" \
-        "${EPISODE_DIR}/sensor_data_left.mcap"
+        "${EPISODE_DIR}/sensor_left.mcap"
     "${CHECKER_BIN}" \
         --expect-topic encoder_right \
         --min-message-count 2 \
         --json-out "${OUTPUT_DIR}/sensor_report_right.json" \
-        "${EPISODE_DIR}/sensor_data_right.mcap"
+        "${EPISODE_DIR}/sensor_right.mcap"
 fi
 
 if [[ "${SKIP_VIDEO_CHECK}" != "1" ]]; then
     print_section "Check Main Camera Videos"
     python3 "${VIDEO_SCRIPT}" \
-        --input "${EPISODE_DIR}/left_cam_main.mkv" \
+        --input "${EPISODE_DIR}/cam_left.mkv" \
         --window-sec "${WINDOW_SEC}" \
         --min-frame-ratio "${MIN_FRAME_RATIO}" \
         --json-out "${OUTPUT_DIR}/video_report_left_cam_main.json"
     python3 "${VIDEO_SCRIPT}" \
-        --input "${EPISODE_DIR}/right_cam_main.mkv" \
+        --input "${EPISODE_DIR}/cam_right.mkv" \
         --window-sec "${WINDOW_SEC}" \
         --min-frame-ratio "${MIN_FRAME_RATIO}" \
         --json-out "${OUTPUT_DIR}/video_report_right_cam_main.json"

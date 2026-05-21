@@ -35,7 +35,7 @@
 - `test/scripts/testVideoPipe.sh`
   - 枚举指定 `/dev/video*` 节点的驱动、格式、分辨率和帧率能力，用于快速核对视频输入能力。
 - `test/scripts/scan_main_camera_mkv_issues.py`
-  - 递归扫描一个或多个目录中的 `left_cam_main.mkv` / `right_cam_main.mkv`，并发检查包时间戳异常、显著时间洞和可疑解码报错。
+  - 递归扫描一个或多个目录中的 `cam_left.mkv` / `cam_right.mkv`，并发检查包时间戳异常、显著时间洞和可疑解码报错。
   - 默认先做快速 `ffprobe` 包级扫描，只对可疑文件追加 `ffmpeg` 解码扫描；适合批量数据排查。
   - 会按同目录左右主摄对齐“大时间洞”事件，便于判断是否存在左右同时异常。
 
