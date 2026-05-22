@@ -13,7 +13,7 @@
 
 1. 音频命令 FIFO：`/tmp/umi_audio_pipe`
 2. 音频 ready 标记：`/tmp/umi_audio_ready`
-3. stereo 控制文件：`/tmp/umi_stereo_camera_control.json`
+3. stereo 控制 FIFO：`/tmp/umi_stereo_camera_control.pipe`
 4. stereo 状态文件：`/tmp/umi_stereo_camera_status.json`
 5. 关机请求文件：`/tmp/umi_shutdown_request`
 
@@ -29,7 +29,7 @@
 | --- | --- | --- | --- | --- | --- | --- |
 | `/tmp/umi_audio_pipe` | FIFO | `record_runtime` 通过 `AudioCoordinator::SendCommand()`；`run_calibration.sh` 通过 `notify_audio()` 直接写 FIFO | `audio/audio_play.py` | 按行文本命令；当前已知命令包括 `ready`、`writing`、`shutdown`、`error`、`pre_audio_recording`、`post_audio_recording`、`audio_recording_stop`、`no_reset_needed`、`calib_start`、`calibrating`、`calib_done` | FIFO 不存在；daemon 未 ready；写端打开失败时命令丢失；`run_calibration.sh` 会自行 `mkfifo`，属于旁路兼容约束 | `src/record_runtime/src/record_runtime.cpp`, `src/record_runtime/src/runtime_process.cpp`, `audio/audio_play.py`, `auto_calibration/run_calibration.sh` |
 | `/tmp/umi_audio_ready` | 普通文件 | `audio/audio_play.py` | `record_runtime` `AudioCoordinator` | 文本 `ready\n`；表示音频后端已绑定可用 sink/source，允许发送正常音效命令 | ready 标记缺失；pipe 已存在但音频后端仍在 warmup；ready 标记丢失会触发 recovery 路径 | `audio/audio_play.py`, `src/record_runtime/src/runtime_process.cpp`, `src/record_runtime/include/record_runtime.h` |
-| `/tmp/umi_stereo_camera_control.json` | JSON 文件 | `record_runtime` 通过 `StereoSessionClient::WriteControl()` | `camera_recorder --stereo-daemon` | JSON 对象：`command_seq`、`recording`、`episode_dir`、`start_system_time_us`、`stop_system_time_us`；用于开始/停止 stereo session | 文件缺失或 JSON 不合法时，daemon 跳过本次命令；重复 `command_seq` 被忽略 | `src/record_runtime/src/runtime_process.cpp`, `src/camera_recorder/src/camera_recorder.cpp`, `src/record_runtime/include/record_runtime.h`, `src/camera_recorder/include/camera_recorder/camera_recorder.h` |
+| `/tmp/umi_stereo_camera_control.pipe` | FIFO | `record_runtime` 通过 `StereoSessionClient::WriteControl()` 写入行命令 | `run_fays_stereo_daemon.sh` | 行协议：`START\|command_seq\|episode_dir\|start_system_time_us`、`STOP\|command_seq\|episode_dir\|stop_system_time_us`；用于开始/停止 stereo session | FIFO 不存在或无 reader 时命令发送失败；重复或旧 `command_seq` 被忽略 | `standalone/UgripperRuntime/runtime_process.cc`, `standalone/FaysStereoRecorder/scripts/run_fays_stereo_daemon.sh`, `standalone/UgripperRuntime/include/record_runtime.h` |
 | `/tmp/umi_stereo_camera_status.json` | JSON 文件 | `camera_recorder --stereo-daemon` | `record_runtime` 的 `HealthMonitor`、`waitForStereoFinalize()`、`mergeEpisodeInfo()` | JSON 对象：`ready`、`service_state`、`finalize_pending`、`active_episode_dir`、`last_finalized_episode_dir`、`last_finalize_error`、`last_session`、`cameras` | 缺失或 JSON 非法会被视为健康检查故障；session finalize 超时会阻断 stop/merge 路径 | `src/camera_recorder/src/camera_recorder.cpp`, `src/record_runtime/src/runtime_domain.cpp`, `src/record_runtime/src/record_runtime.cpp`, `src/record_runtime/include/record_runtime.h` |
 | `/tmp/umi_shutdown_request` | 普通文件 + systemd path watch | `record_runtime::handleDualShutdownAction()` | `umi-shutdown-trigger.path` + `trigger_shutdown.sh` | 文本 `shutdown\n`；表示当前已进入关机流程，请 systemd 侧消费并执行 `poweroff` | 文件写入失败时无法触发 path unit；消费脚本会删除文件后执行 `systemctl poweroff` | `src/record_runtime/src/record_runtime.cpp`, `auto_update/umi-shutdown-trigger.path`, `auto_update/umi-shutdown-trigger.service`, `auto_update/trigger_shutdown.sh` |
 
@@ -77,7 +77,7 @@
 
 当前后端：
 
-- control file：`/tmp/umi_stereo_camera_control.json`
+- control FIFO：`/tmp/umi_stereo_camera_control.pipe`
 - status file：`/tmp/umi_stereo_camera_status.json`
 
 当前代码锚点：

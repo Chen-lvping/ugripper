@@ -87,8 +87,8 @@
 | `UGRIPPER_LANG` | 音频语言选择 | runtime、`audio_play.py`、`usb_auto_update.sh` | `usb_auto_update.sh` |
 | `CAMERA_CODEC` | camera 编码器口径 `h264/h265` | runtime、camera recorder、`usb_auto_update.sh` | `usb_auto_update.sh` |
 
-### 4.3 当前运行时控制文件
-- stereo 控制文件：`/tmp/umi_stereo_camera_control.json`
+### 4.3 当前运行时控制通道
+- stereo 控制 FIFO：`/tmp/umi_stereo_camera_control.pipe`
 - stereo 状态文件：`/tmp/umi_stereo_camera_status.json`
 - 关机触发文件：`/tmp/umi_shutdown_request`
 - 音频命令 FIFO：`/tmp/umi_audio_pipe`

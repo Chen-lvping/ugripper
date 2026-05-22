@@ -138,7 +138,8 @@ force_cleanup_recording_processes() {
         pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
     fi
 
-    rm -f /tmp/umi_audio_pipe /tmp/umi_recording.lock /tmp/umi_system_action_request /tmp/umi_system_action_result || true
+    rm -f /tmp/umi_audio_pipe /tmp/umi_stereo_camera_control.pipe /tmp/umi_stereo_camera_control.json \
+        /tmp/umi_recording.lock /tmp/umi_system_action_request /tmp/umi_system_action_result || true
 }
 
 calibration_file_is_valid() {

@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$(dirname "$SCRIPT_DIR")"
 RUN_FAYS_RECORD="$SCRIPT_DIR/run_fays_record.sh"
 
-CONTROL_FILE="/tmp/umi_stereo_camera_control.json"
+CONTROL_FIFO="/tmp/umi_stereo_camera_control.pipe"
 STATUS_FILE="/tmp/umi_stereo_camera_status.json"
 LEFT_CONFIG="$BUILD_DIR/config/fays_vikit_left.yaml"
 RIGHT_CONFIG="$BUILD_DIR/config/fays_vikit_right.yaml"
@@ -13,10 +13,18 @@ LEFT_FIFO="/tmp/umi_left_fays_cmd"
 RIGHT_FIFO="/tmp/umi_right_fays_cmd"
 LEFT_CALIB_JSON="/tmp/umi_left_fays_calibration.json"
 RIGHT_CALIB_JSON="/tmp/umi_right_fays_calibration.json"
+LEFT_RUNTIME_STATUS_JSON="/dev/shm/umi_left_fays_runtime_status.json"
+RIGHT_RUNTIME_STATUS_JSON="/dev/shm/umi_right_fays_runtime_status.json"
 POLL_INTERVAL_SEC="${FAYS_STEREO_POLL_INTERVAL_SEC:-0.2}"
+HEALTH_POLL_INTERVAL_SEC="${FAYS_STEREO_HEALTH_POLL_INTERVAL_SEC:-1}"
 FINALIZE_TIMEOUT_SEC="${FAYS_STEREO_FINALIZE_TIMEOUT_SEC:-10}"
 START_DELAY_SEC="${FAYS_STEREO_START_DELAY_SEC:-1.5}"
 HEALTH_GRACE_SEC="${FAYS_STEREO_HEALTH_GRACE_SEC:-3}"
+FRAME_STALE_SEC="${FAYS_STEREO_FRAME_STALE_SEC:-3}"
+SYMLINK_STABLE_SEC="${FAYS_STEREO_SYMLINK_STABLE_SEC:-1}"
+SYMLINK_STABLE_TIMEOUT_SEC="${FAYS_STEREO_SYMLINK_STABLE_TIMEOUT_SEC:-8}"
+EXIT_GRACE_SEC="${FAYS_STEREO_EXIT_GRACE_SEC:-2}"
+TERM_GRACE_SEC="${FAYS_STEREO_TERM_GRACE_SEC:-2}"
 
 LEFT_PID=""
 RIGHT_PID=""
@@ -29,6 +37,7 @@ ACTIVE_STOP_US=0
 LAST_FINALIZED_EPISODE_DIR=""
 LAST_FINALIZE_ERROR=""
 LAST_SESSION_JSON="{}"
+LAST_HEALTH_CHECK_MS=0
 RECORDING=false
 FINALIZE_PENDING=false
 
@@ -41,13 +50,17 @@ mark_session_error() {
     fi
 }
 
+now_ms() {
+    date +%s%3N
+}
+
 usage() {
     cat <<'EOF'
 Usage:
   run_fays_stereo_daemon.sh [options]
 
 Options:
-  --control-file FILE
+  --control-fifo FIFO
   --status-file FILE
   --left-config FILE
   --right-config FILE
@@ -55,13 +68,19 @@ Options:
   --right-fifo FIFO
   --left-calib-json FILE
   --right-calib-json FILE
+  --left-runtime-status-json FILE
+  --right-runtime-status-json FILE
 EOF
 }
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --control-file)
-            CONTROL_FILE="$2"
+            CONTROL_FIFO="${2%.json}.pipe"
+            shift 2
+            ;;
+        --control-fifo|--control-pipe)
+            CONTROL_FIFO="$2"
             shift 2
             ;;
         --status-file)
@@ -92,6 +111,14 @@ while [ "$#" -gt 0 ]; do
             RIGHT_CALIB_JSON="$2"
             shift 2
             ;;
+        --left-runtime-status-json)
+            LEFT_RUNTIME_STATUS_JSON="$2"
+            shift 2
+            ;;
+        --right-runtime-status-json)
+            RIGHT_RUNTIME_STATUS_JSON="$2"
+            shift 2
+            ;;
         -h|--help)
             usage
             exit 0
@@ -104,28 +131,16 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-json_read_command() {
-    python3 - "$CONTROL_FILE" <<'PY'
-import json
-import sys
-
-path = sys.argv[1]
-try:
-    with open(path, "r", encoding="utf-8") as f:
-        root = json.load(f)
-except Exception:
-    sys.exit(1)
-
-print(
-    "{}\t{}\t{}\t{}\t{}".format(
-        int(root.get("command_seq", 0)),
-        1 if root.get("recording", False) else 0,
-        str(root.get("episode_dir", "")),
-        int(root.get("start_system_time_us", 0)),
-        int(root.get("stop_system_time_us", 0)),
-    )
-)
-PY
+ensure_control_fifo() {
+    if [ -e "$CONTROL_FIFO" ] && [ ! -p "$CONTROL_FIFO" ]; then
+        echo "Error: stereo control path exists but is not a FIFO: $CONTROL_FIFO" >&2
+        return 1
+    fi
+    if [ ! -p "$CONTROL_FIFO" ]; then
+        rm -f "$CONTROL_FIFO"
+        mkfifo "$CONTROL_FIFO"
+    fi
+    return 0
 }
 
 write_status() {
@@ -152,10 +167,13 @@ write_status() {
     RIGHT_CONFIG="$RIGHT_CONFIG" \
     LEFT_CALIB_JSON="$LEFT_CALIB_JSON" \
     RIGHT_CALIB_JSON="$RIGHT_CALIB_JSON" \
+    LEFT_RUNTIME_STATUS_JSON="$LEFT_RUNTIME_STATUS_JSON" \
+    RIGHT_RUNTIME_STATUS_JSON="$RIGHT_RUNTIME_STATUS_JSON" \
     python3 - <<'PY'
 import json
 import os
 import tempfile
+import time
 
 def as_bool(name):
     return os.environ.get(name, "false") == "true"
@@ -197,7 +215,39 @@ def calibration_state(path):
         root["status"] = "invalid_payload"
     return root
 
-def camera_state(name, process_ready, config_path, calibration):
+def runtime_state(path):
+    root = {
+        "path": path,
+        "valid": False,
+        "status": "missing",
+    }
+    if not path:
+        root["status"] = "disabled"
+        return root
+    if not os.path.isfile(path):
+        return root
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        root["status"] = f"invalid_json:{exc}"
+        return root
+    if not isinstance(data, dict):
+        root["status"] = "invalid_payload"
+        return root
+    root.update(data)
+    root["valid"] = True
+    last_frame_ns = int(data.get("last_frame_system_ns", 0) or 0)
+    if last_frame_ns <= 0:
+        root["status"] = "no_frame"
+        root["frame_age_s"] = None
+    else:
+        age_s = max(0.0, (time.time_ns() - last_frame_ns) / 1e9)
+        root["frame_age_s"] = round(age_s, 3)
+        root["status"] = "ready"
+    return root
+
+def camera_state(name, process_ready, config_path, calibration, runtime):
     serial = calibration.get("serial_number", "")
     devices = calibration.get("devices", {})
     stereo_path = devices.get("stereo_dev_port", "") if isinstance(devices, dict) else ""
@@ -232,6 +282,7 @@ def camera_state(name, process_ready, config_path, calibration):
         "stereo_symlink_online": stereo_online,
         "imu_symlink_online": imu_online,
         "calibration": calibration,
+        "runtime": runtime,
     }
 
 status_file = os.environ["STATUS_FILE"]
@@ -242,6 +293,8 @@ except Exception:
 
 left_calibration = calibration_state(os.environ.get("LEFT_CALIB_JSON", ""))
 right_calibration = calibration_state(os.environ.get("RIGHT_CALIB_JSON", ""))
+left_runtime = runtime_state(os.environ.get("LEFT_RUNTIME_STATUS_JSON", ""))
+right_runtime = runtime_state(os.environ.get("RIGHT_RUNTIME_STATUS_JSON", ""))
 left_process_ready = as_bool("LEFT_PROCESS_READY")
 right_process_ready = as_bool("RIGHT_PROCESS_READY")
 left_camera = camera_state(
@@ -249,12 +302,14 @@ left_camera = camera_state(
     left_process_ready,
     os.environ.get("LEFT_CONFIG", ""),
     left_calibration,
+    left_runtime,
 )
 right_camera = camera_state(
     "right_stereo",
     right_process_ready,
     os.environ.get("RIGHT_CONFIG", ""),
     right_calibration,
+    right_runtime,
 )
 
 multi_device_error = ""
@@ -318,6 +373,26 @@ wait_for_fifo() {
     return 1
 }
 
+wait_for_process_exit() {
+    local pid="$1"
+    local timeout_sec="$2"
+    local deadline=$((SECONDS + timeout_sec))
+
+    [ -z "$pid" ] && return 0
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if ! kill -0 "$pid" 2>/dev/null; then
+            wait "$pid" 2>/dev/null || true
+            return 0
+        fi
+        sleep 0.1
+    done
+    if ! kill -0 "$pid" 2>/dev/null; then
+        wait "$pid" 2>/dev/null || true
+        return 0
+    fi
+    return 1
+}
+
 config_value() {
     local config="$1"
     local key="$2"
@@ -355,6 +430,54 @@ check_side_device_paths() {
         return 1
     fi
     return 0
+}
+
+wait_for_side_symlinks_stable() {
+    local side="$1"
+    local config="$2"
+    local stereo_path imu_path
+    local last_stereo=""
+    local last_imu=""
+    local stable_since_ms=0
+    local start_ms deadline_ms now_ms
+
+    stereo_path="$(config_value "$config" stereo_dev_port)"
+    imu_path="$(config_value "$config" imu_dev_port)"
+    start_ms="$(date +%s%3N)"
+    deadline_ms=$((start_ms + SYMLINK_STABLE_TIMEOUT_SEC * 1000))
+
+    while true; do
+        now_ms="$(date +%s%3N)"
+        [ "$now_ms" -lt "$deadline_ms" ] || break
+
+        if [ -n "$stereo_path" ] && [ "$stereo_path" != "NULL" ] &&
+           [ -n "$imu_path" ] && [ "$imu_path" != "NULL" ] &&
+           [ -e "$stereo_path" ] && [ -e "$imu_path" ]; then
+            local stereo_resolved imu_resolved
+            stereo_resolved="$(readlink -f "$stereo_path" 2>/dev/null || true)"
+            imu_resolved="$(readlink -f "$imu_path" 2>/dev/null || true)"
+            if [ -n "$stereo_resolved" ] && [ -n "$imu_resolved" ]; then
+                if [ "$stereo_resolved" = "$last_stereo" ] && [ "$imu_resolved" = "$last_imu" ]; then
+                    [ "$stable_since_ms" -ne 0 ] || stable_since_ms="$now_ms"
+                    if [ $((now_ms - stable_since_ms)) -ge $((SYMLINK_STABLE_SEC * 1000)) ]; then
+                        return 0
+                    fi
+                else
+                    last_stereo="$stereo_resolved"
+                    last_imu="$imu_resolved"
+                    stable_since_ms="$now_ms"
+                fi
+            fi
+        else
+            last_stereo=""
+            last_imu=""
+            stable_since_ms=0
+        fi
+        sleep 0.1
+    done
+
+    echo "$side Fays symlinks did not become stable before daemon start: stereo=${stereo_path:-<empty>} imu=${imu_path:-<empty>}" >&2
+    return 1
 }
 
 side_started_at() {
@@ -395,6 +518,40 @@ except Exception:
 PY
 }
 
+runtime_status_path() {
+    local side="$1"
+    if [ "$side" = "left" ]; then
+        echo "$LEFT_RUNTIME_STATUS_JSON"
+    else
+        echo "$RIGHT_RUNTIME_STATUS_JSON"
+    fi
+}
+
+runtime_frame_fresh() {
+    local side="$1"
+    local status_json
+    status_json="$(runtime_status_path "$side")"
+    python3 - "$status_json" "$FRAME_STALE_SEC" <<'PY'
+import json
+import os
+import sys
+import time
+
+path = sys.argv[1]
+stale_sec = float(sys.argv[2])
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        root = json.load(f)
+    last_ns = int(root.get("last_frame_system_ns", 0) or 0)
+    if last_ns <= 0:
+        sys.exit(1)
+    age = (time.time_ns() - last_ns) / 1e9
+    sys.exit(0 if age <= stale_sec else 1)
+except Exception:
+    sys.exit(1)
+PY
+}
+
 check_side_working_state() {
     local side="$1"
     local config="$2"
@@ -411,7 +568,14 @@ check_side_working_state() {
         return 1
     fi
     if calibration_serial "$calib_json" >/dev/null 2>&1; then
-        return 0
+        if runtime_frame_fresh "$side"; then
+            return 0
+        fi
+        if side_in_health_grace "$side"; then
+            return 0
+        fi
+        [ "$quiet" = "true" ] || echo "$side Fays warmup frame stale after ${FRAME_STALE_SEC}s" >&2
+        return 1
     fi
     if side_in_health_grace "$side"; then
         return 0
@@ -440,6 +604,8 @@ start_side_daemon() {
     local video_name="$4"
     local mcap_name="$5"
     local calib_json="$6"
+    local runtime_status_json
+    runtime_status_json="$(runtime_status_path "$side")"
 
     if [ ! -x "$RUN_FAYS_RECORD" ]; then
         echo "Fays record script is missing or not executable: $RUN_FAYS_RECORD" >&2
@@ -450,20 +616,27 @@ start_side_daemon() {
         return 1
     fi
 
+    wait_for_side_symlinks_stable "$side" "$config" || return 1
     sleep "$START_DELAY_SEC"
     rm -f "$fifo"
+    rm -f "$runtime_status_json"
     "$RUN_FAYS_RECORD" \
         --config "$config" \
         --control-fifo "$fifo" \
         --video-name "$video_name" \
         --mcap-name "$mcap_name" \
         --calib-json "$calib_json" \
+        --status-json "$runtime_status_json" \
         daemon &
     local pid="$!"
     if ! wait_for_fifo "$fifo"; then
         echo "Timed out waiting for $side Fays FIFO: $fifo" >&2
         kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
+        if ! wait_for_process_exit "$pid" "$TERM_GRACE_SEC"; then
+            echo "$side Fays recorder did not exit after failed startup; sending SIGKILL" >&2
+            kill -KILL "$pid" 2>/dev/null || true
+            wait_for_process_exit "$pid" 1 || true
+        fi
         return 1
     fi
 
@@ -485,10 +658,18 @@ stop_side_daemon() {
         send_side_command "$fifo" exit >/dev/null 2>&1 || true
     fi
     if [ -n "$pid" ]; then
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
+        if ! wait_for_process_exit "$pid" "$EXIT_GRACE_SEC"; then
+            echo "$side Fays recorder did not exit after EXIT command; sending SIGTERM" >&2
+            kill -TERM "$pid" 2>/dev/null || true
+            if ! wait_for_process_exit "$pid" "$TERM_GRACE_SEC"; then
+                echo "$side Fays recorder did not exit after SIGTERM; sending SIGKILL" >&2
+                kill -KILL "$pid" 2>/dev/null || true
+                wait_for_process_exit "$pid" 1 || true
+            fi
+        fi
     fi
     rm -f "$fifo"
+    rm -f "$(runtime_status_path "$side")"
 
     if [ "$side" = "left" ]; then
         LEFT_PID=""
@@ -601,6 +782,8 @@ wait_for_file_nonempty() {
     local path="$1"
     local deadline=$((SECONDS + FINALIZE_TIMEOUT_SEC))
     while [ "$SECONDS" -le "$deadline" ]; do
+        check_runtime_health_during_finalize
+        [ -z "$LAST_FINALIZE_ERROR" ] || return 1
         [ -s "$path" ] && return 0
         sleep 0.1
     done
@@ -611,6 +794,8 @@ wait_for_mcap_complete() {
     local path="$1"
     local deadline=$((SECONDS + FINALIZE_TIMEOUT_SEC))
     while [ "$SECONDS" -le "$deadline" ]; do
+        check_runtime_health_during_finalize
+        [ -z "$LAST_FINALIZE_ERROR" ] || return 1
         if [ -s "$path" ]; then
             python3 - "$path" <<'PY' && return 0
 import os
@@ -634,6 +819,22 @@ PY
         sleep 0.1
     done
     return 1
+}
+
+check_runtime_health_during_finalize() {
+    if [ -n "$LAST_FINALIZE_ERROR" ]; then
+        return 0
+    fi
+    if ! runtime_frame_fresh left; then
+        LAST_FINALIZE_ERROR="left Fays warmup frame stale during session"
+        write_status
+        return 0
+    fi
+    if ! runtime_frame_fresh right; then
+        LAST_FINALIZE_ERROR="right Fays warmup frame stale during session"
+        write_status
+        return 0
+    fi
 }
 
 build_last_session_json() {
@@ -696,6 +897,7 @@ handle_start() {
     ACTIVE_START_US="$start_us"
     ACTIVE_STOP_US=0
     RECORDING=true
+    write_status
 }
 
 handle_stop() {
@@ -750,8 +952,68 @@ handle_stop() {
     write_status
 }
 
+handle_control_command() {
+    local command_line="$1"
+    local command command_seq command_episode command_time_us
+
+    [ -n "$command_line" ] || return 0
+    IFS='|' read -r command command_seq command_episode command_time_us <<EOF
+$command_line
+EOF
+
+    case "$command" in
+        START|STOP)
+            ;;
+        EXIT)
+            exit 0
+            ;;
+        *)
+            echo "Unknown stereo control command: $command_line" >&2
+            return 0
+            ;;
+    esac
+
+    case "${command_seq:-}" in
+        ''|*[!0-9]*)
+            echo "Invalid stereo control command seq: $command_line" >&2
+            return 0
+            ;;
+    esac
+    if [ "$command_seq" -le "$LAST_COMMAND_SEQ" ]; then
+        return 0
+    fi
+    LAST_COMMAND_SEQ="$command_seq"
+
+    case "${command_time_us:-}" in
+        ''|-)
+            command_time_us=0
+            ;;
+        *[!0-9-]*)
+            echo "Invalid stereo control timestamp: $command_line" >&2
+            return 0
+            ;;
+    esac
+
+    if [ "$command" = "START" ]; then
+        handle_start "$command_episode" "$command_time_us"
+    else
+        handle_stop "$command_episode" "$command_time_us"
+    fi
+}
+
+drain_control_fifo() {
+    local timeout_sec="${1:-0.001}"
+    local command_line=""
+    while IFS= read -r -t "$timeout_sec" command_line <&9; do
+        handle_control_command "$command_line"
+        timeout_sec=0.001
+    done
+}
+
 cleanup() {
     set +e
+    exec 9>&- 2>/dev/null || true
+    rm -f "$CONTROL_FIFO"
     stop_side_daemon left "$LEFT_FIFO" "$LEFT_PID"
     stop_side_daemon right "$RIGHT_FIFO" "$RIGHT_PID"
 }
@@ -759,30 +1021,25 @@ cleanup() {
 trap cleanup EXIT
 trap 'cleanup; exit 0' INT TERM
 
+ensure_control_fifo
+exec 9<>"$CONTROL_FIFO"
+
 start_daemons
 clear_recovery_error_if_ready
 write_status
 
 while true; do
-    maintain_side_daemon left "$LEFT_CONFIG" "$LEFT_FIFO" stereo_left.mkv fays_data_left.mcap "$LEFT_CALIB_JSON" "$LEFT_PID"
-    maintain_side_daemon right "$RIGHT_CONFIG" "$RIGHT_FIFO" stereo_right.mkv fays_data_right.mcap "$RIGHT_CALIB_JSON" "$RIGHT_PID"
-    handle_multi_device_health
-    clear_recovery_error_if_ready
+    drain_control_fifo 0.001
+    current_ms="$(now_ms)"
+    if [ "$LAST_HEALTH_CHECK_MS" -eq 0 ] ||
+       [ $((current_ms - LAST_HEALTH_CHECK_MS)) -ge $((HEALTH_POLL_INTERVAL_SEC * 1000)) ]; then
+        LAST_HEALTH_CHECK_MS="$current_ms"
+        maintain_side_daemon left "$LEFT_CONFIG" "$LEFT_FIFO" stereo_left.mkv fays_data_left.mcap "$LEFT_CALIB_JSON" "$LEFT_PID"
+        maintain_side_daemon right "$RIGHT_CONFIG" "$RIGHT_FIFO" stereo_right.mkv fays_data_right.mcap "$RIGHT_CALIB_JSON" "$RIGHT_PID"
+        handle_multi_device_health
+        clear_recovery_error_if_ready
 
-    if command_line="$(json_read_command 2>/dev/null)"; then
-        IFS="$(printf '\t')" read -r command_seq command_recording command_episode command_start_us command_stop_us <<EOF
-$command_line
-EOF
-        if [ "${command_seq:-0}" -ne "$LAST_COMMAND_SEQ" ]; then
-            LAST_COMMAND_SEQ="$command_seq"
-            if [ "$command_recording" = "1" ]; then
-                handle_start "$command_episode" "$command_start_us"
-            else
-                handle_stop "$command_episode" "$command_stop_us"
-            fi
-        fi
+        write_status
     fi
-
-    write_status
-    sleep "$POLL_INTERVAL_SEC"
+    drain_control_fifo "$POLL_INTERVAL_SEC"
 done

@@ -305,6 +305,20 @@ bool SameResolvedDevices(const FaysConfigDevices& lhs, const FaysConfigDevices& 
            lhs.imuResolved == rhs.imuResolved;
 }
 
+uint64_t ReadEnvUInt64(const char* name, uint64_t defaultValue) {
+    const char* value = std::getenv(name);
+    if (value == nullptr || *value == '\0') {
+        return defaultValue;
+    }
+    char* end = nullptr;
+    errno = 0;
+    const unsigned long long parsed = std::strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0') {
+        return defaultValue;
+    }
+    return static_cast<uint64_t>(parsed);
+}
+
 void CleanupSdkTempConfig(std::string* sdkConfigTempPath) {
     if (sdkConfigTempPath != nullptr && !sdkConfigTempPath->empty()) {
         unlink(sdkConfigTempPath->c_str());
@@ -1236,6 +1250,7 @@ private:
 
 class FaysRecorder;
 static FaysRecorder* g_recorder = nullptr;
+static volatile std::sig_atomic_t g_stopRequested = 0;
 void signalHandler(int signal);
 
 class FaysRecorder {
@@ -1243,7 +1258,8 @@ public:
     FaysRecorder(const char* configPath,
                  std::string videoFileName,
                  std::string mcapFileName,
-                 std::string calibrationJsonPath)
+                 std::string calibrationJsonPath,
+                 std::string statusJsonPath)
         : mptrHandle_(nullptr),
           mbIsRunning_(true),
           recordingEnabled_(false),
@@ -1253,13 +1269,20 @@ public:
           videoFileName_(std::move(videoFileName)),
           mcapFileName_(std::move(mcapFileName)),
           calibrationJsonPath_(std::move(calibrationJsonPath)),
+          statusJsonPath_(std::move(statusJsonPath)),
           calibrationDumped_(false),
           lastImuTimestamp_(0),
           lastImgTimestamp_(0),
+          lastFrameSystemNs_(0),
+          lastFrameFaysNs_(0),
+          lastEncodedFrameSystemNs_(0),
+          lastEncodedFrameFaysNs_(0),
+          lastRuntimeStatusWriteNs_(0),
           imuGapCount_(0),
           imuRollbackCount_(0),
           imuToSysOffsetNs_(0),
           hasImuTimeOffset_(false) {
+        statusIntervalNs_ = ReadEnvUInt64("FAYS_RUNTIME_STATUS_INTERVAL_MS", 1000) * 1000000ULL;
         mImgData_.data = new uchar[FAYS_ATRAK_MONO_MAX_BYTES * 3];
 
         FaysConfigDevices configDevices;
@@ -1346,8 +1369,12 @@ public:
     bool IsRunning() const { return mbIsRunning_; }
 
     void Stop() {
-        mbIsRunning_ = false;
+        mbIsRunning_.store(false, std::memory_order_release);
         StopRecordingSession();
+        videoFrameQueue_.Stop();
+        imuQueue_.NotifyStop();
+        camTsQueue_.NotifyStop();
+        mcapControlQueue_.NotifyStop();
     }
 
     void StartRecording(const std::string& outputDir) {
@@ -1364,6 +1391,7 @@ public:
 
         std::cout << "[Control] START recording. Output directory: " << recordingOutputDir_ << std::endl;
         std::cout << "[Control] MCAP output: " << mcapPath << std::endl;
+        WriteRuntimeStatus(true);
     }
 
     void StopRecordingSession() {
@@ -1373,6 +1401,7 @@ public:
             std::cout << "[Control] STOP recording." << std::endl;
         }
         mcapControlQueue_.PushStop(stoppedSessionId);
+        WriteRuntimeStatus(true);
     }
 
 private:
@@ -1862,6 +1891,9 @@ private:
                     }
                 }
                 lastImgTimestamp_ = mImgData_.timestamp;
+                const uint64_t systemNowNs = SystemNowNs();
+                lastFrameSystemNs_.store(systemNowNs, std::memory_order_release);
+                lastFrameFaysNs_.store(mImgData_.timestamp, std::memory_order_release);
 
                 VideoFrame vf;
                 vf.width = mImgData_.width;
@@ -1877,6 +1909,7 @@ private:
                 vf.publishTimeNs = AlignFaysTsToSystem(mImgData_.timestamp);
                 videoFrameQueue_.Push(std::move(vf));
                 TryDumpCalibrationJson("stereo_frame");
+                WriteRuntimeStatus(false);
             }
 
             if (!gotFrame) {
@@ -1946,6 +1979,9 @@ private:
                     pendingCamSamples.push_back(camSample);
                     camTsQueue_.TryPushBatch(pendingCamSamples);
 
+                    lastEncodedFrameSystemNs_.store(SystemNowNs(), std::memory_order_release);
+                    lastEncodedFrameFaysNs_.store(vf.faysTsNs, std::memory_order_release);
+                    WriteRuntimeStatus(false);
                     frameIndex++;
                 }
             } else if (videoSessionOpen) {
@@ -1968,6 +2004,51 @@ private:
     }
 
 private:
+    void WriteRuntimeStatus(bool force) {
+        if (statusJsonPath_.empty()) {
+            return;
+        }
+
+        const uint64_t nowNs = SystemNowNs();
+        uint64_t lastWriteNs = lastRuntimeStatusWriteNs_.load(std::memory_order_acquire);
+        if (!force && lastWriteNs != 0 && nowNs - lastWriteNs < statusIntervalNs_) {
+            return;
+        }
+        if (!lastRuntimeStatusWriteNs_.compare_exchange_strong(
+                lastWriteNs, nowNs, std::memory_order_acq_rel, std::memory_order_acquire)) {
+            return;
+        }
+
+        const std::string tmpPath =
+            statusJsonPath_ + ".tmp." + std::to_string(static_cast<long long>(getpid()));
+        std::ofstream out(tmpPath, std::ios::out | std::ios::trunc);
+        if (!out.is_open()) {
+            return;
+        }
+        const bool recordingEnabled = recordingEnabled_.load(std::memory_order_acquire);
+        const uint64_t sessionId = recordingSessionId_.load(std::memory_order_acquire);
+        out << "{\n";
+        out << "  \"pid\": " << static_cast<long long>(getpid()) << ",\n";
+        out << "  \"config_path\": \"" << JsonEscape(configPath_) << "\",\n";
+        out << "  \"video_name\": \"" << JsonEscape(videoFileName_) << "\",\n";
+        out << "  \"mcap_name\": \"" << JsonEscape(mcapFileName_) << "\",\n";
+        out << "  \"running\": " << (mbIsRunning_.load(std::memory_order_acquire) ? "true" : "false") << ",\n";
+        out << "  \"recording_enabled\": " << (recordingEnabled ? "true" : "false") << ",\n";
+        out << "  \"recording_session_id\": " << sessionId << ",\n";
+        out << "  \"last_frame_system_ns\": " << lastFrameSystemNs_.load(std::memory_order_acquire) << ",\n";
+        out << "  \"last_frame_fays_ns\": " << lastFrameFaysNs_.load(std::memory_order_acquire) << ",\n";
+        out << "  \"last_encoded_frame_system_ns\": " << lastEncodedFrameSystemNs_.load(std::memory_order_acquire) << ",\n";
+        out << "  \"last_encoded_frame_fays_ns\": " << lastEncodedFrameFaysNs_.load(std::memory_order_acquire) << ",\n";
+        out << "  \"status_write_system_ns\": " << nowNs << "\n";
+        out << "}\n";
+        out.close();
+        if (!out) {
+            unlink(tmpPath.c_str());
+            return;
+        }
+        rename(tmpPath.c_str(), statusJsonPath_.c_str());
+    }
+
     void TryDumpCalibrationJson(const char* reason) {
         if (calibrationDumped_.load(std::memory_order_acquire) || calibrationJsonPath_.empty()) {
             return;
@@ -2010,8 +2091,10 @@ private:
     std::string videoFileName_;
     std::string mcapFileName_;
     std::string calibrationJsonPath_;
+    std::string statusJsonPath_;
     std::atomic<bool> calibrationDumped_;
     uint64_t lastCalibrationWarnNs_ = 0;
+    uint64_t statusIntervalNs_;
 
     int recordFps_;
     GstRecorder mRecorder_;
@@ -2025,6 +2108,11 @@ private:
     std::atomic<uint64_t> imuRollbackCount_;
 
     uint64_t lastImgTimestamp_;
+    std::atomic<uint64_t> lastFrameSystemNs_;
+    std::atomic<uint64_t> lastFrameFaysNs_;
+    std::atomic<uint64_t> lastEncodedFrameSystemNs_;
+    std::atomic<uint64_t> lastEncodedFrameFaysNs_;
+    std::atomic<uint64_t> lastRuntimeStatusWriteNs_;
     std::atomic<int64_t> imuToSysOffsetNs_;
     std::atomic<bool> hasImuTimeOffset_;
     std::vector<std::string> monitoredDevicePaths_;
@@ -2033,10 +2121,16 @@ private:
 };
 
 void signalHandler(int signal) {
-    if (g_recorder != nullptr) {
-        std::cout << "\n[Signal] Received signal " << signal << ", stopping recorder..." << std::endl;
-        g_recorder->Stop();
+    (void)signal;
+    g_stopRequested = 1;
+}
+
+static bool ConsumeStopRequested() {
+    if (g_stopRequested == 0) {
+        return false;
     }
+    g_stopRequested = 0;
+    return true;
 }
 
 static std::string Trim(const std::string& input) {
@@ -2077,46 +2171,69 @@ static void RunControlLoop(FaysRecorder& recorder, const std::string& fifoPath) 
     while (recorder.IsRunning()) {
         // Keep FIFO opened in RDWR mode so open() won't block waiting for an external writer.
         // This makes the control endpoint visible immediately after daemon startup.
-        int fd = open(fifoPath.c_str(), O_RDWR);
+        int fd = open(fifoPath.c_str(), O_RDWR | O_NONBLOCK);
         if (fd < 0) {
             std::cerr << "[Control] Failed to open FIFO: " << std::strerror(errno) << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
 
-        FILE* stream = fdopen(fd, "r");
-        if (stream == nullptr) {
-            std::cerr << "[Control] fdopen failed: " << std::strerror(errno) << std::endl;
-            close(fd);
-            std::this_thread::sleep_for(std::chrono::milliseconds(500));
-            continue;
-        }
-
         char buffer[1024];
-        while (recorder.IsRunning() && fgets(buffer, sizeof(buffer), stream) != nullptr) {
-            std::string cmd = Trim(buffer);
-            if (cmd.empty()) {
+        std::string pending;
+        while (recorder.IsRunning()) {
+            if (ConsumeStopRequested()) {
+                std::cout << "\n[Signal] Stop requested, stopping recorder..." << std::endl;
+                recorder.Stop();
+                break;
+            }
+
+            const ssize_t bytesRead = read(fd, buffer, sizeof(buffer));
+            if (bytesRead < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                    continue;
+                }
+                std::cerr << "[Control] FIFO read failed: " << std::strerror(errno) << std::endl;
+                break;
+            }
+            if (bytesRead == 0) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
 
-            if (cmd.rfind("START|", 0) == 0) {
-                std::string outputDir = Trim(cmd.substr(6));
-                if (outputDir.empty()) {
-                    std::cerr << "[Control] START command missing output directory." << std::endl;
+            pending.append(buffer, buffer + bytesRead);
+            size_t newlinePos = std::string::npos;
+            while ((newlinePos = pending.find('\n')) != std::string::npos) {
+                std::string cmd = Trim(pending.substr(0, newlinePos));
+                pending.erase(0, newlinePos + 1);
+
+                if (cmd.empty()) {
                     continue;
                 }
-                recorder.StartRecording(outputDir);
-            } else if (cmd == "STOP") {
-                recorder.StopRecordingSession();
-            } else if (cmd == "EXIT") {
-                recorder.Stop();
-                break;
-            } else {
-                std::cerr << "[Control] Unknown command: " << cmd << std::endl;
+
+                if (cmd.rfind("START|", 0) == 0) {
+                    std::string outputDir = Trim(cmd.substr(6));
+                    if (outputDir.empty()) {
+                        std::cerr << "[Control] START command missing output directory." << std::endl;
+                        continue;
+                    }
+                    recorder.StartRecording(outputDir);
+                } else if (cmd == "STOP") {
+                    recorder.StopRecordingSession();
+                } else if (cmd == "EXIT") {
+                    recorder.Stop();
+                    break;
+                } else {
+                    std::cerr << "[Control] Unknown command: " << cmd << std::endl;
+                }
             }
         }
 
-        fclose(stream);
+        close(fd);
+        if (ConsumeStopRequested()) {
+            std::cout << "\n[Signal] Stop requested, stopping recorder..." << std::endl;
+            recorder.Stop();
+        }
     }
 }
 
@@ -2124,7 +2241,7 @@ int main(int argc, char** argv) {
     if (argc < 2) {
         std::cerr << "Usage:" << std::endl;
         std::cerr << "  ./fays_record_example <config_path> [output_directory] [--video-name name] [--mcap-name name]" << std::endl;
-        std::cerr << "  ./fays_record_example <config_path> --control-fifo <fifo_path> [--video-name name] [--mcap-name name] [--calib-json path]" << std::endl;
+        std::cerr << "  ./fays_record_example <config_path> --control-fifo <fifo_path> [--video-name name] [--mcap-name name] [--calib-json path] [--status-json path]" << std::endl;
         std::cerr << "  ./fays_record_example <config_path> --dump-calib-json <output_path>" << std::endl;
         return 1;
     }
@@ -2138,6 +2255,7 @@ int main(int argc, char** argv) {
     std::string videoFileName = "fays_stereo_output.mkv";
     std::string mcapFileName = "fays_data.mcap";
     std::string calibrationJsonPath;
+    std::string statusJsonPath;
 
     for (int index = 2; index < argc; ++index) {
         const std::string arg = argv[index];
@@ -2161,6 +2279,10 @@ int main(int argc, char** argv) {
         }
         if (arg == "--calib-json" && index + 1 < argc) {
             calibrationJsonPath = argv[++index];
+            continue;
+        }
+        if (arg == "--status-json" && index + 1 < argc) {
+            statusJsonPath = argv[++index];
             continue;
         }
         if (!controlMode && outputDir == ".") {
@@ -2187,7 +2309,7 @@ int main(int argc, char** argv) {
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
 
-    FaysRecorder recorder(configPath.c_str(), videoFileName, mcapFileName, calibrationJsonPath);
+    FaysRecorder recorder(configPath.c_str(), videoFileName, mcapFileName, calibrationJsonPath, statusJsonPath);
     g_recorder = &recorder;
 
     if (controlMode) {

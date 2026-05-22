@@ -13,7 +13,7 @@ namespace ugripper::runtime {
 struct StereoSessionClientOptions
 {
     std::vector<std::string> daemon_arguments;
-    std::string control_file;
+    std::string control_pipe;
     std::string status_file;
     int daemon_stop_timeout_ms = 2000;
     uint64_t restart_interval_ms = 2000;

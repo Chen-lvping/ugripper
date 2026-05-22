@@ -32,7 +32,7 @@ public:
                             std::string* error_message) const = 0;
 };
 
-std::unique_ptr<StereoSessionPort> CreateFileStereoSessionPort(std::string control_path,
+std::unique_ptr<StereoSessionPort> CreateFifoStereoSessionPort(std::string control_path,
                                                                std::string status_path);
 
 }  // namespace ugripper::runtime

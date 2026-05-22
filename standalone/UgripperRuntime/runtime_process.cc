@@ -114,10 +114,10 @@ private:
     std::string ready_path_;
 };
 
-class FileStereoSessionPort : public ugripper::runtime::StereoSessionPort
+class FifoStereoSessionPort : public ugripper::runtime::StereoSessionPort
 {
 public:
-    FileStereoSessionPort(std::string control_path, std::string status_path)
+    FifoStereoSessionPort(std::string control_path, std::string status_path)
         : control_path_(std::move(control_path)),
           status_path_(std::move(status_path))
     {
@@ -128,6 +128,16 @@ public:
         std::error_code error;
         fs::remove(status_path_, error);
         fs::remove(control_path_, error);
+        fs::path legacy_control_path = control_path_;
+        if (legacy_control_path.extension() == ".pipe")
+        {
+            legacy_control_path.replace_extension(".json");
+        }
+        else
+        {
+            legacy_control_path += ".json";
+        }
+        fs::remove(legacy_control_path, error);
     }
 
     bool WriteControl(bool recording,
@@ -137,14 +147,40 @@ public:
                       uint64_t command_seq,
                       std::string* error_message) const override
     {
-        json root = json::object();
-        root["command_seq"] = command_seq;
-        root["recording"] = recording;
-        root["episode_dir"] = episode_dir;
-        root["start_system_time_us"] = start_system_time_us;
-        root["stop_system_time_us"] = stop_system_time_us;
+        const std::string payload = BuildCommandLine(recording,
+                                                     episode_dir,
+                                                     start_system_time_us,
+                                                     stop_system_time_us,
+                                                     command_seq);
+        const int fd = open(control_path_.c_str(), O_WRONLY | O_NONBLOCK);
+        if (fd < 0)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = "open stereo control pipe failed: " + std::string(std::strerror(errno));
+            }
+            return false;
+        }
 
-        return WriteTextFileAtomically(control_path_, root.dump(2) + "\n", error_message);
+        const ssize_t written = write(fd, payload.data(), payload.size());
+        const int saved_errno = errno;
+        close(fd);
+
+        if (written < 0 || static_cast<size_t>(written) != payload.size())
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = written < 0
+                                     ? "write stereo control pipe failed: " + std::string(std::strerror(saved_errno))
+                                     : "short write to stereo control pipe";
+            }
+            return false;
+        }
+        if (error_message != nullptr)
+        {
+            error_message->clear();
+        }
+        return true;
     }
 
     bool LoadStatus(ugripper::runtime::StereoSessionStatusSnapshot* status,
@@ -198,6 +234,23 @@ public:
     }
 
 private:
+    static std::string BuildCommandLine(bool recording,
+                                        const std::string& episode_dir,
+                                        int64_t start_system_time_us,
+                                        int64_t stop_system_time_us,
+                                        uint64_t command_seq)
+    {
+        std::string line = recording ? "START" : "STOP";
+        line += '|';
+        line += std::to_string(command_seq);
+        line += '|';
+        line += episode_dir;
+        line += '|';
+        line += std::to_string(recording ? start_system_time_us : stop_system_time_us);
+        line += '\n';
+        return line;
+    }
+
     fs::path control_path_;
     fs::path status_path_;
 };
@@ -361,10 +414,10 @@ std::unique_ptr<AudioCommandPort> CreateFileAudioCommandPort(std::string command
     return std::make_unique<FileAudioCommandPort>(std::move(command_path), std::move(ready_path));
 }
 
-std::unique_ptr<StereoSessionPort> CreateFileStereoSessionPort(std::string control_path,
+std::unique_ptr<StereoSessionPort> CreateFifoStereoSessionPort(std::string control_path,
                                                                std::string status_path)
 {
-    return std::make_unique<FileStereoSessionPort>(std::move(control_path), std::move(status_path));
+    return std::make_unique<FifoStereoSessionPort>(std::move(control_path), std::move(status_path));
 }
 
 std::unique_ptr<ShutdownRequestPort> CreateFileShutdownRequestPort(std::string request_path,
@@ -950,7 +1003,7 @@ StereoSessionClient::StereoSessionClient(ProcessSupervisor* supervisor,
     if (session_port_ == nullptr)
     {
         session_port_ =
-            CreateFileStereoSessionPort(options_.control_file, options_.status_file);
+            CreateFifoStereoSessionPort(options_.control_pipe, options_.status_file);
     }
 }
 
@@ -958,11 +1011,6 @@ bool StereoSessionClient::StartDaemon(std::string* error_message)
 {
     session_port_->ResetSessionState();
     last_start_attempt_ms_ = now_ms_fn_();
-
-    if (!WriteControl(false, "", 0, 0, error_message))
-    {
-        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to reset stereo control file before launch").str());
-    }
 
     ProcessSpec spec;
     spec.name = "stereo_daemon";
@@ -1074,7 +1122,18 @@ bool StereoSessionClient::WaitForFinalize(const std::string& episode_dir,
 
     if (error_message != nullptr && error_message->empty())
     {
-        *error_message = "timed out waiting for stereo session metadata";
+        StereoSessionStatusSnapshot status;
+        std::string load_error;
+        if (session_port_->LoadStatus(&status, &load_error) &&
+            !status.last_finalize_error.empty() &&
+            (status.active_episode_dir.empty() || status.active_episode_dir == episode_dir))
+        {
+            *error_message = status.last_finalize_error;
+        }
+        else
+        {
+            *error_message = "timed out waiting for stereo session metadata";
+        }
     }
     return false;
 }
@@ -1103,7 +1162,7 @@ bool StereoSessionClient::WriteControl(bool recording,
                                      next_command_seq,
                                      error_message))
     {
-        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write stereo control file: "
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write stereo control pipe: "
                              << (error_message != nullptr ? *error_message : std::string())).str());
         return false;
     }

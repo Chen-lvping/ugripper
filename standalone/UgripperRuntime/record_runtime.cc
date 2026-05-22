@@ -3287,8 +3287,8 @@ bool RecordRuntime::initialize()
             .daemon_arguments =
                 {
                     options_.faysStereoDaemonScript,
-                    "--control-file",
-                    options_.stereoControlFile,
+                    "--control-fifo",
+                    options_.stereoControlPipe,
                     "--status-file",
                     options_.stereoStatusFile,
                     "--left-config",
@@ -3300,7 +3300,7 @@ bool RecordRuntime::initialize()
                     "--right-fifo",
                     options_.rightFaysControlFifo,
                 },
-            .control_file = options_.stereoControlFile,
+            .control_pipe = options_.stereoControlPipe,
             .status_file = options_.stereoStatusFile,
             .daemon_stop_timeout_ms = 2000,
             .restart_interval_ms = kStereoDaemonRestartIntervalMs,

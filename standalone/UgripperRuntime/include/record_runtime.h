@@ -50,7 +50,7 @@ struct RecordRuntimeOptions
     std::string fallbackCalibrationFile = "./bin/UgripperRuntime/config/fakeCamCalib.json";
     std::string tactileStateDir = "/tmp/umi_tactile_state";
     std::string cameraCodec = "h264";
-    std::string stereoControlFile = "/tmp/umi_stereo_camera_control.json";
+    std::string stereoControlPipe = "/tmp/umi_stereo_camera_control.pipe";
     std::string stereoStatusFile = "/tmp/umi_stereo_camera_status.json";
     int pollMs = 20;
 };

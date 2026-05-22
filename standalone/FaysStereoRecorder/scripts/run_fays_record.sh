@@ -13,6 +13,7 @@ LOCAL_FTDI_LIB_DIR="$BUILD_DIR/lib/ft602-linux-${ARCH}"
 VIDEO_NAME="fays_stereo_output.mkv"
 MCAP_NAME="fays_data.mcap"
 CALIB_JSON_PATH=""
+STATUS_JSON_PATH=""
 CMD_SEND_TIMEOUT_SEC="${FAYS_CMD_TIMEOUT_SEC:-0.35}"
 
 append_ld_library_path() {
@@ -153,6 +154,10 @@ while [ "$#" -gt 0 ]; do
             CALIB_JSON_PATH="$2"
             shift 2
             ;;
+        --status-json)
+            STATUS_JSON_PATH="$2"
+            shift 2
+            ;;
         *)
             POSITIONAL+=("$1")
             shift
@@ -176,6 +181,9 @@ case "$MODE" in
         args=("$CONFIG_FILE" --control-fifo "$CMD_FIFO" --video-name "$VIDEO_NAME" --mcap-name "$MCAP_NAME")
         if [ -n "$CALIB_JSON_PATH" ]; then
             args+=(--calib-json "$CALIB_JSON_PATH")
+        fi
+        if [ -n "$STATUS_JSON_PATH" ]; then
+            args+=(--status-json "$STATUS_JSON_PATH")
         fi
         exec "$EXECUTABLE" "${args[@]}"
         ;;
@@ -207,7 +215,7 @@ case "$MODE" in
         ;;
     *)
         echo "Usage:"
-        echo "  $0 [--config FILE] [--control-fifo FIFO] [--video-name NAME] [--mcap-name NAME] [--calib-json PATH] daemon"
+        echo "  $0 [--config FILE] [--control-fifo FIFO] [--video-name NAME] [--mcap-name NAME] [--calib-json PATH] [--status-json PATH] daemon"
         echo "  $0 --config FILE --calib-json PATH dump-calib-json"
         echo "  $0 [--control-fifo FIFO] start <output_dir>"
         echo "  $0 [--control-fifo FIFO] stop"

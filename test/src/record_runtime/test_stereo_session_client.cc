@@ -8,8 +8,12 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <string>
 
 #include <nlohmann/json.hpp>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -101,10 +105,10 @@ public:
     int reset_count = 0;
 };
 
-TEST(StereoSessionClientTest, WritesControlAndReadsFinalizeStatus)
+TEST(StereoSessionClientTest, WritesControlFifoAndReadsFinalizeStatus)
 {
     TempDir temp_dir;
-    const fs::path control_file = temp_dir.path() / "stereo_control.json";
+    const fs::path control_pipe = temp_dir.path() / "stereo_control.pipe";
     const fs::path status_file = temp_dir.path() / "stereo_status.json";
 
     ugripper::runtime::ProcessSupervisor supervisor;
@@ -112,7 +116,7 @@ TEST(StereoSessionClientTest, WritesControlAndReadsFinalizeStatus)
         &supervisor,
         {
             .daemon_arguments = {"/bin/sh", "-c", "sleep 5"},
-            .control_file = control_file.string(),
+            .control_pipe = control_pipe.string(),
             .status_file = status_file.string(),
             .daemon_stop_timeout_ms = 500,
             .restart_interval_ms = 50,
@@ -122,16 +126,21 @@ TEST(StereoSessionClientTest, WritesControlAndReadsFinalizeStatus)
 
     std::string error;
     ASSERT_TRUE(client.StartDaemon(&error)) << error;
+    ASSERT_EQ(mkfifo(control_pipe.c_str(), 0600), 0);
+    const int pipe_fd = open(control_pipe.c_str(), O_RDWR | O_NONBLOCK);
+    ASSERT_GE(pipe_fd, 0);
     ASSERT_TRUE(client.StartSession("/tmp/episode-1", 123, &error)) << error;
 
-    std::ifstream control_input(control_file);
-    ASSERT_TRUE(control_input.is_open());
-    json control = json::parse(control_input);
-    EXPECT_TRUE(control.at("recording").get<bool>());
-    EXPECT_EQ(control.at("episode_dir").get<std::string>(), "/tmp/episode-1");
-    EXPECT_EQ(control.at("start_system_time_us").get<int64_t>(), 123);
+    char buffer[256] = {};
+    ssize_t bytes = read(pipe_fd, buffer, sizeof(buffer) - 1);
+    ASSERT_GT(bytes, 0);
+    EXPECT_EQ(std::string(buffer, static_cast<size_t>(bytes)), "START|1|/tmp/episode-1|123\n");
 
     ASSERT_TRUE(client.StopSession("/tmp/episode-1", 456, &error)) << error;
+    buffer[0] = '\0';
+    bytes = read(pipe_fd, buffer, sizeof(buffer) - 1);
+    ASSERT_GT(bytes, 0);
+    EXPECT_EQ(std::string(buffer, static_cast<size_t>(bytes)), "STOP|2|/tmp/episode-1|456\n");
     {
         std::ofstream status_output(status_file, std::ios::trunc);
         status_output << json{
@@ -146,12 +155,13 @@ TEST(StereoSessionClientTest, WritesControlAndReadsFinalizeStatus)
 
     EXPECT_TRUE(client.WaitForFinalize("/tmp/episode-1", 200, &error)) << error;
     client.StopDaemon();
+    close(pipe_fd);
 }
 
 TEST(StereoSessionClientTest, ReportsFinalizeErrorFromStatusFile)
 {
     TempDir temp_dir;
-    const fs::path control_file = temp_dir.path() / "stereo_control.json";
+    const fs::path control_pipe = temp_dir.path() / "stereo_control.pipe";
     const fs::path status_file = temp_dir.path() / "stereo_status.json";
 
     ugripper::runtime::ProcessSupervisor supervisor;
@@ -159,7 +169,7 @@ TEST(StereoSessionClientTest, ReportsFinalizeErrorFromStatusFile)
         &supervisor,
         {
             .daemon_arguments = {"/bin/sh", "-c", "sleep 5"},
-            .control_file = control_file.string(),
+            .control_pipe = control_pipe.string(),
             .status_file = status_file.string(),
             .daemon_stop_timeout_ms = 500,
             .restart_interval_ms = 50,
@@ -201,7 +211,7 @@ TEST(StereoSessionClientTest, UsesInjectedSessionPortForCommandsAndStatus)
         &supervisor,
         {
             .daemon_arguments = {"/bin/sh", "-c", "sleep 5"},
-            .control_file = "/tmp/unused-control.json",
+            .control_pipe = "/tmp/unused-control.pipe",
             .status_file = "/tmp/unused-status.json",
             .daemon_stop_timeout_ms = 500,
             .restart_interval_ms = 50,
@@ -213,25 +223,23 @@ TEST(StereoSessionClientTest, UsesInjectedSessionPortForCommandsAndStatus)
     std::string error;
     ASSERT_TRUE(client.StartDaemon(&error)) << error;
     ASSERT_EQ(fake_port_ptr->reset_count, 1);
-    ASSERT_EQ(fake_port_ptr->writes.size(), 1u);
-    EXPECT_FALSE(fake_port_ptr->writes[0].recording);
-    EXPECT_EQ(fake_port_ptr->writes[0].command_seq, 1u);
+    ASSERT_TRUE(fake_port_ptr->writes.empty());
 
     ASSERT_TRUE(client.StartSession("/tmp/episode-3", 789, &error)) << error;
     ASSERT_TRUE(client.StopSession("/tmp/episode-3", 987, &error)) << error;
-    EXPECT_EQ(fake_port_ptr->writes.size(), 3u);
-    EXPECT_TRUE(fake_port_ptr->writes[1].recording);
-    EXPECT_EQ(fake_port_ptr->writes[1].episode_dir, "/tmp/episode-3");
-    EXPECT_EQ(fake_port_ptr->writes[1].start_system_time_us, 789);
+    EXPECT_EQ(fake_port_ptr->writes.size(), 2u);
+    EXPECT_TRUE(fake_port_ptr->writes[0].recording);
+    EXPECT_EQ(fake_port_ptr->writes[0].episode_dir, "/tmp/episode-3");
+    EXPECT_EQ(fake_port_ptr->writes[0].start_system_time_us, 789);
+    EXPECT_EQ(fake_port_ptr->writes[0].command_seq, 1u);
+    EXPECT_FALSE(fake_port_ptr->writes[1].recording);
+    EXPECT_EQ(fake_port_ptr->writes[1].stop_system_time_us, 987);
     EXPECT_EQ(fake_port_ptr->writes[1].command_seq, 2u);
-    EXPECT_FALSE(fake_port_ptr->writes[2].recording);
-    EXPECT_EQ(fake_port_ptr->writes[2].stop_system_time_us, 987);
-    EXPECT_EQ(fake_port_ptr->writes[2].command_seq, 3u);
 
     EXPECT_TRUE(client.WaitForFinalize("/tmp/episode-3", 100, &error)) << error;
     client.StopDaemon();
-    ASSERT_EQ(fake_port_ptr->writes.size(), 4u);
-    EXPECT_EQ(fake_port_ptr->writes[3].command_seq, 4u);
+    ASSERT_EQ(fake_port_ptr->writes.size(), 3u);
+    EXPECT_EQ(fake_port_ptr->writes[2].command_seq, 3u);
 }
 
 }  // namespace
