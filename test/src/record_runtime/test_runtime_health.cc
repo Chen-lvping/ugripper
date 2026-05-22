@@ -30,6 +30,7 @@ fs::path MakeTempDir()
 using ugripper::runtime::HealthMonitor;
 using ugripper::runtime::HealthState;
 using ugripper::runtime::HealthStatus;
+using ugripper::runtime::HardwareFaultSide;
 using ugripper::runtime::HmiHealthSnapshot;
 using ugripper::runtime::ProcessState;
 using ugripper::runtime::ProcessStatus;
@@ -124,6 +125,7 @@ TEST(HealthMonitorTest, ReportsFaultOnlyOnceUntilStateChanges)
     EXPECT_TRUE(result.should_notify_fault);
     EXPECT_EQ(result.fault->key, "critical_devices_missing");
     EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error2);
+    EXPECT_EQ(result.fault->side, HardwareFaultSide::Unknown);
 
     g_now_ms = 2500;
     result = monitor.Poll(result.state);
@@ -179,6 +181,49 @@ TEST(HealthMonitorTest, ReportsRecoveryAfterFaultClears)
     EXPECT_FALSE(result.fault.has_value());
     EXPECT_TRUE(result.recovered);
     EXPECT_EQ(result.state.status, HealthStatus::Ok);
+
+    fs::remove_all(temp_dir);
+}
+
+TEST(HealthMonitorTest, ClassifiesMissingLeftAndRightCriticalDevices)
+{
+    const fs::path temp_dir = MakeTempDir();
+    const fs::path stereo_status = temp_dir / "stereo_status.json";
+    std::ofstream(stereo_status) << R"({"ready":true,"service_state":"ready"})";
+
+    HealthMonitor monitor(
+        {.disk_root = temp_dir.string(),
+         .stereo_status_file = stereo_status.string(),
+         .critical_device_paths = {"/dev/stereo_left", "/dev/right_encoder"},
+         .poll_interval_ms = 1000,
+         .hmi_active_timeout_ms = 2500},
+        {.is_disk_writable =
+             [](const std::string&) {
+                 return true;
+             },
+         .path_exists =
+             [](const std::string&) {
+                 return false;
+             },
+         .get_process_status =
+             [](WorkerName) {
+                 return ProcessStatus{.state = ProcessState::Running, .running = true, .pid = 7};
+             },
+         .get_hmi_health =
+             [](uint64_t) {
+                 return HmiHealthSnapshot{
+                     .has_connected_device = true,
+                     .input_connected = true,
+                     .input_active = true,
+                 };
+             }},
+        &FakeNowMs);
+
+    g_now_ms = 1500;
+    const auto result = monitor.Poll(HealthState{});
+    ASSERT_TRUE(result.fault.has_value());
+    EXPECT_EQ(result.fault->key, "critical_devices_missing");
+    EXPECT_EQ(result.fault->side, HardwareFaultSide::Both);
 
     fs::remove_all(temp_dir);
 }
@@ -265,6 +310,7 @@ TEST(HealthMonitorTest, ReportsInputHmiDisconnected)
     ASSERT_TRUE(result.fault.has_value());
     EXPECT_EQ(result.fault->key, "hmi_ports_disconnected");
     EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error2);
+    EXPECT_EQ(result.fault->side, HardwareFaultSide::Right);
 
     fs::remove_all(temp_dir);
 }
@@ -360,6 +406,7 @@ TEST(HealthMonitorTest, ReportsAllHmiDisconnected)
     ASSERT_TRUE(result.fault.has_value());
     EXPECT_EQ(result.fault->key, "hmi_all_disconnected");
     EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error2);
+    EXPECT_EQ(result.fault->side, HardwareFaultSide::Both);
 
     fs::remove_all(temp_dir);
 }
@@ -408,6 +455,7 @@ TEST(HealthMonitorTest, ReportsInactiveAuxiliaryHmiPorts)
     ASSERT_TRUE(result.fault.has_value());
     EXPECT_EQ(result.fault->key, "hmi_ports_inactive");
     EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error2);
+    EXPECT_EQ(result.fault->side, HardwareFaultSide::Left);
     EXPECT_NE(result.fault->detail.find("/dev/left_gripper(age_ms=2875,active=0)"), std::string::npos);
     EXPECT_NE(result.fault->detail.find("port_activity=/dev/right_gripper(age_ms=15,active=1), "
                                         "/dev/left_gripper(age_ms=2875,active=0)"),
@@ -712,7 +760,7 @@ TEST(HealthMonitorTest, ReportsStereoNotReady)
 {
     const fs::path temp_dir = MakeTempDir();
     const fs::path stereo_status = temp_dir / "stereo_status.json";
-    std::ofstream(stereo_status) << R"({"ready":false,"service_state":"warming"})";
+    std::ofstream(stereo_status) << R"({"ready":false,"service_state":"warming","cameras":{"left_stereo":{"ready":false},"right_stereo":{"ready":true}}})";
 
     HealthMonitor monitor(
         {.disk_root = temp_dir.string(),
@@ -748,6 +796,50 @@ TEST(HealthMonitorTest, ReportsStereoNotReady)
     ASSERT_TRUE(result.fault.has_value());
     EXPECT_EQ(result.fault->key, "stereo_not_ready");
     EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error2);
+    EXPECT_EQ(result.fault->side, HardwareFaultSide::Left);
+
+    fs::remove_all(temp_dir);
+}
+
+TEST(HealthMonitorTest, ClassifiesUnknownStereoNotReadyWithoutSideDetails)
+{
+    const fs::path temp_dir = MakeTempDir();
+    const fs::path stereo_status = temp_dir / "stereo_status.json";
+    std::ofstream(stereo_status) << R"({"ready":false,"service_state":"warming"})";
+
+    HealthMonitor monitor(
+        {.disk_root = temp_dir.string(),
+         .stereo_status_file = stereo_status.string(),
+         .critical_device_paths = {"/dev/cam0"},
+         .poll_interval_ms = 1000,
+         .hmi_active_timeout_ms = 2500},
+        {.is_disk_writable =
+             [](const std::string&) {
+                 return true;
+             },
+         .path_exists =
+             [](const std::string&) {
+                 return true;
+             },
+         .get_process_status =
+             [](WorkerName) {
+                 return ProcessStatus{.state = ProcessState::Running, .running = true, .pid = 7};
+             },
+         .get_hmi_health =
+             [](uint64_t) {
+                 return HmiHealthSnapshot{
+                     .has_connected_device = true,
+                     .input_connected = true,
+                     .input_active = true,
+                 };
+             }},
+        &FakeNowMs);
+
+    g_now_ms = 1500;
+    const auto result = monitor.Poll(HealthState{});
+    ASSERT_TRUE(result.fault.has_value());
+    EXPECT_EQ(result.fault->key, "stereo_not_ready");
+    EXPECT_EQ(result.fault->side, HardwareFaultSide::Unknown);
 
     fs::remove_all(temp_dir);
 }

@@ -40,6 +40,52 @@ std::string AppendHmiPortActivity(std::string detail, const std::vector<std::str
     return detail;
 }
 
+ugripper::runtime::HardwareFaultSide SideForText(const std::string& text)
+{
+    const bool has_left = text.find("left") != std::string::npos ||
+                          text.find("/dev/cam_left") != std::string::npos ||
+                          text.find("/dev/stereo_left") != std::string::npos ||
+                          text.find("/dev/left_") != std::string::npos ||
+                          text.find("/dev/tcam_left") != std::string::npos;
+    const bool has_right = text.find("right") != std::string::npos ||
+                           text.find("/dev/cam_right") != std::string::npos ||
+                           text.find("/dev/stereo_right") != std::string::npos ||
+                           text.find("/dev/right_") != std::string::npos ||
+                           text.find("/dev/tcam_right") != std::string::npos;
+    if (has_left && has_right)
+    {
+        return ugripper::runtime::HardwareFaultSide::Both;
+    }
+    if (has_left)
+    {
+        return ugripper::runtime::HardwareFaultSide::Left;
+    }
+    if (has_right)
+    {
+        return ugripper::runtime::HardwareFaultSide::Right;
+    }
+    return ugripper::runtime::HardwareFaultSide::Unknown;
+}
+
+ugripper::runtime::HardwareFaultSide MergeSides(ugripper::runtime::HardwareFaultSide lhs,
+                                                ugripper::runtime::HardwareFaultSide rhs)
+{
+    using ugripper::runtime::HardwareFaultSide;
+    if (lhs == rhs)
+    {
+        return lhs;
+    }
+    if (lhs == HardwareFaultSide::Unknown)
+    {
+        return rhs;
+    }
+    if (rhs == HardwareFaultSide::Unknown)
+    {
+        return lhs;
+    }
+    return HardwareFaultSide::Both;
+}
+
 void CallLog(const ugripper::runtime::RecordingOrchestrator::LogFn& log_fn, const std::string& message)
 {
     if (log_fn != nullptr)
@@ -239,11 +285,12 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
 {
     if (dependencies_.is_disk_writable != nullptr && !dependencies_.is_disk_writable(options_.disk_root))
     {
-        return HealthFault{
-            RuntimeLedState::Error1,
-            "disk_not_writable",
-            "Disk not writable or mount lost: " + options_.disk_root,
-        };
+            return HealthFault{
+                RuntimeLedState::Error1,
+                HardwareFaultSide::Unknown,
+                "disk_not_writable",
+                "Disk not writable or mount lost: " + options_.disk_root,
+            };
     }
 
     if (dependencies_.path_exists != nullptr)
@@ -258,8 +305,14 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
         }
         if (!missing_device_paths.empty())
         {
+            HardwareFaultSide side = HardwareFaultSide::Unknown;
+            for (const std::string& path : missing_device_paths)
+            {
+                side = MergeSides(side, SideForText(path));
+            }
             return HealthFault{
                 RuntimeLedState::Error2,
+                side,
                 "critical_devices_missing",
                 "Critical device nodes missing: " + JoinStrings(missing_device_paths, ", "),
             };
@@ -271,6 +324,7 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
     {
         return HealthFault{
             RuntimeLedState::Error2,
+            HardwareFaultSide::Unknown,
             "stereo_daemon_not_running",
             "Stereo warmup daemon is not running",
         };
@@ -281,6 +335,7 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
     {
         return HealthFault{
             RuntimeLedState::Error2,
+            HardwareFaultSide::Unknown,
             "stereo_status_missing",
             "Stereo status file missing: " + options_.stereo_status_file,
         };
@@ -291,8 +346,24 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
         json stereo_status = json::parse(stereo_status_input);
         if (!stereo_status.value("ready", false))
         {
+            HardwareFaultSide side = HardwareFaultSide::Unknown;
+            if (stereo_status.contains("cameras") && stereo_status["cameras"].is_object())
+            {
+                const json& cameras = stereo_status["cameras"];
+                if (cameras.contains("left_stereo") && cameras["left_stereo"].is_object() &&
+                    !cameras["left_stereo"].value("ready", false))
+                {
+                    side = MergeSides(side, HardwareFaultSide::Left);
+                }
+                if (cameras.contains("right_stereo") && cameras["right_stereo"].is_object() &&
+                    !cameras["right_stereo"].value("ready", false))
+                {
+                    side = MergeSides(side, HardwareFaultSide::Right);
+                }
+            }
             return HealthFault{
                 RuntimeLedState::Error2,
+                side,
                 "stereo_not_ready",
                 "Stereo warmup not ready: " + stereo_status.value("service_state", std::string("unknown")),
             };
@@ -302,6 +373,7 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
     {
         return HealthFault{
             RuntimeLedState::Error2,
+            HardwareFaultSide::Unknown,
             "stereo_status_invalid",
             std::string("Stereo status invalid: ") + ex.what(),
         };
@@ -315,6 +387,7 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
         {
             return HealthFault{
                 RuntimeLedState::Error2,
+                HardwareFaultSide::Both,
                 "hmi_all_disconnected",
                 "All HMI ports are disconnected",
             };
@@ -323,6 +396,7 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
         {
             return HealthFault{
                 RuntimeLedState::Error2,
+                SideForText(JoinStrings(hmi_health.disconnected_ports, ", ")),
                 "hmi_ports_disconnected",
                 "HMI ports disconnected: " + JoinStrings(hmi_health.disconnected_ports, ", "),
             };
@@ -331,6 +405,7 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
         {
             return HealthFault{
                 RuntimeLedState::Error2,
+                SideForText(JoinStrings(hmi_health.disconnected_ports, ", ")),
                 "hmi_input_disconnected",
                 "Input HMI port disconnected",
             };
@@ -345,6 +420,7 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
             }
             return HealthFault{
                 RuntimeLedState::Error2,
+                SideForText(AppendHmiPortActivity(detail, hmi_health.port_activity)),
                 "hmi_input_inactive",
                 AppendHmiPortActivity(std::move(detail), hmi_health.port_activity),
             };
@@ -355,6 +431,7 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
                 hmi_health.inactive_port_details.empty() ? hmi_health.inactive_ports : hmi_health.inactive_port_details;
             return HealthFault{
                 RuntimeLedState::Error2,
+                SideForText(JoinStrings(inactive_detail_source, ", ")),
                 "hmi_ports_inactive",
                 AppendHmiPortActivity("HMI ports inactive: " + JoinStrings(inactive_detail_source, ", "),
                                       hmi_health.port_activity),

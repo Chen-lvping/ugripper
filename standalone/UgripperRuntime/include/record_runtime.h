@@ -127,7 +127,9 @@ private:
         bool silenceBeepForSide(const std::string &side);
         void silenceBeep();
         void setLedEffect(const GripperLedEffect &effect);
+        void setLedEffectForSide(const std::string &side, const GripperLedEffect &effect);
         void setLedColor(uint8_t red, uint8_t green, uint8_t blue);
+        void setLedColorForSide(const std::string &side, uint8_t red, uint8_t green, uint8_t blue);
         void turnOff();
 
     private:
@@ -152,6 +154,14 @@ private:
         bool hasBeepState_ = false;
         GripperLedEffect currentLedEffect_{};
         GripperLedColor currentLedColor_{};
+        struct PerSideLedState
+        {
+            bool hasEffect = false;
+            bool hasColor = false;
+            GripperLedEffect effect{};
+            GripperLedColor color{};
+        };
+        std::vector<PerSideLedState> perSideLedStates_;
         GripperBeepState currentBeepState_{};
     };
 
@@ -329,6 +339,7 @@ private:
     void setAudioRecoveryCommand(std::string command);
     void sendAudioCommand(const std::string &command) const;
     void setLedState(LedState state, double progress = 0.0);
+    void setHardwareFaultLedState(const ugripper::runtime::HealthFault &fault);
     bool isRecordingActive() const;
     const std::string &currentEpisodeDir() const;
     const std::string &lastEpisodeDir() const;

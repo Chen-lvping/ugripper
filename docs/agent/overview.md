@@ -247,7 +247,7 @@
 - `WARNING`：触觉软告警，黄灯闪烁；当前只用于“同一 tactile serial 最近 3 个 episode 都异常”的 runtime 损坏提示。若后续一次录制把最近 `3` 次窗口刷回非全异常，黄灯会自动清除。持久化 baseline 超阈值仍会播放 damaged 语音并冻结 baseline，但不会单独把黄灯锁住。
 - `RECORDING`：录制中，绿色闪烁；当前只在亮灭边沿和低频补发时下发 RGB，避免高频重复写串口造成丢闪。
 - `CALIB_PRE` / `CALIB_RUN` / `CALIB_DONE`：供 USB 导入与校准脚本复用。
-- `ERROR_1` ~ `ERROR_5`：红灯长短码，分别用于完整性失败到运行时错误。
+- `ERROR_1` ~ `ERROR_5`：红灯长短码，分别用于完整性失败到运行时错误。硬件缺失类 `ERROR_2` 会按侧别提示：缺失侧夹爪闪烁 `ERROR_2`，另一侧红灯常亮；左右都缺失则两侧一起闪烁；无法归属左右侧时，两侧同步先闪一次 `ERROR_2` 完整序列，再红灯常亮相同时间并循环。
 - `EXIT`：关机退出阶段。
 
 ### 8.2 关键持久化与临时路径
@@ -292,7 +292,7 @@
 ### 8.6 硬件健康监控
 - `record_runtime` 当前参考 v1 口径保留低频硬件健康监控，约每 `1s` 检查一次关键硬件状态，而不是在主循环里做高频主动轮询。
 - 当前监控项包括：`/mnt/data_disk` 是否仍可写、8 路相机设备节点、左右 IMU/encoder 设备节点、stereo daemon `ready/not-ready` 状态，以及左右 HMI 串口是否仍连接、输入侧 HMI 是否持续有响应。
-- 发现磁盘异常时进入 `ERROR_1`；发现关键设备节点缺失、HMI 断连或 HMI 长时间无响应时进入 `ERROR_2`，并通过音频守护进程播报 `error`。
+- 发现磁盘异常时进入 `ERROR_1`；发现关键设备节点缺失、HMI 断连或 HMI 长时间无响应时进入 `ERROR_2`，并通过音频守护进程播报 `error`。`ERROR_2` 会根据缺失路径、stereo 状态或 HMI port 归属到左手、右手、双手或 unknown，用对应侧别灯效提示现场先看哪侧硬件。
 - 若录制中发现任意关键设备、HMI、数据盘或 stereo daemon 健康故障，当前 episode 会立即按错误停录收尾，写失败 `metadata.json` 和 `validation_error.log`，并将 `quality_check_err_type` 归类为 `device_disconnected` 或更具体的错误类型；设备后续恢复只影响下一次录制，不会把本条数据恢复成成功。
 - 若异常恢复发生在空闲态：回到 `READY` 并补播 `ready`。
 - `camera_recorder` 仍保持“单路 recorder 失败不立即主动终止整次录制”的容错语义；本次实现只加强停录阶段的子进程组回收与 stop 日志，不把启动期短暂抖动直接升级为全量停录。

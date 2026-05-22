@@ -62,6 +62,14 @@ enum class HealthStatus
     Error,
 };
 
+enum class HardwareFaultSide
+{
+    Unknown,
+    Left,
+    Right,
+    Both,
+};
+
 struct HealthState
 {
     HealthStatus status = HealthStatus::Unknown;
@@ -73,6 +81,7 @@ struct HealthState
 struct HealthFault
 {
     RuntimeLedState led_state = RuntimeLedState::Error5;
+    HardwareFaultSide side = HardwareFaultSide::Unknown;
     std::string key;
     std::string detail;
 };

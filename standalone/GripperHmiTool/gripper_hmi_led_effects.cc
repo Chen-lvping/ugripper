@@ -76,6 +76,10 @@ bool GripperLedEffectRenderer::parseStateText(const std::string &text, GripperLe
     {
         parsed.state = GripperLedEffectState::Error4;
     }
+    else if (stateText == "ERROR_2_UNKNOWN")
+    {
+        parsed.state = GripperLedEffectState::Error2Unknown;
+    }
     else if (stateText == "CALIB_PRE")
     {
         parsed.state = GripperLedEffectState::CalibPre;
@@ -135,6 +139,8 @@ std::string GripperLedEffectRenderer::stateText(const GripperLedEffect &effect)
         return "ERROR_4";
     case GripperLedEffectState::Error5:
         return "ERROR_5";
+    case GripperLedEffectState::Error2Unknown:
+        return "ERROR_2_UNKNOWN";
     case GripperLedEffectState::CalibPre:
         return "CALIB_PRE";
     case GripperLedEffectState::CalibRun:
@@ -217,6 +223,42 @@ GripperLedColor GripperLedEffectRenderer::render(const GripperLedEffect &effect,
             phaseMs -= onMs;
 
             const uint64_t offMs = (index == level) ? kErrorSequenceGapMs : kErrorPulseGapMs;
+            if (phaseMs < offMs)
+            {
+                return GripperLedColor{0, 0, 0};
+            }
+            phaseMs -= offMs;
+        }
+
+        return GripperLedColor{0, 0, 0};
+    }
+    case GripperLedEffectState::Error2Unknown:
+    {
+        constexpr int kError2Level = 1;
+        uint64_t errorCycleMs = 0;
+        for (int index = 0; index <= kError2Level; ++index)
+        {
+            errorCycleMs += (index == 0) ? kErrorLongOnMs : kErrorShortOnMs;
+            errorCycleMs += (index == kError2Level) ? kErrorSequenceGapMs : kErrorPulseGapMs;
+        }
+
+        const uint64_t fullCycleMs = errorCycleMs * 2;
+        uint64_t phaseMs = (fullCycleMs == 0) ? 0 : (steadyMs % fullCycleMs);
+        if (phaseMs >= errorCycleMs)
+        {
+            return GripperLedColor{255, 0, 0};
+        }
+
+        for (int index = 0; index <= kError2Level; ++index)
+        {
+            const uint64_t onMs = (index == 0) ? kErrorLongOnMs : kErrorShortOnMs;
+            if (phaseMs < onMs)
+            {
+                return GripperLedColor{255, 0, 0};
+            }
+            phaseMs -= onMs;
+
+            const uint64_t offMs = (index == kError2Level) ? kErrorSequenceGapMs : kErrorPulseGapMs;
             if (phaseMs < offMs)
             {
                 return GripperLedColor{0, 0, 0};

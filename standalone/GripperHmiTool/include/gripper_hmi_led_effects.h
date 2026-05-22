@@ -17,6 +17,7 @@ enum class GripperLedEffectState
     Error3,
     Error4,
     Error5,
+    Error2Unknown,
     CalibPre,
     CalibRun,
     CalibDone,

@@ -4464,6 +4464,7 @@ bool RecordRuntime::startRecording(bool resetRecording)
     }
     cancelBackgroundTactileValidation();
     tactileTriggeredAudioCommand_.clear();
+    activeHardwareFault_.reset();
     return recordingOrchestrator_->StartRecording(resetRecording, nullptr);
 }
 
@@ -4475,8 +4476,18 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
         return false;
     }
     const bool ok = recordingOrchestrator_->StopRecording(dueToError, reason, nullptr);
+    const std::string completedEpisodeDir = lastEpisodeDir();
+    if (ok && !dueToError && !completedEpisodeDir.empty())
+    {
+        scheduleBackgroundTactileValidation(completedEpisodeDir);
+    }
+    if (ok && dueToError && activeHardwareFault_.has_value())
+    {
+        setHardwareFaultLedState(*activeHardwareFault_);
+    }
     if (ok && !dueToError)
     {
+        activeHardwareFault_.reset();
         if (!tactileTriggeredAudioCommand_.empty())
         {
             setAudioRecoveryCommand(tactileWarningActive_ ? "" : tactileTriggeredAudioCommand_);
@@ -4870,6 +4881,7 @@ void RecordRuntime::monitorHardwareHealth()
 
     if (result.fault.has_value())
     {
+        activeHardwareFault_ = *result.fault;
         if (isRecordingActive())
         {
             const std::string stopReason =
@@ -4894,7 +4906,7 @@ void RecordRuntime::monitorHardwareHealth()
                 << "[HMI_DIAG] category=health_fault"
                 << " key=" << result.fault->key
                 << " led_state=" << ledStateName(toLedState(result.fault->led_state))).str());
-            setLedState(toLedState(result.fault->led_state));
+            setHardwareFaultLedState(*result.fault);
             sendAudioCommand("error");
         }
         return;
@@ -4902,6 +4914,7 @@ void RecordRuntime::monitorHardwareHealth()
 
     if (result.recovered)
     {
+        activeHardwareFault_.reset();
         DM_LOG_INFO("{}", (::DA::utils::LogString() << "hardware health recovered" << std::endl).str());
         DM_LOG_INFO("{}", (::DA::utils::LogString()
             << "[HMI_DIAG] category=health_recovered"
@@ -4964,6 +4977,36 @@ void RecordRuntime::setLedState(LedState state, double progress)
     if (ledController_)
     {
         ledController_->setState(state, progress);
+    }
+}
+
+void RecordRuntime::setHardwareFaultLedState(const ugripper::runtime::HealthFault &fault)
+{
+    if (fault.led_state != ugripper::runtime::RuntimeLedState::Error2 || !ledController_)
+    {
+        setLedState(toLedState(fault.led_state));
+        return;
+    }
+
+    const GripperLedEffect missingEffect{GripperLedEffectState::Error2, 0.0};
+    const GripperLedEffect unknownEffect{GripperLedEffectState::Error2Unknown, 0.0};
+    switch (fault.side)
+    {
+    case ugripper::runtime::HardwareFaultSide::Left:
+        panelManager_.setLedEffectForSide("left", missingEffect);
+        panelManager_.setLedColorForSide("right", 255, 0, 0);
+        break;
+    case ugripper::runtime::HardwareFaultSide::Right:
+        panelManager_.setLedColorForSide("left", 255, 0, 0);
+        panelManager_.setLedEffectForSide("right", missingEffect);
+        break;
+    case ugripper::runtime::HardwareFaultSide::Both:
+        panelManager_.setLedEffect(missingEffect);
+        break;
+    case ugripper::runtime::HardwareFaultSide::Unknown:
+    default:
+        panelManager_.setLedEffect(unknownEffect);
+        break;
     }
 }
 
@@ -5304,6 +5347,18 @@ void RecordRuntime::GripperPanelManager::maybeReconnectDriver(size_t index)
     {
         drivers_[index]->setLedEffect(currentLedEffect_);
     }
+    if (index < perSideLedStates_.size())
+    {
+        const auto &sideLed = perSideLedStates_[index];
+        if (sideLed.hasColor)
+        {
+            drivers_[index]->setLedColor(sideLed.color);
+        }
+        else if (sideLed.hasEffect)
+        {
+            drivers_[index]->setLedEffect(sideLed.effect);
+        }
+    }
 }
 
 bool RecordRuntime::GripperPanelManager::poll(int timeoutMs, ButtonSnapshot *snapshot)
@@ -5559,6 +5614,7 @@ void RecordRuntime::GripperPanelManager::setLedColor(uint8_t red, uint8_t green,
     currentLedColor_ = GripperLedColor{red, green, blue};
     hasDirectLedColor_ = true;
     hasLedEffect_ = false;
+    perSideLedStates_.clear();
     for (auto &driver : drivers_)
     {
         if (driver != nullptr)
@@ -5573,12 +5629,55 @@ void RecordRuntime::GripperPanelManager::setLedEffect(const GripperLedEffect &ef
     currentLedEffect_ = effect;
     hasLedEffect_ = true;
     hasDirectLedColor_ = false;
+    perSideLedStates_.clear();
     for (auto &driver : drivers_)
     {
         if (driver != nullptr)
         {
             driver->setLedEffect(effect);
         }
+    }
+}
+
+void RecordRuntime::GripperPanelManager::setLedColorForSide(const std::string &side, uint8_t red, uint8_t green, uint8_t blue)
+{
+    const int index = findDriverIndexForSide(side);
+    if (index < 0)
+    {
+        return;
+    }
+    if (perSideLedStates_.size() < drivers_.size())
+    {
+        perSideLedStates_.resize(drivers_.size());
+    }
+    auto &sideLed = perSideLedStates_[static_cast<size_t>(index)];
+    sideLed.color = GripperLedColor{red, green, blue};
+    sideLed.hasColor = true;
+    sideLed.hasEffect = false;
+    if (drivers_[static_cast<size_t>(index)] != nullptr)
+    {
+        drivers_[static_cast<size_t>(index)]->setLedColor(red, green, blue);
+    }
+}
+
+void RecordRuntime::GripperPanelManager::setLedEffectForSide(const std::string &side, const GripperLedEffect &effect)
+{
+    const int index = findDriverIndexForSide(side);
+    if (index < 0)
+    {
+        return;
+    }
+    if (perSideLedStates_.size() < drivers_.size())
+    {
+        perSideLedStates_.resize(drivers_.size());
+    }
+    auto &sideLed = perSideLedStates_[static_cast<size_t>(index)];
+    sideLed.effect = effect;
+    sideLed.hasEffect = true;
+    sideLed.hasColor = false;
+    if (drivers_[static_cast<size_t>(index)] != nullptr)
+    {
+        drivers_[static_cast<size_t>(index)]->setLedEffect(effect);
     }
 }
 
