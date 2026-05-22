@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <initializer_list>
 #include <iostream>
@@ -94,6 +95,7 @@ constexpr double kTactileCorrelationThreshold = 0.94;
 constexpr size_t kTactileHistoryWindow = 3;
 constexpr int kTactileSnapshotTimeoutMs = 2500;
 constexpr uint64_t kTactilePersistentBaselineRefreshMs = 12ULL * 60ULL * 60ULL * 1000ULL;
+constexpr const char *kEpisodeTimingFileName = ".recording_timing.json";
 
 struct EpisodeVideoArtifact
 {
@@ -156,6 +158,13 @@ struct VideoProbeResult
     double spanSec = 0.0;
 };
 
+struct VideoProbeTaskResult
+{
+    bool ok = false;
+    VideoProbeResult probe;
+    std::string errorMessage;
+};
+
 struct EncoderTailCheckTarget
 {
     const char *side;
@@ -205,6 +214,7 @@ struct TactileFrameMetrics
 };
 
 bool writeTextFileAtomically(const fs::path &path, const std::string &content, std::string *errorMessage);
+bool loadJsonFile(const std::string &path, json *output, std::string *errorMessage);
 
 struct TactileCalibrationTarget
 {
@@ -216,10 +226,10 @@ struct TactileCalibrationTarget
 };
 
 constexpr std::array<TactileCalibrationTarget, 4> kTactileCalibrationTargets = {{
-    {"left_tcam_l", "left", "/dev/tcam_left_l", "observation.images.left_tcam_l", "{{LEFT_TCAM_L_SERIAL}}"},
-    {"left_tcam_r", "left", "/dev/tcam_left_r", "observation.images.left_tcam_r", "{{LEFT_TCAM_R_SERIAL}}"},
-    {"right_tcam_l", "right", "/dev/tcam_right_l", "observation.images.right_tcam_l", "{{RIGHT_TCAM_L_SERIAL}}"},
-    {"right_tcam_r", "right", "/dev/tcam_right_r", "observation.images.right_tcam_r", "{{RIGHT_TCAM_R_SERIAL}}"},
+    {"left_tcam_l", "left", "/dev/tcam_left_l", "observation.images.tcam_left_l", "{{LEFT_TCAM_L_SERIAL}}"},
+    {"left_tcam_r", "left", "/dev/tcam_left_r", "observation.images.tcam_left_r", "{{LEFT_TCAM_R_SERIAL}}"},
+    {"right_tcam_l", "right", "/dev/tcam_right_l", "observation.images.tcam_right_l", "{{RIGHT_TCAM_L_SERIAL}}"},
+    {"right_tcam_r", "right", "/dev/tcam_right_r", "observation.images.tcam_right_r", "{{RIGHT_TCAM_R_SERIAL}}"},
 }};
 
 const char *boolText(bool value)
@@ -256,6 +266,22 @@ fs::path tactileReferenceDir(const fs::path &root)
 fs::path tactilePersistentDir(const fs::path &root)
 {
     return root / "persistent";
+}
+
+fs::path episodeTimingPath(const fs::path &episodeDir)
+{
+    return episodeDir / kEpisodeTimingFileName;
+}
+
+std::string stripEpisodeTempSuffix(const std::string &name)
+{
+    constexpr const char *suffix = "-temp";
+    constexpr size_t suffixLen = 5;
+    if (name.size() >= suffixLen && name.compare(name.size() - suffixLen, suffixLen, suffix) == 0)
+    {
+        return name.substr(0, name.size() - suffixLen);
+    }
+    return name;
 }
 
 fs::path tactileHistoryPath(const fs::path &root)
@@ -639,151 +665,13 @@ bool writeTextFileAtomically(const fs::path &path, const std::string &content, s
     return true;
 }
 
-json makeStereoPlaceholderFromTemplate(const json *templateEntry)
+json makeRuntimeTactileCalibrationEntry(const std::string &serial)
 {
-    json placeholder = json::object();
-    if (templateEntry != nullptr && templateEntry->is_object())
-    {
-        placeholder = *templateEntry;
-    }
-
-    if (!placeholder.contains("shape") || !placeholder["shape"].is_array())
-    {
-        placeholder["shape"] = json::array({400, 1280, 3});
-    }
-    if (!placeholder.contains("names") || !placeholder["names"].is_array())
-    {
-        placeholder["names"] = json::array({"height", "width", "channels"});
-    }
-    if (!placeholder.contains("info"))
-    {
-        placeholder["info"] = nullptr;
-    }
-    if (!placeholder.contains("dtype"))
-    {
-        placeholder["dtype"] = "video";
-    }
-    if (!placeholder.contains("fps"))
-    {
-        placeholder["fps"] = 60;
-    }
-
-    if (!placeholder.contains("camera_model"))
-    {
-        placeholder["camera_model"] = "pinhole";
-    }
-    if (!placeholder.contains("distortion_model"))
-    {
-        placeholder["distortion_model"] = "equidistant";
-    }
-    if (!placeholder.contains("distortion_coeffs"))
-    {
-        placeholder["distortion_coeffs"] = json::array({0.0, 0.0, 0.0, 0.0});
-    }
-
-    if (!placeholder.contains("intrinsics") || !placeholder["intrinsics"].is_object() || placeholder["intrinsics"].empty())
-    {
-        placeholder["intrinsics"] = json::object({
-            {"1280x400", {
-                {"fx", 1280.0},
-                {"fy", 400.0},
-                {"ppx", 640.0},
-                {"ppy", 200.0},
-            }},
-        });
-    }
-
-    return placeholder;
-}
-
-json makeTactileCalibrationEntry(const json *templateEntry, const std::string &serialPlaceholder)
-{
-    json entry = json::object();
-    if (templateEntry != nullptr && templateEntry->is_object())
-    {
-        entry = *templateEntry;
-    }
-
-    if (!entry.contains("shape") || !entry["shape"].is_array())
-    {
-        entry["shape"] = json::array({480, 640, 3});
-    }
-    if (!entry.contains("names") || !entry["names"].is_array())
-    {
-        entry["names"] = json::array({"height", "width", "channels"});
-    }
-    if (!entry.contains("info"))
-    {
-        entry["info"] = nullptr;
-    }
-    if (!entry.contains("dtype"))
-    {
-        entry["dtype"] = "video";
-    }
-
-    entry["serial"] = serialPlaceholder;
-    return entry;
-}
-
-void appendCalibrationNote(json *calibrationInfo, const std::string &message)
-{
-    if (calibrationInfo == nullptr || !calibrationInfo->is_object())
-    {
-        return;
-    }
-
-    const std::string existing = calibrationInfo->value("notes", std::string());
-    if (existing.empty())
-    {
-        (*calibrationInfo)["notes"] = message;
-        return;
-    }
-
-    if (existing.find(message) != std::string::npos)
-    {
-        return;
-    }
-
-    (*calibrationInfo)["notes"] = existing + " " + message;
-}
-
-void removeIfPresent(json *root, const std::string &key)
-{
-    if (root == nullptr || !root->is_object() || key.empty())
-    {
-        return;
-    }
-
-    const size_t separator = key.rfind('.');
-    if (separator == std::string::npos)
-    {
-        root->erase(key);
-        return;
-    }
-
-    json *cursor = root;
-    size_t start = 0;
-    while (start < separator)
-    {
-        const size_t dot = key.find('.', start);
-        if (dot == std::string::npos)
-        {
-            break;
-        }
-        const std::string token = key.substr(start, dot - start);
-        if (!cursor->contains(token) || !(*cursor)[token].is_object())
-        {
-            return;
-        }
-        cursor = &(*cursor)[token];
-        start = dot + 1;
-    }
-
-    const std::string leaf = key.substr(separator + 1);
-    if (!leaf.empty() && cursor->is_object())
-    {
-        cursor->erase(leaf);
-    }
+    return json::object({
+        {"names", json::array({"height", "width", "channels"})},
+        {"serial", serial},
+        {"shape", json::array({480, 640, 3})},
+    });
 }
 
 json *findJsonPath(json *root, const std::string &path, bool createMissing)
@@ -878,133 +766,6 @@ const json *findJsonPathConst(const json *root, const std::string &path)
     return nullptr;
 }
 
-void removeLegacyFlattenedCalibrationKeys(json *root)
-{
-    if (root == nullptr || !root->is_object())
-    {
-        return;
-    }
-
-    std::vector<std::string> keysToErase;
-    for (auto it = root->begin(); it != root->end(); ++it)
-    {
-        if (it.key().rfind("observation.", 0) == 0)
-        {
-            keysToErase.push_back(it.key());
-        }
-    }
-    for (const std::string &key : keysToErase)
-    {
-        root->erase(key);
-    }
-}
-
-void migrateLegacyFlattenedCalibrationKeys(json *root)
-{
-    if (root == nullptr || !root->is_object())
-    {
-        return;
-    }
-
-    std::vector<std::pair<std::string, json>> flattenedEntries;
-    for (auto it = root->begin(); it != root->end(); ++it)
-    {
-        if (it.key().rfind("observation.", 0) == 0)
-        {
-            flattenedEntries.emplace_back(it.key(), it.value());
-        }
-    }
-
-    for (const auto &[path, value] : flattenedEntries)
-    {
-        json *target = findJsonPath(root, path, true);
-        if (target != nullptr && target->is_object() && value.is_object())
-        {
-            *target = value;
-        }
-    }
-
-    removeLegacyFlattenedCalibrationKeys(root);
-}
-
-void replaceJsonStringValues(json *node, const std::string &placeholder, const std::string &replacement)
-{
-    if (node == nullptr || placeholder.empty())
-    {
-        return;
-    }
-
-    if (node->is_string())
-    {
-        std::string value = node->get<std::string>();
-        size_t position = value.find(placeholder);
-        while (position != std::string::npos)
-        {
-            value.replace(position, placeholder.size(), replacement);
-            position = value.find(placeholder, position + replacement.size());
-        }
-        *node = value;
-        return;
-    }
-
-    if (node->is_array())
-    {
-        for (json &item : *node)
-        {
-            replaceJsonStringValues(&item, placeholder, replacement);
-        }
-        return;
-    }
-
-    if (node->is_object())
-    {
-        for (auto &item : node->items())
-        {
-            replaceJsonStringValues(&item.value(), placeholder, replacement);
-        }
-    }
-}
-
-std::string legacyTactileJsonPathForSide(const std::string &side)
-{
-    return side == "left" ? "observation.images.gripper_left_tactile"
-                          : "observation.images.gripper_right_tactile";
-}
-
-std::string legacyTactileSerialPlaceholderForSide(const std::string &side)
-{
-    return side == "left" ? "{{TACTILE_LEFT_SERIAL}}"
-                          : "{{TACTILE_RIGHT_SERIAL}}";
-}
-
-std::vector<std::string> tactileTemplateCandidateKeys(const TactileCalibrationTarget &target)
-{
-    std::vector<std::string> keys;
-    keys.push_back(target.jsonPath);
-    for (const auto &candidate : kTactileCalibrationTargets)
-    {
-        if (std::string(candidate.side) == target.side && std::string(candidate.jsonPath) != target.jsonPath)
-        {
-            keys.push_back(candidate.jsonPath);
-        }
-    }
-    keys.push_back(legacyTactileJsonPathForSide(target.side));
-    return keys;
-}
-
-const json *findSourceCalibrationEntry(const std::map<std::string, json> &entries, const std::vector<std::string> &keys)
-{
-    for (const std::string &key : keys)
-    {
-        const auto it = entries.find(key);
-        if (it != entries.end() && it->second.is_object())
-        {
-            return &it->second;
-        }
-    }
-    return nullptr;
-}
-
 bool loadJsonFile(const std::string &path, json *output, std::string *errorMessage)
 {
     std::ifstream input(path);
@@ -1058,51 +819,20 @@ size_t gripperStateIndexForSide(const std::string &side)
 
 const char *mainCameraJsonPathForSide(const std::string &side)
 {
-    return side == "left" ? "observation.images.left_cam_main"
-                          : "observation.images.right_cam_main";
+    return side == "left" ? "observation.images.cam_left_main"
+                          : "observation.images.cam_right_main";
 }
 
 const char *stereoJsonPathForSide(const std::string &side)
 {
-    return side == "left" ? "observation.images.left_stereo"
-                          : "observation.images.right_stereo";
+    return side == "left" ? "observation.images.stereo_left"
+                          : "observation.images.stereo_right";
 }
 
 const char *imuJsonPathForSide(const std::string &side)
 {
-    return side == "left" ? "observation.imu.left_imu"
-                          : "observation.imu.right_imu";
-}
-
-json makeRgbCalibrationEntryFromPayload(const gripper_hmi::GripperCalibrationDataV1 &payload)
-{
-    const int width = static_cast<int>(std::lround(payload.rgbCamera.resolution[0]));
-    const int height = static_cast<int>(std::lround(payload.rgbCamera.resolution[1]));
-    return json::object({
-        {"shape", json::array({height > 0 ? height : 1080, width > 0 ? width : 1920, 3})},
-        {"names", json::array({"height", "width", "channels"})},
-        {"info", nullptr},
-        {"intrinsics",
-         json::object({{std::to_string(width > 0 ? width : 1920) + "x" +
-                             std::to_string(height > 0 ? height : 1080),
-                         json::object({
-                             {"fx", payload.rgbCamera.intrinsics[0]},
-                             {"fy", payload.rgbCamera.intrinsics[1]},
-                             {"ppx", payload.rgbCamera.intrinsics[2]},
-                             {"ppy", payload.rgbCamera.intrinsics[3]},
-                         })}})},
-        {"camera_model", "pinhole"},
-        {"distortion_model", "equidistant"},
-        {"distortion_coeffs",
-         json::array({
-             payload.rgbCamera.distortionCoefficients[0],
-             payload.rgbCamera.distortionCoefficients[1],
-             payload.rgbCamera.distortionCoefficients[2],
-             payload.rgbCamera.distortionCoefficients[3],
-         })},
-        {"dtype", "video"},
-        {"fps", "unknown"},
-    });
+    return side == "left" ? "observation.imu.imu_left"
+                          : "observation.imu.imu_right";
 }
 
 json makeMainCameraCalibrationEntryFromPayload(const std::array<uint8_t, kYuzhouPayloadSize> &payload)
@@ -1114,9 +844,16 @@ json makeMainCameraCalibrationEntryFromPayload(const std::array<uint8_t, kYuzhou
     const int normalizedWidth = width > 0 ? width : 1920;
     const int normalizedHeight = height > 0 ? height : 1080;
     return json::object({
-        {"shape", json::array({normalizedHeight, normalizedWidth, 3})},
-        {"names", json::array({"height", "width", "channels"})},
-        {"info", nullptr},
+        {"camera_model", "pinhole"},
+        {"distortion_coeffs",
+         json::array({
+             data.mainCamera.distortionCoefficients[0],
+             data.mainCamera.distortionCoefficients[1],
+             data.mainCamera.distortionCoefficients[2],
+             data.mainCamera.distortionCoefficients[3],
+         })},
+        {"distortion_model", "equidistant"},
+        {"fps", 60.0},
         {"intrinsics",
          json::object({{std::to_string(normalizedWidth) + "x" +
                              std::to_string(normalizedHeight),
@@ -1126,50 +863,31 @@ json makeMainCameraCalibrationEntryFromPayload(const std::array<uint8_t, kYuzhou
                              {"ppx", data.mainCamera.intrinsics[2]},
                              {"ppy", data.mainCamera.intrinsics[3]},
                          })}})},
-        {"camera_model", "pinhole"},
-        {"distortion_model", "equidistant"},
-        {"distortion_coeffs",
-         json::array({
-             data.mainCamera.distortionCoefficients[0],
-             data.mainCamera.distortionCoefficients[1],
-             data.mainCamera.distortionCoefficients[2],
-             data.mainCamera.distortionCoefficients[3],
-         })},
-        {"dtype", "video"},
-        {"fps", "unknown"},
+        {"names", json::array({"height", "width", "channels"})},
+        {"shape", json::array({normalizedHeight, normalizedWidth, 3})},
     });
 }
 
-json makeMainCameraPlaceholderFromTemplate(const json *templateEntry)
+json makeDefaultMainCameraCalibrationEntry()
 {
-    const json source = (templateEntry != nullptr && templateEntry->is_object()) ? *templateEntry : json::object();
-    json normalized = json::object();
-    normalized["shape"] = source.contains("shape") && source["shape"].is_array()
-                              ? source["shape"]
-                              : json::array({1080, 1920, 3});
-    normalized["names"] = source.contains("names") && source["names"].is_array()
-                              ? source["names"]
-                              : json::array({"height", "width", "channels"});
-    normalized["info"] = source.contains("info") ? source["info"] : json(nullptr);
-    normalized["intrinsics"] = source.contains("intrinsics") && source["intrinsics"].is_object() && !source["intrinsics"].empty()
-                                   ? source["intrinsics"]
-                                   : json::object({
-                                         {"1920x1080",
-                                          json::object({
-                                              {"fx", 1920.0},
-                                              {"fy", 1080.0},
-                                              {"ppx", 960.0},
-                                              {"ppy", 540.0},
-                                          })},
-                                     });
-    normalized["camera_model"] = source.contains("camera_model") ? source["camera_model"] : json("pinhole");
-    normalized["distortion_model"] = source.contains("distortion_model") ? source["distortion_model"] : json("equidistant");
-    normalized["distortion_coeffs"] = source.contains("distortion_coeffs") && source["distortion_coeffs"].is_array()
-                                          ? source["distortion_coeffs"]
-                                          : json::array({0.0, 0.0, 0.0, 0.0});
-    normalized["dtype"] = source.contains("dtype") ? source["dtype"] : json("video");
-    normalized["fps"] = source.contains("fps") ? source["fps"] : json("unknown");
-    return normalized;
+    return json::object({
+        {"camera_model", "pinhole"},
+        {"distortion_coeffs", json::array({0.0, 0.0, 0.0, 0.0})},
+        {"distortion_model", "equidistant"},
+        {"fps", 60.0},
+        {"intrinsics",
+         json::object({
+             {"1920x1080",
+              json::object({
+                  {"fx", 1920.0},
+                  {"fy", 1080.0},
+                  {"ppx", 960.0},
+                  {"ppy", 540.0},
+              })},
+         })},
+        {"names", json::array({"height", "width", "channels"})},
+        {"shape", json::array({1080, 1920, 3})},
+    });
 }
 
 bool loadFaysCalibrationFromStatus(const std::string &stereoStatusFile,
@@ -1295,17 +1013,14 @@ json makeFaysCameraCalibrationEntry(const json &camera)
 
     const std::string distortionModel = camera.value("distortion_model", std::string("ADM_KB4"));
     json entry = json::object();
-    entry["camera_model_enum"] = camera.contains("camera_model_enum")
-                                     ? camera["camera_model_enum"]
-                                     : json(0);
     entry["intrinsics"] = camera.contains("intrinsics") && camera["intrinsics"].is_object() && !camera["intrinsics"].empty()
                               ? camera["intrinsics"]
                               : json::object({
-                                    {"1280x400",
+                                    {"640x400",
                                      json::object({
-                                         {"fx", 1280.0},
+                                         {"fx", 640.0},
                                          {"fy", 400.0},
-                                         {"ppx", 640.0},
+                                         {"ppx", 320.0},
                                          {"ppy", 200.0},
                                      })},
                                 });
@@ -1339,16 +1054,6 @@ json makeFaysStereoCalibrationEntry(const json &faysCalibration)
     };
 
     json stereo = json::object();
-    stereo["shape"] = faysCalibration.contains("shape") && faysCalibration["shape"].is_array()
-                          ? faysCalibration["shape"]
-                          : json::array({400, 1280, 3});
-    stereo["names"] = faysCalibration.contains("names") && faysCalibration["names"].is_array()
-                          ? faysCalibration["names"]
-                          : json::array({"height", "width", "channels"});
-    stereo["info"] = faysCalibration.contains("info") ? faysCalibration["info"] : json(nullptr);
-    stereo["camera_model"] = faysCalibration.contains("camera_model") ? faysCalibration["camera_model"] : json("pinhole");
-    stereo["distortion_model"] = normalizeDistortionModel(
-        faysCalibration.contains("distortion_model") ? faysCalibration["distortion_model"] : json("ADM_KB4"));
     stereo["cam0"] = makeFaysCameraCalibrationEntry(
         faysCalibration.contains("cam0") && faysCalibration["cam0"].is_object()
             ? faysCalibration["cam0"]
@@ -1357,24 +1062,64 @@ json makeFaysStereoCalibrationEntry(const json &faysCalibration)
         faysCalibration.contains("cam1") && faysCalibration["cam1"].is_object()
             ? faysCalibration["cam1"]
             : json::object());
+    stereo["camera_model"] = faysCalibration.contains("camera_model") ? faysCalibration["camera_model"] : json("pinhole");
+    stereo["distortion_model"] = normalizeDistortionModel(
+        faysCalibration.contains("distortion_model") ? faysCalibration["distortion_model"] : json("ADM_KB4"));
     stereo["extrinsics"] = faysCalibration.contains("extrinsics") && faysCalibration["extrinsics"].is_object()
                                ? faysCalibration["extrinsics"]
                                : json::object();
-    if (faysCalibration.contains("residuals") && faysCalibration["residuals"].is_object())
-    {
-        stereo["residuals"] = faysCalibration["residuals"];
-    }
-    stereo["dtype"] = faysCalibration.contains("dtype") ? faysCalibration["dtype"] : json("video");
-    stereo["fps"] = faysCalibration.contains("fps") ? faysCalibration["fps"] : json(25);
+    stereo["fps"] = 25.0;
+    stereo["names"] = json::array({"height", "width", "channels"});
+    stereo["shape"] = json::array({800, 640, 3});
     return stereo;
+}
+
+json makeDefaultStereoCalibrationEntry()
+{
+    const auto makeCamera = []() {
+        return json::object({
+            {"distortion_coeffs", json::array({0.0, 0.0, 0.0, 0.0})},
+            {"intrinsics",
+             json::object({
+                 {"640x400",
+                  json::object({
+                      {"fx", 640.0},
+                      {"fy", 400.0},
+                      {"ppx", 320.0},
+                      {"ppy", 200.0},
+                  })},
+             })},
+        });
+    };
+    const auto identity = []() {
+        return json::array({
+            json::array({1.0, 0.0, 0.0, 0.0}),
+            json::array({0.0, 1.0, 0.0, 0.0}),
+            json::array({0.0, 0.0, 1.0, 0.0}),
+            json::array({0.0, 0.0, 0.0, 1.0}),
+        });
+    };
+    return json::object({
+        {"cam0", makeCamera()},
+        {"cam1", makeCamera()},
+        {"camera_model", "pinhole"},
+        {"distortion_model", "equidistant"},
+        {"extrinsics",
+         json::object({
+             {"T_ic_cam0_to_imu0", identity()},
+             {"T_ic_cam1_to_imu0", identity()},
+             {"timeshift_cam0_to_imu0", 0.0},
+             {"timeshift_cam1_to_imu0", 0.0},
+         })},
+        {"fps", 25.0},
+        {"names", json::array({"height", "width", "channels"})},
+        {"shape", json::array({800, 640, 3})},
+    });
 }
 
 json makeFaysImuCalibrationEntry(const json &faysCalibration)
 {
-    json imu = json::object({
-        {"dtype", "imu"},
-        {"model", "fays_vikit"},
-    });
+    json imu = json::object();
     if (faysCalibration.contains("imu") && faysCalibration["imu"].is_object())
     {
         const json &source = faysCalibration["imu"];
@@ -1410,162 +1155,29 @@ json makeFaysImuCalibrationEntry(const json &faysCalibration)
     return imu;
 }
 
-json makeStereoCalibrationEntryFromPayload(const std::string &side,
-                                           const gripper_hmi::GripperCalibrationDataV1 &payload)
+json makeDefaultFaysImuCalibrationEntry()
 {
-    (void)side;
-    const auto makeIntrinsics = [](float fx, float fy, float ppx, float ppy) {
-        return json::object({
-            {"640x400",
-             json::object({
-                 {"fx", fx},
-                 {"fy", fy},
-                 {"ppx", ppx},
-                 {"ppy", ppy},
-             })},
-        });
-    };
-    const auto makeDistortion = [](const float *coeffs) {
-        return json::array({coeffs[0], coeffs[1], coeffs[2], coeffs[3]});
-    };
-    const auto matrixToJson = [](const float *values) {
-        json rows = json::array();
-        for (size_t row = 0; row < 4; ++row)
-        {
-            rows.push_back(json::array({
-                values[row * 4 + 0],
-                values[row * 4 + 1],
-                values[row * 4 + 2],
-                values[row * 4 + 3],
-            }));
-        }
-        return rows;
-    };
-    const auto statsToJson = [](const gripper_hmi::GripperStatisticsBlock &stats) {
-        return json::object({
-            {"mean", stats.mean},
-            {"median", stats.median},
-            {"stddev", stats.stddev},
-        });
-    };
-
     return json::object({
-        {"shape", json::array({400, 1280, 3})},
-        {"names", json::array({"height", "width", "channels"})},
-        {"info", nullptr},
-        {"camera_model", "pinhole"},
-        {"distortion_model", "equidistant"},
-        {"cam0",
+        {"accelerometer",
          json::object({
-             {"camera_model_enum", payload.stereoCam0.cameraModelEnum},
-             {"intrinsics",
-              makeIntrinsics(payload.stereoCam0.focalLength[0],
-                             payload.stereoCam0.focalLength[1],
-                             payload.stereoCam0.principalPoint[0],
-                             payload.stereoCam0.principalPoint[1])},
-             {"distortion_coeffs", makeDistortion(payload.stereoCam0.distortionCoefficients)},
+             {"noise_density_discrete", 0.0},
+             {"random_walk", 0.0},
          })},
-        {"cam1",
+        {"gyroscope",
          json::object({
-             {"camera_model_enum", payload.stereoCam1.cameraModelEnum},
-             {"intrinsics",
-              makeIntrinsics(payload.stereoCam1.focalLength[0],
-                             payload.stereoCam1.focalLength[1],
-                             payload.stereoCam1.principalPoint[0],
-                             payload.stereoCam1.principalPoint[1])},
-             {"distortion_coeffs", makeDistortion(payload.stereoCam1.distortionCoefficients)},
+             {"noise_density_discrete", 0.0},
+             {"random_walk", 0.0},
          })},
-        {"extrinsics",
-         json::object({
-             {"T_ic_cam0_to_imu0", matrixToJson(payload.extrinsics.tIcCam0ToImu0)},
-             {"timeshift_cam0_to_imu0", payload.extrinsics.timeshiftCam0ToImu0},
-             {"T_ic_cam1_to_imu0", matrixToJson(payload.extrinsics.tIcCam1ToImu0)},
-             {"timeshift_cam1_to_imu0", payload.extrinsics.timeshiftCam1ToImu0},
-             {"baseline_norm", payload.extrinsics.baselineNorm},
-         })},
-        {"residuals",
-         json::object({
-             {"reprojection_error_cam0_px", statsToJson(payload.residuals.reprojectionErrorCam0Px)},
-             {"reprojection_error_cam1_px", statsToJson(payload.residuals.reprojectionErrorCam1Px)},
-             {"gyroscope_error_imu0_rad_s", statsToJson(payload.residuals.gyroscopeErrorImu0RadS)},
-             {"accelerometer_error_imu0_m_s2", statsToJson(payload.residuals.accelerometerErrorImu0MS2)},
-         })},
-        {"dtype", "video"},
-        {"fps", 60},
+        {"update_rate_hz", 0},
     });
 }
 
-json makeLockedCalibrationMetadata(const std::string &generationDate,
-                                   const std::string &calibrationStatus)
+json makeLockedCalibrationInfo(const std::string &calibrationStatus)
 {
     return json::object({
         {"calibration_status", calibrationStatus},
-        {"description", "Camera calibration parameters"},
         {"format_version", "3.0"},
-        {"generation_date", generationDate},
     });
-}
-
-json makeLockedCalibrationInfo(const std::string &generationDate,
-                               const std::string &calibrationStatus,
-                               const std::string &notes)
-{
-    return json::object({
-        {"calibration_date", generationDate},
-        {"calibration_status", calibrationStatus},
-        {"notes", notes},
-    });
-}
-
-void sanitizeCalibrationTopLevel(json *calibrationJson)
-{
-    if (calibrationJson == nullptr || !calibrationJson->is_object())
-    {
-        return;
-    }
-
-    json observation = json::object();
-    if (calibrationJson->contains("observation") && (*calibrationJson)["observation"].is_object())
-    {
-        observation = (*calibrationJson)["observation"];
-    }
-
-    *calibrationJson = json::object({
-        {"calibration_info", json::object()},
-        {"metadata", json::object()},
-        {"observation", observation},
-    });
-}
-
-void eraseSideCalibrationEntries(json *calibrationJson, const std::string &side)
-{
-    if (calibrationJson == nullptr || !calibrationJson->is_object())
-    {
-        return;
-    }
-
-    removeIfPresent(calibrationJson, mainCameraJsonPathForSide(side));
-    removeIfPresent(calibrationJson, stereoJsonPathForSide(side));
-    removeIfPresent(calibrationJson, imuJsonPathForSide(side));
-}
-
-void applySideCalibrationPayload(json *calibrationJson,
-                                 const std::string &side,
-                                 const gripper_hmi::GripperCalibrationDataV1 &payload)
-{
-    if (calibrationJson == nullptr || !calibrationJson->is_object())
-    {
-        return;
-    }
-
-    if (json *mainCamera = findJsonPath(calibrationJson, mainCameraJsonPathForSide(side), true))
-    {
-        *mainCamera = makeRgbCalibrationEntryFromPayload(payload);
-    }
-    if (json *stereo = findJsonPath(calibrationJson, stereoJsonPathForSide(side), true))
-    {
-        *stereo = makeStereoCalibrationEntryFromPayload(side, payload);
-    }
 }
 
 std::string joinArguments(const std::vector<std::string> &arguments)
@@ -1781,7 +1393,7 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
     paths.push_back(episodeDir / "sensor_right.mcap");
     paths.push_back(episodeDir / "metadata.json");
     paths.push_back(episodeDir / "calibration.json");
-    paths.push_back(episodeDir / "info.json");
+    paths.push_back(episodeTimingPath(episodeDir));
 
     const fs::path audioPre = episodeDir / "audio_pre.wav";
     if (fs::exists(audioPre))
@@ -2517,82 +2129,6 @@ std::string resolveDeviceNodeTarget(const std::string &devicePath)
     return devicePath;
 }
 
-void injectRuntimeTactileSerial(json *calibrationJson,
-                                const TactileCalibrationTarget &target,
-                                const std::string &runtimeSerial,
-                                const std::string &probeDetail,
-                                const std::string &sourceFile,
-                                const std::string &persistCalibrationFile)
-{
-    if (calibrationJson == nullptr || !calibrationJson->is_object())
-    {
-        return;
-    }
-
-    json *entry = findJsonPath(calibrationJson, target.jsonPath, true);
-    if (entry == nullptr)
-    {
-        return;
-    }
-    if (!entry->is_object())
-    {
-        *entry = json::object();
-    }
-
-    const std::string previous = entry->value("serial", std::string());
-    if (previous.empty())
-    {
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << "tactile serial missing in source calibration, inject runtime value:"
-                  << " camera=" << target.cameraName
-                  << " device=" << target.devicePath
-                  << " serial=" << runtimeSerial << std::endl).str());
-    }
-    else if (previous == target.serialPlaceholder)
-    {
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << "tactile serial placeholder resolved at runtime:"
-                  << " camera=" << target.cameraName
-                  << " placeholder=" << target.serialPlaceholder
-                  << " device=" << target.devicePath
-                  << " serial=" << runtimeSerial << std::endl).str());
-    }
-    else if (previous != runtimeSerial)
-    {
-        DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile serial mismatch, correcting episode calibration only:"
-                  << " camera=" << target.cameraName
-                  << " source_serial=" << previous
-                  << " runtime_serial=" << runtimeSerial
-                  << " source_file=" << sourceFile
-                  << " persist_rewritten=false" << std::endl).str());
-    }
-    else
-    {
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << "tactile serial matches runtime hardware:"
-                  << " camera=" << target.cameraName
-                  << " device=" << target.devicePath
-                  << " serial=" << runtimeSerial << std::endl).str());
-    }
-
-    if (!probeDetail.empty())
-    {
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << "tactile serial probe detail:"
-                  << " camera=" << target.cameraName
-                  << " detail=" << probeDetail << std::endl).str());
-    }
-
-    replaceJsonStringValues(calibrationJson, target.serialPlaceholder, runtimeSerial);
-    (*entry)["serial"] = runtimeSerial;
-
-    if (sourceFile == persistCalibrationFile &&
-        previous != runtimeSerial &&
-        !previous.empty() &&
-        previous != target.serialPlaceholder)
-    {
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << "persist calibration remains unchanged;"
-                  << " episode calibration now uses runtime tactile serial for camera=" << target.cameraName
-                  << std::endl).str());
-    }
-}
-
 bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::string *errorMessage)
 {
     if (result == nullptr)
@@ -2701,6 +2237,113 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
               << " duration_sec=" << formatSeconds(result->durationSec)
               << " span_sec=" << formatSeconds(result->spanSec) << std::endl).str());
     return true;
+}
+
+std::vector<VideoProbeTaskResult> probeVideoFilesParallel(
+    const std::string &episodeDir,
+    const std::vector<EpisodeVideoArtifact> &artifacts)
+{
+    std::vector<std::future<VideoProbeTaskResult>> futures;
+    futures.reserve(artifacts.size());
+    for (const auto &artifact : artifacts)
+    {
+        futures.push_back(std::async(
+            std::launch::async,
+            [episodeDir, artifact]() {
+                VideoProbeTaskResult task;
+                task.probe.cameraName = artifact.cameraName;
+                task.probe.fileName = artifact.fileName;
+                task.ok = probeVideoFile(
+                    (fs::path(episodeDir) / artifact.fileName).string(),
+                    &task.probe,
+                    &task.errorMessage);
+                return task;
+            }));
+    }
+
+    std::vector<VideoProbeTaskResult> results;
+    results.reserve(futures.size());
+    for (auto &future : futures)
+    {
+        results.push_back(future.get());
+    }
+    return results;
+}
+
+bool writeVideoProbeCacheToTimingFile(const std::string &episodeDir,
+                                      const std::vector<VideoProbeResult> &probes,
+                                      std::string *errorMessage)
+{
+    const fs::path timingPath = episodeTimingPath(episodeDir);
+    json timing = json::object();
+    if (!loadJsonFile(timingPath.string(), &timing, errorMessage))
+    {
+        return false;
+    }
+    if (!timing.is_object())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "internal timing file top-level value must be an object";
+        }
+        return false;
+    }
+
+    json cache = json::array();
+    for (const auto &probe : probes)
+    {
+        cache.push_back(json::object({
+            {"camera_name", probe.cameraName},
+            {"file_name", probe.fileName},
+            {"start_time_sec", probe.startTimeSec},
+            {"duration_sec", probe.durationSec},
+            {"span_sec", probe.spanSec},
+        }));
+    }
+    timing["video_probes"] = std::move(cache);
+    return writeTextFileAtomically(timingPath, timing.dump(2) + "\n", errorMessage);
+}
+
+bool loadCachedVideoProbe(const json &timing,
+                          const EpisodeVideoArtifact &artifact,
+                          VideoProbeResult *probe)
+{
+    if (probe == nullptr || !timing.contains("video_probes") || !timing["video_probes"].is_array())
+    {
+        return false;
+    }
+
+    for (const auto &entry : timing["video_probes"])
+    {
+        if (!entry.is_object() ||
+            entry.value("camera_name", std::string()) != artifact.cameraName ||
+            entry.value("file_name", std::string()) != artifact.fileName)
+        {
+            continue;
+        }
+        if (!entry.contains("start_time_sec") ||
+            !entry.contains("duration_sec") ||
+            !entry.contains("span_sec"))
+        {
+            return false;
+        }
+        const json &start = entry["start_time_sec"];
+        const json &duration = entry["duration_sec"];
+        const json &span = entry["span_sec"];
+        if (!start.is_number() || !duration.is_number() || !span.is_number())
+        {
+            return false;
+        }
+
+        probe->cameraName = artifact.cameraName;
+        probe->fileName = artifact.fileName;
+        probe->startTimeSec = start.get<double>();
+        probe->durationSec = duration.get<double>();
+        probe->spanSec = span.get<double>();
+        return std::isfinite(probe->durationSec) && probe->durationSec > 0.0 &&
+               std::isfinite(probe->spanSec) && probe->spanSec > 0.0;
+    }
+    return false;
 }
 
 bool loadLastTopicLogTimeFromTailChunks(const std::string &mcapPath,
@@ -3321,6 +2964,7 @@ bool RecordRuntime::initialize()
                 std::vector<std::string>(criticalDevicePaths.begin(), criticalDevicePaths.end()),
             .poll_interval_ms = kHealthCheckIntervalMs,
             .hmi_active_timeout_ms = kHmiActiveTimeoutMs,
+            .stereo_startup_grace_ms = 12000,
         },
         ugripper::runtime::HealthMonitor::Dependencies{
             .is_disk_writable =
@@ -3477,6 +3121,18 @@ bool RecordRuntime::initialize()
                 [](const std::string& episode_dir, const std::string& error_message) {
                     writeValidationErrorLog(fs::path(episode_dir), error_message);
                 },
+            .finalize_episode_dir =
+                [this](const std::string& episode_dir, std::string* error_message) {
+                    if (episodeManager_ == nullptr)
+                    {
+                        if (error_message != nullptr)
+                        {
+                            *error_message = "episode manager not initialized";
+                        }
+                        return std::string();
+                    }
+                    return episodeManager_->finalizeEpisodeDir(episode_dir, error_message);
+                },
             .write_recording_lock =
                 [this](const std::string& episode_dir) {
                     return writeRecordingLock(episode_dir);
@@ -3526,6 +3182,10 @@ bool RecordRuntime::initialize()
     for (const std::string side : {"left", "right"})
     {
         refreshGripperRuntimeStateForSide(side);
+    }
+    if (episodeManager_ != nullptr)
+    {
+        episodeManager_->setGripperRuntimeStates(gripperRuntimeStates_);
     }
     panelManager_.consumeConnectionEvents();
 
@@ -3683,7 +3343,7 @@ bool RecordRuntime::writeStereoControl(bool recording,
     }
     if (!ok)
     {
-        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write stereo control file: " << errorMessage << std::endl).str());
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write stereo control pipe: " << errorMessage << std::endl).str());
     }
     return ok;
 }
@@ -3703,14 +3363,14 @@ bool RecordRuntime::waitForStereoFinalize(const std::string &episodeDir, int tim
 
 bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const
 {
-    const fs::path baseInfoPath = fs::path(episodeDir) / "info.json";
+    const fs::path baseInfoPath = episodeTimingPath(episodeDir);
 
     std::ifstream baseInput(baseInfoPath);
     if (!baseInput.is_open())
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = "cannot open base info.json";
+            *errorMessage = std::string("cannot open internal timing file: ") + kEpisodeTimingFileName;
         }
         return false;
     }
@@ -3808,7 +3468,7 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = "cannot rewrite merged info.json";
+            *errorMessage = std::string("cannot rewrite internal timing file: ") + kEpisodeTimingFileName;
         }
         return false;
     }
@@ -4135,18 +3795,12 @@ void RecordRuntime::handleGripperConnectionEvents()
         ugripper::runtime::GripperRefreshRuntimeView view{
             .side = runtimeState.side,
             .connected = runtimeState.connected,
-            .calibration_valid = runtimeState.calibrationValid,
-            .calibration_status = runtimeState.calibrationStatus,
-            .calibration_source = runtimeState.calibrationSource,
             .last_error = runtimeState.lastError,
         };
 
         ugripper::runtime::ApplyGripperConnectionEvent(&view, &pendingGripperRefresh_[index], event.side, event.connected);
         runtimeState.side = view.side;
         runtimeState.connected = view.connected;
-        runtimeState.calibrationValid = view.calibration_valid;
-        runtimeState.calibrationStatus = view.calibration_status;
-        runtimeState.calibrationSource = view.calibration_source;
         runtimeState.lastError = view.last_error;
 
         if (event.connected)
@@ -4179,9 +3833,6 @@ void RecordRuntime::processPendingGripperRefreshes()
         ugripper::runtime::GripperRefreshRuntimeView view{
             .side = state.side,
             .connected = state.connected,
-            .calibration_valid = state.calibrationValid,
-            .calibration_status = state.calibrationStatus,
-            .calibration_source = state.calibrationSource,
             .last_error = state.lastError,
         };
         const auto action = ugripper::runtime::AdvancePendingGripperRefresh(
@@ -4192,9 +3843,6 @@ void RecordRuntime::processPendingGripperRefreshes()
             panelManager_.isSideReadyForRefresh(side, kGripperRefreshActiveTimeoutMs));
         state.side = view.side;
         state.connected = view.connected;
-        state.calibrationValid = view.calibration_valid;
-        state.calibrationStatus = view.calibration_status;
-        state.calibrationSource = view.calibration_source;
         state.lastError = view.last_error;
 
         if (action == ugripper::runtime::GripperRefreshAction::RequestState)
@@ -4227,12 +3875,7 @@ void RecordRuntime::clearGripperRuntimeStateForSide(const std::string &side,
     state.connected = connected;
     state.hasSerialNumber = false;
     state.serialNumber.clear();
-    state.calibrationValid = false;
-    state.calibrationStatus = status;
-    state.calibrationSource.clear();
     state.lastError = errorMessage;
-    state.calibrationPayloadCached = false;
-    state.calibrationPayload = {};
 }
 
 void RecordRuntime::refreshGripperRuntimeStateForSide(const std::string &side)
@@ -4242,27 +3885,29 @@ void RecordRuntime::refreshGripperRuntimeStateForSide(const std::string &side)
 
     std::string serialNumber;
     bool hasSerialNumber = false;
-    gripper_hmi::GripperCalibrationDataV1 calibrationData{};
     std::string runtimeReadError;
-    if (!panelManager_.readRuntimeIdentityForSide(
-            side, &serialNumber, &hasSerialNumber, &calibrationData, &runtimeReadError))
+    if (!panelManager_.readRuntimeIdentityForSide(side, &serialNumber, &hasSerialNumber, &runtimeReadError))
     {
         if (!runtimeReadError.empty())
         {
             state.lastError = runtimeReadError;
         }
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "gripper runtime cache refresh failed: side=" << side
+            << " detail=" << (runtimeReadError.empty() ? "readRuntimeIdentityForSide failed" : runtimeReadError)
+            << std::endl).str());
         return;
     }
 
     state.connected = true;
     state.hasSerialNumber = hasSerialNumber;
     state.serialNumber = hasSerialNumber ? serialNumber : "";
-    state.calibrationValid = true;
-    state.calibrationStatus = hasSerialNumber ? "calibrated" : "calibrated_no_sn";
-    state.calibrationSource = "gripper_runtime_cache";
-    state.calibrationPayloadCached = true;
-    state.calibrationPayload = calibrationData;
     state.lastError.clear();
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+        << "gripper runtime cache refreshed: side=" << side
+        << " has_sn=" << boolText(hasSerialNumber)
+        << " sn=" << state.serialNumber
+        << std::endl).str());
     refreshTactileReferenceCachesForSide(side);
 }
 
@@ -4343,7 +3988,7 @@ void RecordRuntime::maintainMainCameraRuntimeStates()
         const bool exists = fs::exists(state.devicePath);
         if (!exists)
         {
-            if (state.present || !state.serialNumber.empty() || state.calibrationPayloadCached || !state.lastError.empty())
+            if (state.present || !state.serialNumber.empty() || state.calibrationPayloadCached)
             {
                 DM_LOG_WARN("{}", (::DA::utils::LogString()
                     << "main camera device removed, clear runtime cache: camera=" << state.cameraName
@@ -4968,6 +4613,22 @@ void RecordRuntime::monitorHardwareHealth()
 
     if (result.fault.has_value())
     {
+        if (isRecordingActive())
+        {
+            const std::string stopReason =
+                "recording hardware fault (" + result.fault->key + "): " + result.fault->detail;
+            if (result.should_notify_fault)
+            {
+                DM_LOG_ERROR("{}", (::DA::utils::LogString() << stopReason << std::endl).str());
+                DM_LOG_INFO("{}", (::DA::utils::LogString()
+                    << "[HMI_DIAG] category=health_fault"
+                    << " key=" << result.fault->key
+                    << " led_state=" << ledStateName(toLedState(result.fault->led_state))
+                    << " action=stop_recording").str());
+            }
+            stopRecording(true, stopReason);
+            return;
+        }
         if (result.should_notify_fault)
         {
             DM_LOG_ERROR("{}", (::DA::utils::LogString() << "hardware health fault (" << result.fault->key << "): "
@@ -5493,7 +5154,6 @@ bool RecordRuntime::GripperPanelManager::readRuntimeIdentityForSide(
     const std::string &side,
     std::string *serialNumber,
     bool *hasSerialNumber,
-    gripper_hmi::GripperCalibrationDataV1 *calibrationData,
     std::string *errorMessage)
 {
     if (serialNumber != nullptr)
@@ -5504,15 +5164,6 @@ bool RecordRuntime::GripperPanelManager::readRuntimeIdentityForSide(
     {
         *hasSerialNumber = false;
     }
-    if (calibrationData == nullptr)
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "calibration output is null";
-        }
-        return false;
-    }
-
     const int index = findDriverIndexForSide(side);
     if (index < 0)
     {
@@ -5533,28 +5184,38 @@ bool RecordRuntime::GripperPanelManager::readRuntimeIdentityForSide(
         return false;
     }
 
-    const bool ok = driver->readSerialNumberAndCalibration(serialNumber, hasSerialNumber, calibrationData);
-    if (!ok)
+    const bool serialOk = driver->readSerialNumber(serialNumber);
+    if (serialOk)
+    {
+        if (hasSerialNumber != nullptr)
+        {
+            *hasSerialNumber = true;
+        }
+    }
+    else
+    {
+        if (hasSerialNumber != nullptr)
+        {
+            *hasSerialNumber = false;
+        }
+        if (serialNumber != nullptr)
+        {
+            serialNumber->clear();
+        }
+    }
+
+    if (!serialOk)
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = driver->getLastCommandError().empty()
-                                ? "readSerialNumberAndCalibration failed"
-                                : driver->getLastCommandError();
+            *errorMessage = driver->getLastCommandError();
         }
         return false;
     }
 
     if (errorMessage != nullptr)
     {
-        if (hasSerialNumber != nullptr && !*hasSerialNumber)
-        {
-            *errorMessage = driver->getLastCommandError();
-        }
-        else
-        {
-            errorMessage->clear();
-        }
+        errorMessage->clear();
     }
     return true;
 }
@@ -5801,7 +5462,12 @@ std::string RecordRuntime::EpisodeManager::createNextEpisodeDir()
         {
             continue;
         }
-        const std::string suffix = name.substr(prefix.size());
+        const std::string normalizedName = stripEpisodeTempSuffix(name);
+        if (normalizedName.rfind(prefix, 0) != 0)
+        {
+            continue;
+        }
+        const std::string suffix = normalizedName.substr(prefix.size());
         if (!suffix.empty() && std::all_of(suffix.begin(), suffix.end(), [](unsigned char ch) { return std::isdigit(ch) != 0; }))
         {
             maxId = std::max(maxId, std::stoi(suffix));
@@ -5811,7 +5477,7 @@ std::string RecordRuntime::EpisodeManager::createNextEpisodeDir()
     const int nextId = maxId + 1;
     char idBuffer[16] = {0};
     std::snprintf(idBuffer, sizeof(idBuffer), "%04d", nextId);
-    const fs::path episodePath = fs::path(episodeRoot_) / (prefix + idBuffer);
+    const fs::path episodePath = fs::path(episodeRoot_) / (prefix + idBuffer + "-temp");
     fs::create_directories(episodePath, error);
     if (error)
     {
@@ -6000,7 +5666,6 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         "sensor_left.mcap",
         "sensor_right.mcap",
         "calibration.json",
-        "info.json",
     };
 
     for (const auto &artifact : artifacts)
@@ -6079,13 +5744,13 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         return false;
     }
 
-    const std::string infoPath = episodeDir + "/info.json";
+    const std::string infoPath = episodeTimingPath(episodeDir).string();
     std::ifstream infoInput(infoPath);
     if (!infoInput.is_open())
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = "cannot open info.json for read";
+            *errorMessage = std::string("cannot open internal timing file for read: ") + kEpisodeTimingFileName;
         }
         return false;
     }
@@ -6101,7 +5766,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = std::string("failed to parse info.json: ") + ex.what();
+            *errorMessage = std::string("failed to parse internal timing file: ") + ex.what();
         }
         return false;
     }
@@ -6109,7 +5774,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = "info.json top-level value must be an object";
+            *errorMessage = "internal timing file top-level value must be an object";
         }
         return false;
     }
@@ -6120,7 +5785,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = "info.json missing or invalid numeric field: boot_time_offset";
+            *errorMessage = "internal timing file missing or invalid numeric field: boot_time_offset";
         }
         return false;
     }
@@ -6128,7 +5793,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = "info.json missing or invalid integer field: boot_time_offset_us";
+            *errorMessage = "internal timing file missing or invalid integer field: boot_time_offset_us";
         }
         return false;
     }
@@ -6136,7 +5801,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = "info.json boot_time_offset and boot_time_offset_us are inconsistent";
+            *errorMessage = "internal timing file boot_time_offset and boot_time_offset_us are inconsistent";
         }
         return false;
     }
@@ -6150,45 +5815,56 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         {
             if (errorMessage != nullptr)
             {
-                *errorMessage = "info.json missing or invalid integer field: " + fieldName;
+                *errorMessage = "internal timing file missing or invalid integer field: " + fieldName;
             }
             return false;
         }
         recordTimeOffsetUsByCamera[artifact.cameraName] = recordTimeOffsetUs;
     }
 
-    std::vector<VideoProbeResult> probes;
-    probes.reserve(artifacts.size());
     double referenceSpanSec = 0.0;
-    for (const auto &artifact : artifacts)
+    const int64_t videoProbeStartMs = steadyNowMs();
+    const auto probeTasks = probeVideoFilesParallel(episodeDir, artifacts);
+    std::vector<VideoProbeResult> probes;
+    probes.reserve(probeTasks.size());
+    for (const auto &task : probeTasks)
     {
-        VideoProbeResult probe;
-        probe.cameraName = artifact.cameraName;
-        probe.fileName = artifact.fileName;
-
-        std::string probeError;
-        if (!probeVideoFile(episodeDir + "/" + artifact.fileName, &probe, &probeError))
+        if (!task.ok)
         {
             if (errorMessage != nullptr)
             {
-                *errorMessage = "video unreadable or missing timing metadata: " + std::string(artifact.fileName) + " (" + probeError + ")";
+                *errorMessage = "video unreadable or missing timing metadata: " + task.probe.fileName +
+                                " (" + task.errorMessage + ")";
             }
             return false;
         }
 
-        if (probe.spanSec < kMinReasonableVideoSpanSec)
+        if (task.probe.spanSec < kMinReasonableVideoSpanSec)
         {
             if (errorMessage != nullptr)
             {
-                *errorMessage = std::string("video span too short: ") + artifact.fileName +
-                                " span=" + formatSeconds(probe.spanSec) +
+                *errorMessage = "video span too short: " + task.probe.fileName +
+                                " span=" + formatSeconds(task.probe.spanSec) +
                                 "s, expected >=" + formatSeconds(kMinReasonableVideoSpanSec) + "s";
             }
             return false;
         }
 
-        referenceSpanSec = std::max(referenceSpanSec, probe.spanSec);
-        probes.push_back(probe);
+        referenceSpanSec = std::max(referenceSpanSec, task.probe.spanSec);
+        probes.push_back(task.probe);
+    }
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] parallel video probe done: episode_dir=" << episodeDir
+                  << " count=" << probes.size()
+                  << " elapsed_ms=" << (steadyNowMs() - videoProbeStartMs) << std::endl).str());
+
+    std::string probeCacheError;
+    if (!writeVideoProbeCacheToTimingFile(episodeDir, probes, &probeCacheError))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to cache video probe results: " + probeCacheError;
+        }
+        return false;
     }
 
     for (const auto &probe : probes)
@@ -6599,6 +6275,14 @@ std::string generateUuid()
 std::string classifyQualityError(const std::string &message)
 {
     const std::string lowered = lowerCopy(message);
+    if (lowered.find("recording hardware fault") != std::string::npos ||
+        lowered.find("disconnected") != std::string::npos ||
+        lowered.find("disconnect") != std::string::npos ||
+        lowered.find("disappeared") != std::string::npos ||
+        lowered.find("device node") != std::string::npos)
+    {
+        return "device_disconnected";
+    }
     if (lowered.find("finalize") != std::string::npos ||
         lowered.find("stereo session") != std::string::npos ||
         lowered.find("fays recorder unhealthy") != std::string::npos ||
@@ -6727,7 +6411,7 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
     hardwareList["stereo_left_sn"] = jsonStringPath(stereoStatus, "cameras.left_stereo.serial_number");
 
     json infoRoot = json::object();
-    loadJsonFile((episodePath / "info.json").string(), &infoRoot, &ignoredError);
+    loadJsonFile(episodeTimingPath(episodePath).string(), &infoRoot, &ignoredError);
     std::map<std::string, int64_t> offsetByCamera;
     int64_t minOffsetUs = std::numeric_limits<int64_t>::max();
     for (const auto &artifact : metadataVideoArtifacts(chestCameraEnabled_))
@@ -6759,12 +6443,15 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
         }
 
         VideoProbeResult probe;
-        probe.cameraName = artifact.cameraName;
-        probe.fileName = artifact.fileName;
-        std::string probeError;
-        if (!probeVideoFile(videoPath.string(), &probe, &probeError))
+        if (!loadCachedVideoProbe(infoRoot, artifact, &probe))
         {
-            continue;
+            probe.cameraName = artifact.cameraName;
+            probe.fileName = artifact.fileName;
+            std::string probeError;
+            if (!probeVideoFile(videoPath.string(), &probe, &probeError))
+            {
+                continue;
+            }
         }
 
         const auto offsetIt = offsetByCamera.find(artifact.cameraName);
@@ -6785,7 +6472,6 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
     ordered_json requiredFiles = ordered_json::array({
         "metadata.json",
         "calibration.json",
-        "info.json",
         "cam_left.mkv",
         "cam_right.mkv",
         "stereo_left.mkv",
@@ -6818,7 +6504,7 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
     metadata["das_usb_updater_version"] = updaterVersion_;
     metadata["data_version"] = "3.0";
     metadata["hardware_list"] = std::move(hardwareList);
-    metadata["episode_name"] = episodePath.filename().string();
+    metadata["episode_name"] = stripEpisodeTempSuffix(episodePath.filename().string());
     metadata["data_uuid"] = existingMetadata.value("data_uuid", generateUuid());
     metadata["audio_uuid"] = hasAudio ? existingMetadata.value("audio_uuid", generateUuid()) : "";
     metadata["quality_check_status"] = qualityOk ? "success" : "fail";
@@ -6834,237 +6520,62 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
     return true;
 }
 
-bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &episodeDir, std::string *errorMessage) const
+std::string RecordRuntime::EpisodeManager::finalizeEpisodeDir(const std::string &episodeDir,
+                                                              std::string *errorMessage) const
 {
-    json calibrationJson;
-    std::vector<std::string> candidateFiles;
-    if (fs::exists(persistCalibrationFile_))
+    const fs::path sourcePath(episodeDir);
+    const std::string sourceName = sourcePath.filename().string();
+    const std::string finalName = stripEpisodeTempSuffix(sourceName);
+    if (finalName == sourceName)
     {
-        candidateFiles.push_back(persistCalibrationFile_);
-    }
-    if (fs::exists(exampleCalibrationFile_) && exampleCalibrationFile_ != persistCalibrationFile_)
-    {
-        candidateFiles.push_back(exampleCalibrationFile_);
-    }
-    if (fs::exists(fallbackCalibrationFile_) &&
-        fallbackCalibrationFile_ != persistCalibrationFile_ &&
-        fallbackCalibrationFile_ != exampleCalibrationFile_)
-    {
-        candidateFiles.push_back(fallbackCalibrationFile_);
+        return episodeDir;
     }
 
-    std::string sourceFile;
-    std::string lastError;
-    bool loaded = false;
-    for (const std::string &candidate : candidateFiles)
-    {
-        if (loadCalibrationJsonFile(candidate, &calibrationJson, &lastError))
-        {
-            sourceFile = candidate;
-            loaded = true;
-            break;
-        }
-    }
-
-    if (!loaded)
+    const fs::path targetPath = sourcePath.parent_path() / finalName;
+    std::error_code error;
+    if (fs::exists(targetPath, error))
     {
         if (errorMessage != nullptr)
         {
-            if (!lastError.empty())
-            {
-                *errorMessage = lastError;
-            }
-            else
-            {
-                *errorMessage = "no usable calibration source found";
-            }
+            *errorMessage = "final episode directory already exists: " + targetPath.string();
         }
-        return false;
+        return {};
     }
 
-    if (sourceFile != persistCalibrationFile_ && fs::exists(persistCalibrationFile_))
+    fs::rename(sourcePath, targetPath, error);
+    if (error)
     {
-        DM_LOG_WARN("{}", (::DA::utils::LogString() << "invalid persist calibration, fallback to " << sourceFile << std::endl).str());
-    }
-
-    const std::string generationDate =
-        calibrationJson.contains("metadata") && calibrationJson["metadata"].is_object()
-            ? calibrationJson["metadata"].value("generation_date", currentDateString())
-            : currentDateString();
-    const std::string notes =
-        calibrationJson.contains("calibration_info") && calibrationJson["calibration_info"].is_object()
-            ? calibrationJson["calibration_info"].value(
-                  "notes",
-                  "Main/stereo/imu entries are filled from gripper calibration payload when available; tactile serials are resolved from runtime devices.")
-            : "Main/stereo/imu entries are filled from gripper calibration payload when available; tactile serials are resolved from runtime devices.";
-
-    migrateLegacyFlattenedCalibrationKeys(&calibrationJson);
-    sanitizeCalibrationTopLevel(&calibrationJson);
-
-    std::map<std::string, json> sourceCalibrationEntries;
-    for (const auto &target : kTactileCalibrationTargets)
-    {
-        if (const json *entry = findJsonPathConst(&calibrationJson, target.jsonPath);
-            entry != nullptr && entry->is_object())
+        if (errorMessage != nullptr)
         {
-            sourceCalibrationEntries.emplace(target.jsonPath, *entry);
+            *errorMessage = "rename episode directory failed: " + error.message();
         }
-    }
-    for (const std::string side : {"left", "right"})
-    {
-        const std::string legacyJsonPath = legacyTactileJsonPathForSide(side);
-        if (const json *entry = findJsonPathConst(&calibrationJson, legacyJsonPath);
-            entry != nullptr && entry->is_object())
-        {
-            sourceCalibrationEntries.emplace(legacyJsonPath, *entry);
-        }
+        return {};
     }
 
-    json leftStereoTemplate;
-    json rightStereoTemplate;
-    json chestCameraTemplate;
-    const json *leftStereoTemplatePtr = nullptr;
-    const json *rightStereoTemplatePtr = nullptr;
-    const json *chestCameraTemplatePtr = nullptr;
-    if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.left_stereo");
-        entry != nullptr && entry->is_object())
+    std::error_code removeError;
+    fs::remove(targetPath / kEpisodeTimingFileName, removeError);
+    if (removeError)
     {
-        leftStereoTemplate = *entry;
-        leftStereoTemplatePtr = &leftStereoTemplate;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to remove internal timing file: "
+                      << (targetPath / kEpisodeTimingFileName)
+                      << " error=" << removeError.message() << std::endl).str());
     }
-    else if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.fays_cam0");
-             entry != nullptr && entry->is_object())
-    {
-        leftStereoTemplate = *entry;
-        leftStereoTemplatePtr = &leftStereoTemplate;
-    }
+    flushEpisodeDirectoriesToDisk(targetPath, "episode_finalize");
+    return targetPath.string();
+}
 
-    if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.right_stereo");
-        entry != nullptr && entry->is_object())
-    {
-        rightStereoTemplate = *entry;
-        rightStereoTemplatePtr = &rightStereoTemplate;
-    }
-    else if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.fays_cam1");
-             entry != nullptr && entry->is_object())
-    {
-        rightStereoTemplate = *entry;
-        rightStereoTemplatePtr = &rightStereoTemplate;
-    }
-    if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.chest_cam_main");
-        entry != nullptr && entry->is_object())
-    {
-        chestCameraTemplate = *entry;
-        chestCameraTemplatePtr = &chestCameraTemplate;
-    }
-    else if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.left_cam_main");
-             entry != nullptr && entry->is_object())
-    {
-        chestCameraTemplate = *entry;
-        chestCameraTemplatePtr = &chestCameraTemplate;
-    }
-    else if (const json *entry = findJsonPathConst(&calibrationJson, "observation.images.right_cam_main");
-             entry != nullptr && entry->is_object())
-    {
-        chestCameraTemplate = *entry;
-        chestCameraTemplatePtr = &chestCameraTemplate;
-    }
+bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &episodeDir, std::string *errorMessage) const
+{
+    ordered_json mainImages = ordered_json::object();
+    ordered_json tactileImages = ordered_json::object();
+    ordered_json images = ordered_json::object();
+    ordered_json imu = ordered_json::object();
+    images["stereo_left"] = makeDefaultStereoCalibrationEntry();
+    images["stereo_right"] = makeDefaultStereoCalibrationEntry();
+    imu["imu_left"] = makeDefaultFaysImuCalibrationEntry();
+    imu["imu_right"] = makeDefaultFaysImuCalibrationEntry();
 
-    removeIfPresent(&calibrationJson, "observation.images.fays_cam0");
-    removeIfPresent(&calibrationJson, "observation.images.fays_cam1");
-    removeIfPresent(&calibrationJson, "observation.imu.fays_imu0");
-    removeIfPresent(&calibrationJson, "observation.imu.left_imu");
-    removeIfPresent(&calibrationJson, "observation.imu.right_imu");
-
-    if (json *leftStereo = findJsonPath(&calibrationJson, "observation.images.left_stereo", true))
-    {
-        *leftStereo = makeStereoPlaceholderFromTemplate(leftStereoTemplatePtr);
-    }
-    if (json *rightStereo = findJsonPath(&calibrationJson, "observation.images.right_stereo", true))
-    {
-        *rightStereo = makeStereoPlaceholderFromTemplate(rightStereoTemplatePtr);
-    }
-    if (chestCameraEnabled_)
-    {
-        if (json *chestCamera = findJsonPath(&calibrationJson, "observation.images.chest_cam_main", true))
-        {
-            *chestCamera = makeMainCameraPlaceholderFromTemplate(chestCameraTemplatePtr);
-        }
-    }
-    else
-    {
-        removeIfPresent(&calibrationJson, "observation.images.chest_cam_main");
-    }
-
-    for (const auto &target : kTactileCalibrationTargets)
-    {
-        const json *templateEntry = findSourceCalibrationEntry(
-            sourceCalibrationEntries,
-            tactileTemplateCandidateKeys(target));
-        if (json *entry = findJsonPath(&calibrationJson, target.jsonPath, true))
-        {
-            *entry = makeTactileCalibrationEntry(templateEntry, target.serialPlaceholder);
-        }
-    }
-
-    if (!commandExists("udevadm"))
-    {
-        DM_LOG_WARN("{}", (::DA::utils::LogString() << "udevadm not found in PATH, skip runtime tactile serial injection" << std::endl).str());
-    }
-    else
-    {
-        std::map<std::string, std::string> sideReplacementSerials;
-        for (const auto &target : kTactileCalibrationTargets)
-        {
-            std::string detail;
-            const auto serial = probeUsbSerialForDeviceNode(target.devicePath, &detail);
-            if (!serial.has_value())
-            {
-                DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to resolve runtime tactile serial for camera=" << target.cameraName
-                          << " device=" << target.devicePath
-                          << " detail=" << detail
-                          << "; keep source calibration value" << std::endl).str());
-                continue;
-            }
-
-            injectRuntimeTactileSerial(
-                &calibrationJson,
-                target,
-                *serial,
-                detail,
-                sourceFile,
-                persistCalibrationFile_);
-
-            if (sideReplacementSerials.find(target.side) == sideReplacementSerials.end())
-            {
-                sideReplacementSerials.emplace(target.side, *serial);
-            }
-        }
-
-        for (const auto &entry : sideReplacementSerials)
-        {
-            replaceJsonStringValues(
-                &calibrationJson,
-                legacyTactileSerialPlaceholderForSide(entry.first),
-                entry.second);
-        }
-    }
-
-    removeIfPresent(&calibrationJson, "observation.images.gripper_left_tactile");
-    removeIfPresent(&calibrationJson, "observation.images.gripper_right_tactile");
-    removeLegacyFlattenedCalibrationKeys(&calibrationJson);
-
-    bool anyCalibrationValid = false;
-    for (const auto &state : gripperRuntimeStates_)
-    {
-        if (state.calibrationValid && state.calibrationPayloadCached)
-        {
-            applySideCalibrationPayload(&calibrationJson, state.side, state.calibrationPayload);
-            anyCalibrationValid = true;
-        }
-    }
-
-    bool anyMainCameraCalibrationValid = false;
+    bool allMainCameraCalibrationValid = true;
     for (const auto &state : mainCameraRuntimeStates_)
     {
         if (!state.enabled)
@@ -7074,35 +6585,33 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
         std::string jsonPath;
         if (state.cameraName == "left_cam_main")
         {
-            jsonPath = "observation.images.left_cam_main";
+            jsonPath = "cam_left_main";
         }
         else if (state.cameraName == "right_cam_main")
         {
-            jsonPath = "observation.images.right_cam_main";
+            jsonPath = "cam_right_main";
         }
         else if (state.cameraName == "chest_cam_main")
         {
-            jsonPath = "observation.images.chest_cam_main";
+            jsonPath = "cam_chest_main";
         }
         if (jsonPath.empty())
         {
             continue;
         }
 
+        mainImages[jsonPath] = makeDefaultMainCameraCalibrationEntry();
         std::string calibrationDetail;
         if (state.present &&
             isYuzhouMainCameraSn(state.serialNumber) &&
             state.calibrationPayloadCached &&
             validateYuzhouMainCameraCalibrationPayload(state.calibrationPayload, &calibrationDetail))
         {
-            if (json *mainCamera = findJsonPath(&calibrationJson, jsonPath, true))
-            {
-                *mainCamera = makeMainCameraCalibrationEntryFromPayload(state.calibrationPayload);
-                anyMainCameraCalibrationValid = true;
-            }
+            mainImages[jsonPath] = makeMainCameraCalibrationEntryFromPayload(state.calibrationPayload);
         }
         else
         {
+            allMainCameraCalibrationValid = false;
             DM_LOG_WARN("{}", (::DA::utils::LogString()
                 << "main camera calibration cache unavailable for episode calibration: camera="
                 << state.cameraName
@@ -7112,7 +6621,7 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
         }
     }
 
-    bool anyFaysCalibrationValid = false;
+    bool allFaysCalibrationValid = true;
     for (const auto &entry : std::vector<std::pair<std::string, std::string>>{
              {"left", "left_stereo"},
              {"right", "right_stereo"},
@@ -7122,31 +6631,71 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
         std::string faysStatus;
         if (!loadFaysCalibrationFromStatus(stereoStatusFile_, entry.second, &faysCalibration, &faysStatus))
         {
+            allFaysCalibrationValid = false;
             DM_LOG_WARN("{}", (::DA::utils::LogString() << "Fays calibration unavailable for "
                                  << entry.second << ": " << faysStatus << std::endl).str());
             continue;
         }
 
-        if (json *stereo = findJsonPath(&calibrationJson, stereoJsonPathForSide(entry.first), true))
-        {
-            *stereo = makeFaysStereoCalibrationEntry(faysCalibration);
-        }
-        if (json *imu = findJsonPath(&calibrationJson, imuJsonPathForSide(entry.first), true))
-        {
-            *imu = makeFaysImuCalibrationEntry(faysCalibration);
-        }
-        anyFaysCalibrationValid = true;
+        images[entry.first == "left" ? "stereo_left" : "stereo_right"] =
+            makeFaysStereoCalibrationEntry(faysCalibration);
+        imu[entry.first == "left" ? "imu_left" : "imu_right"] =
+            makeFaysImuCalibrationEntry(faysCalibration);
         DM_LOG_INFO("{}", (::DA::utils::LogString() << "Fays calibration loaded for "
                             << entry.second << ": " << faysStatus << std::endl).str());
     }
 
-    const std::string calibrationStatus = (anyCalibrationValid || anyMainCameraCalibrationValid || anyFaysCalibrationValid)
+    for (const auto &target : kTactileCalibrationTargets)
+    {
+        std::string serial;
+        std::string detail;
+        const auto runtimeSerial = probeUsbSerialForDeviceNode(target.devicePath, &detail);
+        if (runtimeSerial.has_value())
+        {
+            serial = *runtimeSerial;
+        }
+        else
+        {
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                << "failed to resolve runtime tactile serial for camera=" << target.cameraName
+                << " device=" << target.devicePath
+                << " detail=" << detail
+                << "; write empty serial" << std::endl).str());
+        }
+        std::string imageKey = target.cameraName;
+        if (imageKey.rfind("left_tcam_", 0) == 0)
+        {
+            imageKey = "tcam_left_" + imageKey.substr(std::string("left_tcam_").size());
+        }
+        else if (imageKey.rfind("right_tcam_", 0) == 0)
+        {
+            imageKey = "tcam_right_" + imageKey.substr(std::string("right_tcam_").size());
+        }
+        tactileImages[imageKey] = makeRuntimeTactileCalibrationEntry(serial);
+    }
+
+    ordered_json orderedImages = ordered_json::object();
+    if (mainImages.contains("cam_chest_main"))
+    {
+        orderedImages["cam_chest_main"] = mainImages["cam_chest_main"];
+    }
+    orderedImages["stereo_left"] = images["stereo_left"];
+    orderedImages["tcam_left_l"] = tactileImages.value("tcam_left_l", makeRuntimeTactileCalibrationEntry(""));
+    orderedImages["tcam_left_r"] = tactileImages.value("tcam_left_r", makeRuntimeTactileCalibrationEntry(""));
+    orderedImages["stereo_right"] = images["stereo_right"];
+    orderedImages["tcam_right_l"] = tactileImages.value("tcam_right_l", makeRuntimeTactileCalibrationEntry(""));
+    orderedImages["tcam_right_r"] = tactileImages.value("tcam_right_r", makeRuntimeTactileCalibrationEntry(""));
+    orderedImages["cam_left_main"] = mainImages.value("cam_left_main", makeDefaultMainCameraCalibrationEntry());
+    orderedImages["cam_right_main"] = mainImages.value("cam_right_main", makeDefaultMainCameraCalibrationEntry());
+
+    ordered_json calibrationJson = ordered_json::object();
+    const std::string calibrationStatus = (allMainCameraCalibrationValid && allFaysCalibrationValid)
                                              ? "calibrated"
                                              : "uncalibrated";
-    calibrationJson["metadata"] =
-        makeLockedCalibrationMetadata(generationDate, calibrationStatus);
-    calibrationJson["calibration_info"] =
-        makeLockedCalibrationInfo(generationDate, calibrationStatus, notes);
+    calibrationJson["calibration_info"] = makeLockedCalibrationInfo(calibrationStatus);
+    calibrationJson["observation"] = ordered_json::object();
+    calibrationJson["observation"]["images"] = std::move(orderedImages);
+    calibrationJson["observation"]["imu"] = std::move(imu);
 
     std::ofstream output(episodeDir + "/calibration.json");
     if (!output.is_open())

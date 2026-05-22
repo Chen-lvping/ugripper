@@ -120,7 +120,6 @@ private:
         bool readRuntimeIdentityForSide(const std::string &side,
                                         std::string *serialNumber,
                                         bool *hasSerialNumber,
-                                        gripper_hmi::GripperCalibrationDataV1 *calibrationData,
                                         std::string *errorMessage);
         std::vector<ConnectionEvent> consumeConnectionEvents();
         bool isSideReadyForRefresh(const std::string &side, uint64_t activeTimeoutMs) const;
@@ -179,12 +178,7 @@ private:
             bool connected = false;
             bool hasSerialNumber = false;
             std::string serialNumber;
-            bool calibrationValid = false;
-            std::string calibrationStatus;
-            std::string calibrationSource;
             std::string lastError;
-            bool calibrationPayloadCached = false;
-            gripper_hmi::GripperCalibrationDataV1 calibrationPayload{};
         };
 
         struct MainCameraRuntimeState
@@ -241,6 +235,7 @@ private:
                                 bool qualityOk,
                                 const std::string &qualityErrorMessage,
                                 std::string *errorMessage) const;
+        std::string finalizeEpisodeDir(const std::string &episodeDir, std::string *errorMessage) const;
         const std::string &dataRoot() const;
 
     private:

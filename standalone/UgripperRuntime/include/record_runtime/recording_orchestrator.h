@@ -40,6 +40,7 @@ public:
     using FlushEpisodeArtifactsFn = std::function<void(const std::string&, const char*)>;
     using WriteEpisodeMetadataFn = std::function<void(const std::string&, bool, const std::string&)>;
     using WriteValidationErrorLogFn = std::function<void(const std::string&, const std::string&)>;
+    using FinalizeEpisodeDirFn = std::function<std::string(const std::string&, std::string*)>;
     using WriteRecordingLockFn = std::function<bool(const std::string&)>;
     using RemoveRecordingLockFn = std::function<void()>;
     using StartWorkerFn = std::function<bool(WorkerName, const ProcessSpec&, std::string*)>;
@@ -67,6 +68,7 @@ public:
         FlushEpisodeArtifactsFn flush_episode_artifacts;
         WriteEpisodeMetadataFn write_episode_metadata;
         WriteValidationErrorLogFn write_validation_error_log;
+        FinalizeEpisodeDirFn finalize_episode_dir;
         WriteRecordingLockFn write_recording_lock;
         RemoveRecordingLockFn remove_recording_lock;
         StartWorkerFn start_worker;

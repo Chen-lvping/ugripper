@@ -67,6 +67,7 @@ struct HealthState
     HealthStatus status = HealthStatus::Unknown;
     std::string last_error_key;
     uint64_t last_check_ms = 0;
+    uint64_t first_seen_ms = 0;
 };
 
 struct HealthFault

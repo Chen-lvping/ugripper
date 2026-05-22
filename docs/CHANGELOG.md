@@ -5,6 +5,14 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- Fays recorder 新增 `/dev/shm/umi_left_fays_runtime_status.json` / `/dev/shm/umi_right_fays_runtime_status.json` 低频刷新型运行态调试文件，只记录最近 warmup frame/encoded frame 时间等事实变量；stereo daemon 用最近 frame freshness 判断 idle/recording 拉流健康，录制中异常会让当前 session 快速失败，停录等待文件期间也可被已知错误打断。
+- 停录 validation 阶段优化视频探测链路：8/9 路视频 `ffprobe` 改为并行执行，并把成功结果缓存到内部 `.recording_timing.json.video_probes`，`metadata.json` 生成阶段直接复用该结果，避免同一批视频在停录收尾里重复探测。
+- episode 完成状态改为目录名表达：录制中/停录收尾使用 `episode_YYYYMMDD_NNNN-temp`，收尾完成后 rename 为 `episode_YYYYMMDD_NNNN`；最终产物不再包含 `info.json`，时间偏移信息迁移到 `metadata.json.video_details[].start_offset_us`，校验脚本同步移除 `info.json` 必需项。
+- Fays stereo daemon 热插拔恢复继续加固：单侧 recorder 启动前先等待 stereo/IMU symlink 目标稳定，再执行 1.5s 延迟；清理时优先通过 FIFO `EXIT` 走进程内队列唤醒和正常退出，仍未退出时再按 `SIGTERM`/`SIGKILL` 兜底，避免外层 daemon 被 SDK 卡住的子进程无界 `wait` 阻塞。
+- 主摄运行时缓存的设备缺失日志改为状态变化时输出，避免设备掉线期间每 20ms 重复刷 `main camera device removed`。
+- 录制中硬件健康故障不再静默恢复：关键设备/HMI/数据盘/stereo daemon 任一掉线会立即错误停录，本条 episode 写失败 `metadata.json` 与 `validation_error.log`；`quality_check_err_type` 新增 `device_disconnected`，避免设备重连后误判为正常录制。
+- `calibration.json` 生成改为按 3.0 新范本从零组装：顶层只保留 `calibration_info/observation`，相机 key 切到 `cam_left_main/cam_right_main/cam_chest_main/stereo_left/stereo_right/tcam_*`，IMU key 切到 `imu_left/imu_right`；不再读取旧持久化 calibration 作为 episode 输出来源，避免旧标定字段和旧表述混入。
+- gripper HMI 运行时刷新收口为只维护左右手 SN 与连接态，不再同步读取校准 payload；episode 侧不再把 gripper calibration 当作有效缓存项，避免启动和重连阶段误报 `invalid header magic`。
 - 主摄/胸部相机 SN 与标定读取改为设备插入/目标变化时异步维护运行时缓存，拔出即清空；`metadata.json` 和 `calibration.json` 只消费缓存，停录路径不再同步读取 XU。若在线主摄缺少合法 `FE...` SN 或 `MCAL` 标定，episode 停录校验失败并写 `quality_check_err_type=calibration_error`；`main_camera_xu_tool` 增加快速 `--read-sn`、`--read-calib`、`--validate` 验证口径。
 - `metadata.json` 输出改用 `nlohmann::ordered_json` 固定范本字段顺序；UUID fallback 改为 `libuuid`，无音频时允许 `audio_uuid` 为空；主摄/胸部相机 SN 只读取 Yuzhou UVC XU flash，失败写空；gripper SN 复用插入 refresh 后的运行时缓存，拔出后清理，不在写 metadata 时额外同步读串口。
 - Fays stereo daemon 增加工作状态 watchdog：除进程/FIFO/symlink 外，还会持续检查 calibration/serial；单侧异常只重启单侧，左右 serial 重复时重启两侧，录制中异常会写入当前 session 的 `last_finalize_error`。
@@ -18,7 +26,7 @@
 - 新增安全 NTP 同步链路：主包安装 `ugripper-ntp-sync.service` 与 `time_sync/safe_ntp_sync.sh`，只在非录制态执行一次性校时；脚本优先使用板端现有 `sntp -S`，再 fallback 到 `ntpd -q -g` / `timedatectl`，完成、失败、超时或检测到录制开始后立即停止常驻 NTP 服务，避免录制期间系统时间跳变。
 - `record_runtime` 现在在起录入口立即写入 `/tmp/umi_recording.lock`，停录写盘/校验完成后清理；NTP 脚本会识别该锁及其中的 runtime pid，遇到有效录制锁直接跳过，遇到 stale pid 锁则清理后再尝试同步。
 - 新版取消板载 IM648 链路：`sensor_recorder` 只采集左右 encoder，不再打开 `/dev/left_imu` / `/dev/right_imu`，episode 校验和板端 smoke/integration check 不再要求 `imu_left` / `imu_right` topic；Fays stereo 自带 IMU 链路保持不变。
-- `config/99-fixed-usb-map.rules` 不再生成板载 `left_imu` / `right_imu` symlink；运行时输出 `calibration.json` 时会清理旧版本遗留的 `observation.imu.left_imu/right_imu`。
+- `config/99-fixed-usb-map.rules` 不再生成板载 `left_imu` / `right_imu` symlink；运行时输出 `calibration.json` 时会清理旧版本遗留的板载 IMU 表述。
 - 出包链路继续收口到“当前仓库可独立稳定出包”口径：
   - 顶层 `CMakeLists.txt` 默认关闭可选 `src/third_party/mcap_builder`，避免普通主包构建被私有 SSH 拉仓阻塞
   - `build_deb.sh` 标准模式改为只编译主包必需目标，并新增 `.venv` 与 5 个核心二进制的 ELF 架构校验
@@ -37,7 +45,7 @@
 - 修复 `ugripper` 安装后的 CH9344 双手串口识别补齐：`postinst` 在 `udevadm control --reload-rules` 后，新增对现有 `ttyCH9344USB*` 的定向 `add` 触发，避免设备已在位时只重载规则却不回填 `/dev/left_gripper`、`/dev/right_gripper`、`*_encoder`、`*_imu`。
 - 板端 `HSD-RB1021` 验证确认：双手 CH9344 在接线正确且回放 `tty add` 后，可稳定生成 6 个固定 symlink；`ugripper.service` 能继续通过 gripper/sensor 初始化阶段。当前剩余板端阻塞为音频 Python 环境缺少 `pygame`。
 - 新增可选胸部主摄 `chest_cam_main`：按板载直连 USB 口识别，默认启用，可用 `ENABLE_CHEST_CAM_MAIN=0/false/no/off` 关闭；录制、停录校验、health check 与 episode 深度校验同步接入该路视频和时间偏移字段。
-- 收口 episode 标定格式：`metadata.json.data_format_version=3`、`calibration.json.metadata.format_version=3.0`；`calibration.json` 顶层固定为 `metadata/calibration_info/observation`，并为胸部主摄预留 `observation.images.chest_cam_main`。
+- 收口 episode 标定格式：`metadata.json.data_format_version=3`、`calibration_info.format_version=3.0`；`calibration.json` 顶层固定为 `calibration_info/observation`，胸部主摄输出为 `observation.images.cam_chest_main`。
 - 固化 `calibration.json` schema 与 fallback 语义：主摄、stereo、tactile、IMU 字段白名单由运行时、USB 导入和校验脚本统一执行；fallback 只补缺，不覆盖已写入的合法数据。
 - 新增运行时触觉损坏轻量抽检：夹爪插回并完成该侧 refresh 后，会按 tactile 相机 USB `serial` 刷新参考灰度帧缓存；停录阶段只抽取起录附近单帧做快速比对，不扫描整段视频，也不重新读取 MCAP 做 encoder 对齐。
 - 同一 tactile `serial` 最近 `3` 个 episode 都异常时，空闲态改为黄灯闪烁 `WARNING`，并播放对应的 `left/right_tcam_*_damaged.wav` 提示音；该能力属于软告警，不会把当前 episode 升级为 `validation_failed`。

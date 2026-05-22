@@ -3469,10 +3469,10 @@ const std::vector<std::unique_ptr<CameraRecorder>>& CameraRecorderManager::recor
 
 bool CameraRecorderManager::WriteInfoJson() const {
     const int64_t boot_time_offset_us = BootTimeOffsetUs();
-    const fs::path info_json_path = options_.output_dir / "info.json";
+    const fs::path info_json_path = options_.output_dir / ".recording_timing.json";
     std::ofstream output(info_json_path, std::ios::trunc);
     if (!output.is_open()) {
-        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] failed to open info.json for write: "
+        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] failed to open recording timing file for write: "
                               << info_json_path).str());
         return false;
     }

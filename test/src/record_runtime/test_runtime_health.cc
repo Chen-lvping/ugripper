@@ -183,6 +183,47 @@ TEST(HealthMonitorTest, ReportsRecoveryAfterFaultClears)
     fs::remove_all(temp_dir);
 }
 
+TEST(HealthMonitorTest, IgnoresStereoStartupFaultsDuringGraceWindow)
+{
+    const fs::path temp_dir = MakeTempDir();
+    HealthMonitor monitor(
+        {.disk_root = temp_dir.string(),
+         .stereo_status_file = (temp_dir / "missing_stereo_status.json").string(),
+         .critical_device_paths = {"/dev/cam0"},
+         .poll_interval_ms = 1000,
+         .hmi_active_timeout_ms = 2500,
+         .stereo_startup_grace_ms = 10000},
+        {.is_disk_writable =
+             [](const std::string&) {
+                 return true;
+             },
+         .path_exists =
+             [](const std::string&) {
+                 return true;
+             },
+         .get_process_status =
+             [](WorkerName) {
+                 return ProcessStatus{.state = ProcessState::Running, .running = true, .pid = 7};
+             },
+         .get_hmi_health =
+             [](uint64_t) {
+                 return HmiHealthSnapshot{
+                     .has_connected_device = true,
+                     .input_connected = true,
+                     .input_active = true,
+                 };
+             }},
+        &FakeNowMs);
+
+    g_now_ms = 1000;
+    auto result = monitor.Poll(HealthState{});
+    EXPECT_TRUE(result.checked);
+    EXPECT_FALSE(result.fault.has_value());
+    EXPECT_EQ(result.state.status, HealthStatus::Unknown);
+
+    fs::remove_all(temp_dir);
+}
+
 TEST(HealthMonitorTest, ReportsInputHmiDisconnected)
 {
     const fs::path temp_dir = MakeTempDir();

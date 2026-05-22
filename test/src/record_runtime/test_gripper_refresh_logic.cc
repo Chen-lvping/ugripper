@@ -14,9 +14,6 @@ TEST(GripperRefreshLogicTest, ConnectedEventMarksStateAsReconnectingAndPending)
     GripperRefreshRuntimeView state{
         .side = "right",
         .connected = false,
-        .calibration_valid = true,
-        .calibration_status = "calibrated",
-        .calibration_source = "gripper_runtime_cache",
         .last_error = "",
     };
     bool pending_refresh = false;
@@ -26,9 +23,6 @@ TEST(GripperRefreshLogicTest, ConnectedEventMarksStateAsReconnectingAndPending)
     EXPECT_TRUE(pending_refresh);
     EXPECT_EQ(state.side, "right");
     EXPECT_TRUE(state.connected);
-    EXPECT_FALSE(state.calibration_valid);
-    EXPECT_EQ(state.calibration_status, "reconnecting");
-    EXPECT_TRUE(state.calibration_source.empty());
     EXPECT_EQ(state.last_error, "waiting for gripper reconnect refresh");
 }
 
@@ -37,9 +31,6 @@ TEST(GripperRefreshLogicTest, DisconnectedEventClearsPendingAndMarksDisconnected
     GripperRefreshRuntimeView state{
         .side = "left",
         .connected = true,
-        .calibration_valid = true,
-        .calibration_status = "calibrated",
-        .calibration_source = "gripper_runtime_cache",
         .last_error = "",
     };
     bool pending_refresh = true;
@@ -49,9 +40,6 @@ TEST(GripperRefreshLogicTest, DisconnectedEventClearsPendingAndMarksDisconnected
     EXPECT_FALSE(pending_refresh);
     EXPECT_EQ(state.side, "left");
     EXPECT_FALSE(state.connected);
-    EXPECT_FALSE(state.calibration_valid);
-    EXPECT_EQ(state.calibration_status, "disconnected");
-    EXPECT_TRUE(state.calibration_source.empty());
     EXPECT_EQ(state.last_error, "gripper disconnected");
 }
 
@@ -60,9 +48,6 @@ TEST(GripperRefreshLogicTest, PendingRefreshWaitsForSideDevicesBeforeRequestingS
     GripperRefreshRuntimeView state{
         .side = "right",
         .connected = true,
-        .calibration_valid = false,
-        .calibration_status = "reconnecting",
-        .calibration_source = "",
         .last_error = "waiting for gripper reconnect refresh",
     };
     bool pending_refresh = true;
@@ -72,7 +57,6 @@ TEST(GripperRefreshLogicTest, PendingRefreshWaitsForSideDevicesBeforeRequestingS
     EXPECT_EQ(action, GripperRefreshAction::None);
     EXPECT_TRUE(pending_refresh);
     EXPECT_TRUE(state.connected);
-    EXPECT_EQ(state.calibration_status, "waiting_side_devices");
     EXPECT_EQ(state.last_error, "waiting for side critical devices");
 }
 
@@ -81,9 +65,6 @@ TEST(GripperRefreshLogicTest, PendingRefreshRequestsStateUntilGripperBecomesActi
     GripperRefreshRuntimeView state{
         .side = "right",
         .connected = true,
-        .calibration_valid = false,
-        .calibration_status = "reconnecting",
-        .calibration_source = "",
         .last_error = "waiting for gripper reconnect refresh",
     };
     bool pending_refresh = true;
@@ -93,7 +74,6 @@ TEST(GripperRefreshLogicTest, PendingRefreshRequestsStateUntilGripperBecomesActi
     EXPECT_EQ(action, GripperRefreshAction::RequestState);
     EXPECT_TRUE(pending_refresh);
     EXPECT_TRUE(state.connected);
-    EXPECT_EQ(state.calibration_status, "waiting_gripper_ready");
     EXPECT_EQ(state.last_error, "waiting for gripper reconnect to become active");
 }
 
@@ -102,9 +82,6 @@ TEST(GripperRefreshLogicTest, PendingRefreshTransitionsToRefreshActionWhenReady)
     GripperRefreshRuntimeView state{
         .side = "left",
         .connected = true,
-        .calibration_valid = false,
-        .calibration_status = "waiting_gripper_ready",
-        .calibration_source = "",
         .last_error = "waiting for gripper reconnect to become active",
     };
     bool pending_refresh = true;
@@ -122,9 +99,6 @@ TEST(GripperRefreshLogicTest, NoPendingRefreshProducesNoAction)
     GripperRefreshRuntimeView state{
         .side = "left",
         .connected = true,
-        .calibration_valid = true,
-        .calibration_status = "calibrated",
-        .calibration_source = "gripper_runtime_cache",
         .last_error = "",
     };
     bool pending_refresh = false;
@@ -133,8 +107,7 @@ TEST(GripperRefreshLogicTest, NoPendingRefreshProducesNoAction)
 
     EXPECT_EQ(action, GripperRefreshAction::None);
     EXPECT_FALSE(pending_refresh);
-    EXPECT_TRUE(state.calibration_valid);
-    EXPECT_EQ(state.calibration_status, "calibrated");
+    EXPECT_TRUE(state.connected);
 }
 
 }  // namespace

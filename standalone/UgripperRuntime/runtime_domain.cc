@@ -185,6 +185,10 @@ HealthMonitor::PollResult HealthMonitor::Poll(const HealthState& current_state) 
     result.state = current_state;
 
     const uint64_t now_ms = now_ms_fn_ != nullptr ? now_ms_fn_() : current_state.last_check_ms;
+    if (result.state.first_seen_ms == 0)
+    {
+        result.state.first_seen_ms = now_ms;
+    }
     if ((now_ms - current_state.last_check_ms) < options_.poll_interval_ms)
     {
         return result;
@@ -195,6 +199,21 @@ HealthMonitor::PollResult HealthMonitor::Poll(const HealthState& current_state) 
     result.fault = EvaluateHealth();
     if (result.fault.has_value())
     {
+        const bool startup_grace_active =
+            current_state.status == HealthStatus::Unknown &&
+            result.state.first_seen_ms != 0 &&
+            (now_ms - result.state.first_seen_ms) < options_.stereo_startup_grace_ms &&
+            (result.fault->key == "stereo_daemon_not_running" ||
+             result.fault->key == "stereo_status_missing" ||
+             result.fault->key == "stereo_status_invalid" ||
+             result.fault->key == "stereo_not_ready");
+        if (startup_grace_active)
+        {
+            result.fault.reset();
+            result.state.status = current_state.status;
+            result.state.last_error_key = current_state.last_error_key;
+            return result;
+        }
         const std::string error_key = result.fault->key + "|" + result.fault->detail;
         result.should_notify_fault =
             current_state.status != HealthStatus::Error || current_state.last_error_key != error_key;
@@ -794,20 +813,30 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
                                write_phase_start_ms));
 
     std::string episode_validation_error;
-    std::string final_error_message;
+    std::string final_error_message = due_to_error ? reason : std::string();
     if (!stereo_stop_ok)
     {
+        std::string stereo_failure;
         if (!stereo_finalize_error.empty())
         {
-            final_error_message = stereo_finalize_error;
+            stereo_failure = stereo_finalize_error;
         }
         else if (!merge_error.empty())
         {
-            final_error_message = merge_error;
+            stereo_failure = merge_error;
         }
         else
         {
-            final_error_message = "stereo session finalize failed";
+            stereo_failure = "stereo session finalize failed";
+        }
+
+        if (final_error_message.empty())
+        {
+            final_error_message = stereo_failure;
+        }
+        else if (!stereo_failure.empty())
+        {
+            final_error_message += "; " + stereo_failure;
         }
     }
     const int64_t validate_phase_start_ms = steady_ms_fn_ != nullptr ? steady_ms_fn_() : 0;
@@ -853,6 +882,39 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
         }
     }
 
+    bool episode_dir_finalized = true;
+    if (dependencies_.finalize_episode_dir != nullptr && !state_.current_episode_dir.empty())
+    {
+        std::string finalize_dir_error;
+        const std::string renamed_episode_dir =
+            dependencies_.finalize_episode_dir(state_.current_episode_dir, &finalize_dir_error);
+        if (renamed_episode_dir.empty())
+        {
+            episode_dir_finalized = false;
+            CallLog(dependencies_.log_error, "failed to finalize episode directory: " + finalize_dir_error);
+            if (final_error_message.empty())
+            {
+                final_error_message = finalize_dir_error;
+            }
+            else if (!finalize_dir_error.empty())
+            {
+                final_error_message += "; " + finalize_dir_error;
+            }
+            if (dependencies_.write_episode_metadata != nullptr)
+            {
+                dependencies_.write_episode_metadata(state_.current_episode_dir, false, final_error_message);
+            }
+            if (dependencies_.write_validation_error_log != nullptr)
+            {
+                dependencies_.write_validation_error_log(state_.current_episode_dir, final_error_message);
+            }
+        }
+        else
+        {
+            state_.last_episode_dir = renamed_episode_dir;
+        }
+    }
+
     state_.current_episode_dir.clear();
     if (dependencies_.remove_recording_lock != nullptr)
     {
@@ -887,7 +949,8 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
         return false;
     }
 
-    if (!valid)
+    const bool final_valid = valid && episode_dir_finalized;
+    if (!final_valid)
     {
         if (dependencies_.set_led_state != nullptr)
         {
@@ -902,8 +965,8 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
             dependencies_.send_audio_command("validation_failed");
         }
         CallLog(dependencies_.log_info,
-                "[PERF] stop phase end: valid=false total_elapsed_ms=" +
-                    std::to_string((steady_ms_fn_ != nullptr ? steady_ms_fn_() : stop_start_ms) - stop_start_ms));
+            "[PERF] stop phase end: valid=false total_elapsed_ms=" +
+                std::to_string((steady_ms_fn_ != nullptr ? steady_ms_fn_() : stop_start_ms) - stop_start_ms));
         if (dependencies_.sync_runtime_log != nullptr)
         {
             dependencies_.sync_runtime_log("video stop");
