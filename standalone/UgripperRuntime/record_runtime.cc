@@ -49,6 +49,7 @@ using ordered_json = nlohmann::ordered_json;
 
 namespace {
 constexpr const char *kChestCameraEnvKey = "ENABLE_CHEST_CAM_MAIN";
+constexpr const char *kPerfLogEnvKey = "UGRIPPER_PERF_LOG";
 constexpr uint64_t kActionDebounceMs = 250;
 constexpr uint64_t kLongPressThresholdMs = 800;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
@@ -68,6 +69,7 @@ constexpr int64_t kEncoderTailWindowNs = 1000LL * 1000LL * 1000LL;
 constexpr int64_t kEncoderTailMaxLagNs = 1000LL * 1000LL * 1000LL;
 constexpr size_t kEncoderTailChunkScanLimit = 4;
 constexpr int64_t kFaysImuTailMaxLagNs = 1000LL * 1000LL * 1000LL;
+constexpr int64_t kFaysMcapMinSpanNs = 500LL * 1000LL * 1000LL;
 constexpr size_t kFaysTailChunkScanLimit = 4;
 constexpr mcap::ChannelId kFaysImuChannelId = 1;
 constexpr mcap::ChannelId kFaysCameraChannelId = 2;
@@ -96,6 +98,22 @@ constexpr size_t kTactileHistoryWindow = 3;
 constexpr int kTactileSnapshotTimeoutMs = 2500;
 constexpr uint64_t kTactilePersistentBaselineRefreshMs = 12ULL * 60ULL * 60ULL * 1000ULL;
 constexpr const char *kEpisodeTimingFileName = ".recording_timing.json";
+
+bool g_perfLogEnabled = true;
+
+bool perfLogEnabled()
+{
+    return g_perfLogEnabled;
+}
+
+void logPerf(const std::string &message)
+{
+    if (!perfLogEnabled())
+    {
+        return;
+    }
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << message << std::endl).str());
+}
 
 struct EpisodeVideoArtifact
 {
@@ -196,6 +214,22 @@ constexpr std::array<FaysTailCheckTarget, 2> kFaysTailCheckTargets = {{
     {"left", "fays_data_left.mcap", "i", "c"},
     {"right", "fays_data_right.mcap", "i", "c"},
 }};
+
+struct FaysMcapSummary
+{
+    uint64_t lastImuLogTimeNs = 0;
+    uint64_t lastCameraLogTimeNs = 0;
+    uint64_t imuMessageCount = 0;
+    uint64_t cameraMessageCount = 0;
+    uint64_t spanNs = 0;
+};
+
+struct TailCheckTaskResult
+{
+    bool ok = false;
+    std::string detail;
+    std::string errorMessage;
+};
 
 struct CommandCaptureResult
 {
@@ -1352,8 +1386,8 @@ void flushEpisodeDirectoriesToDisk(const fs::path &episodeDir, const char *phase
     {
         if (!fs::exists(directory))
         {
-            DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush dir skip missing: phase=" << phaseLabel
-                      << " path=" << directory << std::endl).str());
+            logPerf((::DA::utils::LogString() << "[PERF] flush dir skip missing: phase=" << phaseLabel
+                      << " path=" << directory).str());
             continue;
         }
 
@@ -1367,10 +1401,51 @@ void flushEpisodeDirectoriesToDisk(const fs::path &episodeDir, const char *phase
             continue;
         }
 
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush dir done: phase=" << phaseLabel
+        logPerf((::DA::utils::LogString() << "[PERF] flush dir done: phase=" << phaseLabel
                   << " path=" << directory
-                  << " elapsed_ms=" << (steadyNowMs() - dirFlushStartMs) << std::endl).str());
+                  << " elapsed_ms=" << (steadyNowMs() - dirFlushStartMs)).str());
     }
+}
+
+bool shouldFlushVideoArtifactForPhase(const EpisodeVideoArtifact &artifact, const std::string &phase)
+{
+    const bool isStereo = std::string(artifact.fileName).find("stereo_") == 0;
+    if (phase == "pre_stereo_finalize")
+    {
+        return !isStereo;
+    }
+    if (phase == "final")
+    {
+        return isStereo;
+    }
+    return false;
+}
+
+bool shouldFlushPathForPhase(const fs::path &episodeDir, const fs::path &path, const std::string &phase)
+{
+    (void)episodeDir;
+    const std::string fileName = path.filename().string();
+    if (phase == "pre_stereo_finalize")
+    {
+        return fileName == "sensor_left.mcap" ||
+               fileName == "sensor_right.mcap" ||
+               fileName == "calibration.json" ||
+               fileName == kEpisodeTimingFileName ||
+               fileName == "audio_pre.wav" ||
+               fileName == "audio_post.wav";
+    }
+    if (phase == "final")
+    {
+        return fileName == "fays_data_left.mcap" ||
+               fileName == "fays_data_right.mcap" ||
+               fileName == kEpisodeTimingFileName;
+    }
+    if (phase == "metadata_final")
+    {
+        return fileName == "metadata.json" ||
+               fileName == "validation_error.log";
+    }
+    return true;
 }
 
 void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEnabled, const char *phaseLabel)
@@ -1380,19 +1455,26 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
         return;
     }
 
+    const std::string phase = phaseLabel != nullptr ? phaseLabel : "";
     std::vector<fs::path> paths;
     const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled);
-    paths.reserve(artifacts.size() + 6);
+    paths.reserve(artifacts.size() + 9);
 
     for (const auto &artifact : artifacts)
     {
-        paths.push_back(episodeDir / artifact.fileName);
+        if (shouldFlushVideoArtifactForPhase(artifact, phase))
+        {
+            paths.push_back(episodeDir / artifact.fileName);
+        }
     }
 
     paths.push_back(episodeDir / "sensor_left.mcap");
     paths.push_back(episodeDir / "sensor_right.mcap");
+    paths.push_back(episodeDir / "fays_data_left.mcap");
+    paths.push_back(episodeDir / "fays_data_right.mcap");
     paths.push_back(episodeDir / "metadata.json");
     paths.push_back(episodeDir / "calibration.json");
+    paths.push_back(episodeDir / "validation_error.log");
     paths.push_back(episodeTimingPath(episodeDir));
 
     const fs::path audioPre = episodeDir / "audio_pre.wav";
@@ -1408,15 +1490,26 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
     }
 
     const int64_t flushStartMs = steadyNowMs();
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush begin: phase=" << phaseLabel
-              << " episode_dir=" << episodeDir
-              << " candidate_paths=" << paths.size() << std::endl).str());
-
+    std::vector<fs::path> filteredPaths;
+    filteredPaths.reserve(paths.size());
     for (const auto &path : paths)
+    {
+        if (shouldFlushPathForPhase(episodeDir, path, phase))
+        {
+            filteredPaths.push_back(path);
+        }
+    }
+
+    logPerf((::DA::utils::LogString() << "[PERF] flush begin: phase=" << phaseLabel
+              << " episode_dir=" << episodeDir
+              << " candidate_paths=" << filteredPaths.size()).str());
+
+    for (const auto &path : filteredPaths)
     {
         if (!fs::exists(path))
         {
-            DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush skip missing: path=" << path << std::endl).str());
+            logPerf((::DA::utils::LogString() << "[PERF] flush skip missing: phase=" << phaseLabel
+                     << " path=" << path).str());
             continue;
         }
 
@@ -1429,15 +1522,16 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
             continue;
         }
 
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush done: path=" << path
-                  << " elapsed_ms=" << (steadyNowMs() - artifactFlushStartMs) << std::endl).str());
+        logPerf((::DA::utils::LogString() << "[PERF] flush done: phase=" << phaseLabel
+                  << " path=" << path
+                  << " elapsed_ms=" << (steadyNowMs() - artifactFlushStartMs)).str());
     }
 
     flushEpisodeDirectoriesToDisk(episodeDir, phaseLabel);
 
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] flush end: phase=" << phaseLabel
+    logPerf((::DA::utils::LogString() << "[PERF] flush end: phase=" << phaseLabel
               << " episode_dir=" << episodeDir
-              << " elapsed_ms=" << (steadyNowMs() - flushStartMs) << std::endl).str());
+              << " elapsed_ms=" << (steadyNowMs() - flushStartMs)).str());
 }
 
 std::string makeTimestampString()
@@ -2141,7 +2235,7 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
     }
 
     const int64_t probeStartMs = steadyNowMs();
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] ffprobe begin: file=" << filePath << std::endl).str());
+    logPerf((::DA::utils::LogString() << "[PERF] ffprobe begin: file=" << filePath).str());
     const CommandCaptureResult probe = runCommandCapture(
         {
             "ffprobe",
@@ -2159,8 +2253,8 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
 
     if (probe.timedOut)
     {
-        DM_LOG_WARN("{}", (::DA::utils::LogString() << "[PERF] ffprobe timeout: file=" << filePath
-                  << " elapsed_ms=" << (steadyNowMs() - probeStartMs) << std::endl).str());
+        logPerf((::DA::utils::LogString() << "[PERF] ffprobe timeout: file=" << filePath
+                  << " elapsed_ms=" << (steadyNowMs() - probeStartMs)).str());
         if (errorMessage != nullptr)
         {
             *errorMessage = "ffprobe timeout after " + std::to_string(kVideoProbeTimeoutMs) + "ms";
@@ -2169,9 +2263,9 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
     }
     if (!probe.success)
     {
-        DM_LOG_WARN("{}", (::DA::utils::LogString() << "[PERF] ffprobe failed: file=" << filePath
+        logPerf((::DA::utils::LogString() << "[PERF] ffprobe failed: file=" << filePath
                   << " elapsed_ms=" << (steadyNowMs() - probeStartMs)
-                  << " exit_code=" << probe.exitCode << std::endl).str());
+                  << " exit_code=" << probe.exitCode).str());
         if (errorMessage != nullptr)
         {
             std::string detail = trim(probe.output);
@@ -2231,11 +2325,11 @@ bool probeVideoFile(const std::string &filePath, VideoProbeResult *result, std::
         return false;
     }
 
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] ffprobe done: file=" << filePath
+    logPerf((::DA::utils::LogString() << "[PERF] ffprobe done: file=" << filePath
               << " elapsed_ms=" << (steadyNowMs() - probeStartMs)
               << " start_sec=" << formatSeconds(result->startTimeSec)
               << " duration_sec=" << formatSeconds(result->durationSec)
-              << " span_sec=" << formatSeconds(result->spanSec) << std::endl).str());
+              << " span_sec=" << formatSeconds(result->spanSec)).str());
     return true;
 }
 
@@ -2377,7 +2471,7 @@ bool loadLastTopicLogTimeFromTailChunks(const std::string &mcapPath,
 
     std::string summaryProblem;
     const auto summaryStatus = reader.readSummary(
-        mcap::ReadSummaryMethod::AllowFallbackScan,
+        mcap::ReadSummaryMethod::NoFallbackScan,
         [&summaryProblem](const mcap::Status &status) {
             if (summaryProblem.empty())
             {
@@ -2514,19 +2608,15 @@ bool loadLastTopicLogTimeFromTailChunks(const std::string &mcapPath,
     return true;
 }
 
-bool loadFaysMcapTailTimes(const std::string &mcapPath,
-                           const std::string &imuTopic,
-                           const std::string &cameraTopic,
-                           uint64_t *lastImuLogTimeNs,
-                           uint64_t *lastCameraLogTimeNs,
-                           uint64_t *imuMessageCount,
-                           uint64_t *cameraMessageCount,
-                           std::string *errorMessage)
+bool loadFaysMcapSummary(const std::string &mcapPath,
+                         const std::string &imuTopic,
+                         const std::string &cameraTopic,
+                         FaysMcapSummary *summary,
+                         std::string *errorMessage)
 {
     (void)imuTopic;
     (void)cameraTopic;
-    if (lastImuLogTimeNs == nullptr || lastCameraLogTimeNs == nullptr ||
-        imuMessageCount == nullptr || cameraMessageCount == nullptr)
+    if (summary == nullptr)
     {
         if (errorMessage != nullptr)
         {
@@ -2535,10 +2625,7 @@ bool loadFaysMcapTailTimes(const std::string &mcapPath,
         return false;
     }
 
-    *lastImuLogTimeNs = 0;
-    *lastCameraLogTimeNs = 0;
-    *imuMessageCount = 0;
-    *cameraMessageCount = 0;
+    *summary = FaysMcapSummary{};
 
     mcap::McapReader reader;
     const auto openStatus = reader.open(mcapPath);
@@ -2553,7 +2640,7 @@ bool loadFaysMcapTailTimes(const std::string &mcapPath,
 
     std::string summaryProblem;
     const auto summaryStatus = reader.readSummary(
-        mcap::ReadSummaryMethod::AllowFallbackScan,
+        mcap::ReadSummaryMethod::NoFallbackScan,
         [&summaryProblem](const mcap::Status &status) {
             if (summaryProblem.empty())
             {
@@ -2578,13 +2665,30 @@ bool loadFaysMcapTailTimes(const std::string &mcapPath,
         const auto imuCountIt = reader.statistics()->channelMessageCounts.find(kFaysImuChannelId);
         if (imuCountIt != reader.statistics()->channelMessageCounts.end())
         {
-            *imuMessageCount = imuCountIt->second;
+            summary->imuMessageCount = imuCountIt->second;
         }
         const auto cameraCountIt = reader.statistics()->channelMessageCounts.find(kFaysCameraChannelId);
         if (cameraCountIt != reader.statistics()->channelMessageCounts.end())
         {
-            *cameraMessageCount = cameraCountIt->second;
+            summary->cameraMessageCount = cameraCountIt->second;
         }
+        const auto messageStartTime = reader.statistics()->messageStartTime;
+        const auto messageEndTime = reader.statistics()->messageEndTime;
+        if (messageEndTime > messageStartTime)
+        {
+            summary->spanNs = messageEndTime - messageStartTime;
+        }
+    }
+
+    if (summary->imuMessageCount == 0 || summary->cameraMessageCount == 0)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "Fays summary has zero messages: imu_count=" +
+                            std::to_string(summary->imuMessageCount) +
+                            ", camera_count=" + std::to_string(summary->cameraMessageCount);
+        }
+        return false;
     }
 
     const auto classifyFaysMessage = [](const mcap::Message &message) {
@@ -2619,17 +2723,17 @@ bool loadFaysMcapTailTimes(const std::string &mcapPath,
                 const char kind = classifyFaysMessage(message);
                 if (kind == 'i')
                 {
-                    if (!foundImu || message.logTime > *lastImuLogTimeNs)
+                    if (!foundImu || message.logTime > summary->lastImuLogTimeNs)
                     {
-                        *lastImuLogTimeNs = message.logTime;
+                        summary->lastImuLogTimeNs = message.logTime;
                         foundImu = true;
                     }
                 }
                 else if (kind == 'c')
                 {
-                    if (!foundCamera || message.logTime > *lastCameraLogTimeNs)
+                    if (!foundCamera || message.logTime > summary->lastCameraLogTimeNs)
                     {
-                        *lastCameraLogTimeNs = message.logTime;
+                        summary->lastCameraLogTimeNs = message.logTime;
                         foundCamera = true;
                     }
                 }
@@ -2664,14 +2768,34 @@ bool loadFaysMcapTailTimes(const std::string &mcapPath,
         }
         return false;
     }
-
-    if (*imuMessageCount == 0)
+    if (summary->spanNs == 0 && !reader.chunkIndexes().empty())
     {
-        *imuMessageCount = foundImu ? 1 : 0;
+        uint64_t firstChunkMessageNs = std::numeric_limits<uint64_t>::max();
+        uint64_t lastChunkMessageNs = 0;
+        for (const auto &chunkIndex : reader.chunkIndexes())
+        {
+            if (chunkIndex.messageStartTime < firstChunkMessageNs)
+            {
+                firstChunkMessageNs = chunkIndex.messageStartTime;
+            }
+            if (chunkIndex.messageEndTime > lastChunkMessageNs)
+            {
+                lastChunkMessageNs = chunkIndex.messageEndTime;
+            }
+        }
+        if (lastChunkMessageNs > firstChunkMessageNs && firstChunkMessageNs != std::numeric_limits<uint64_t>::max())
+        {
+            summary->spanNs = lastChunkMessageNs - firstChunkMessageNs;
+        }
     }
-    if (*cameraMessageCount == 0)
+    if (summary->spanNs < static_cast<uint64_t>(kFaysMcapMinSpanNs))
     {
-        *cameraMessageCount = foundCamera ? 1 : 0;
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "Fays mcap span too short: span_ns=" + std::to_string(summary->spanNs) +
+                            ", threshold_ns=" + std::to_string(kFaysMcapMinSpanNs);
+        }
+        return false;
     }
     return true;
 }
@@ -2806,6 +2930,7 @@ RecordRuntime::~RecordRuntime()
 {
     requestStop();
     stopRecording(false, "shutdown");
+    requestStopBackgroundTactileValidation();
     waitForMainCameraRefreshes();
     stopAudioPlayer();
     if (ledController_)
@@ -2844,6 +2969,11 @@ bool RecordRuntime::initialize()
     chestCameraEnabled_ = !isFalseLikeValue(readEnvValue(options_.envFile, kChestCameraEnvKey));
     DM_LOG_INFO("{}", (::DA::utils::LogString() << kChestCameraEnvKey << "="
                          << (chestCameraEnabled_ ? "true" : "false") << std::endl).str());
+
+    perfLogEnabled_ = !isFalseLikeValue(readEnvValue(options_.envFile, kPerfLogEnvKey));
+    g_perfLogEnabled = perfLogEnabled_;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << kPerfLogEnvKey << "="
+                         << (perfLogEnabled_ ? "true" : "false") << std::endl).str());
 
     hardwareVersion_ = readEnvValue(options_.envFile, "UGRIPPER_HARDWARE_VERSION");
     if (hardwareVersion_.empty())
@@ -3021,26 +3151,11 @@ bool RecordRuntime::initialize()
                 },
             .validate_episode =
                 [this](const std::string& episode_dir, std::string* error_message) {
-                    tactileWarningActive_ = false;
-                    tactileTriggeredAudioCommand_.clear();
                     if (episodeManager_ == nullptr)
                     {
                         return false;
                     }
-                    std::vector<EpisodeManager::TactileValidationFinding> findings;
-                    const bool valid = episodeManager_->validateEpisode(episode_dir, error_message, &findings);
-                    for (const auto &finding : findings)
-                    {
-                        if (tactileTriggeredAudioCommand_.empty() && finding.warningTriggered)
-                        {
-                            tactileTriggeredAudioCommand_ = finding.audioCommand;
-                        }
-                        if (finding.warningActive)
-                        {
-                            tactileWarningActive_ = true;
-                        }
-                    }
-                    return valid;
+                    return episodeManager_->validateEpisode(episode_dir, error_message, nullptr);
                 },
             .prepare_sensor_start = nullptr,
             .finalize_sensor_start = nullptr,
@@ -3161,6 +3276,13 @@ bool RecordRuntime::initialize()
                 [](const std::string& message) {
                     DM_LOG_INFO("{}", (::DA::utils::LogString() << message << std::endl).str());
                 },
+            .log_perf =
+                [this](const std::string& message) {
+                    if (perfLogEnabled_)
+                    {
+                        DM_LOG_INFO("{}", (::DA::utils::LogString() << message << std::endl).str());
+                    }
+                },
             .log_warn =
                 [](const std::string& message) {
                     DM_LOG_WARN("{}", (::DA::utils::LogString() << message << std::endl).str());
@@ -3221,6 +3343,7 @@ int RecordRuntime::run()
         maintainMainCameraRuntimeStates();
         maintainAudioPlayer();
         maintainStereoDaemon();
+        maintainBackgroundTactileValidation();
         monitorHardwareHealth();
 
         ButtonSnapshot buttons;
@@ -4117,6 +4240,139 @@ void RecordRuntime::refreshTactileReferenceCachesForSide(const std::string &side
     }
 }
 
+void RecordRuntime::applyTactileValidationFindings(
+    const std::vector<EpisodeManager::TactileValidationFinding> &findings)
+{
+    for (const auto &finding : findings)
+    {
+        if (tactileTriggeredAudioCommand_.empty() && finding.warningTriggered)
+        {
+            tactileTriggeredAudioCommand_ = finding.audioCommand;
+        }
+        if (finding.warningActive)
+        {
+            tactileWarningActive_ = true;
+        }
+    }
+}
+
+void RecordRuntime::scheduleBackgroundTactileValidation(const std::string &episodeDir)
+{
+    if (episodeDir.empty())
+    {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(backgroundTactileMutex_);
+        pendingBackgroundTactileEpisodeDir_ = episodeDir;
+    }
+    logPerf((::DA::utils::LogString()
+             << "[PERF] tactile background validation queued: episode_dir=" << episodeDir).str());
+}
+
+void RecordRuntime::maintainBackgroundTactileValidation()
+{
+    if (backgroundTactileFuture_.valid() &&
+        backgroundTactileFuture_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+    {
+        BackgroundTactileValidationResult result = backgroundTactileFuture_.get();
+        if (!result.findings.empty())
+        {
+            applyTactileValidationFindings(result.findings);
+            if (!isRecordingActive())
+            {
+                if (!tactileTriggeredAudioCommand_.empty())
+                {
+                    setAudioRecoveryCommand(tactileWarningActive_ ? "" : tactileTriggeredAudioCommand_);
+                    sendAudioCommand(tactileTriggeredAudioCommand_);
+                }
+                else if (!tactileWarningActive_)
+                {
+                    setAudioRecoveryCommand("ready");
+                }
+                applyIdleState();
+            }
+        }
+        logPerf((::DA::utils::LogString()
+                 << "[PERF] tactile background validation applied: episode_dir="
+                 << result.episodeDir
+                 << " findings=" << result.findings.size()).str());
+    }
+
+    if (backgroundTactileFuture_.valid() || isRecordingActive() || episodeManager_ == nullptr)
+    {
+        return;
+    }
+
+    std::string episodeDir;
+    {
+        std::lock_guard<std::mutex> lock(backgroundTactileMutex_);
+        episodeDir.swap(pendingBackgroundTactileEpisodeDir_);
+    }
+    if (episodeDir.empty())
+    {
+        return;
+    }
+
+    stopBackgroundTactileValidation_.store(false);
+    logPerf((::DA::utils::LogString()
+             << "[PERF] tactile background validation start: episode_dir=" << episodeDir).str());
+    EpisodeManager *manager = episodeManager_.get();
+    std::atomic<bool> *stopFlag = &stopBackgroundTactileValidation_;
+    backgroundTactileFuture_ = std::async(
+        std::launch::async,
+        [manager, episodeDir, stopFlag]() {
+            BackgroundTactileValidationResult result;
+            result.episodeDir = episodeDir;
+            if (stopFlag->load())
+            {
+                logPerf((::DA::utils::LogString()
+                         << "[PERF] tactile background validation skipped: episode_dir="
+                         << episodeDir
+                         << " reason=stop_requested").str());
+                return result;
+            }
+            manager->validateTactileEpisode(episodeDir, &result.findings);
+            if (stopFlag->load())
+            {
+                result.findings.clear();
+                logPerf((::DA::utils::LogString()
+                         << "[PERF] tactile background validation discarded: episode_dir="
+                         << episodeDir
+                         << " reason=stop_requested").str());
+            }
+            return result;
+        });
+}
+
+void RecordRuntime::requestStopBackgroundTactileValidation()
+{
+    stopBackgroundTactileValidation_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(backgroundTactileMutex_);
+        pendingBackgroundTactileEpisodeDir_.clear();
+    }
+    if (backgroundTactileFuture_.valid())
+    {
+        logPerf("[PERF] tactile background validation wait for stop");
+        backgroundTactileFuture_.wait();
+        backgroundTactileFuture_.get();
+    }
+}
+
+void RecordRuntime::cancelBackgroundTactileValidation()
+{
+    stopBackgroundTactileValidation_.store(true);
+    {
+        std::lock_guard<std::mutex> lock(backgroundTactileMutex_);
+        pendingBackgroundTactileEpisodeDir_.clear();
+    }
+    if (backgroundTactileFuture_.valid())
+    {
+        logPerf("[PERF] tactile background validation cancel requested");
+    }
+}
+
 void RecordRuntime::applyIdleState()
 {
     setLedState(tactileWarningActive_ ? LedState::Warning : LedState::Ready);
@@ -4206,6 +4462,7 @@ bool RecordRuntime::startRecording(bool resetRecording)
         DM_LOG_ERROR("{}", (::DA::utils::LogString() << "recording orchestrator not initialized" << std::endl).str());
         return false;
     }
+    cancelBackgroundTactileValidation();
     tactileTriggeredAudioCommand_.clear();
     return recordingOrchestrator_->StartRecording(resetRecording, nullptr);
 }
@@ -5660,7 +5917,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                                                     std::vector<TactileValidationFinding> *tactileFindings) const
 {
     const int64_t validateStartMs = steadyNowMs();
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] validateEpisode begin: episode_dir=" << episodeDir << std::endl).str());
+    logPerf((::DA::utils::LogString() << "[PERF] validateEpisode begin: episode_dir=" << episodeDir).str());
     const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled_);
     const std::vector<std::string> requiredFiles = {
         "sensor_left.mcap",
@@ -5821,6 +6078,8 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         }
         recordTimeOffsetUsByCamera[artifact.cameraName] = recordTimeOffsetUs;
     }
+    logPerf((::DA::utils::LogString() << "[PERF] validation setup done: episode_dir=" << episodeDir
+             << " elapsed_ms=" << (steadyNowMs() - validateStartMs)).str());
 
     double referenceSpanSec = 0.0;
     const int64_t videoProbeStartMs = steadyNowMs();
@@ -5853,9 +6112,9 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         referenceSpanSec = std::max(referenceSpanSec, task.probe.spanSec);
         probes.push_back(task.probe);
     }
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] parallel video probe done: episode_dir=" << episodeDir
+    logPerf((::DA::utils::LogString() << "[PERF] parallel video probe done: episode_dir=" << episodeDir
                   << " count=" << probes.size()
-                  << " elapsed_ms=" << (steadyNowMs() - videoProbeStartMs) << std::endl).str());
+                  << " elapsed_ms=" << (steadyNowMs() - videoProbeStartMs)).str());
 
     std::string probeCacheError;
     if (!writeVideoProbeCacheToTimingFile(episodeDir, probes, &probeCacheError))
@@ -5883,154 +6142,182 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         }
     }
 
+    const int64_t tailCheckStartMs = steadyNowMs();
+    std::vector<std::future<TailCheckTaskResult>> tailCheckFutures;
+    tailCheckFutures.reserve(kEncoderTailCheckTargets.size() + kFaysTailCheckTargets.size());
+
     for (const auto &target : kEncoderTailCheckTargets)
     {
-        int64_t tailVideoEndNs = 0;
-        for (const auto *cameraName : target.referenceCameraNames)
-        {
-            const auto offsetIt = recordTimeOffsetUsByCamera.find(cameraName);
-            if (offsetIt == recordTimeOffsetUsByCamera.end())
-            {
-                continue;
-            }
+        tailCheckFutures.push_back(std::async(
+            std::launch::async,
+            [episodeDir, recordTimeOffsetUsByCamera, probes, target]() {
+                TailCheckTaskResult result;
+                int64_t tailVideoEndNs = 0;
+                for (const auto *cameraName : target.referenceCameraNames)
+                {
+                    const auto offsetIt = recordTimeOffsetUsByCamera.find(cameraName);
+                    if (offsetIt == recordTimeOffsetUsByCamera.end())
+                    {
+                        continue;
+                    }
 
-            const auto probeIt = std::find_if(
-                probes.begin(),
-                probes.end(),
-                [cameraName](const VideoProbeResult &probe) {
-                    return probe.cameraName == cameraName;
-                });
-            if (probeIt == probes.end())
-            {
-                continue;
-            }
+                    const auto probeIt = std::find_if(
+                        probes.begin(),
+                        probes.end(),
+                        [cameraName](const VideoProbeResult &probe) {
+                            return probe.cameraName == cameraName;
+                        });
+                    if (probeIt == probes.end())
+                    {
+                        continue;
+                    }
 
-            const int64_t candidateEndNs =
-                offsetIt->second * 1000LL +
-                static_cast<int64_t>(std::llround(probeIt->durationSec * 1000000000.0));
-            tailVideoEndNs = std::max(tailVideoEndNs, candidateEndNs);
-        }
+                    const int64_t candidateEndNs =
+                        offsetIt->second * 1000LL +
+                        static_cast<int64_t>(std::llround(probeIt->durationSec * 1000000000.0));
+                    tailVideoEndNs = std::max(tailVideoEndNs, candidateEndNs);
+                }
 
-        if (tailVideoEndNs <= 0)
-        {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = std::string("failed to build encoder tail reference for side=") + target.side;
-            }
-            return false;
-        }
+                if (tailVideoEndNs <= 0)
+                {
+                    result.errorMessage = std::string("failed to build encoder tail reference for side=") + target.side;
+                    return result;
+                }
 
-        uint64_t lastEncoderLogTimeNs = 0;
-        uint64_t encoderMessageCount = 0;
-        std::string encoderTailError;
-        if (!loadLastTopicLogTimeFromTailChunks(
-                episodeDir + "/" + target.mcapFileName,
-                target.encoderTopic,
-                &lastEncoderLogTimeNs,
-                &encoderMessageCount,
-                &encoderTailError))
-        {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = std::string("encoder tail check failed for side=") + target.side +
-                                ": " + encoderTailError;
-            }
-            return false;
-        }
+                uint64_t lastEncoderLogTimeNs = 0;
+                uint64_t encoderMessageCount = 0;
+                std::string encoderTailError;
+                if (!loadLastTopicLogTimeFromTailChunks(
+                        episodeDir + "/" + target.mcapFileName,
+                        target.encoderTopic,
+                        &lastEncoderLogTimeNs,
+                        &encoderMessageCount,
+                        &encoderTailError))
+                {
+                    result.errorMessage = std::string("encoder tail check failed for side=") + target.side +
+                                          ": " + encoderTailError;
+                    return result;
+                }
 
-        const int64_t tailWindowStartNs = std::max<int64_t>(0, tailVideoEndNs - kEncoderTailWindowNs);
-        if (static_cast<int64_t>(lastEncoderLogTimeNs) < tailWindowStartNs)
-        {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = std::string("encoder tail has no samples near episode end for side=") +
-                                target.side +
-                                " (last_encoder_ns=" + std::to_string(lastEncoderLogTimeNs) +
-                                ", tail_video_start_ns=" + std::to_string(tailWindowStartNs) +
-                                ", tail_video_end_ns=" + std::to_string(tailVideoEndNs) + ")";
-            }
-            return false;
-        }
+                const int64_t tailWindowStartNs = std::max<int64_t>(0, tailVideoEndNs - kEncoderTailWindowNs);
+                if (static_cast<int64_t>(lastEncoderLogTimeNs) < tailWindowStartNs)
+                {
+                    result.errorMessage = std::string("encoder tail has no samples near episode end for side=") +
+                                          target.side +
+                                          " (last_encoder_ns=" + std::to_string(lastEncoderLogTimeNs) +
+                                          ", tail_video_start_ns=" + std::to_string(tailWindowStartNs) +
+                                          ", tail_video_end_ns=" + std::to_string(tailVideoEndNs) + ")";
+                    return result;
+                }
 
-        int64_t lagNs = tailVideoEndNs - static_cast<int64_t>(lastEncoderLogTimeNs);
-        if (lagNs < 0)
-        {
-            lagNs = 0;
-        }
-        if (lagNs > kEncoderTailMaxLagNs)
-        {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = std::string("encoder tail lag too large for side=") + target.side +
-                                " (lag_ns=" + std::to_string(lagNs) +
-                                ", threshold_ns=" + std::to_string(kEncoderTailMaxLagNs) +
-                                ", tail_video_end_ns=" + std::to_string(tailVideoEndNs) +
-                                ", last_encoder_ns=" + std::to_string(lastEncoderLogTimeNs) + ")";
-            }
-            return false;
-        }
+                int64_t lagNs = tailVideoEndNs - static_cast<int64_t>(lastEncoderLogTimeNs);
+                if (lagNs < 0)
+                {
+                    lagNs = 0;
+                }
+                if (lagNs > kEncoderTailMaxLagNs)
+                {
+                    result.errorMessage = std::string("encoder tail lag too large for side=") + target.side +
+                                          " (lag_ns=" + std::to_string(lagNs) +
+                                          ", threshold_ns=" + std::to_string(kEncoderTailMaxLagNs) +
+                                          ", tail_video_end_ns=" + std::to_string(tailVideoEndNs) +
+                                          ", last_encoder_ns=" + std::to_string(lastEncoderLogTimeNs) + ")";
+                    return result;
+                }
 
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] encoder tail check pass:"
-                  << " side=" << target.side
-                  << " encoder_count=" << encoderMessageCount
-                  << " tail_video_end_ns=" << tailVideoEndNs
-                  << " last_encoder_ns=" << lastEncoderLogTimeNs
-                  << " lag_ms=" << (lagNs / 1000000.0) << std::endl).str());
+                result.ok = true;
+                result.detail = (::DA::utils::LogString()
+                                 << "encoder_" << target.side
+                                 << "{count=" << encoderMessageCount
+                                 << ", tail_video_end_ns=" << tailVideoEndNs
+                                 << ", last_ns=" << lastEncoderLogTimeNs
+                                 << ", lag_ms=" << (lagNs / 1000000.0)
+                                 << "}").str();
+                return result;
+            }));
     }
 
     for (const auto &target : kFaysTailCheckTargets)
     {
-        uint64_t lastImuLogTimeNs = 0;
-        uint64_t lastCameraLogTimeNs = 0;
-        uint64_t imuMessageCount = 0;
-        uint64_t cameraMessageCount = 0;
-        std::string faysTailError;
-        if (!loadFaysMcapTailTimes(
-                episodeDir + "/" + target.mcapFileName,
-                target.imuTopic,
-                target.cameraTopic,
-                &lastImuLogTimeNs,
-                &lastCameraLogTimeNs,
-                &imuMessageCount,
-                &cameraMessageCount,
-                &faysTailError))
-        {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = std::string("Fays MCAP tail check failed for side=") + target.side +
-                                ": " + faysTailError;
-            }
-            return false;
-        }
+        tailCheckFutures.push_back(std::async(
+            std::launch::async,
+            [episodeDir, target]() {
+                TailCheckTaskResult result;
+                FaysMcapSummary faysSummary;
+                std::string faysTailError;
+                if (!loadFaysMcapSummary(
+                        episodeDir + "/" + target.mcapFileName,
+                        target.imuTopic,
+                        target.cameraTopic,
+                        &faysSummary,
+                        &faysTailError))
+                {
+                    result.errorMessage = std::string("Fays MCAP tail check failed for side=") + target.side +
+                                          ": " + faysTailError;
+                    return result;
+                }
 
-        int64_t lagNs = static_cast<int64_t>(lastCameraLogTimeNs) -
-                        static_cast<int64_t>(lastImuLogTimeNs);
-        if (lagNs < 0)
-        {
-            lagNs = 0;
-        }
-        if (lagNs > kFaysImuTailMaxLagNs)
-        {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = std::string("Fays IMU tail lag too large for side=") + target.side +
-                                " (lag_ns=" + std::to_string(lagNs) +
-                                ", threshold_ns=" + std::to_string(kFaysImuTailMaxLagNs) +
-                                ", last_camera_ns=" + std::to_string(lastCameraLogTimeNs) +
-                                ", last_imu_ns=" + std::to_string(lastImuLogTimeNs) + ")";
-            }
-            return false;
-        }
+                int64_t lagNs = static_cast<int64_t>(faysSummary.lastCameraLogTimeNs) -
+                                static_cast<int64_t>(faysSummary.lastImuLogTimeNs);
+                if (lagNs < 0)
+                {
+                    lagNs = 0;
+                }
+                if (lagNs > kFaysImuTailMaxLagNs)
+                {
+                    result.errorMessage = std::string("Fays IMU tail lag too large for side=") + target.side +
+                                          " (lag_ns=" + std::to_string(lagNs) +
+                                          ", threshold_ns=" + std::to_string(kFaysImuTailMaxLagNs) +
+                                          ", last_camera_ns=" + std::to_string(faysSummary.lastCameraLogTimeNs) +
+                                          ", last_imu_ns=" + std::to_string(faysSummary.lastImuLogTimeNs) + ")";
+                    return result;
+                }
 
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] Fays MCAP tail check pass:"
-                  << " side=" << target.side
-                  << " imu_count=" << imuMessageCount
-                  << " camera_count=" << cameraMessageCount
-                  << " last_camera_ns=" << lastCameraLogTimeNs
-                  << " last_imu_ns=" << lastImuLogTimeNs
-                  << " lag_ms=" << (lagNs / 1000000.0) << std::endl).str());
+                result.ok = true;
+                result.detail = (::DA::utils::LogString()
+                                 << "fays_" << target.side
+                                 << "{imu_count=" << faysSummary.imuMessageCount
+                                 << ", camera_count=" << faysSummary.cameraMessageCount
+                                 << ", span_ms=" << (faysSummary.spanNs / 1000000.0)
+                                 << ", last_camera_ns=" << faysSummary.lastCameraLogTimeNs
+                                 << ", last_imu_ns=" << faysSummary.lastImuLogTimeNs
+                                 << ", lag_ms=" << (lagNs / 1000000.0)
+                                 << "}").str();
+                return result;
+            }));
     }
 
+    std::vector<std::string> tailDetails;
+    tailDetails.reserve(tailCheckFutures.size());
+    for (auto &future : tailCheckFutures)
+    {
+        TailCheckTaskResult result = future.get();
+        if (!result.ok)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = result.errorMessage.empty() ? "tail check failed" : result.errorMessage;
+            }
+            return false;
+        }
+        tailDetails.push_back(result.detail);
+    }
+    logPerf((::DA::utils::LogString() << "[PERF] tail checks done: episode_dir=" << episodeDir
+             << " count=" << tailDetails.size()
+             << " elapsed_ms=" << (steadyNowMs() - tailCheckStartMs)
+             << " details=" << joinStrings(tailDetails, "; ")).str());
+
+    logPerf((::DA::utils::LogString() << "[PERF] validateEpisode end: episode_dir=" << episodeDir
+              << " elapsed_ms=" << (steadyNowMs() - validateStartMs)
+              << " reference_span_sec=" << formatSeconds(referenceSpanSec)).str());
+    return true;
+}
+
+void RecordRuntime::EpisodeManager::validateTactileEpisode(
+    const std::string &episodeDir,
+    std::vector<TactileValidationFinding> *tactileFindings) const
+{
+    const int64_t tactileValidationStartMs = steadyNowMs();
     json tactileHistory = json::object();
     {
         std::ifstream historyInput(tactileHistoryPath(tactileStateDir_));
@@ -6064,12 +6351,6 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     }
     for (const auto &target : kTactileCalibrationTargets)
     {
-        const auto offsetIt = recordTimeOffsetUsByCamera.find(target.cameraName);
-        if (offsetIt == recordTimeOffsetUsByCamera.end() || offsetIt->second <= 0)
-        {
-            continue;
-        }
-
         std::string serialDetail;
         const auto serial = probeUsbSerialForDeviceNode(target.devicePath, &serialDetail);
         if (!serial.has_value() || serial->empty())
@@ -6204,11 +6485,8 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
             DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to persist tactile history: " << writeError << std::endl).str());
         }
     }
-
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "[PERF] validateEpisode end: episode_dir=" << episodeDir
-              << " elapsed_ms=" << (steadyNowMs() - validateStartMs)
-              << " reference_span_sec=" << formatSeconds(referenceSpanSec) << std::endl).str());
-    return true;
+    logPerf((::DA::utils::LogString() << "[PERF] tactile validation done: episode_dir=" << episodeDir
+             << " elapsed_ms=" << (steadyNowMs() - tactileValidationStartMs)).str());
 }
 
 const std::string &RecordRuntime::EpisodeManager::dataRoot() const

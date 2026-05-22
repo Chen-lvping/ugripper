@@ -991,7 +991,7 @@ private:
 
 class FaysDataLogger {
 public:
-    FaysDataLogger() : isOpen_(false), imuSeq_(0), camSeq_(0) {}
+    FaysDataLogger() : writer_(std::make_unique<mcap::McapWriter>()), isOpen_(false), imuSeq_(0), camSeq_(0) {}
 
     ~FaysDataLogger() {
         Close();
@@ -1001,9 +1001,10 @@ public:
         std::lock_guard<std::mutex> lock(mtx_);
 
         if (isOpen_) {
-            writer_.close();
+            writer_->close();
             isOpen_ = false;
         }
+        writer_ = std::make_unique<mcap::McapWriter>();
 
         mcap::McapWriterOptions options("fays_recorder");
         options.noChunking = false;
@@ -1015,7 +1016,7 @@ public:
         options.noRepeatedChannels = true;
         options.noMessageIndex = true;
 
-        auto openStatus = writer_.open(path, options);
+        auto openStatus = writer_->open(path, options);
         if (!openStatus.ok()) {
             std::cerr << "[MCAP] Failed to open " << path << ": " << openStatus.message << std::endl;
             return false;
@@ -1034,14 +1035,14 @@ public:
                 "description": "little-endian uint32 frameIndex"
             })");
 
-        writer_.addSchema(imuSchema);
-        writer_.addSchema(camSchema);
+        writer_->addSchema(imuSchema);
+        writer_->addSchema(camSchema);
 
         auto imuChannel = mcap::Channel("i", "binary", imuSchema.id);
         auto camChannel = mcap::Channel("c", "binary", camSchema.id);
 
-        writer_.addChannel(imuChannel);
-        writer_.addChannel(camChannel);
+        writer_->addChannel(imuChannel);
+        writer_->addChannel(camChannel);
 
         imuChannelId_ = imuChannel.id;
         camChannelId_ = camChannel.id;
@@ -1054,7 +1055,7 @@ public:
     void Close() {
         std::lock_guard<std::mutex> lock(mtx_);
         if (isOpen_) {
-            writer_.close();
+            writer_->close();
             isOpen_ = false;
         }
     }
@@ -1081,7 +1082,7 @@ public:
         msg.data = reinterpret_cast<const std::byte*>(&sample);
         msg.dataSize = sizeof(sample);
 
-        auto writeStatus = writer_.write(msg);
+        auto writeStatus = writer_->write(msg);
         if (!writeStatus.ok()) {
             std::cerr << "[MCAP] Failed to write IMU frame: " << writeStatus.message << std::endl;
         }
@@ -1104,14 +1105,14 @@ public:
         msg.data = reinterpret_cast<const std::byte*>(&sample);
         msg.dataSize = sizeof(sample);
 
-        auto writeStatus = writer_.write(msg);
+        auto writeStatus = writer_->write(msg);
         if (!writeStatus.ok()) {
             std::cerr << "[MCAP] Failed to write camera timestamp: " << writeStatus.message << std::endl;
         }
     }
 
 private:
-    mcap::McapWriter writer_;
+    std::unique_ptr<mcap::McapWriter> writer_;
     bool isOpen_;
     mcap::ChannelId imuChannelId_;
     mcap::ChannelId camChannelId_;

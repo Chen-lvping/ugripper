@@ -170,14 +170,14 @@
 
 ### 6.4 停止录制
 1. `record_runtime` 会先向 stereo warmup daemon 发送 stop-session，尽早冻结本次双目 session 的收尾边界，避免 stop 命令在普通相机与传感器都停完之后才传到双目链路。
-2. 在 stereo daemon 收到 stop-session 后，`record_runtime` 再停止普通录制模式下的 `camera_recorder`，最后停止 `sensor_recorder`。
+2. 在 stereo daemon 收到 stop-session 后，`record_runtime` 并发停止普通录制模式下的 `camera_recorder` 与 `sensor_recorder`，降低两条独立链路顺序收尾带来的蓝灯等待。
 3. stereo daemon 收到 stop-session 后会先一次性冻结左右双目 session 的送帧边界，再逐路 finalize 文件，避免某一路在另一侧 finalize 期间继续长出额外尾巴；收尾完成后后台 warmup 继续运行。
 4. 先发送 `recording_stop`，随后立即切到 `writing`；提示音采用“后触发抢占前触发”的语义，因此 `writing` 会直接打断仍在播放的上一条提示。
-5. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行 `sync`；停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
+5. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行分阶段文件级 flush。`pre_stereo_finalize` 只刷普通相机视频、左右 sensor MCAP、`calibration.json`、内部 timing 和可选音频；等待 stereo finalize 并合并 session 信息后，`final` 只刷 `stereo_*.mkv`、`fays_data_*.mcap` 与更新后的内部 timing；`metadata_final` 只刷最终 `metadata.json`、失败时的 `validation_error.log` 和目录项，避免停录路径重复刷同一批媒体文件。停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
 6. `record_runtime` 等待 daemon 在状态文件中写出本次 `last_session`，再将其并入内部 `.recording_timing.json`。
 7. 执行稳定校验：强校验内部 timing 字段，并并行用轻量 `ffprobe` 检查 8 路视频可读性与时长合理性；探测结果写入内部 `.recording_timing.json.video_probes`，供后续 metadata 生成复用，避免停录路径重复探测同一批视频。
-8. 停录校验阶段当前额外执行两轮轻量 tactile 状态抽检：其一是“本次起录附近单帧 vs 插爪参考帧”的实时比较；其二是“本次起录附近单帧 vs 同 `serial` 的持久化 baseline”的慢变量比较。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
-9. 实时触觉抽检当前属于软告警而不是完整性失败：单次异常只更新该 tactile `serial` 的近期历史；当同一 `serial` 最近 `3` 个 episode 都判为异常时，空闲态切到黄灯闪烁，并播放对应 `left/right_tcam_*_damaged` 提示音。
+8. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 抽检：其一是“本次起录附近单帧 vs 插爪参考帧”的实时比较；其二是“本次起录附近单帧 vs 同 `serial` 的持久化 baseline”的慢变量比较。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
+9. 实时触觉抽检当前属于软告警而不是完整性失败：单次异常只更新该 tactile `serial` 的近期历史；当同一 `serial` 最近 `3` 个 episode 都判为异常时，空闲态切到黄灯闪烁，并播放对应 `left/right_tcam_*_damaged` 提示音。后台 tactile 校验最多保留一个待处理 episode；若下一次录制开始，会请求当前后台校验停止并清空待处理任务，避免干扰下一次录制。
 10. 持久化 baseline 当前按 `12h` 窗口维护：插爪阶段和停录阶段都会与上一份持久化 baseline 做比较；若超过阈值，则立即触发同一套 damaged 软告警并锁住该 `serial` 的持久化 baseline，不再自动刷新。只有服务重启一次后，下一次插爪才允许用当前图像重建该 `serial` 的持久化 baseline。
 11. 停录收尾完成后将 `episode_YYYYMMDD_NNNN-temp` rename 为 `episode_YYYYMMDD_NNNN`；无论质量成功或失败，只要收尾已完成就去掉 `-temp`，质量结果由 `metadata.json` 和 `validation_error.log` 表达。完整性成功且无触觉软告警则回到 `READY` 并播放 `ready`；完整性失败进入 `ERROR_1` 并播放 `validation_failed`；运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
 
@@ -228,6 +228,7 @@
 - 内部 timing 字段完整性：停录收尾期间强制 `.recording_timing.json` 包含 `boot_time_offset`、`boot_time_offset_us` 与 8 路 `<camera>_record_time_offset_us`，且 `boot_time_offset` 与 `boot_time_offset_us` 必须数值一致；该文件只用于内部生成最终 metadata，不作为 episode 最终产物。
 - 视频可读性：每路 `mkv` 都必须能被并行 `ffprobe` 读出首个视频流与 `start_time/duration`；成功结果会缓存到内部 timing 文件，metadata 生成阶段复用该结果。
 - 时长合理性：每路视频跨度都必须大于最小阈值，且不能比本次 episode 的最长视频短超过 `5s`。
+- Fays MCAP 轻量完整性：左右 `fays_data_*.mcap` 必须能读取 summary，`i/c` 两类消息计数都必须非零，并且 summary/chunk 索引给出的消息覆盖跨度不能过短；该检查只读 MCAP summary 与尾部少量 chunk，不允许 fallback 全量扫描消息。
 - 条件产物：若执行了 pre/post 音频录制，对应 wav 仍需存在。
 - 触觉软校验：
   - 每路 tactile 只取起录附近单帧，与插爪阶段缓存的同 `serial` 参考灰度帧比较 `mean_abs_diff / mask_ratio / correlation`；单次异常不让当前 episode 失败，仅用于连续 `3` 个 episode 的损坏提示。
@@ -264,7 +265,12 @@
 - `/mnt/data_disk` 只作为固定挂载点使用：安装阶段会预创建为 `root:root 0555`，业务不会把本地空目录当成数据目录；只有真实数据盘挂载成功后才允许继续启动录制服务。
 - 运行日志维护当前参考 V1 口径：本地先写 `/tmp`，在视频停录、音频停录和运行时退出时增量同步到 `/mnt/data_disk/logs`，并只保留当天同 SN 日志。
 
-### 8.3 音频链路关键行为
+### 8.3 PERF 日志
+- 停录收尾、文件 flush、视频探测和 episode validation 会输出 `[PERF]` 耗时日志，用于现场拆分蓝灯延迟。
+- 可通过 `/etc/environment` 设置 `UGRIPPER_PERF_LOG=0/false/no/off` 关闭这类耗时日志；不影响错误日志、校验失败记录和必要状态日志。
+- validation 耗时当前按粗粒度输出：setup、并行视频 probe、并行 tail checks 与总耗时。其中 encoder/Fays tail checks 会作为 4 个只读任务并行执行，并统一打一条总耗时与详情日志；后台 tactile 慢校验另行输出 queued/start/end/applied/cancel 相关 PERF。
+
+### 8.4 音频链路关键行为
 - `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音，并优先绑定 PulseAudio 中受支持的 USB 音频设备；当前兼容 `0020:0b21 (liyuany USB Audio)` 与 `0023:0b23 (liyuany USB PnP Sound Device)`。若无耳机，则回退系统默认 sink/source；耳机晚于服务启动才出现时，守护进程会先启动 FIFO 和监听线程，再在耳机出现后自动切回耳机。
 - 提示音主线程通过 FIFO 收命令后使用 `pygame.mixer` 播放到当前选中的 PulseAudio sink；启动时只做一次短静音预热、每段提示音前补前导静音，不再维持常驻静音 keepalive。
 - `audio/audio_play.py` 只有在真实绑定到一个可用的 PulseAudio 播放目标并完成后端初始化后才会写 `/tmp/umi_audio_ready`；当前无论是受支持 USB 耳机还是系统默认声卡，都需要建好 backend 才会进入 ready，backend teardown 时会移除该标记，避免业务把“进程活着”误判成“提示音已可播放”。
@@ -277,13 +283,13 @@
 - 回滚方式：若需恢复 PulseAudio 默认模块状态，可重启当前用户的 PulseAudio 会话，或重启 `ugripper.service` 让音频守护进程重新按默认环境启动；无需在运行期反复手工切换 `module-suspend-on-idle`。
 - 现场 5 步回归 SOP：1）确认耳机已识别且服务正常，观察 `journalctl -u ugripper.service -n 100` 是否出现 USB 音频初始化日志；2）空闲 3~5 分钟后执行 `python3 py_script/usb_audio_play_test.py`，确认首个测试音不吞头；3）再次空闲 3~5 分钟后执行 `python3 py_script/usb_audio_mic_test.py --playback`，确认录音回放起始段不被截断；4）若需覆盖热恢复，再做一次耳机热插拔后重复步骤 2/3；5）若结果异常，记录 `pactl list short modules`、`pactl list short sinks`、`pactl list short sources` 与 `journalctl -u ugripper.service -n 200` 作为现场。
 
-### 8.4 相关辅助单元
+### 8.5 相关辅助单元
 - `auto_update/umi-shutdown-trigger.path`：监控 `/tmp/umi_system_action_request`。
 - `auto_update/umi-shutdown-trigger.service`：检测到触发文件后执行统一 helper；当前支持 `shutdown` 与 `umount` 两类动作，并把执行结果写回 `/tmp/umi_system_action_result`。
 - `auto_calibration/ugripper-network-monitor.service`：监听网线插拔，当前仅在拔线时重启 `ugripper.service`。
 - `auto_update/boot_check_install.sh`：开机时检查 `/opt/backup` 中的 `deb` 是否需要恢复或升级。
 
-### 8.5 硬件健康监控
+### 8.6 硬件健康监控
 - `record_runtime` 当前参考 v1 口径保留低频硬件健康监控，约每 `1s` 检查一次关键硬件状态，而不是在主循环里做高频主动轮询。
 - 当前监控项包括：`/mnt/data_disk` 是否仍可写、8 路相机设备节点、左右 IMU/encoder 设备节点、stereo daemon `ready/not-ready` 状态，以及左右 HMI 串口是否仍连接、输入侧 HMI 是否持续有响应。
 - 发现磁盘异常时进入 `ERROR_1`；发现关键设备节点缺失、HMI 断连或 HMI 长时间无响应时进入 `ERROR_2`，并通过音频守护进程播报 `error`。
@@ -301,6 +307,7 @@
 | `UGRIPPER_LANG` | 提示音语言 | 由 `config.txt` 导入 |
 | `CAMERA_CODEC` | `camera_recorder` 启动参数 | 仅支持 `h264` / `h265` |
 | `ENABLE_CHEST_CAM_MAIN` | `record_runtime` 读取 | 默认启用胸部主摄；显式写成 `0/false/no/off/disable/disabled` 时关闭 |
+| `UGRIPPER_PERF_LOG` | `record_runtime` 读取 | 默认开启 `[PERF]` 耗时日志；显式写成 `0/false/no/off/disable/disabled` 时关闭 |
 
 说明：当前录制与 U 盘导入流程都不再使用角色环境变量；episode `metadata.json` 也不再写角色字段。
 

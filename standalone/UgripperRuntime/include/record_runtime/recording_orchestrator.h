@@ -75,6 +75,7 @@ public:
         StopWorkerFn stop_worker;
         GetWorkerStatusFn get_worker_status;
         LogFn log_info;
+        LogFn log_perf;
         LogFn log_warn;
         LogFn log_error;
         SyncRuntimeLogFn sync_runtime_log;

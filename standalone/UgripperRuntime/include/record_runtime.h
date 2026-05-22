@@ -231,6 +231,8 @@ private:
         bool validateEpisode(const std::string &episodeDir,
                              std::string *errorMessage,
                              std::vector<TactileValidationFinding> *tactileFindings = nullptr) const;
+        void validateTactileEpisode(const std::string &episodeDir,
+                                    std::vector<TactileValidationFinding> *tactileFindings) const;
         bool writeFinalMetadata(const std::string &episodeDir,
                                 bool qualityOk,
                                 const std::string &qualityErrorMessage,
@@ -318,6 +320,11 @@ private:
     bool mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const;
     bool syncRuntimeLogToDisk(const char *reason) const;
     void refreshTactileReferenceCachesForSide(const std::string &side);
+    void scheduleBackgroundTactileValidation(const std::string &episodeDir);
+    void maintainBackgroundTactileValidation();
+    void cancelBackgroundTactileValidation();
+    void requestStopBackgroundTactileValidation();
+    void applyTactileValidationFindings(const std::vector<EpisodeManager::TactileValidationFinding> &findings);
     void applyIdleState();
     void setAudioRecoveryCommand(std::string command);
     void sendAudioCommand(const std::string &command) const;
@@ -333,6 +340,7 @@ private:
     std::string deviceSn_;
     std::string language_;
     bool chestCameraEnabled_ = true;
+    bool perfLogEnabled_ = true;
     std::string hardwareVersion_;
     std::string packageVersion_;
     std::string updaterVersion_;
@@ -348,6 +356,16 @@ private:
     bool leftDualLongHandled_ = false;
     bool tactileWarningActive_ = false;
     std::string tactileTriggeredAudioCommand_;
+    struct BackgroundTactileValidationResult
+    {
+        std::string episodeDir;
+        std::vector<EpisodeManager::TactileValidationFinding> findings;
+    };
+    std::mutex backgroundTactileMutex_;
+    std::string pendingBackgroundTactileEpisodeDir_;
+    std::future<BackgroundTactileValidationResult> backgroundTactileFuture_;
+    std::atomic<bool> stopBackgroundTactileValidation_{false};
+    std::optional<ugripper::runtime::HealthFault> activeHardwareFault_;
     LedState lastLoggedLedState_ = LedState::Init;
     double lastLoggedLedProgress_ = 0.0;
     bool hasLastLoggedLedState_ = false;

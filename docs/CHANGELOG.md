@@ -5,6 +5,11 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- 停录阶段进一步缩短蓝灯等待：`camera_recorder` 与 `sensor_recorder` 改为并发 stop，并新增 `stop workers`、`stereo finalize wait`、`stereo merge` 分段耗时日志。
+- 触觉状态抽检改为后台慢校验：停录硬校验不再等待 tactile 单帧抽取与 baseline 比对；后台任务只更新触觉软告警与历史状态，起录时会取消/丢弃后台任务以避免干扰下一次录制。
+- 停录收尾 flush 改为按阶段拆分：`pre_stereo_finalize` 不再提前刷 stereo/Fays 产物，`final` 只刷 stereo/Fays 和内部 timing，`metadata_final` 只刷最终 metadata/错误日志/目录；同时新增 `UGRIPPER_PERF_LOG` 开关控制 `[PERF]` 耗时日志。
+- episode validation 的 encoder/Fays tail check 改为 4 个只读任务并行执行，并统一输出一条 tail checks 总耗时与详情日志；validation 耗时日志收敛为 setup、video probe、tail checks、tactile validation 与总耗时。
+- 停录收尾补齐 Fays MCAP 和 `validation_error.log` 的文件级 flush，并强化 Fays MCAP 轻量校验：不再把缺失 summary 计数兜底为 1，要求 `i/c` 计数非零且数据跨度合理；episode 校验脚本同步检查 Fays MCAP 头尾 magic、可解析性和覆盖时长，并将视频起始对齐默认阈值放宽到 1s 但固定输出起始偏移表。
 - Fays recorder 新增 `/dev/shm/umi_left_fays_runtime_status.json` / `/dev/shm/umi_right_fays_runtime_status.json` 低频刷新型运行态调试文件，只记录最近 warmup frame/encoded frame 时间等事实变量；stereo daemon 用最近 frame freshness 判断 idle/recording 拉流健康，录制中异常会让当前 session 快速失败，停录等待文件期间也可被已知错误打断。
 - 停录 validation 阶段优化视频探测链路：8/9 路视频 `ffprobe` 改为并行执行，并把成功结果缓存到内部 `.recording_timing.json.video_probes`，`metadata.json` 生成阶段直接复用该结果，避免同一批视频在停录收尾里重复探测。
 - episode 完成状态改为目录名表达：录制中/停录收尾使用 `episode_YYYYMMDD_NNNN-temp`，收尾完成后 rename 为 `episode_YYYYMMDD_NNNN`；最终产物不再包含 `info.json`，时间偏移信息迁移到 `metadata.json.video_details[].start_offset_us`，校验脚本同步移除 `info.json` 必需项。
