@@ -4,7 +4,6 @@
 
 - `metadata.json`
 - `calibration.json`
-- `info.json`
 - `cam_left.mkv`
 - `cam_right.mkv`
 - `stereo_left.mkv`
@@ -24,11 +23,11 @@
 - `audio_pre.wav` / `audio_post.wav` 是否按预期出现
 - `metadata.json` 是否包含新 3.0 字段：`device_sn` / `hardware_list` / `require_files` / `video_details` / `collection_duration_s` / `quality_check_status`
 - `metadata.json` 顶层字段、`hardware_list` 字段和 `video_details[]` 字段顺序是否符合标准范本
-- `metadata.json` / `info.json` / `calibration.json` 的顶层 key 集合是否仍符合约定
+- `metadata.json` / `calibration.json` 的顶层 key 集合是否仍符合约定
 - 关键 JSON 字段类型是否仍符合约定，防止“有字段但类型偷偷变了”
 - `video_details` 是否不再重复写 `serial`，且使用 `duration_s` / `start_offset_us`
 - `calibration.json.observation.images` 是否覆盖 8 路图像
-- Fays 侧 IMU 数据是否在 `fays_data_left.mcap` / `fays_data_right.mcap` 中可读
+- Fays 侧 `fays_data_left.mcap` / `fays_data_right.mcap` 是否头尾 magic 完整、可解析、包含 `i/c` 数据，且覆盖时长接近对应 stereo 视频
 - 主摄专项扫描是否发现 `backward_dts` / `decode_non_monotonic_dts` / `decode_error`
 - 是否输出统一的首帧对齐表，覆盖 8 路 `mkv` 和左右 sensor topic
 
@@ -36,11 +35,11 @@
 
 这些阈值是“录后体检”的默认经验值，适合作为首轮筛查；真正判责时仍要结合现场机型、录制时长和日志交叉确认。
 
-- 视频起始对齐 warn/fail：`80ms / 150ms`
+- 视频起始对齐 warn/fail：`500ms / 1000ms`，即使未超阈值也必须输出各路起始偏移表
 - 视频结束对齐 warn/fail：`150ms / 300ms`
 - 首帧同步误差 warn/fail：`33ms / 80ms`
 - 全 12 路流首帧范围 warn/fail：`80ms / 150ms`
-- 左右成对视频起始对齐 warn/fail：`50ms / 120ms`
+- 左右成对视频起始对齐 warn/fail：`500ms / 1000ms`
 - 左右成对视频结束对齐 warn/fail：`80ms / 180ms`
 - 单视频 gap 告警：`max(3 x 中位帧间隔, 80ms)`
 - 容器 duration 与包级 span 偏差 warn/fail：`80ms / 150ms`

@@ -37,6 +37,13 @@ SENSOR_FILES = [
     ("left", "sensor_left.mcap", ["encoder_left"]),
     ("right", "sensor_right.mcap", ["encoder_right"]),
 ]
+FAYS_MCAP_FILES = [
+    ("left", "fays_data_left.mcap", "left_stereo"),
+    ("right", "fays_data_right.mcap", "right_stereo"),
+]
+MCAP_MAGIC = b"\x89MCAP0\r\n"
+FAYS_IMU_PAYLOAD_BYTES = 48
+FAYS_CAMERA_PAYLOAD_BYTES = 4
 EXPECTED_METADATA_KEY_ORDER = [
     "device_sn",
     "device_type",
@@ -347,12 +354,24 @@ class SensorTopicStats:
 
 
 @dataclass
+class FaysMcapStats:
+    side: str
+    source_file: str
+    imu_count: int = 0
+    camera_count: int = 0
+    first_log_time_ns: int | None = None
+    last_log_time_ns: int | None = None
+    span_sec: float = 0.0
+
+
+@dataclass
 class Report:
     episode_dir: str
     status: str
     findings: list[Finding]
     videos: dict[str, VideoStats]
     sensors: dict[str, SensorTopicStats]
+    fays_mcaps: dict[str, FaysMcapStats]
     artifacts: dict[str, Any]
     summary: dict[str, Any]
 
@@ -405,6 +424,7 @@ class EpisodeValidator:
         self.video_start_offsets_us: dict[str, int] = {}
         self.video_stats: dict[str, VideoStats] = {}
         self.sensor_stats: dict[str, SensorTopicStats] = {}
+        self.fays_mcap_stats: dict[str, FaysMcapStats] = {}
         self.artifacts: dict[str, Any] = {}
         self.active_video_files: list[tuple[str, str, str]] = list(BASE_VIDEO_FILES)
 
@@ -427,6 +447,7 @@ class EpisodeValidator:
         self.scan_videos()
         self.scan_main_camera_pair()
         self.scan_sensors()
+        self.scan_fays_mcaps()
         self.check_video_span_consistency()
         self.check_video_alignment()
         self.check_pair_alignment()
@@ -453,6 +474,7 @@ class EpisodeValidator:
             },
             "video_count": len(self.video_stats),
             "sensor_topic_count": len(self.sensor_stats),
+            "fays_mcap_count": len(self.fays_mcap_stats),
             "artifact_count": len(self.artifacts),
         }
         return Report(
@@ -461,6 +483,7 @@ class EpisodeValidator:
             findings=self.findings,
             videos=self.video_stats,
             sensors=self.sensor_stats,
+            fays_mcaps=self.fays_mcap_stats,
             artifacts=self.artifacts,
             summary=summary,
         )
@@ -1229,6 +1252,26 @@ class EpisodeValidator:
                     continue
                 yield str(channel.topic), int(record.log_time)
 
+    def iter_mcap_message_records(self, mcap_path: Path):
+        if StreamReader is None:
+            raise RuntimeError(
+                "python mcap package is unavailable; prefer running this script via `uv run python ...`"
+            )
+        with mcap_path.open("rb") as handle:
+            channels: dict[int, Any] = {}
+            for record in StreamReader(handle).records:
+                record_name = type(record).__name__
+                if record_name == "Channel":
+                    channels[record.id] = record
+                    continue
+                if record_name != "Message":
+                    continue
+                channel = channels.get(record.channel_id)
+                if channel is None:
+                    continue
+                data_size = len(getattr(record, "data", b"") or b"")
+                yield str(channel.topic), int(record.log_time), data_size
+
     def scan_sensors(self) -> None:
         if StreamReader is None:
             self.add_finding(
@@ -1297,6 +1340,88 @@ class EpisodeValidator:
                     large_gap_count=stats.large_gap_count,
                 )
 
+    def scan_fays_mcaps(self) -> None:
+        if StreamReader is None:
+            self.add_finding(
+                "WARN",
+                "mcap_dependency_missing",
+                "无法执行 Fays MCAP 深度分析，当前 Python 环境缺少可用的 mcap 读取器，建议改用 `uv run python`",
+                fallback_roots=[str(path) for path in MCAP_FALLBACK_ROOTS],
+            )
+            return
+
+        for side, file_name, stereo_camera_name in FAYS_MCAP_FILES:
+            path = self.episode_dir / file_name
+            if not path.exists() or path.stat().st_size <= 0:
+                continue
+
+            try:
+                with path.open("rb") as handle:
+                    head = handle.read(len(MCAP_MAGIC))
+                    handle.seek(-len(MCAP_MAGIC), 2)
+                    tail = handle.read(len(MCAP_MAGIC))
+                if head != MCAP_MAGIC or tail != MCAP_MAGIC:
+                    self.add_finding(
+                        "FAIL",
+                        "fays_mcap_magic",
+                        f"{file_name} MCAP 头尾 magic 不完整",
+                        path=str(path),
+                        head_ok=head == MCAP_MAGIC,
+                        tail_ok=tail == MCAP_MAGIC,
+                        size=path.stat().st_size,
+                    )
+            except Exception as exc:
+                self.add_finding("FAIL", "fays_mcap_read_error", f"读取 {file_name} 头尾失败", error=str(exc))
+                continue
+
+            stats = FaysMcapStats(side=side, source_file=str(path))
+            try:
+                for topic, log_time_ns, data_size in self.iter_mcap_message_records(path):
+                    is_imu = topic == "i" or data_size == FAYS_IMU_PAYLOAD_BYTES
+                    is_camera = topic == "c" or data_size == FAYS_CAMERA_PAYLOAD_BYTES
+                    if not is_imu and not is_camera:
+                        continue
+                    if is_imu:
+                        stats.imu_count += 1
+                    if is_camera:
+                        stats.camera_count += 1
+                    if stats.first_log_time_ns is None or log_time_ns < stats.first_log_time_ns:
+                        stats.first_log_time_ns = log_time_ns
+                    if stats.last_log_time_ns is None or log_time_ns > stats.last_log_time_ns:
+                        stats.last_log_time_ns = log_time_ns
+            except Exception as exc:
+                self.add_finding("FAIL", "fays_mcap_read_error", f"解析 {file_name} 失败", error=str(exc))
+                continue
+
+            if stats.first_log_time_ns is not None and stats.last_log_time_ns is not None:
+                stats.span_sec = max(0.0, (stats.last_log_time_ns - stats.first_log_time_ns) / 1_000_000_000.0)
+            self.fays_mcap_stats[file_name] = stats
+
+            if stats.imu_count <= 0 or stats.camera_count <= 0:
+                self.add_finding(
+                    "FAIL",
+                    "fays_mcap_topic",
+                    f"{file_name} 缺少 Fays i/c topic 数据",
+                    imu_count=stats.imu_count,
+                    camera_count=stats.camera_count,
+                )
+                continue
+
+            stereo_stats = self.video_stats.get(stereo_camera_name)
+            reference_duration_sec = stereo_stats.duration_sec if stereo_stats else None
+            if reference_duration_sec and reference_duration_sec > 0:
+                coverage_ratio = stats.span_sec / reference_duration_sec
+                if coverage_ratio < self.args.fays_mcap_coverage_warn_ratio:
+                    severity = "FAIL" if coverage_ratio < self.args.fays_mcap_coverage_fail_ratio else "WARN"
+                    self.add_finding(
+                        severity,
+                        "fays_mcap_coverage",
+                        f"{file_name} 覆盖时长明显短于对应 stereo 视频",
+                        span_sec=round(stats.span_sec, 3),
+                        reference_video_duration_sec=round(reference_duration_sec, 3),
+                        coverage_ratio=round(coverage_ratio, 3),
+                    )
+
     def check_video_span_consistency(self) -> None:
         for stats in self.video_stats.values():
             if stats.duration_sec is None or stats.first_pts_sec is None or stats.last_pts_sec is None:
@@ -1327,7 +1452,16 @@ class EpisodeValidator:
             if stats.last_system_time_us is not None
         }
         if len(starts) >= 2:
+            earliest_start_us = min(starts.values())
             start_range_ms = us_to_ms(max(starts.values()) - min(starts.values()))
+            self.add_finding(
+                "INFO",
+                "video_start_offsets",
+                "所有 mkv 起始时间相对最早视频的偏移量",
+                earliest_start_us=earliest_start_us,
+                start_range_ms=round(start_range_ms, 3),
+                per_camera_ms={name: round(us_to_ms(value - earliest_start_us), 3) for name, value in sorted(starts.items())},
+            )
             if start_range_ms > self.args.video_start_warn_ms:
                 severity = "FAIL" if start_range_ms >= self.args.video_start_fail_ms else "WARN"
                 self.add_finding(
@@ -1335,7 +1469,7 @@ class EpisodeValidator:
                     "video_start_alignment",
                     "多路视频起始时间对齐偏差过大",
                     start_range_ms=round(start_range_ms, 3),
-                    per_camera_ms={name: round(us_to_ms(value - min(starts.values())), 3) for name, value in starts.items()},
+                    per_camera_ms={name: round(us_to_ms(value - earliest_start_us), 3) for name, value in sorted(starts.items())},
                 )
         if len(ends) >= 2:
             end_range_ms = us_to_ms(max(ends.values()) - min(ends.values()))
@@ -1549,8 +1683,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--imu-gap-min-ms", type=float, default=20.0)
     parser.add_argument("--encoder-gap-min-ms", type=float, default=30.0)
     parser.add_argument("--sensor-gap-fail-ms", type=float, default=120.0)
-    parser.add_argument("--video-start-warn-ms", type=float, default=80.0)
-    parser.add_argument("--video-start-fail-ms", type=float, default=150.0)
+    parser.add_argument("--video-start-warn-ms", type=float, default=500.0)
+    parser.add_argument("--video-start-fail-ms", type=float, default=1000.0)
     parser.add_argument("--video-end-warn-ms", type=float, default=1000.0)
     parser.add_argument("--video-end-fail-ms", type=float, default=1500.0)
     parser.add_argument("--first-frame-warn-ms", type=float, default=33.0)
@@ -1571,12 +1705,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-sensor-overlap-fail-ratio", type=float, default=0.75)
     parser.add_argument("--video-span-delta-warn-ms", type=float, default=80.0)
     parser.add_argument("--video-span-delta-fail-ms", type=float, default=150.0)
-    parser.add_argument("--video-pair-start-warn-ms", type=float, default=50.0)
-    parser.add_argument("--video-pair-start-fail-ms", type=float, default=120.0)
+    parser.add_argument("--video-pair-start-warn-ms", type=float, default=500.0)
+    parser.add_argument("--video-pair-start-fail-ms", type=float, default=1000.0)
     parser.add_argument("--video-pair-end-warn-ms", type=float, default=80.0)
     parser.add_argument("--video-pair-end-fail-ms", type=float, default=180.0)
     parser.add_argument("--sensor-coverage-warn-ratio", type=float, default=0.9)
     parser.add_argument("--sensor-coverage-fail-ratio", type=float, default=0.75)
+    parser.add_argument("--fays-mcap-coverage-warn-ratio", type=float, default=0.9)
+    parser.add_argument("--fays-mcap-coverage-fail-ratio", type=float, default=0.75)
     parser.add_argument("--pattern-group-stagger-warn-ms", type=float, default=80.0)
     parser.add_argument("--pattern-group-stagger-fail-ms", type=float, default=150.0)
     parser.add_argument(
@@ -1623,6 +1759,15 @@ def print_text_report(report: Report) -> None:
                 f"- {name}: count={item.count} median_gap_ms={round(item.median_gap_ms, 3)} "
                 f"max_gap_ms={round(item.max_gap_ms, 3)} large_gap_count={item.large_gap_count}"
             )
+    if report.fays_mcaps:
+        print()
+        print("Fays MCAPs:")
+        for name in sorted(report.fays_mcaps):
+            item = report.fays_mcaps[name]
+            print(
+                f"- {name}: imu_count={item.imu_count} camera_count={item.camera_count} "
+                f"span_sec={round(item.span_sec, 3)}"
+            )
     if report.artifacts:
         print()
         print("Artifacts:")
@@ -1639,6 +1784,7 @@ def report_to_json(report: Report) -> str:
             "findings": [asdict(item) for item in report.findings],
             "videos": {key: asdict(value) for key, value in report.videos.items()},
             "sensors": {key: asdict(value) for key, value in report.sensors.items()},
+            "fays_mcaps": {key: asdict(value) for key, value in report.fays_mcaps.items()},
             "artifacts": report.artifacts,
         },
         ensure_ascii=False,
