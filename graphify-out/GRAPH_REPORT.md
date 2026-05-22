@@ -1,16 +1,16 @@
 # Graph Report - UGripper  (2026-05-22)
 
 ## Corpus Check
-- 201 files · ~202,910 words
+- 201 files · ~204,794 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 3054 nodes · 5793 edges · 239 communities (222 shown, 17 thin omitted)
+- 3084 nodes · 5946 edges · 244 communities (226 shown, 18 thin omitted)
 - Extraction: 98% EXTRACTED · 2% INFERRED · 0% AMBIGUOUS · INFERRED: 99 edges (avg confidence: 0.78)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `6f16f124`
+- Built from commit: `565841cf`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -34,6 +34,7 @@
 - [[_COMMUNITY_Community 16|Community 16]]
 - [[_COMMUNITY_Community 17|Community 17]]
 - [[_COMMUNITY_Community 18|Community 18]]
+- [[_COMMUNITY_Community 19|Community 19]]
 - [[_COMMUNITY_Community 20|Community 20]]
 - [[_COMMUNITY_Community 21|Community 21]]
 - [[_COMMUNITY_Community 22|Community 22]]
@@ -207,6 +208,11 @@
 - [[_COMMUNITY_Community 212|Community 212]]
 - [[_COMMUNITY_Community 237|Community 237]]
 - [[_COMMUNITY_Community 238|Community 238]]
+- [[_COMMUNITY_Community 239|Community 239]]
+- [[_COMMUNITY_Community 240|Community 240]]
+- [[_COMMUNITY_Community 241|Community 241]]
+- [[_COMMUNITY_Community 242|Community 242]]
+- [[_COMMUNITY_Community 243|Community 243]]
 
 ## God Nodes (most connected - your core abstractions)
 1. `main()` - 193 edges
@@ -217,42 +223,42 @@
 6. `GripperHmiClient` - 44 edges
 7. `EpisodeManager::writeFilteredCalibration()` - 36 edges
 8. `Ugripper V2` - 35 edges
-9. `test` - 33 edges
-10. `EpisodeManager::validateEpisode()` - 30 edges
+9. `EpisodeManager::validateEpisode()` - 33 edges
+10. `test` - 33 edges
 
 ## Surprising Connections (you probably didn't know these)
 - `HealthMonitor()` --references--> `runtime_config`  [AMBIGUOUS]
   standalone/UgripperRuntime/runtime_domain.cc → docs/archive/2026-refactor-history/repo-architecture.md
 - `RecordingOrchestrator()` --references--> `runtime_config`  [AMBIGUOUS]
   standalone/UgripperRuntime/runtime_domain.cc → docs/archive/2026-refactor-history/repo-architecture.md
+- `Ugripper V2` --calls--> `CreateFileShutdownRequestPort()`  [INFERRED]
+  README.md → standalone/UgripperRuntime/runtime_process.cc
 - `TaskScheduler` --conceptually_related_to--> `HmiController()`  [AMBIGUOUS]
   docs/archive/2026-refactor-history/ugripper-refactor-plan.md → standalone/UgripperRuntime/include/record_runtime/hmi_controller.h
 - `test` --calls--> `Get_CRC16()`  [INFERRED]
   CMakeLists.txt → standalone/SensorRecorder/bsp_crc.cc
-- `Ugripper V2` --calls--> `TryGetEncoderResponseFrameLength()`  [INFERRED]
-  README.md → standalone/SensorRecorder/sensor_protocol.cc
 
-## Communities (239 total, 17 thin omitted)
+## Communities (244 total, 18 thin omitted)
 
 ### Community 0 - "Community 0"
 Cohesion: 0.07
-Nodes (54): abortCalibrationWriteStateLocked(), connect(), currentSteadyMs(), describeStatusFrame(), disconnect(), formatHexByte(), getSnapshot(), GripperHmiDriver() (+46 more)
+Nodes (55): abortCalibrationWriteStateLocked(), allocateCommandIdLocked(), connect(), currentSteadyMs(), describeStatusFrame(), disconnect(), formatHexByte(), getSnapshot() (+47 more)
 
 ### Community 1 - "Community 1"
-Cohesion: 0.17
-Nodes (30): _format_float(), _safe_float(), GapEvent, scan_main_camera_mkv_issues.py, align_shared_events(), analyze_file(), analyze_packets(), auto_jobs() (+22 more)
+Cohesion: 0.14
+Nodes (31): analyze_video(), _build_default_run_dir(), _build_issue_tags(), build_report_paths(), _collect_frame_stats(), _copy_file(), _estimate_effective_fps(), _format_float() (+23 more)
 
 ### Community 2 - "Community 2"
 Cohesion: 0.06
 Nodes (37): AudioPlayer, _find_event_device(), _handle_volume_key(), main(), _run_pactl(), setup_audio_device(), _bootstrap_pulse_env(), _card_from_properties() (+29 more)
 
 ### Community 3 - "Community 3"
-Cohesion: 0.14
-Nodes (16): attachPendingPreAudio(), fileExistsAndNotEmpty(), flushDirectoryToDisk(), flushFileToDisk(), isYuzhouMainCameraSn(), makeTimestampString(), moveFileWithCrossDeviceFallback(), probeMainCameraSerialForDeviceNode() (+8 more)
+Cohesion: 0.21
+Nodes (11): EpisodeManager::createNextEpisodeDir(), EpisodeManager::finalizeEpisodeDir(), flushDirectoryToDisk(), flushEpisodeDirectoriesToDisk(), isYuzhouMainCameraSn(), probeMainCameraSerialForDeviceNode(), readYuzhouMainCameraIdentity(), readYuzhouMainCameraSn() (+3 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.27
-Nodes (9): load_lines(), main(), parse_count_requirement(), parse_diag_fields(), load_lines(), main(), parse_diag_fields(), load_lines() (+1 more)
+Cohesion: 0.13
+Nodes (33): resolve_root_dir(), _add_data_root(), add_label(), build_report_root(), compute_damage_metrics(), detect_latest_root(), detect_layout(), device_label_from_metadata() (+25 more)
 
 ### Community 5 - "Community 5"
 Cohesion: 0.07
@@ -263,16 +269,16 @@ Cohesion: 0.06
 Nodes (25): Python3, test_check_video_windows_rules, test/scripts/*, Python3 Interpreter, test_check_hmi_event_log_health_faults_fail, test_check_hmi_event_log_pass, choose_primary_reason(), load_report() (+17 more)
 
 ### Community 7 - "Community 7"
-Cohesion: 0.11
-Nodes (29): getSerialPort(), calculate_crc16(), find_devices(), main(), 对所有编码器进行归零操作          Args:         baudrate: 波特率，默认115200, 对单个编码器进行归零          Args:         device_path: 设备路径，如 '/dev/ttyCH9344USB0', 计算Modbus CRC16校验     返回: (crc_low, crc_high), 向编码器发送归零命令          Args:         ser: 串口对象         device_name: 设备名称（用于日志） (+21 more)
+Cohesion: 0.07
+Nodes (36): getSerialPort(), EncoderData, main(), SerialEncoder, SerialManager, calculate_crc16(), find_devices(), main() (+28 more)
 
 ### Community 8 - "Community 8"
-Cohesion: 0.06
-Nodes (43): EncoderData, main(), SerialEncoder, SerialManager, joinArguments(), maintainAudioPlayer(), startAudioPlayer(), stopAudioPlayer() (+35 more)
+Cohesion: 0.08
+Nodes (41): ugripper(), joinArguments(), maintainAudioPlayer(), startAudioPlayer(), stopAudioPlayer(), AudioCoordinator(), CreateFifoStereoSessionPort(), CreateFileAudioCommandPort() (+33 more)
 
 ### Community 9 - "Community 9"
 Cohesion: 0.13
-Nodes (38): ClientOptions, build_calibration_bin(), build_delivery_readme(), colorize(), column_letters_to_index(), create_delivery_bundle(), ensure_sn_unique(), find_matches() (+30 more)
+Nodes (37): ClientOptions, build_calibration_bin(), build_delivery_readme(), colorize(), column_letters_to_index(), create_delivery_bundle(), ensure_sn_unique(), find_matches() (+29 more)
 
 ### Community 10 - "Community 10"
 Cohesion: 0.02
@@ -280,19 +286,19 @@ Nodes (133): 2026-04-03 - establish-refactor-workflow-docs, 2026-04-08 - add-cam
 
 ### Community 11 - "Community 11"
 Cohesion: 0.05
-Nodes (67): build_payload_template(), camera_model_enum_from_strings(), detect_raw_pair_from_dir(), fill_float_array(), fill_statistics(), finalize_payload(), GripperCalibrationDataV1, GripperCalibrationHeader (+59 more)
+Nodes (66): build_payload_template(), camera_model_enum_from_strings(), detect_raw_pair_from_dir(), fill_float_array(), fill_statistics(), finalize_payload(), GripperCalibrationDataV1, GripperCalibrationHeader (+58 more)
 
 ### Community 12 - "Community 12"
-Cohesion: 0.13
-Nodes (32): _add_data_root(), add_label(), build_report_root(), compute_damage_metrics(), detect_latest_root(), detect_layout(), device_label_from_metadata(), discover_data_roots() (+24 more)
+Cohesion: 0.19
+Nodes (28): _safe_float(), scan_main_camera_mkv_issues.py, align_shared_events(), analyze_file(), analyze_packets(), auto_jobs(), build_pair_summaries(), build_parser() (+20 more)
 
 ### Community 13 - "Community 13"
-Cohesion: 0.04
-Nodes (46): 10.1 服务管理, 10.2 录制相关进程, 10.3 U 盘流程日志, 10.4 运行日志, 10.5 设备映射优先检查, 10.6 快速定位建议, 10.7 tactile serial 定向核对, 10.8 仓库内测试脚本 (+38 more)
+Cohesion: 0.15
+Nodes (13): 10.1 服务管理, 10.2 录制相关进程, 10.3 U 盘流程日志, 10.4 运行日志, 10.5 设备映射优先检查, 10.6 快速定位建议, 10.7 tactile serial 定向核对, 10.8 仓库内测试脚本 (+5 more)
 
 ### Community 14 - "Community 14"
-Cohesion: 0.19
-Nodes (25): PkgConfig::LZ4, PkgConfig::LIBSERIALPORT, SensorRecorder, sensorrecorder_local_libserialport, standalone, Threads::Threads, UgripperRuntime, zeroing (+17 more)
+Cohesion: 0.17
+Nodes (27): PkgConfig::LZ4, PkgConfig::LIBSERIALPORT, SensorRecorder, sensorrecorder_local_libserialport, standalone, Threads::Threads, UgripperRuntime, zeroing (+19 more)
 
 ### Community 15 - "Community 15"
 Cohesion: 0.09
@@ -300,7 +306,7 @@ Nodes (34): PrintCalibrationInfo(), PrintDeviceInfo(), printTransform(), Calibra
 
 ### Community 16 - "Community 16"
 Cohesion: 0.07
-Nodes (46): CameraXuDevice, deserialize(), fnv1a32(), isYuzhouMainCameraSn(), main(), parseOptions(), printCalibrationSummary(), printUsage() (+38 more)
+Nodes (45): CameraXuDevice, deserialize(), fnv1a32(), isYuzhouMainCameraSn(), main(), parseOptions(), printCalibrationSummary(), printUsage() (+37 more)
 
 ### Community 17 - "Community 17"
 Cohesion: 0.22
@@ -310,69 +316,69 @@ Nodes (22): gripper_hmi_protocol, buildAbortCalibrationWriteCommand(), buildBeep
 Cohesion: 0.15
 Nodes (42): BuildHybridCameraCommand(), BuildMainCameraCommand(), BuildStereoHybridCameraCommand(), BuildStereoServiceStatusJson(), BuildStereoTrackStatusJson(), BuildVideoFilter(), CaptureHeight(), CaptureInputFormat() (+34 more)
 
+### Community 19 - "Community 19"
+Cohesion: 0.08
+Nodes (8): Header(), extract_pts_from_mkv(), load_boot_time(), main(), Use boot_time_offset from info.json (seconds), Extract PTS timestamps from MKV file using ffprobe     Returns: list of (frame_i, Write camera frames using accurate PTS from ffprobe, write_camera_with_pts()
+
 ### Community 20 - "Community 20"
-Cohesion: 0.1
-Nodes (40): probe_frames(), probe_stream(), _run_ffprobe_json(), analyze_device_root(), analyze_episode_stream(), analyze_packet_sequence(), build_alert_episode_rows(), build_alert_episode_stream_rows() (+32 more)
+Cohesion: 0.11
+Nodes (38): _run_ffprobe_json(), analyze_device_root(), analyze_episode_stream(), analyze_packet_sequence(), build_alert_episode_rows(), build_alert_episode_stream_rows(), build_device_summary_rows(), build_episode_stream_rows() (+30 more)
 
 ### Community 21 - "Community 21"
 Cohesion: 0.18
 Nodes (21): GTest::gtest_main, nlohmann_json, PP::utils, runtime_control_plane, runtime_process_boundary, ugripperruntime_support_utils, test_audio_coordinator, test_button_event_timing (+13 more)
 
 ### Community 22 - "Community 22"
-Cohesion: 0.11
-Nodes (22): yaml-cpp, Ugripper Current Status Overview, docs/REFACTOR_LOG.md, pp_main 合并后 ugripper 正式测试方案, scripts/build_arm_deb_in_pp_arm_dev.sh, build_deb.sh, scripts/build_runtime_venv.sh, config/camera_recorder.yaml (+14 more)
+Cohesion: 0.13
+Nodes (20): yaml-cpp, Ugripper Current Status Overview, docs/REFACTOR_LOG.md, pp_main 合并后 ugripper 正式测试方案, scripts/build_arm_deb_in_pp_arm_dev.sh, build_deb.sh, scripts/build_runtime_venv.sh, config/camera_recorder.yaml (+12 more)
 
 ### Community 23 - "Community 23"
-Cohesion: 0.06
-Nodes (62): writeBinaryFile(), CurrentEpochMs(), record_runtime, appendCalibrationNote(), captureTactileGrayFrame(), computeTactileFrameMetrics(), currentEpochMs(), EpisodeManager::EpisodeManager() (+54 more)
+Cohesion: 0.07
+Nodes (40): record_runtime, appendCalibrationNote(), applySideCalibrationPayload(), clearGripperRuntimeStateForSide(), EpisodeManager::EpisodeManager(), EpisodeManager::prepareEpisode(), EpisodeManager::setGripperRuntimeStates(), EpisodeManager::writeMetadata() (+32 more)
 
 ### Community 24 - "Community 24"
-Cohesion: 0.2
-Nodes (28): applyIdleState(), boolText(), handleButtons(), handleDualShutdownAction(), handleGripperConnectionEvents(), handleLeftButtons(), handleLeftDualUmountAction(), handleLongDownAction() (+20 more)
+Cohesion: 0.15
+Nodes (36): applyIdleState(), applyTactileValidationFindings(), areSideCriticalDevicesReady(), boolText(), checkRecorderProcesses(), handleButtons(), handleDualShutdownAction(), handleGripperConnectionEvents() (+28 more)
 
 ### Community 25 - "Community 25"
-Cohesion: 0.15
-Nodes (18): Initialize(), SetLevel(), activeCriticalDevicePaths(), commandExists(), initialize(), isFalseLikeValue(), joinCsv(), makeLocalDateTimeString() (+10 more)
+Cohesion: 0.08
+Nodes (35): Initialize(), SetLevel(), activeCriticalDevicePaths(), activeEpisodeVideoArtifacts(), attachPendingPreAudio(), episodeTimingPath(), fileExistsAndNotEmpty(), flushEpisodeArtifactsToDisk() (+27 more)
 
 ### Community 26 - "Community 26"
 Cohesion: 0.13
 Nodes (20): src/utils, Control Channel Ledger Baseline, Audio Command FIFO /tmp/umi_audio_pipe, Audio Ready File /tmp/umi_audio_ready, Shutdown Request File /tmp/umi_shutdown_request, Equivalence Checklist, Naming YAML Contract, pp_main naming baseline (+12 more)
 
 ### Community 27 - "Community 27"
-Cohesion: 0.11
-Nodes (21): activeEpisodeVideoArtifacts(), addVersionPrefix(), classifyQualityError(), EpisodeManager::createNextEpisodeDir(), EpisodeManager::finalizeEpisodeDir(), EpisodeManager::writeFinalMetadata(), episodeTimingPath(), flushEpisodeArtifactsToDisk() (+13 more)
+Cohesion: 0.18
+Nodes (20): build_markdown_report(), build_parser(), build_validate_command(), choose_python_runner(), discover_device_roots(), EpisodeResult, find_first_issue(), format_timestamp() (+12 more)
 
 ### Community 28 - "Community 28"
 Cohesion: 0.05
 Nodes (43): 10. 当前维护入口, 1. 当前仓库一句话, 2.1 主实现真源, 2.2 测试真源, 2.3 部署与交付真源, 2.4 文档真源, 2.5 非当前实现真源, 2.6 已归档历史文档 (+35 more)
 
-### Community 29 - "Community 29"
-Cohesion: 0.31
-Nodes (8): Header(), extract_pts_from_mkv(), load_boot_time(), main(), Use boot_time_offset from info.json (seconds), Extract PTS timestamps from MKV file using ffprobe     Returns: list of (frame_i, Write camera frames using accurate PTS from ffprobe, write_camera_with_pts()
-
 ### Community 30 - "Community 30"
-Cohesion: 0.16
-Nodes (19): MakeHybridCamera(), TEST(), CameraSampleDir(), TEST(), add_host_only_camera_gtest, GTest, gtest_discover_tests, test (+11 more)
+Cohesion: 0.18
+Nodes (17): MakeHybridCamera(), TEST(), CameraSampleDir(), TEST(), add_host_only_camera_gtest, GTest, gtest_discover_tests, test (+9 more)
 
 ### Community 31 - "Community 31"
 Cohesion: 0.26
 Nodes (11): Status(), MagicToHex(), ParseByteArray(), ParseKeyValueMap(), ParseString(), ParseStringView(), ParseUint32(), ParseUint64() (+3 more)
 
 ### Community 32 - "Community 32"
-Cohesion: 0.05
-Nodes (25): gripper_hmi, gripper_hmi_led_effects, utils, utils_smoke_test, clampProgress(), clampToU8(), errorLevel(), parseStateText() (+17 more)
+Cohesion: 0.1
+Nodes (7): encodeSerialNumber(), isPrintableSerialChar(), makeDefaultCalibrationDataV1(), mainCamera(), MainCameraCalibrationDataV1, MainCameraCalibrationHeader, MainCameraIntrinsicsBlock
 
 ### Community 33 - "Community 33"
 Cohesion: 0.05
 Nodes (40): 1. 当前基线, 2.1 不推翻 `A1-A3`, 2.2 测试体系要前置，但不一次性铺满, 2.3 不先做大规模 rename, 2.4 保留 supervisor 多进程模型, 2.5.1 logger / 通信 / 调度的靠拢方式, 2.5 camera 重构优先拆“域模型”，不先碰深层设备访问, 2.6 YAML 先兼容，后升级 (+32 more)
 
 ### Community 34 - "Community 34"
-Cohesion: 0.33
-Nodes (13): alsa_hw(), alsa_plughw(), describe_usb_audio_device(), ensure_playback_mixer(), get_usb_audio_device(), _normalize_usb_name(), _parse_card_device_from_symlink(), _read_capture_node() (+5 more)
+Cohesion: 0.12
+Nodes (11): gripper_hmi, utils, utils_smoke_test, ReadEnvValue(), TrimWhitespace(), test_env_utils, test_file_utils, test_time_utils (+3 more)
 
 ### Community 35 - "Community 35"
-Cohesion: 0.2
-Nodes (11): sensor_protocol, test_bsp_crc, test_encoder_protocol, test_imu_batch_timestamp, ugripper(), FixedNowNs(), MakePayload(), TEST() (+3 more)
+Cohesion: 0.33
+Nodes (13): alsa_hw(), alsa_plughw(), describe_usb_audio_device(), ensure_playback_mixer(), get_usb_audio_device(), _normalize_usb_name(), _parse_card_device_from_symlink(), _read_capture_node() (+5 more)
 
 ### Community 37 - "Community 37"
 Cohesion: 0.5
@@ -391,8 +397,8 @@ Cohesion: 0.33
 Nodes (6): test/src/camera_recorder, test/src/gripper_hmi, test/src/record_runtime, test/src/sensor_recorder, test/src/utils, test/src/*
 
 ### Community 41 - "Community 41"
-Cohesion: 0.17
-Nodes (24): GripperHmiTool, allocateCommandIdLocked(), readAnyStatusFrameLocked(), readSerialNumber(), writeCalibrationData(), writeSerialNumber(), build_calib_chunk_frame(), _build_log_callback() (+16 more)
+Cohesion: 0.23
+Nodes (18): GripperHmiTool, writeSerialNumber(), build_calib_chunk_frame(), _build_log_callback(), build_write_sn_frame(), decode_serial_number(), describe_status_code(), describe_status_frame() (+10 more)
 
 ### Community 42 - "Community 42"
 Cohesion: 0.25
@@ -403,16 +409,16 @@ Cohesion: 0.35
 Nodes (8): Interval, intervalStart(), intervalStop(), IntervalTree, visit_all(), visit_contained(), visit_near(), visit_overlapping()
 
 ### Community 45 - "Community 45"
-Cohesion: 0.08
-Nodes (40): applySideCalibrationPayload(), checkRecorderProcesses(), currentDateString(), EpisodeManager::writeFilteredCalibration(), eraseSideCalibrationEntries(), findJsonPath(), findJsonPathConst(), findSourceCalibrationEntry() (+32 more)
+Cohesion: 0.07
+Nodes (43): addVersionPrefix(), classifyQualityError(), currentDateString(), EpisodeManager::writeFilteredCalibration(), EpisodeManager::writeFinalMetadata(), findJsonPath(), findJsonPathConst(), findSourceCalibrationEntry() (+35 more)
 
 ### Community 46 - "Community 46"
 Cohesion: 0.05
-Nodes (55): CameraKind(), Changelog, Top-level CMakeLists, ros2-humble-arm Container Environment Request, Naming And YAML Contract, Agent Overview, Package Contents Baseline, pp_main (+47 more)
+Nodes (58): CameraKind(), Changelog, Top-level CMakeLists, ros2-humble-arm Container Environment Request, Naming And YAML Contract, Agent Overview, Package Contents Baseline, pp_main (+50 more)
 
 ### Community 47 - "Community 47"
-Cohesion: 0.18
-Nodes (11): Changelog, Unreleased, v1.2.0 - 2026-03-14, v1.2.10 - 2026-04-09, v1.2.1 - 2026-03-14, v1.2.2 - 2026-03-16, v1.2.5 - 2026-03-19, v1.2.6 - 2026-03-20 (+3 more)
+Cohesion: 0.4
+Nodes (8): gripper_hmi_led_effects, clampProgress(), clampToU8(), errorLevel(), parseStateText(), render(), stateText(), GripperLedEffectRenderer()
 
 ### Community 49 - "Community 49"
 Cohesion: 0.29
@@ -423,8 +429,8 @@ Cohesion: 0.7
 Nodes (4): extract_class_name(), extract_function_name(), format(), get_level_color_start()
 
 ### Community 52 - "Community 52"
-Cohesion: 0.25
-Nodes (15): assert_output_has_mcaps(), build_topic_stats(), collect_gap_events(), create_output_dir(), ensure_mcap_dependency(), iter_mcap_messages(), main(), ns_to_text() (+7 more)
+Cohesion: 0.24
+Nodes (16): assert_output_has_mcaps(), build_topic_stats(), collect_gap_events(), create_output_dir(), ensure_mcap_dependency(), GapEvent, iter_mcap_messages(), main() (+8 more)
 
 ### Community 54 - "Community 54"
 Cohesion: 0.67
@@ -436,15 +442,15 @@ Nodes (3): ASR README, sherpa-onnx, ASR/test.py
 
 ### Community 78 - "Community 78"
 Cohesion: 0.51
-Nodes (38): Changelog, Changelog, Changelog, Changelog, Changelog, Changelog, Changelog, Changelog (+30 more)
+Nodes (42): Changelog, Changelog, Changelog, Changelog, Changelog, Changelog, Changelog, Changelog (+34 more)
 
 ### Community 79 - "Community 79"
 Cohesion: 0.06
 Nodes (32): code:bash (sudo systemctl status ugripper.service), code:bash (./scripts/build_runtime_venv.sh), code:bash (./scripts/build_runtime_venv.sh --target-dir /tmp/ugripper-a), code:bash (./usb_updater_build.sh), code:bash (PKG_VERSION_SUFFIX=+merge1 ./usb_updater_build.sh), code:bash (build/package/updater/das-usb-updater_1.0.0_all.deb), code:bash (./usb_updater_transition_build.sh), code:bash (build/package/updater-transition/ugripper-usb-updater_1.2.5_) (+24 more)
 
 ### Community 80 - "Community 80"
-Cohesion: 0.33
-Nodes (7): currentSteadyMs(), GripperPanelManager::maybeReconnectDriver(), GripperPanelManager::poll(), initializeMainCameraRuntimeStates(), maintainMainCameraRuntimeStates(), resolveDeviceNodeTarget(), syncMainCameraRuntimeStatesToEpisodeManager()
+Cohesion: 0.43
+Nodes (4): main(), resolveEncoderLabel(), resolveEncoderPort(), sampleFinalState()
 
 ### Community 81 - "Community 81"
 Cohesion: 0.08
@@ -611,20 +617,20 @@ Cohesion: 0.22
 Nodes (8): 1. 总体结论, 2. CameraRecorder, 3. SensorRecorder, 4. GripperHmiTool, 5. UgripperRuntime, 6. 暂不进入 standalone app 的内容, 7. B1 完成口径, Standalone Integration Inputs Baseline
 
 ### Community 123 - "Community 123"
-Cohesion: 0.18
-Nodes (20): build_markdown_report(), build_parser(), build_validate_command(), choose_python_runner(), discover_device_roots(), EpisodeResult, find_first_issue(), format_timestamp() (+12 more)
+Cohesion: 0.27
+Nodes (9): load_lines(), main(), parse_count_requirement(), parse_diag_fields(), load_lines(), main(), parse_diag_fields(), load_lines() (+1 more)
 
 ### Community 124 - "Community 124"
 Cohesion: 0.17
 Nodes (17): audio_log(), read_env_file_value(), empty(), EnsureGstreamerInitialized(), ParseArgs(), ParseFramePtsUsFromDebugTsLine(), ParseFramePtsUsFromGstIdentityLine(), ParseFramePtsUsFromProgressLine() (+9 more)
 
 ### Community 125 - "Community 125"
-Cohesion: 0.12
-Nodes (36): analyze_video(), _build_default_run_dir(), _build_issue_tags(), build_report_paths(), _collect_frame_stats(), _copy_file(), _estimate_effective_fps(), _format_number() (+28 more)
+Cohesion: 0.14
+Nodes (25): load_camera_params(), main(), 从 Kalibr camchain.yaml 文件中读取内参和畸变参数, main(), record_capture(), render_output(), require_sox(), main() (+17 more)
 
 ### Community 126 - "Community 126"
-Cohesion: 0.17
-Nodes (12): isExclusiveStatusFrame(), isValidEightByteRecvFrame(), readExpectedStatusFrameLocked(), readStatusFrameLocked(), hex_encode(), is_exclusive_status_frame(), Enabled(), EnsureParentDirExistsLocked() (+4 more)
+Cohesion: 0.26
+Nodes (7): readAnyStatusFrameLocked(), readExpectedStatusFrameLocked(), readSerialNumber(), GripperHmiClient, hex_encode(), is_exclusive_status_frame(), main()
 
 ### Community 127 - "Community 127"
 Cohesion: 0.22
@@ -715,16 +721,16 @@ Cohesion: 0.29
 Nodes (6): Runtime Entrypoints Baseline, 主链启动链, 入口清单, 备注, 当前最小可运行基线, 当前本地状态
 
 ### Community 149 - "Community 149"
-Cohesion: 0.4
-Nodes (5): 11. 推荐迁移阶段, Phase 1：仓内重构，不改主进程边界, Phase 2：控制面向 standalone 模式对齐, Phase 3：逐步并入 `pp_main/standalone`, Phase 4：评估是否继续缩减进程边界
+Cohesion: 0.33
+Nodes (7): currentSteadyMs(), GripperPanelManager::maybeReconnectDriver(), GripperPanelManager::poll(), initializeMainCameraRuntimeStates(), maintainMainCameraRuntimeStates(), resolveDeviceNodeTarget(), syncMainCameraRuntimeStatesToEpisodeManager()
 
 ### Community 150 - "Community 150"
 Cohesion: 0.29
 Nodes (6): 1. 测试结构, 2. 主要测试项, 3. 当前结果快照, 4. 现在可以怎么理解这些结果, 5. 推荐把它和哪份文档一起看, `pp_main` 合并后 `ugripper` 测试结构与当前结果简表
 
 ### Community 151 - "Community 151"
-Cohesion: 0.43
-Nodes (4): main(), resolveEncoderLabel(), resolveEncoderPort(), sampleFinalState()
+Cohesion: 0.15
+Nodes (15): sensor_domain, sensor_protocol, MakeTempDir(), TEST(), test_bsp_crc, test_encoder_protocol, test_imu_batch_timestamp, test_sensor_mcap_checker (+7 more)
 
 ### Community 152 - "Community 152"
 Cohesion: 0.33
@@ -815,8 +821,8 @@ Cohesion: 0.4
 Nodes (5): 4.1 目录真源规则, 4.3 建议的 namespace 口径, 4.4 Shell / Python 命名规则, 4.5 YAML 规范规则, 4. 建议采用的目标规范
 
 ### Community 174 - "Community 174"
-Cohesion: 0.39
-Nodes (7): main(), record_capture(), render_output(), require_sox(), main(), record_capture(), require_sox()
+Cohesion: 0.18
+Nodes (11): Changelog, Unreleased, v1.2.0 - 2026-03-14, v1.2.10 - 2026-04-09, v1.2.1 - 2026-03-14, v1.2.2 - 2026-03-16, v1.2.5 - 2026-03-19, v1.2.6 - 2026-03-20 (+3 more)
 
 ### Community 175 - "Community 175"
 Cohesion: 0.4
@@ -867,8 +873,8 @@ Cohesion: 0.4
 Nodes (3): FakeStereoSessionPort, TempDir, TEST()
 
 ### Community 187 - "Community 187"
-Cohesion: 0.31
-Nodes (6): MakeTempDir(), TEST(), test_sensor_mcap_checker, MakeTempDir(), TEST(), WriteSyntheticMcap()
+Cohesion: 0.83
+Nodes (3): MakeTempDir(), TEST(), WriteSyntheticMcap()
 
 ### Community 188 - "Community 188"
 Cohesion: 0.5
@@ -879,8 +885,8 @@ Cohesion: 0.5
 Nodes (4): 8.1 可以立即生效的规则, 8.2 需要按模块渐进迁移的规则, 8.3 不建议现在就做的事, 8. 命名迁移策略
 
 ### Community 190 - "Community 190"
-Cohesion: 0.47
-Nodes (8): count_frames(), decode_window(), evaluate_windows(), main(), parse_fraction(), probe_stream_info(), run_command(), summarize_failures()
+Cohesion: 0.09
+Nodes (41): CurrentEpochMs(), cancelBackgroundTactileValidation(), captureTactileGrayFrame(), commandExists(), computeTactileFrameMetrics(), currentEpochMs(), EpisodeManager::initialize(), EpisodeManager::refreshTactileReferenceCacheForSide() (+33 more)
 
 ### Community 191 - "Community 191"
 Cohesion: 0.5
@@ -915,22 +921,42 @@ Cohesion: 0.5
 Nodes (4): A7. 拆高风险脚本, 内容, 完成标准, 测试策略
 
 ### Community 199 - "Community 199"
-Cohesion: 0.32
-Nodes (8): areSideCriticalDevicesReady(), clearGripperRuntimeStateForSide(), EpisodeManager::writeMetadata(), gripperStateIndexForSide(), processPendingGripperRefreshes(), refreshGripperIdentityCacheForMetadata(), refreshGripperRuntimeStateForSide(), refreshTactileReferenceCachesForSide()
+Cohesion: 0.2
+Nodes (9): 11. 当前使用注意点, 1. 当前系统一句话, 2. 安装布局与入口, 3. 模块总览, 4. 启动链路, 5.1 空闲态与阈值, 5.2 按键动作, 5. 状态机与按键行为 (+1 more)
 
 ### Community 203 - "Community 203"
-Cohesion: 0.5
-Nodes (4): 10.1 顶层, 10.2 worker, 10.3 公共层, 10. 推荐的目标架构
+Cohesion: 0.2
+Nodes (10): 8.1 当前状态灯语义, 8.2 关键持久化与临时路径, 8.3 PERF 日志, 8.3 音频链路关键行为, 8.4 相关辅助单元, 8.4 音频链路关键行为, 8.5 相关辅助单元, 8.5 硬件健康监控 (+2 more)
 
 ### Community 205 - "Community 205"
-Cohesion: 0.67
-Nodes (3): load_camera_params(), main(), 从 Kalibr camchain.yaml 文件中读取内参和畸变参数
+Cohesion: 0.5
+Nodes (4): 10.1 顶层, 10.2 worker, 10.3 公共层, 10. 推荐的目标架构
 
 ### Community 206 - "Community 206"
 Cohesion: 0.67
 Nodes (3): 11.1 可复用公共库, 11.2 仍带明显 standalone 语义的模块, 11. 并入 `pp_main` 时的建议落位
 
 ### Community 237 - "Community 237"
+Cohesion: 0.25
+Nodes (8): 9.1 当前主要配置入口, 9.2 当前默认项, 9.3 U 盘支持内容, 9.4 U 盘同次插入顺序, 9.5 安装脚本与网络行为, 9.6 网线监测行为, 9.7 主包打包约束, 9. 配置、安装与 U 盘流程
+
+### Community 238 - "Community 238"
+Cohesion: 0.4
+Nodes (5): 11. 推荐迁移阶段, Phase 1：仓内重构，不改主进程边界, Phase 2：控制面向 standalone 模式对齐, Phase 3：逐步并入 `pp_main/standalone`, Phase 4：评估是否继续缩减进程边界
+
+### Community 239 - "Community 239"
+Cohesion: 0.4
+Nodes (5): 6.1 开始录制, 6.2 相机链路, 6.3 传感器链路, 6.4 停止录制, 6. 录制生命周期
+
+### Community 240 - "Community 240"
+Cohesion: 0.4
+Nodes (5): 7.1 默认产物, 7.2 metadata.json, 7.2 停录强校验, 7.3 停录强校验, 7. Episode 产物与检查
+
+### Community 241 - "Community 241"
+Cohesion: 0.29
+Nodes (6): Enabled(), EnsureParentDirExistsLocked(), Log(), NowUnixSecUsecLocked(), OpenFileIfNeededLocked(), DA()
+
+### Community 243 - "Community 243"
 Cohesion: 0.67
 Nodes (3): 14. 关键源码参考, `pp_main`, `ugripper`
 
@@ -969,9 +995,9 @@ Nodes (3): 14. 关键源码参考, `pp_main`, `ugripper`
   docs/archive/2026-refactor-history/baseline/config-entrypoints.md · relation: conceptually_related_to
 
 ## Knowledge Gaps
-- **1080 isolated node(s):** `StreamSpec`, `Use boot_time_offset from info.json (seconds)`, `Extract PTS timestamps from MKV file using ffprobe     Returns: list of (frame_i`, `Write camera frames using accurate PTS from ffprobe`, `从 Kalibr camchain.yaml 文件中读取内参和畸变参数` (+1075 more)
+- **1084 isolated node(s):** `StreamSpec`, `Use boot_time_offset from info.json (seconds)`, `Extract PTS timestamps from MKV file using ffprobe     Returns: list of (frame_i`, `Write camera frames using accurate PTS from ffprobe`, `从 Kalibr camchain.yaml 文件中读取内参和畸变参数` (+1079 more)
   These have ≤1 connection - possible missing edges or undocumented components.
-- **17 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
+- **18 thin communities (<3 nodes) omitted from report** — run `graphify query` to explore isolated nodes.
 
 ## Suggested Questions
 _Questions this graph is uniquely positioned to answer:_
