@@ -126,6 +126,21 @@ static std::string keyName(int keyIndex)
     }
 }
 
+static std::string toHexString(const std::string &text)
+{
+    std::ostringstream stream;
+    for (size_t index = 0; index < text.size(); ++index)
+    {
+        if (index != 0)
+        {
+            stream << ' ';
+        }
+        stream << std::hex << std::uppercase << std::setw(2) << std::setfill('0')
+               << static_cast<int>(static_cast<unsigned char>(text[index]));
+    }
+    return stream.str();
+}
+
 static bool parseInt(const char *text, int *value)
 {
     if (text == nullptr || value == nullptr)
@@ -522,7 +537,12 @@ int main(int argc, char **argv)
                 }
                 else
                 {
-                    std::cout << '[' << device->getPort() << "] sn=" << serialNumber << std::endl;
+                    std::cout << '[' << device->getPort() << "] sn=" << serialNumber;
+                    if (serialNumber.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-") != std::string::npos)
+                    {
+                        std::cout << " hex=" << toHexString(serialNumber);
+                    }
+                    std::cout << std::endl;
                 }
             }
         }

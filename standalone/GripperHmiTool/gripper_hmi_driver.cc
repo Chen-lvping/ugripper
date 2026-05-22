@@ -1291,6 +1291,19 @@ bool GripperHmiDriver::readSerialNumberLocked(std::string *serialNumber)
             }
 
             *serialNumber = gripper_hmi::decodeSerialNumber(encoded);
+            if (serialNumber->empty())
+            {
+                lastCommandError_ = "serial number read returned empty payload";
+                return false;
+            }
+            const bool all_same = std::all_of(encoded.begin(), encoded.end(), [](char ch) {
+                return static_cast<unsigned char>(ch) == 0xFF || ch == '\0';
+            });
+            if (all_same)
+            {
+                lastCommandError_ = "serial number read returned invalid payload";
+                return false;
+            }
             if (serialNumber->size() == (GripperHmiProtocol::kSerialNumberChunkSize * 2) &&
                 serialNumber->substr(0, GripperHmiProtocol::kSerialNumberChunkSize) ==
                     serialNumber->substr(GripperHmiProtocol::kSerialNumberChunkSize))
