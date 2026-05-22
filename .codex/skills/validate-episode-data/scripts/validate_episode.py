@@ -30,9 +30,9 @@ BASE_VIDEO_FILES = [
     ("right_tcam_r", "tcam_right_r.mkv", "right"),
 ]
 CHEST_VIDEO_FILE = ("chest_cam_main", "cam_chest.mkv", "chest")
-MAIN_CAMERA_NAMES = {"left_cam_main", "right_cam_main", "chest_cam_main"}
-STEREO_CAMERA_NAMES = {"left_stereo", "right_stereo"}
-TACTILE_CAMERA_NAMES = {"left_tcam_l", "left_tcam_r", "right_tcam_l", "right_tcam_r"}
+MAIN_CAMERA_NAMES = {"cam_left_main", "cam_right_main", "cam_chest_main"}
+STEREO_CAMERA_NAMES = {"stereo_left", "stereo_right"}
+TACTILE_CAMERA_NAMES = {"tcam_left_l", "tcam_left_r", "tcam_right_l", "tcam_right_r"}
 SENSOR_FILES = [
     ("left", "sensor_left.mcap", ["encoder_left"]),
     ("right", "sensor_right.mcap", ["encoder_right"]),
@@ -100,46 +100,49 @@ EXPECTED_METADATA_VIDEO_DETAIL_NAMES = [
     "stereo_right.mkv",
     "cam_chest.mkv",
 ]
-EXPECTED_INFO_KEYS = {
-    "boot_time_offset",
-    "boot_time_offset_us",
-    *(f"{video_name}_record_time_offset_us" for video_name, _, _ in BASE_VIDEO_FILES),
-}
-OPTIONAL_INFO_KEYS = {"stereo_session"}
-EXPECTED_CALIBRATION_ROOT_KEYS = {"calibration_info", "metadata", "observation"}
+EXPECTED_CALIBRATION_KEY_ORDER = ["calibration_info", "observation"]
+EXPECTED_CALIBRATION_INFO_KEY_ORDER = ["calibration_status", "format_version"]
+EXPECTED_CALIBRATION_OBSERVATION_KEY_ORDER = ["images", "imu"]
+EXPECTED_CALIBRATION_ROOT_KEYS = set(EXPECTED_CALIBRATION_KEY_ORDER)
 EXPECTED_CALIBRATION_OBSERVATION_KEYS = {"images", "imu"}
-REQUIRED_CALIBRATION_ROOT_KEYS = ["calibration_info", "metadata", "observation"]
-REQUIRED_CALIBRATION_IMAGE_KEYS = [video_name for video_name, _, _ in BASE_VIDEO_FILES]
-REQUIRED_CALIBRATION_IMU_KEYS = ["left_imu", "right_imu"]
-MAIN_CAMERA_CALIBRATION_KEYS = {
-    "shape",
-    "names",
-    "info",
-    "intrinsics",
+REQUIRED_CALIBRATION_ROOT_KEYS = list(EXPECTED_CALIBRATION_KEY_ORDER)
+EXPECTED_CALIBRATION_IMAGE_KEY_ORDER = [
+    "cam_chest_main",
+    "stereo_left",
+    "tcam_left_l",
+    "tcam_left_r",
+    "stereo_right",
+    "tcam_right_l",
+    "tcam_right_r",
+    "cam_left_main",
+    "cam_right_main",
+]
+REQUIRED_CALIBRATION_IMU_KEYS = ["imu_left", "imu_right"]
+MAIN_CAMERA_CALIBRATION_KEY_ORDER = [
     "camera_model",
-    "distortion_model",
     "distortion_coeffs",
-    "dtype",
+    "distortion_model",
     "fps",
-}
-STEREO_CALIBRATION_KEYS = {
-    "shape",
+    "intrinsics",
     "names",
-    "info",
+    "shape",
+]
+STEREO_CALIBRATION_KEY_ORDER = [
     "cam0",
     "cam1",
+    "camera_model",
+    "distortion_model",
     "extrinsics",
-    "residuals",
-    "dtype",
     "fps",
-}
-STEREO_CAMERA_NODE_KEYS = {"camera_model_enum", "intrinsics", "distortion_coeffs"}
-TACTILE_CALIBRATION_KEYS = {"shape", "names", "info", "dtype", "serial"}
-IMU_CALIBRATION_KEYS = {"dtype", "model", "update_rate_hz", "accelerometer", "gyroscope"}
+    "names",
+    "shape",
+]
+STEREO_CAMERA_NODE_KEY_ORDER = ["distortion_coeffs", "intrinsics"]
+TACTILE_CALIBRATION_KEY_ORDER = ["names", "serial", "shape"]
+IMU_CALIBRATION_KEYS = {"update_rate_hz", "accelerometer", "gyroscope"}
 REQUIRED_FILES = [
     "metadata.json",
     "calibration.json",
-    "info.json",
     *(file_name for _, file_name, _ in BASE_VIDEO_FILES),
     *(file_name for _, file_name, _ in SENSOR_FILES),
     "fays_data_left.mcap",
@@ -397,9 +400,9 @@ class EpisodeValidator:
         self.args = args
         self.episode_dir = resolve_episode_dir(args.path, args.latest)
         self.findings: list[Finding] = []
-        self.info: dict[str, Any] = {}
         self.metadata: dict[str, Any] = {}
         self.calibration: dict[str, Any] = {}
+        self.video_start_offsets_us: dict[str, int] = {}
         self.video_stats: dict[str, VideoStats] = {}
         self.sensor_stats: dict[str, SensorTopicStats] = {}
         self.artifacts: dict[str, Any] = {}
@@ -416,12 +419,10 @@ class EpisodeValidator:
         self.check_required_files()
         self.check_optional_artifacts()
         self.load_metadata()
-        self.load_info()
         self.load_calibration()
         self.resolve_active_video_files()
         self.check_dynamic_required_files()
         self.validate_metadata_fields()
-        self.validate_info_fields()
         self.validate_calibration_structure()
         self.scan_videos()
         self.scan_main_camera_pair()
@@ -481,11 +482,10 @@ class EpisodeValidator:
 
     def chest_camera_enabled(self) -> bool:
         chest_file = self.episode_dir / CHEST_VIDEO_FILE[1]
-        chest_offset_key = f"{CHEST_VIDEO_FILE[0]}_record_time_offset_us"
         images = ((self.calibration.get("observation") or {}).get("images") or {}) if isinstance(self.calibration, dict) else {}
         return (
             chest_file.exists()
-            or chest_offset_key in self.info
+            or CHEST_VIDEO_FILE[1] in self.video_start_offsets_us
             or CHEST_VIDEO_FILE[0] in images
         )
 
@@ -537,9 +537,6 @@ class EpisodeValidator:
 
     def load_metadata(self) -> None:
         self.metadata = self.load_json_file("metadata.json")
-
-    def load_info(self) -> None:
-        self.info = self.load_json_file("info.json")
 
     def load_calibration(self) -> None:
         self.calibration = self.load_json_file("calibration.json")
@@ -646,6 +643,28 @@ class EpisodeValidator:
                         expected_type="str",
                         actual_type=value_type_name(nested_value),
                     )
+            required_non_empty = [
+                "gripper_right_sn",
+                "gripper_left_sn",
+                "cam_right_sn",
+                "cam_left_sn",
+                "tactile_right_l_sn",
+                "tactile_right_r_sn",
+                "tactile_left_l_sn",
+                "tactile_left_r_sn",
+                "stereo_right_sn",
+                "stereo_left_sn",
+            ]
+            if self.chest_camera_enabled():
+                required_non_empty.append("cam_chest_sn")
+            for key in required_non_empty:
+                value = hardware_list.get(key)
+                if not isinstance(value, str) or not value.strip():
+                    self.add_finding(
+                        "FAIL",
+                        "metadata_hardware_sn",
+                        f"metadata.json.hardware_list.{key} 为空",
+                    )
         data_version = safe_str(self.metadata.get("data_version"))
         if data_version is not None and data_version != "3.0":
             self.add_finding(
@@ -677,7 +696,16 @@ class EpisodeValidator:
                 quality_check_status=quality_status,
             )
         quality_err_type = safe_str(self.metadata.get("quality_check_err_type"))
-        if quality_err_type is not None and quality_err_type not in {"", "missing_file", "collection_duration_too_short", "frame_loss", "finalize_error", "unknown"}:
+        if quality_err_type is not None and quality_err_type not in {
+            "",
+            "missing_file",
+            "collection_duration_too_short",
+            "frame_loss",
+            "finalize_error",
+            "calibration_error",
+            "device_disconnected",
+            "unknown",
+        }:
             self.add_finding(
                 "WARN",
                 "metadata_quality_check_err_type",
@@ -733,51 +761,19 @@ class EpisodeValidator:
                         self.add_finding("FAIL", "metadata_video_details", f"video_details[{index}].{key} 类型异常")
                 if "start_offset_us" in detail and not isinstance(detail.get("start_offset_us"), int):
                     self.add_finding("FAIL", "metadata_video_details", f"video_details[{index}].start_offset_us 类型异常")
-
-    def validate_info_fields(self) -> None:
-        info_keys = set(self.info.keys())
-        expected_info_keys = set(EXPECTED_INFO_KEYS)
-        if self.chest_camera_enabled():
-            expected_info_keys.add("chest_cam_main_record_time_offset_us")
-        missing_keys = sorted(expected_info_keys - info_keys)
-        unexpected_keys = sorted(info_keys - expected_info_keys - OPTIONAL_INFO_KEYS)
-        if missing_keys:
-            self.add_finding(
-                "FAIL",
-                "info_schema_missing_keys",
-                "info.json 缺少预期字段集合中的键",
-                missing_keys=missing_keys,
-            )
-        if unexpected_keys:
-            self.add_finding(
-                "FAIL",
-                "info_schema_unexpected_keys",
-                "info.json 出现未登记字段，疑似 schema 被改动",
-                unexpected_keys=unexpected_keys,
-            )
-        boot_offset = safe_float(self.info.get("boot_time_offset"))
-        boot_offset_us = safe_int(self.info.get("boot_time_offset_us"))
-        if boot_offset is None or boot_offset <= 0:
-            self.add_finding("FAIL", "info_field", "info.json 缺少合法的 boot_time_offset")
-        if boot_offset_us is None or boot_offset_us <= 0:
-            self.add_finding("FAIL", "info_field", "info.json 缺少合法的 boot_time_offset_us")
-        if boot_offset is not None and boot_offset_us is not None:
-            if abs(boot_offset * 1_000_000.0 - boot_offset_us) > 1.0:
-                self.add_finding(
-                    "FAIL",
-                    "boot_offset_mismatch",
-                    "boot_time_offset 与 boot_time_offset_us 不一致",
-                    boot_time_offset=boot_offset,
-                    boot_time_offset_us=boot_offset_us,
-                )
-
-        for video_name, _, _ in self.active_video_files:
-            field_name = f"{video_name}_record_time_offset_us"
-            value = safe_int(self.info.get(field_name))
-            if value is None or value <= 0:
-                self.add_finding("FAIL", "info_field", f"info.json 缺少合法字段: {field_name}")
+                if isinstance(detail.get("name"), str) and isinstance(detail.get("start_offset_us"), int):
+                    self.video_start_offsets_us[detail["name"]] = detail["start_offset_us"]
 
     def validate_calibration_structure(self) -> None:
+        calibration_key_order = list(self.calibration.keys())
+        if calibration_key_order != EXPECTED_CALIBRATION_KEY_ORDER:
+            self.add_finding(
+                "FAIL",
+                "calibration_schema_key_order",
+                "calibration.json 顶层字段顺序不符合 3.0 标准范本",
+                actual_order=calibration_key_order,
+                expected_order=EXPECTED_CALIBRATION_KEY_ORDER,
+            )
         calibration_keys = set(self.calibration.keys())
         missing_root_keys = sorted(EXPECTED_CALIBRATION_ROOT_KEYS - calibration_keys)
         unexpected_root_keys = sorted(calibration_keys - EXPECTED_CALIBRATION_ROOT_KEYS)
@@ -798,6 +794,38 @@ class EpisodeValidator:
         for key in REQUIRED_CALIBRATION_ROOT_KEYS:
             if key not in self.calibration:
                 self.add_finding("FAIL", "calibration_field", f"calibration.json 缺少字段: {key}")
+        calibration_info = self.calibration.get("calibration_info")
+        if not isinstance(calibration_info, dict):
+            self.add_finding(
+                "FAIL",
+                "calibration_schema_type",
+                "calibration.json.calibration_info 类型异常",
+                expected_type="dict",
+                actual_type=value_type_name(calibration_info),
+            )
+        else:
+            if list(calibration_info.keys()) != EXPECTED_CALIBRATION_INFO_KEY_ORDER:
+                self.add_finding(
+                    "FAIL",
+                    "calibration_schema_key_order",
+                    "calibration.json.calibration_info 字段顺序不符合 3.0 标准范本",
+                    actual_order=list(calibration_info.keys()),
+                    expected_order=EXPECTED_CALIBRATION_INFO_KEY_ORDER,
+                )
+            if calibration_info.get("calibration_status") not in {"calibrated", "uncalibrated"}:
+                self.add_finding(
+                    "FAIL",
+                    "calibration_field",
+                    "calibration.json.calibration_info.calibration_status 非法",
+                    value=calibration_info.get("calibration_status"),
+                )
+            if calibration_info.get("format_version") != "3.0":
+                self.add_finding(
+                    "FAIL",
+                    "calibration_field",
+                    "calibration.json.calibration_info.format_version 应为 3.0",
+                    value=calibration_info.get("format_version"),
+                )
         observation = self.calibration.get("observation")
         if not isinstance(observation, dict):
             self.add_finding(
@@ -808,6 +836,14 @@ class EpisodeValidator:
                 actual_type=value_type_name(observation),
             )
             return
+        if list(observation.keys()) != EXPECTED_CALIBRATION_OBSERVATION_KEY_ORDER:
+            self.add_finding(
+                "FAIL",
+                "calibration_schema_key_order",
+                "calibration.json.observation 字段顺序不符合 3.0 标准范本",
+                actual_order=list(observation.keys()),
+                expected_order=EXPECTED_CALIBRATION_OBSERVATION_KEY_ORDER,
+            )
         observation_keys = set(observation.keys())
         missing_observation_keys = sorted(EXPECTED_CALIBRATION_OBSERVATION_KEYS - observation_keys)
         unexpected_observation_keys = sorted(observation_keys - EXPECTED_CALIBRATION_OBSERVATION_KEYS)
@@ -829,9 +865,17 @@ class EpisodeValidator:
         if not isinstance(images, dict):
             self.add_finding("FAIL", "calibration_field", "calibration.json.observation.images 缺失或非法")
         else:
-            expected_image_keys = list(REQUIRED_CALIBRATION_IMAGE_KEYS)
-            if self.chest_camera_enabled():
-                expected_image_keys.append(CHEST_VIDEO_FILE[0])
+            expected_image_keys = list(EXPECTED_CALIBRATION_IMAGE_KEY_ORDER)
+            if not self.chest_camera_enabled():
+                expected_image_keys = [name for name in expected_image_keys if name != "cam_chest_main"]
+            if list(images.keys()) != expected_image_keys:
+                self.add_finding(
+                    "FAIL",
+                    "calibration_schema_key_order",
+                    "calibration.json.observation.images 字段顺序不符合 3.0 标准范本",
+                    actual_order=list(images.keys()),
+                    expected_order=expected_image_keys,
+                )
             unexpected_image_keys = sorted(set(images.keys()) - set(expected_image_keys))
             if unexpected_image_keys:
                 self.add_finding(
@@ -848,6 +892,14 @@ class EpisodeValidator:
         if not isinstance(imu, dict):
             self.add_finding("FAIL", "calibration_field", "calibration.json.observation.imu 缺失或非法")
         else:
+            if list(imu.keys()) != REQUIRED_CALIBRATION_IMU_KEYS:
+                self.add_finding(
+                    "FAIL",
+                    "calibration_schema_key_order",
+                    "calibration.json.observation.imu 字段顺序不符合 3.0 标准范本",
+                    actual_order=list(imu.keys()),
+                    expected_order=REQUIRED_CALIBRATION_IMU_KEYS,
+                )
             unexpected_imu_keys = sorted(set(imu.keys()) - set(REQUIRED_CALIBRATION_IMU_KEYS))
             if unexpected_imu_keys:
                 self.add_finding(
@@ -861,11 +913,12 @@ class EpisodeValidator:
                     self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.imu 缺少 {key}")
             self.validate_calibration_imu_entries(imu)
 
-    def validate_entry_allowed_keys(self, entry: Any, expected_keys: set[str], path: str) -> None:
+    def validate_entry_allowed_keys(self, entry: Any, expected_keys: set[str] | list[str], path: str) -> None:
         if not isinstance(entry, dict):
             self.add_finding("FAIL", "calibration_field", f"{path} 缺失或非法")
             return
-        unexpected_keys = sorted(set(entry.keys()) - expected_keys)
+        expected_key_set = set(expected_keys)
+        unexpected_keys = sorted(set(entry.keys()) - expected_key_set)
         if unexpected_keys:
             self.add_finding(
                 "FAIL",
@@ -873,23 +926,48 @@ class EpisodeValidator:
                 f"{path} 出现未登记字段，疑似 schema 被改动",
                 unexpected_keys=unexpected_keys,
             )
+        if isinstance(expected_keys, list) and list(entry.keys()) != expected_keys:
+            self.add_finding(
+                "FAIL",
+                "calibration_schema_key_order",
+                f"{path} 字段顺序不符合 3.0 标准范本",
+                actual_order=list(entry.keys()),
+                expected_order=expected_keys,
+            )
 
     def validate_calibration_image_entries(self, images: dict[str, Any], expected_image_keys: list[str]) -> None:
         for key in expected_image_keys:
             entry = images.get(key)
             if key in MAIN_CAMERA_NAMES:
-                self.validate_entry_allowed_keys(entry, MAIN_CAMERA_CALIBRATION_KEYS, f"calibration.json.observation.images.{key}")
+                self.validate_entry_allowed_keys(entry, MAIN_CAMERA_CALIBRATION_KEY_ORDER, f"calibration.json.observation.images.{key}")
+                if isinstance(entry, dict):
+                    if entry.get("camera_model") != "pinhole":
+                        self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images.{key}.camera_model 非法")
+                    if entry.get("distortion_model") != "equidistant":
+                        self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images.{key}.distortion_model 非法")
+                    if entry.get("names") != ["height", "width", "channels"]:
+                        self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images.{key}.names 非法")
+                    if entry.get("shape") != [1080, 1920, 3]:
+                        self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images.{key}.shape 非法")
             elif key in STEREO_CAMERA_NAMES:
-                self.validate_entry_allowed_keys(entry, STEREO_CALIBRATION_KEYS, f"calibration.json.observation.images.{key}")
+                self.validate_entry_allowed_keys(entry, STEREO_CALIBRATION_KEY_ORDER, f"calibration.json.observation.images.{key}")
                 if isinstance(entry, dict):
                     for camera_node in ("cam0", "cam1"):
                         self.validate_entry_allowed_keys(
                             entry.get(camera_node),
-                            STEREO_CAMERA_NODE_KEYS,
+                            STEREO_CAMERA_NODE_KEY_ORDER,
                             f"calibration.json.observation.images.{key}.{camera_node}",
                         )
+                    if entry.get("camera_model") != "pinhole":
+                        self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images.{key}.camera_model 非法")
+                    if entry.get("distortion_model") != "equidistant":
+                        self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images.{key}.distortion_model 非法")
+                    if entry.get("names") != ["height", "width", "channels"]:
+                        self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images.{key}.names 非法")
+                    if entry.get("shape") != [800, 640, 3]:
+                        self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images.{key}.shape 非法")
             elif key in TACTILE_CAMERA_NAMES:
-                self.validate_entry_allowed_keys(entry, TACTILE_CALIBRATION_KEYS, f"calibration.json.observation.images.{key}")
+                self.validate_entry_allowed_keys(entry, TACTILE_CALIBRATION_KEY_ORDER, f"calibration.json.observation.images.{key}")
                 if isinstance(entry, dict):
                     serial = entry.get("serial")
                     if not isinstance(serial, str) or not serial.strip():
@@ -905,6 +983,10 @@ class EpisodeValidator:
                             f"calibration.json.observation.images.{key}.serial 仍是占位符，未写入真实设备 serial",
                             serial=serial,
                         )
+                    if entry.get("names") != ["height", "width", "channels"]:
+                        self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images.{key}.names 非法")
+                    if entry.get("shape") != [480, 640, 3]:
+                        self.add_finding("FAIL", "calibration_field", f"calibration.json.observation.images.{key}.shape 非法")
 
     def validate_calibration_imu_entries(self, imu: dict[str, Any]) -> None:
         for key in REQUIRED_CALIBRATION_IMU_KEYS:
@@ -975,7 +1057,7 @@ class EpisodeValidator:
                 self.add_finding("FAIL", "video_unreadable", f"视频不可读: {file_name}", error=str(exc))
                 continue
 
-            record_offset_us = safe_int(self.info.get(f"{video_name}_record_time_offset_us"))
+            record_offset_us = safe_int(self.video_start_offsets_us.get(file_name))
             if self.args.skip_video_packets:
                 if stats.duration_sec is not None and record_offset_us is not None:
                     stats.first_pts_sec = 0.0
@@ -1339,54 +1421,7 @@ class EpisodeValidator:
                 )
 
     def check_stereo_session_consistency(self) -> None:
-        stereo_session = self.info.get("stereo_session")
-        if not isinstance(stereo_session, dict):
-            return
-
-        start_us = safe_int(stereo_session.get("start_system_time_us"))
-        stop_us = safe_int(stereo_session.get("stop_system_time_us"))
-        if start_us is None or stop_us is None or stop_us <= start_us:
-            self.add_finding("FAIL", "stereo_session", "stereo_session 的 start/stop_system_time_us 非法")
-            return
-
-        cameras = stereo_session.get("cameras")
-        if not isinstance(cameras, dict):
-            self.add_finding("FAIL", "stereo_session", "stereo_session 缺少 cameras 字段")
-            return
-
-        for camera_name in ("left_stereo", "right_stereo"):
-            entry = cameras.get(camera_name)
-            if not isinstance(entry, dict):
-                self.add_finding("FAIL", "stereo_session", f"stereo_session 缺少 {camera_name} entry")
-                continue
-            first_pts_us = safe_int(entry.get("first_written_frame_pts_us"))
-            first_sys_us = safe_int(entry.get("first_written_frame_system_time_us"))
-            last_pts_us = safe_int(entry.get("last_written_frame_pts_us"))
-            last_sys_us = safe_int(entry.get("last_written_frame_system_time_us"))
-            offset_us = safe_int(self.info.get(f"{camera_name}_record_time_offset_us"))
-            if None in (first_pts_us, first_sys_us, last_pts_us, last_sys_us, offset_us):
-                self.add_finding("FAIL", "stereo_session", f"{camera_name} 的 stereo_session 首尾字段不完整")
-                continue
-            expected_first_sys_us = offset_us + first_pts_us
-            expected_last_sys_us = offset_us + last_pts_us
-            first_error_ms = us_to_ms(abs(expected_first_sys_us - first_sys_us))
-            last_error_ms = us_to_ms(abs(expected_last_sys_us - last_sys_us))
-            if first_error_ms > self.args.stereo_consistency_warn_ms:
-                severity = "FAIL" if first_error_ms >= self.args.stereo_consistency_fail_ms else "WARN"
-                self.add_finding(
-                    severity,
-                    "stereo_first_consistency",
-                    f"{camera_name} 首帧时间与顶层 offset 不自洽",
-                    error_ms=round(first_error_ms, 3),
-                )
-            if last_error_ms > self.args.stereo_consistency_warn_ms:
-                severity = "FAIL" if last_error_ms >= self.args.stereo_consistency_fail_ms else "WARN"
-                self.add_finding(
-                    severity,
-                    "stereo_last_consistency",
-                    f"{camera_name} 尾帧时间与顶层 offset 不自洽",
-                    error_ms=round(last_error_ms, 3),
-                )
+        return
 
     def check_sensor_alignment(self) -> None:
         for topic_prefix in ("imu", "encoder"):
@@ -1457,57 +1492,10 @@ class EpisodeValidator:
         return (min(starts) if starts else None, max(ends) if ends else None)
 
     def check_video_sensor_alignment(self) -> None:
-        for side in ("left", "right"):
-            video_start_us, video_end_us = self.side_video_window_us(side)
-            sensor_start_ns, sensor_end_ns = self.side_sensor_window_ns(side)
-            if None in (video_start_us, video_end_us, sensor_start_ns, sensor_end_ns):
-                continue
-            start_diff_ms = abs(video_start_us * 1000 - sensor_start_ns) / 1_000_000.0
-            end_diff_ms = abs(video_end_us * 1000 - sensor_end_ns) / 1_000_000.0
-            if start_diff_ms > self.args.video_sensor_start_warn_ms:
-                severity = "FAIL" if start_diff_ms >= self.args.video_sensor_start_fail_ms else "WARN"
-                self.add_finding(
-                    severity,
-                    "video_sensor_start_alignment",
-                    f"{side} 侧视频与 sensor 起始窗口错位",
-                    start_diff_ms=round(start_diff_ms, 3),
-                )
-            if end_diff_ms > self.args.video_sensor_end_warn_ms:
-                severity = "FAIL" if end_diff_ms >= self.args.video_sensor_end_fail_ms else "WARN"
-                self.add_finding(
-                    severity,
-                    "video_sensor_end_alignment",
-                    f"{side} 侧视频与 sensor 结束窗口错位",
-                    end_diff_ms=round(end_diff_ms, 3),
-                )
+        return
 
     def check_video_sensor_overlap(self) -> None:
-        for side in ("left", "right"):
-            video_start_us, video_end_us = self.side_video_window_us(side)
-            sensor_start_ns, sensor_end_ns = self.side_sensor_window_ns(side)
-            if None in (video_start_us, video_end_us, sensor_start_ns, sensor_end_ns):
-                continue
-            video_start_ns = video_start_us * 1000
-            video_end_ns = video_end_us * 1000
-            overlap_ns = min(video_end_ns, sensor_end_ns) - max(video_start_ns, sensor_start_ns)
-            if overlap_ns <= 0:
-                self.add_finding(
-                    "FAIL",
-                    "video_sensor_overlap",
-                    f"{side} 侧视频与 sensor 窗口没有重叠",
-                    video_window_ns=[video_start_ns, video_end_ns],
-                    sensor_window_ns=[sensor_start_ns, sensor_end_ns],
-                )
-                continue
-            overlap_ratio = overlap_ns / max(1, video_end_ns - video_start_ns)
-            if overlap_ratio < self.args.video_sensor_overlap_warn_ratio:
-                severity = "FAIL" if overlap_ratio < self.args.video_sensor_overlap_fail_ratio else "WARN"
-                self.add_finding(
-                    severity,
-                    "video_sensor_overlap",
-                    f"{side} 侧视频与 sensor 重叠比例偏低",
-                    overlap_ratio=round(overlap_ratio, 3),
-                )
+        return
 
     def classify_patterns(self) -> None:
         starts = {
