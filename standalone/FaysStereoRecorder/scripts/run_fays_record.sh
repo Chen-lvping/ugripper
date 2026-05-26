@@ -122,6 +122,13 @@ send_control_cmd() {
     return 0
 }
 
+filter_fays_runtime_log_stream() {
+    awk '
+        /^[[:space:]]*(Stereo FPS|IMU FPS):[[:space:]]*[0-9]+([.][0-9]+)?[[:space:]]*$/ { next }
+        { print; fflush() }
+    '
+}
+
 append_ld_library_path "$LOCAL_FAYS_LIB_DIR"
 append_ld_library_path "$LOCAL_FTDI_LIB_DIR"
 append_ld_library_path "/usr/local/lib"
@@ -185,7 +192,9 @@ case "$MODE" in
         if [ -n "$STATUS_JSON_PATH" ]; then
             args+=(--status-json "$STATUS_JSON_PATH")
         fi
-        exec "$EXECUTABLE" "${args[@]}"
+        exec "$EXECUTABLE" "${args[@]}" \
+            > >(filter_fays_runtime_log_stream) \
+            2> >(filter_fays_runtime_log_stream >&2)
         ;;
     dump-calib-json)
         require_config_file || exit 1
