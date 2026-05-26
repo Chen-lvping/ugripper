@@ -163,9 +163,7 @@ GripperLedColor GripperLedEffectRenderer::render(const GripperLedEffect &effect,
     {
         const double phase = static_cast<double>(steadyMs % kReadyBreathPeriodMs) /
                              static_cast<double>(kReadyBreathPeriodMs);
-        // Keep the "deep breath" shape, but let it rise from full off and only
-        // cap the maximum brightness lower than before.
-        const double pulse = 0.5 - 0.5 * std::cos(2.0 * kPi * phase);
+        const double pulse = 0.5 + 0.5 * std::cos(2.0 * kPi * phase);
         const double shaped = pulse * pulse * pulse;
         const int level = static_cast<int>(std::lround(120.0 * shaped));
         return GripperLedColor{0, clampToU8(level), clampToU8((12 * level) / 150)};

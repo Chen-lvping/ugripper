@@ -50,6 +50,21 @@ TEST(GripperLedEffectRendererTest, RenderProducesStableColorsForSimpleStates)
     EXPECT_EQ(recordingOff.blue, 0);
 }
 
+TEST(GripperLedEffectRendererTest, ReadyBreathStartsBright)
+{
+    GripperLedEffectRenderer renderer;
+
+    const auto readyStart = renderer.render(GripperLedEffect{GripperLedEffectState::Ready, 0.0}, 0, 0);
+    EXPECT_EQ(readyStart.red, 0);
+    EXPECT_EQ(readyStart.green, 120);
+    EXPECT_EQ(readyStart.blue, 9);
+
+    const auto readyHalfCycle = renderer.render(GripperLedEffect{GripperLedEffectState::Ready, 0.0}, 2250, 0);
+    EXPECT_EQ(readyHalfCycle.red, 0);
+    EXPECT_EQ(readyHalfCycle.green, 0);
+    EXPECT_EQ(readyHalfCycle.blue, 0);
+}
+
 TEST(GripperLedEffectRendererTest, StateTextKeepsCalibRunPrefix)
 {
     const auto text = GripperLedEffectRenderer::stateText(

@@ -381,6 +381,7 @@ bool GripperHmiDriver::connect()
     ledEffectEnabled_ = false;
     ledEffectDirty_ = false;
     ledEffect_ = {};
+    ledEffectStartedAtMs_ = 0;
     pendingLedColor_ = GripperLedColor{0, 0, 0};
     lastRenderedColor_ = {255, 255, 255};
     lastLedRenderAtMs_ = 0;
@@ -524,8 +525,13 @@ bool GripperHmiDriver::setLedEffect(const GripperLedEffect &effect)
         return false;
     }
 
+    const bool sameState = ledEffectEnabled_ && ledEffect_.state == effect.state;
     ledEffect_ = effect;
     ledEffectEnabled_ = true;
+    if (!sameState || ledEffectStartedAtMs_ == 0)
+    {
+        ledEffectStartedAtMs_ = currentSteadyMs();
+    }
     ledEffectDirty_ = true;
     ioCv_.notify_one();
     return true;
@@ -2005,7 +2011,9 @@ void GripperHmiDriver::ioLoop()
         {
             if (renderDue || ledEffectDirty_)
             {
-                desiredColor = ledRenderer_.render(ledEffect_, nowMs, epochMs);
+                const uint64_t effectMs =
+                    nowMs >= ledEffectStartedAtMs_ ? (nowMs - ledEffectStartedAtMs_) : 0;
+                desiredColor = ledRenderer_.render(ledEffect_, effectMs, epochMs);
                 lastLedRenderAtMs_ = nowMs;
             }
             else
