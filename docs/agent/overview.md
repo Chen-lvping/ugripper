@@ -173,7 +173,7 @@
 2. 在 stereo daemon 收到 stop-session 后，`record_runtime` 并发停止普通录制模式下的 `camera_recorder` 与 `sensor_recorder`，降低两条独立链路顺序收尾带来的蓝灯等待。
 3. stereo daemon 收到 stop-session 后会先一次性冻结左右双目 session 的送帧边界，再逐路 finalize 文件，避免某一路在另一侧 finalize 期间继续长出额外尾巴；收尾完成后后台 warmup 继续运行。
 4. 先发送 `recording_stop`，随后立即切到 `writing`；提示音采用“后触发抢占前触发”的语义，因此 `writing` 会直接打断仍在播放的上一条提示。
-5. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行分阶段文件级 flush。`pre_stereo_finalize` 只刷普通相机视频、左右 sensor MCAP、`calibration.json`、内部 timing 和可选音频；等待 stereo finalize 并合并 session 信息后，`final` 只刷 `stereo_*.mkv`、`fays_data_*.mcap` 与更新后的内部 timing；`metadata_final` 只刷最终 `metadata.json`、失败时的 `validation_error.log` 和目录项，避免停录路径重复刷同一批媒体文件。停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
+5. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行分阶段文件级 flush。所有 episode 产物都必须在所属阶段显式执行文件级 flush，再刷 episode 目录项；`pre_stereo_finalize` 只刷普通相机视频、左右 sensor MCAP、`calibration.json`、内部 timing 和可选音频；等待 stereo finalize 并合并 session 信息后，`final` 只刷 `stereo_*.mkv`、`fays_data_*.mcap` 与更新后的内部 timing；`metadata_final` 只刷最终 `metadata.json`、失败时的 `validation_error.log` 和目录项，避免停录路径重复刷同一批媒体文件。停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
 6. `record_runtime` 等待 daemon 在状态文件中写出本次 `last_session`，再将其并入内部 `.recording_timing.json`。
 7. 执行稳定校验：强校验内部 timing 字段，并并行用轻量 `ffprobe` 检查 8 路视频可读性与时长合理性；探测结果写入内部 `.recording_timing.json.video_probes`，供后续 metadata 生成复用，避免停录路径重复探测同一批视频。
 8. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 抽检：其一是“本次起录附近单帧 vs 插爪参考帧”的实时比较；其二是“本次起录附近单帧 vs 同 `serial` 的持久化 baseline”的慢变量比较。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。

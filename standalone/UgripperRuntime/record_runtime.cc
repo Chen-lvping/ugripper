@@ -1421,10 +1421,18 @@ bool shouldFlushVideoArtifactForPhase(const EpisodeVideoArtifact &artifact, cons
     return false;
 }
 
-bool shouldFlushPathForPhase(const fs::path &episodeDir, const fs::path &path, const std::string &phase)
+bool shouldFlushPathForPhase(const fs::path &episodeDir,
+                             const fs::path &path,
+                             const std::string &phase,
+                             const std::set<std::string> &selectedVideoFileNames)
 {
     (void)episodeDir;
     const std::string fileName = path.filename().string();
+    if (selectedVideoFileNames.find(fileName) != selectedVideoFileNames.end())
+    {
+        return true;
+    }
+
     if (phase == "pre_stereo_finalize")
     {
         return fileName == "sensor_left.mcap" ||
@@ -1458,6 +1466,7 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
     const std::string phase = phaseLabel != nullptr ? phaseLabel : "";
     std::vector<fs::path> paths;
     const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled);
+    std::set<std::string> selectedVideoFileNames;
     paths.reserve(artifacts.size() + 9);
 
     for (const auto &artifact : artifacts)
@@ -1465,6 +1474,7 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
         if (shouldFlushVideoArtifactForPhase(artifact, phase))
         {
             paths.push_back(episodeDir / artifact.fileName);
+            selectedVideoFileNames.insert(artifact.fileName);
         }
     }
 
@@ -1494,7 +1504,7 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
     filteredPaths.reserve(paths.size());
     for (const auto &path : paths)
     {
-        if (shouldFlushPathForPhase(episodeDir, path, phase))
+        if (shouldFlushPathForPhase(episodeDir, path, phase, selectedVideoFileNames))
         {
             filteredPaths.push_back(path);
         }
