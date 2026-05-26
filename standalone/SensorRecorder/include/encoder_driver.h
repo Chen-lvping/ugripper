@@ -104,7 +104,7 @@ public:
     ~EncoderDriver();
 
     // Connection management
-    ConnectStatus connect();
+    ConnectStatus connect(bool logVerification = true);
     void disconnect();
     void resetBaudrate(uint32_t baudrate);
     bool isConnected() const { return isConnected_; }

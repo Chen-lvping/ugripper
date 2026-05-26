@@ -271,8 +271,19 @@ bool openSideWriter(const fs::path &outputDir, const SensorSideConfig &config, S
 }
 
 bool connectEncoderWithFallback(EncoderRuntime &encoderRuntime) {
-    auto connectStatus = encoderRuntime.driver->connect();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    constexpr int kFastBaudrate = 1000000;
+    constexpr int kSlowBaudrate = 115200;
+    constexpr int kFastRetryAttempts = 3;
+    ConnectStatus connectStatus = ConnectStatus::NO_RESPONSE;
+
+    for (int attempt = 1; attempt <= kFastRetryAttempts; ++attempt) {
+        encoderRuntime.driver->resetBaudrate(kFastBaudrate);
+        connectStatus = encoderRuntime.driver->connect(false);
+        if (connectStatus != ConnectStatus::NO_RESPONSE || attempt == kFastRetryAttempts) {
+            break;
+        }
+        encoderRuntime.driver->disconnect();
+    }
 
     if (connectStatus == ConnectStatus::SERIAL_FAIL) {
         DM_LOG_ERROR("{}", (::DA::utils::LogString() << "Failed to connect encoder serial port: " << encoderRuntime.config.encoderPort).str());
@@ -281,19 +292,17 @@ bool connectEncoderWithFallback(EncoderRuntime &encoderRuntime) {
 
     if (connectStatus == ConnectStatus::NO_RESPONSE) {
         DM_LOG_WARN("{}", (::DA::utils::LogString() << encoderRuntime.config.label
-                             << " encoder not responding at 1Mbps, falling back to 115200...").str());
+                             << " encoder no response at 1Mbps after " << kFastRetryAttempts
+                             << " attempts, falling back to 115200...").str());
         encoderRuntime.driver->disconnect();
-        encoderRuntime.driver->resetBaudrate(115200);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        encoderRuntime.driver->resetBaudrate(kSlowBaudrate);
         connectStatus = encoderRuntime.driver->connect();
         if (connectStatus == ConnectStatus::SUCCESS) {
             DM_LOG_INFO("{}", (::DA::utils::LogString() << encoderRuntime.config.label
                                  << " encoder ready at 115200, switching back to 1Mbps.").str());
-            encoderRuntime.driver->setBaudrate(1000000);
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            encoderRuntime.driver->setBaudrate(kFastBaudrate);
             encoderRuntime.driver->disconnect();
-            encoderRuntime.driver->resetBaudrate(1000000);
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            encoderRuntime.driver->resetBaudrate(kFastBaudrate);
             connectStatus = encoderRuntime.driver->connect();
         }
         if (connectStatus != ConnectStatus::SUCCESS) {
@@ -302,7 +311,8 @@ bool connectEncoderWithFallback(EncoderRuntime &encoderRuntime) {
             return false;
         }
     } else {
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << encoderRuntime.config.label << " encoder ready at 1Mbps.").str());
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << encoderRuntime.config.label
+                             << " encoder ready at 1Mbps after quick verification.").str());
     }
 
     return true;

@@ -166,7 +166,7 @@
   - `sensor_right.mcap`
   - `sensor_left.mcap`
 - IMU / encoder 的 MCAP 时间戳当前默认沿用主机侧原始样本时间；若主循环一次从本地缓冲区取到多帧样本，则认为出现了缓冲区 burst，会以该批最后一帧的主机时间为锚点，按各自名义频率（IMU `200Hz`、encoder `1kHz`）向前回填这批样本的伪时间戳，尽量消除追赶帧导致的时间轴挤压。
-- encoder 连接会优先尝试 `1Mbps`，失败后回退 `115200`。
+- encoder 连接会优先在 `1Mbps` 下做 3 次快速验证重试（总验证窗口约 `150ms`，目标控制在 `200ms` 内），仍无响应才回退 `115200`；若 `115200` 可响应，则切回 `1Mbps` 后再次验证。
 
 ### 6.4 停止录制
 1. `record_runtime` 会先向 stereo warmup daemon 发送 stop-session，尽早冻结本次双目 session 的收尾边界，避免 stop 命令在普通相机与传感器都停完之后才传到双目链路。

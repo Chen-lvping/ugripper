@@ -5,6 +5,7 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- SensorRecorder 的 encoder 起录连接增加 `1Mbps` 快速验证重试：首次无响应后额外重试 2 次，约 `150ms` 验证窗口内收敛临时串口通讯抖动，再回退 `115200`；同时收敛重试期间的重复无响应日志。
 - 停录阶段进一步缩短蓝灯等待：`camera_recorder` 与 `sensor_recorder` 改为并发 stop，并新增 `stop workers`、`stereo finalize wait`、`stereo merge` 分段耗时日志。
 - 触觉状态抽检改为后台慢校验：停录硬校验不再等待 tactile 单帧抽取与 baseline 比对；后台任务只更新触觉软告警与历史状态，起录时会取消/丢弃后台任务以避免干扰下一次录制。
 - 停录收尾 flush 改为按阶段拆分：`pre_stereo_finalize` 不再提前刷 stereo/Fays 产物，`final` 只刷 stereo/Fays 和内部 timing，`metadata_final` 只刷最终 metadata/错误日志/目录；同时新增 `UGRIPPER_PERF_LOG` 开关控制 `[PERF]` 耗时日志。

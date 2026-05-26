@@ -60,7 +60,7 @@ void EncoderDriver::markDisconnected(const std::string &operation)
     }
 }
 
-ConnectStatus EncoderDriver::connect()
+ConnectStatus EncoderDriver::connect(bool logVerification)
 {
     if (isConnected_)
         return ConnectStatus::SUCCESS;
@@ -95,7 +95,10 @@ ConnectStatus EncoderDriver::connect()
     isConnected_ = true;
     isActive_ = true;
 
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "EncoderDriver: Serial port opened at " << baudrate_ << " baud. Verifying encoder...").str());
+    if (logVerification)
+    {
+        DM_LOG_INFO("{}", (::DA::utils::LogString() << "EncoderDriver: Serial port opened at " << baudrate_ << " baud. Verifying encoder...").str());
+    }
 
     // --- 验证编码器是否有响应 ---
     uint8_t buf[256];
@@ -106,12 +109,18 @@ ConnectStatus EncoderDriver::connect()
 
     if (n == 7) // 根据你的指令帧长度判断
     {
-        DM_LOG_INFO("EncoderDriver: Encoder responded successfully.");
+        if (logVerification)
+        {
+            DM_LOG_INFO("EncoderDriver: Encoder responded successfully.");
+        }
         return ConnectStatus::SUCCESS;
     }
     else
     {
-        DM_LOG_ERROR("EncoderDriver: No response from encoder.");
+        if (logVerification)
+        {
+            DM_LOG_ERROR("EncoderDriver: No response from encoder.");
+        }
         return ConnectStatus::NO_RESPONSE;
     }
 }
