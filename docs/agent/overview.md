@@ -102,7 +102,7 @@
    - stereo 字段按范本保留 `cam0/cam1/camera_model/distortion_model/extrinsics/fps/names/shape`；IMU 字段按范本保留 `accelerometer/gyroscope/update_rate_hz`。
    - 左右主摄、胸部主摄 SN 与主摄标定参数由运行时在相机 symlink 插入/目标变化时通过 Yuzhou UVC XU 异步刷新缓存，拔出时清空；episode 生成只消费缓存，不再停录后同步读 XU。若在线主摄缺少合法 `FE...` SN 或 `MCAL` 标定 payload，本条 episode 会在停录校验阶段失败。
    - 左右 stereo 与 IMU 标定由 Fays daemon 状态填充；不再把 gripper payload 或旧持久化 calibration 作为 episode `calibration.json` 的来源。
-5. `record_runtime` 不再产出最终 `info.json`；camera/stereo 录制链路只在 `-temp` 目录内维护内部 `.recording_timing.json`，用于停录强校验、并行视频探测结果缓存和最终 `metadata.json.video_details[].start_offset_us/duration_s` 生成，episode 完成 rename 前会清理该内部文件：
+5. `record_runtime` 不再产出最终 `info.json`；camera/stereo 录制链路只在 `/dev/shm/ugripper_recording_timing_*.json` 维护内部 timing 缓存，用于 stereo offset 合并、并行视频探测结果缓存和最终 `metadata.json.video_details[].start_offset_us/duration_s` 生成，episode 完成 rename 前会清理该内部文件。停录硬校验只面向最终媒体、MCAP、`calibration.json` 和最终 `metadata.json` 语义，不再把该 shm 缓存作为 episode 产物或硬校验对象：
    - 内部文件顶层临时保留下面这些字段；`stereo_session` 可作为双目会话摘要存在，其他临时调试字段不得写入。
    - `boot_time_offset`
    - `boot_time_offset_us`
@@ -173,9 +173,9 @@
 2. 在 stereo daemon 收到 stop-session 后，`record_runtime` 并发停止普通录制模式下的 `camera_recorder` 与 `sensor_recorder`，降低两条独立链路顺序收尾带来的蓝灯等待。
 3. stereo daemon 收到 stop-session 后会先一次性冻结左右双目 session 的送帧边界，再逐路 finalize 文件，避免某一路在另一侧 finalize 期间继续长出额外尾巴；收尾完成后后台 warmup 继续运行。
 4. 先发送 `recording_stop`，随后立即切到 `writing`；提示音采用“后触发抢占前触发”的语义，因此 `writing` 会直接打断仍在播放的上一条提示。
-5. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行分阶段文件级 flush。所有 episode 产物都必须在所属阶段显式执行文件级 flush，再刷 episode 目录项；`pre_stereo_finalize` 只刷普通相机视频、左右 sensor MCAP、`calibration.json`、内部 timing 和可选音频；等待 stereo finalize 并合并 session 信息后，`final` 只刷 `stereo_*.mkv`、`fays_data_*.mcap` 与更新后的内部 timing；`metadata_final` 只刷最终 `metadata.json`、失败时的 `validation_error.log` 和目录项，避免停录路径重复刷同一批媒体文件。停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
-6. `record_runtime` 等待 daemon 在状态文件中写出本次 `last_session`，再将其并入内部 `.recording_timing.json`。
-7. 执行稳定校验：强校验内部 timing 字段，并并行用轻量 `ffprobe` 检查 8 路视频可读性与时长合理性；探测结果写入内部 `.recording_timing.json.video_probes`，供后续 metadata 生成复用，避免停录路径重复探测同一批视频。
+5. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行分阶段文件级 flush。所有 episode 产物都必须在所属阶段显式执行文件级 flush，再刷 episode 目录项；`pre_stereo_finalize` 只刷普通相机视频、左右 sensor MCAP、`calibration.json` 和可选音频；等待 stereo finalize 并合并 session 信息后，`final` 只刷 `stereo_*.mkv` 与 `fays_data_*.mcap`；`metadata_final` 只刷最终 `metadata.json`、失败时的 `validation_error.log` 和目录项，避免停录路径重复刷同一批媒体文件。停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
+6. `record_runtime` 等待 daemon 在状态文件中写出本次 `last_session`，再将其并入 `/dev/shm` 内部 timing 缓存。
+7. 先生成最终 `metadata.json`，其中 `video_details[].start_offset_us/duration_s` 来自 `/dev/shm` 内部 timing 缓存和视频轻量探测；随后执行稳定校验，校验只读取最终 `metadata.json` 与最终媒体/MCAP/`calibration.json`，不再直接依赖 shm 缓存。视频探测结果会尽量写入 `/dev/shm` 内部 timing 缓存的 `video_probes`，供同次 metadata 生成复用；若缓存写入失败，只记录告警，不作为 episode 硬校验失败原因。
 8. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 抽检：其一是“本次起录附近单帧 vs 插爪参考帧”的实时比较；其二是“本次起录附近单帧 vs 同 `serial` 的持久化 baseline”的慢变量比较。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
 9. 实时触觉抽检当前属于软告警而不是完整性失败：单次异常只更新该 tactile `serial` 的近期历史；当同一 `serial` 最近 `3` 个 episode 都判为异常时，空闲态切到黄灯闪烁，并播放对应 `left/right_tcam_*_damaged` 提示音。后台 tactile 校验最多保留一个待处理 episode；若下一次录制开始，会请求当前后台校验停止并清空待处理任务，避免干扰下一次录制。
 10. 持久化 baseline 当前按 `12h` 窗口维护：插爪阶段和停录阶段都会与上一份持久化 baseline 做比较；若超过阈值，则立即触发同一套 damaged 软告警并锁住该 `serial` 的持久化 baseline，不再自动刷新。只有服务重启一次后，下一次插爪才允许用当前图像重建该 `serial` 的持久化 baseline。
@@ -224,9 +224,9 @@
 停录后当前按以下层次校验：
 - 若 stereo daemon 已明确返回 finalize/session 错误，则直接记录失败、写 `metadata.json` 与 `validation_error.log`，跳过后续完整性强校验，避免对已知缺失的 stereo 文件重复等待。
 - 在线主摄、胸部主摄必须已有合法运行时缓存：SN 必须为 Yuzhou XU 中的 `FE...` 字段，标定必须为合法 `MCAL` V1 payload。缺任一项即校验失败，并写 `quality_check_err_type=calibration_error`。
-- 文件存在性：八路 `mkv`、`sensor_left.mcap`、`sensor_right.mcap`、`fays_data_left.mcap`、`fays_data_right.mcap`、`calibration.json` 必须存在且非空；`metadata.json` 在校验完成后再写最终结果。
-- 内部 timing 字段完整性：停录收尾期间强制 `.recording_timing.json` 包含 `boot_time_offset`、`boot_time_offset_us` 与 8 路 `<camera>_record_time_offset_us`，且 `boot_time_offset` 与 `boot_time_offset_us` 必须数值一致；该文件只用于内部生成最终 metadata，不作为 episode 最终产物。
-- 视频可读性：每路 `mkv` 都必须能被并行 `ffprobe` 读出首个视频流与 `start_time/duration`；成功结果会缓存到内部 timing 文件，metadata 生成阶段复用该结果。
+- 文件存在性：八路 `mkv`、`sensor_left.mcap`、`sensor_right.mcap`、`fays_data_left.mcap`、`fays_data_right.mcap`、`calibration.json`、`metadata.json` 必须存在且非空；其中 `metadata.json` 会先于稳定校验写出，供校验阶段读取最终 metadata 语义。
+- 内部 timing 缓存：停录收尾期间由 `/dev/shm/ugripper_recording_timing_*.json` 暂存 `boot_time_offset`、`boot_time_offset_us`、各路 `<camera>_record_time_offset_us` 和 `video_probes`，只用于生成最终 metadata；该文件不落到 episode，不作为硬校验对象，完成后清理。
+- metadata 与视频可读性：最终 `metadata.json` 必须存在且包含可用的 `video_details[].start_offset_us/duration_s`；每路 `mkv` 都必须能被并行 `ffprobe` 读出首个视频流与 `start_time/duration`。
 - 时长合理性：每路视频跨度都必须大于最小阈值，且不能比本次 episode 的最长视频短超过 `5s`。
 - Fays MCAP 轻量完整性：左右 `fays_data_*.mcap` 必须能读取 summary，`i/c` 两类消息计数都必须非零，并且 summary/chunk 索引给出的消息覆盖跨度不能过短；该检查只读 MCAP summary 与尾部少量 chunk，不允许 fallback 全量扫描消息。
 - 条件产物：若执行了 pre/post 音频录制，对应 wav 仍需存在。

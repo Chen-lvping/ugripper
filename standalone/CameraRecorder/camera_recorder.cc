@@ -110,6 +110,28 @@ std::string Trim(const std::string& input) {
     return input.substr(start, end - start + 1);
 }
 
+std::string SanitizeTimingPathComponent(const std::string& text) {
+    std::string result;
+    result.reserve(text.size());
+    for (const char ch : text) {
+        if ((ch >= '0' && ch <= '9') ||
+            (ch >= 'a' && ch <= 'z') ||
+            (ch >= 'A' && ch <= 'Z') ||
+            ch == '.' || ch == '_' || ch == '-') {
+            result.push_back(ch);
+        } else {
+            result.push_back('_');
+        }
+    }
+    return result.empty() ? "unknown" : result;
+}
+
+fs::path RecordingTimingPathForEpisode(const fs::path& episode_dir) {
+    const std::string parent = SanitizeTimingPathComponent(episode_dir.parent_path().filename().string());
+    const std::string name = SanitizeTimingPathComponent(episode_dir.filename().string());
+    return fs::path("/dev/shm") / ("ugripper_recording_timing_" + parent + "_" + name + ".json");
+}
+
 std::string ShellQuote(const std::string& value) {
     std::string out = "'";
     for (char ch : value) {
@@ -3469,7 +3491,7 @@ const std::vector<std::unique_ptr<CameraRecorder>>& CameraRecorderManager::recor
 
 bool CameraRecorderManager::WriteInfoJson() const {
     const int64_t boot_time_offset_us = BootTimeOffsetUs();
-    const fs::path info_json_path = options_.output_dir / ".recording_timing.json";
+    const fs::path info_json_path = RecordingTimingPathForEpisode(options_.output_dir);
     std::ofstream output(info_json_path, std::ios::trunc);
     if (!output.is_open()) {
         DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] failed to open recording timing file for write: "

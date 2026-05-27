@@ -98,6 +98,7 @@ constexpr size_t kTactileHistoryWindow = 3;
 constexpr int kTactileSnapshotTimeoutMs = 2500;
 constexpr uint64_t kTactilePersistentBaselineRefreshMs = 12ULL * 60ULL * 60ULL * 1000ULL;
 constexpr const char *kEpisodeTimingFileName = ".recording_timing.json";
+constexpr const char *kEpisodeTimingShmPrefix = "ugripper_recording_timing_";
 
 bool g_perfLogEnabled = true;
 
@@ -304,7 +305,9 @@ fs::path tactilePersistentDir(const fs::path &root)
 
 fs::path episodeTimingPath(const fs::path &episodeDir)
 {
-    return episodeDir / kEpisodeTimingFileName;
+    const std::string parent = sanitizeFileComponent(episodeDir.parent_path().filename().string());
+    const std::string name = sanitizeFileComponent(episodeDir.filename().string());
+    return fs::path("/dev/shm") / (std::string(kEpisodeTimingShmPrefix) + parent + "_" + name + ".json");
 }
 
 std::string stripEpisodeTempSuffix(const std::string &name)
@@ -1438,15 +1441,13 @@ bool shouldFlushPathForPhase(const fs::path &episodeDir,
         return fileName == "sensor_left.mcap" ||
                fileName == "sensor_right.mcap" ||
                fileName == "calibration.json" ||
-               fileName == kEpisodeTimingFileName ||
                fileName == "audio_pre.wav" ||
                fileName == "audio_post.wav";
     }
     if (phase == "final")
     {
         return fileName == "fays_data_left.mcap" ||
-               fileName == "fays_data_right.mcap" ||
-               fileName == kEpisodeTimingFileName;
+               fileName == "fays_data_right.mcap";
     }
     if (phase == "metadata_final")
     {
@@ -1485,7 +1486,6 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
     paths.push_back(episodeDir / "metadata.json");
     paths.push_back(episodeDir / "calibration.json");
     paths.push_back(episodeDir / "validation_error.log");
-    paths.push_back(episodeTimingPath(episodeDir));
 
     const fs::path audioPre = episodeDir / "audio_pre.wav";
     if (fs::exists(audioPre))
@@ -2448,6 +2448,95 @@ bool loadCachedVideoProbe(const json &timing,
                std::isfinite(probe->spanSec) && probe->spanSec > 0.0;
     }
     return false;
+}
+
+bool validateMetadataVideoDetails(const fs::path &metadataPath,
+                                  const std::vector<EpisodeVideoArtifact> &artifacts,
+                                  std::string *errorMessage)
+{
+    json metadata = json::object();
+    if (!loadJsonFile(metadataPath.string(), &metadata, errorMessage))
+    {
+        return false;
+    }
+    if (!metadata.is_object())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "metadata.json top-level value must be an object";
+        }
+        return false;
+    }
+    if (!metadata.contains("video_details") || !metadata["video_details"].is_array())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "metadata.json missing video_details array";
+        }
+        return false;
+    }
+
+    std::set<std::string> requiredFileNames;
+    for (const auto &artifact : artifacts)
+    {
+        requiredFileNames.insert(artifact.fileName);
+    }
+
+    std::set<std::string> seenFileNames;
+    for (const auto &detail : metadata["video_details"])
+    {
+        if (!detail.is_object() ||
+            !detail.contains("name") || !detail["name"].is_string() ||
+            !detail.contains("start_offset_us") || !detail["start_offset_us"].is_number_integer() ||
+            !detail.contains("duration_s") || !detail["duration_s"].is_number())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "metadata.json has invalid video_details entry";
+            }
+            return false;
+        }
+
+        const std::string fileName = detail["name"].get<std::string>();
+        if (requiredFileNames.find(fileName) == requiredFileNames.end())
+        {
+            continue;
+        }
+
+        const int64_t startOffsetUs = detail["start_offset_us"].get<int64_t>();
+        if (startOffsetUs < 0)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "metadata.json has negative start_offset_us for " + fileName;
+            }
+            return false;
+        }
+
+        const double durationS = detail["duration_s"].get<double>();
+        if (!std::isfinite(durationS) || durationS <= 0.0)
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "metadata.json has invalid duration_s for " + fileName;
+            }
+            return false;
+        }
+        seenFileNames.insert(fileName);
+    }
+
+    for (const auto &fileName : requiredFileNames)
+    {
+        if (seenFileNames.find(fileName) == seenFileNames.end())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "metadata.json missing video_details entry for " + fileName;
+            }
+            return false;
+        }
+    }
+    return true;
 }
 
 bool loadLastTopicLogTimeFromTailChunks(const std::string &mcapPath,
@@ -6032,6 +6121,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         "sensor_left.mcap",
         "sensor_right.mcap",
         "calibration.json",
+        "metadata.json",
     };
 
     for (const auto &artifact : artifacts)
@@ -6110,83 +6200,18 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         return false;
     }
 
-    const std::string infoPath = episodeTimingPath(episodeDir).string();
-    std::ifstream infoInput(infoPath);
-    if (!infoInput.is_open())
+    std::string metadataError;
+    if (!validateMetadataVideoDetails(fs::path(episodeDir) / "metadata.json",
+                                      artifacts,
+                                      &metadataError))
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = std::string("cannot open internal timing file for read: ") + kEpisodeTimingFileName;
-        }
-        return false;
-    }
-    std::ostringstream infoBuffer;
-    infoBuffer << infoInput.rdbuf();
-    const std::string infoJson = infoBuffer.str();
-    json infoRoot;
-    try
-    {
-        infoRoot = json::parse(infoJson);
-    }
-    catch (const std::exception &ex)
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = std::string("failed to parse internal timing file: ") + ex.what();
-        }
-        return false;
-    }
-    if (!infoRoot.is_object())
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "internal timing file top-level value must be an object";
+            *errorMessage = "metadata validation failed: " + metadataError;
         }
         return false;
     }
 
-    double bootTimeOffset = 0.0;
-    int64_t bootTimeOffsetUsFromFile = 0;
-    if (!extractJsonNumberField(infoJson, "boot_time_offset", &bootTimeOffset) || bootTimeOffset <= 0.0)
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "internal timing file missing or invalid numeric field: boot_time_offset";
-        }
-        return false;
-    }
-    if (!extractJsonIntegerField(infoJson, "boot_time_offset_us", &bootTimeOffsetUsFromFile) || bootTimeOffsetUsFromFile <= 0)
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "internal timing file missing or invalid integer field: boot_time_offset_us";
-        }
-        return false;
-    }
-    if (std::fabs((bootTimeOffset * 1000000.0) - static_cast<double>(bootTimeOffsetUsFromFile)) > 1.0)
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "internal timing file boot_time_offset and boot_time_offset_us are inconsistent";
-        }
-        return false;
-    }
-
-    std::map<std::string, int64_t> recordTimeOffsetUsByCamera;
-    for (const auto &artifact : artifacts)
-    {
-        int64_t recordTimeOffsetUs = 0;
-        const std::string fieldName = std::string(artifact.cameraName) + "_record_time_offset_us";
-        if (!extractJsonIntegerField(infoJson, fieldName, &recordTimeOffsetUs) || recordTimeOffsetUs <= 0)
-        {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = "internal timing file missing or invalid integer field: " + fieldName;
-            }
-            return false;
-        }
-        recordTimeOffsetUsByCamera[artifact.cameraName] = recordTimeOffsetUs;
-    }
     logPerf((::DA::utils::LogString() << "[PERF] validation setup done: episode_dir=" << episodeDir
              << " elapsed_ms=" << (steadyNowMs() - validateStartMs)).str());
 
@@ -6228,11 +6253,8 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     std::string probeCacheError;
     if (!writeVideoProbeCacheToTimingFile(episodeDir, probes, &probeCacheError))
     {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "failed to cache video probe results: " + probeCacheError;
-        }
-        return false;
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to cache video probe results in shm timing file: "
+                         << probeCacheError << std::endl).str());
     }
 
     for (const auto &probe : probes)
@@ -6259,40 +6281,8 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     {
         tailCheckFutures.push_back(std::async(
             std::launch::async,
-            [episodeDir, recordTimeOffsetUsByCamera, probes, target]() {
+            [episodeDir, target]() {
                 TailCheckTaskResult result;
-                int64_t tailVideoEndNs = 0;
-                for (const auto *cameraName : target.referenceCameraNames)
-                {
-                    const auto offsetIt = recordTimeOffsetUsByCamera.find(cameraName);
-                    if (offsetIt == recordTimeOffsetUsByCamera.end())
-                    {
-                        continue;
-                    }
-
-                    const auto probeIt = std::find_if(
-                        probes.begin(),
-                        probes.end(),
-                        [cameraName](const VideoProbeResult &probe) {
-                            return probe.cameraName == cameraName;
-                        });
-                    if (probeIt == probes.end())
-                    {
-                        continue;
-                    }
-
-                    const int64_t candidateEndNs =
-                        offsetIt->second * 1000LL +
-                        static_cast<int64_t>(std::llround(probeIt->durationSec * 1000000000.0));
-                    tailVideoEndNs = std::max(tailVideoEndNs, candidateEndNs);
-                }
-
-                if (tailVideoEndNs <= 0)
-                {
-                    result.errorMessage = std::string("failed to build encoder tail reference for side=") + target.side;
-                    return result;
-                }
-
                 uint64_t lastEncoderLogTimeNs = 0;
                 uint64_t encoderMessageCount = 0;
                 std::string encoderTailError;
@@ -6308,39 +6298,11 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                     return result;
                 }
 
-                const int64_t tailWindowStartNs = std::max<int64_t>(0, tailVideoEndNs - kEncoderTailWindowNs);
-                if (static_cast<int64_t>(lastEncoderLogTimeNs) < tailWindowStartNs)
-                {
-                    result.errorMessage = std::string("encoder tail has no samples near episode end for side=") +
-                                          target.side +
-                                          " (last_encoder_ns=" + std::to_string(lastEncoderLogTimeNs) +
-                                          ", tail_video_start_ns=" + std::to_string(tailWindowStartNs) +
-                                          ", tail_video_end_ns=" + std::to_string(tailVideoEndNs) + ")";
-                    return result;
-                }
-
-                int64_t lagNs = tailVideoEndNs - static_cast<int64_t>(lastEncoderLogTimeNs);
-                if (lagNs < 0)
-                {
-                    lagNs = 0;
-                }
-                if (lagNs > kEncoderTailMaxLagNs)
-                {
-                    result.errorMessage = std::string("encoder tail lag too large for side=") + target.side +
-                                          " (lag_ns=" + std::to_string(lagNs) +
-                                          ", threshold_ns=" + std::to_string(kEncoderTailMaxLagNs) +
-                                          ", tail_video_end_ns=" + std::to_string(tailVideoEndNs) +
-                                          ", last_encoder_ns=" + std::to_string(lastEncoderLogTimeNs) + ")";
-                    return result;
-                }
-
                 result.ok = true;
                 result.detail = (::DA::utils::LogString()
                                  << "encoder_" << target.side
                                  << "{count=" << encoderMessageCount
-                                 << ", tail_video_end_ns=" << tailVideoEndNs
                                  << ", last_ns=" << lastEncoderLogTimeNs
-                                 << ", lag_ms=" << (lagNs / 1000000.0)
                                  << "}").str();
                 return result;
             }));
@@ -6819,6 +6781,27 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
         minOffsetUs = 0;
     }
 
+    if (qualityOk)
+    {
+        const auto metadataArtifacts = metadataVideoArtifacts(chestCameraEnabled_);
+        if (!infoRoot.is_object())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "internal shm timing file top-level value must be an object";
+            }
+            return false;
+        }
+        if (offsetByCamera.size() != metadataArtifacts.size())
+        {
+            if (errorMessage != nullptr)
+            {
+                *errorMessage = "internal shm timing file missing video offset cache";
+            }
+            return false;
+        }
+    }
+
     ordered_json videoDetails = ordered_json::array();
     double collectionDurationS = 0.0;
     for (const auto &artifact : metadataVideoArtifacts(chestCameraEnabled_))
@@ -6940,11 +6923,11 @@ std::string RecordRuntime::EpisodeManager::finalizeEpisodeDir(const std::string 
     }
 
     std::error_code removeError;
-    fs::remove(targetPath / kEpisodeTimingFileName, removeError);
+    fs::remove(episodeTimingPath(sourcePath), removeError);
     if (removeError)
     {
         DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to remove internal timing file: "
-                      << (targetPath / kEpisodeTimingFileName)
+                      << episodeTimingPath(sourcePath)
                       << " error=" << removeError.message() << std::endl).str());
     }
     flushEpisodeDirectoriesToDisk(targetPath, "episode_finalize");

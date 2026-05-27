@@ -5,6 +5,7 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- 内部录制 timing 缓存迁移到 `/dev/shm/ugripper_recording_timing_*.json`：不再在 U 盘 episode 目录写入或 flush 临时 timing JSON；停录硬校验只读取最终 `metadata.json` 与最终产物，shm 缓存仅用于生成 `metadata.json` 的视频 offset 与探测缓存。
 - SensorRecorder 的 encoder 起录连接增加 `1Mbps` 快速验证重试：首次无响应后额外重试 2 次，约 `150ms` 验证窗口内收敛临时串口通讯抖动，再回退 `115200`；同时收敛重试期间的重复无响应日志。
 - 停录阶段进一步缩短蓝灯等待：`camera_recorder` 与 `sensor_recorder` 改为并发 stop，并新增 `stop workers`、`stereo finalize wait`、`stereo merge` 分段耗时日志。
 - Fays recorder daemon 模式过滤 SDK 周期性 `Stereo FPS:` / `IMU FPS:` 行，避免相机帧率刷屏进入 `umi_sys_*.log`；其他 Fays 状态、告警和错误输出仍保留。

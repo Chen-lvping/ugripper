@@ -961,6 +961,10 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
         CallLog(dependencies_.log_warn,
                 "skip episode validation because stereo finalize already failed: " + final_error_message);
     }
+    if (dependencies_.write_episode_metadata != nullptr)
+    {
+        dependencies_.write_episode_metadata(state_.current_episode_dir, stereo_stop_ok, final_error_message);
+    }
     const bool episode_valid =
         skip_episode_validation ||
         (dependencies_.validate_episode != nullptr &&
@@ -983,9 +987,9 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
                 " valid=" + std::string(valid ? "true" : "false") + " elapsed_ms=" +
                 std::to_string((steady_ms_fn_ != nullptr ? steady_ms_fn_() : validate_phase_start_ms) -
                                validate_phase_start_ms));
-    if (dependencies_.write_episode_metadata != nullptr)
+    if (!valid && dependencies_.write_episode_metadata != nullptr)
     {
-        dependencies_.write_episode_metadata(state_.current_episode_dir, valid, final_error_message);
+        dependencies_.write_episode_metadata(state_.current_episode_dir, false, final_error_message);
     }
     if (!valid)
     {
