@@ -25,6 +25,8 @@
 #include <unistd.h>
 #include <cerrno>
 #include <cstring>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <mcap/writer.hpp>
 #include <limits.h>
 #include <stdexcept>
@@ -1181,12 +1183,12 @@ private:
 
 class GstRecorder {
 public:
-    GstRecorder() : pipe_(nullptr) {}
+    GstRecorder() : pipeFd_(-1), childPid_(-1) {}
 
     ~GstRecorder() { Stop(); }
 
     bool Start(const std::string& savePath, int width, int height, int fps) {
-        if (pipe_) {
+        if (pipeFd_ >= 0 || childPid_ > 0) {
             return true;
         }
 
@@ -1214,39 +1216,118 @@ public:
                   << " -> " << ffmpegEncoder << std::endl;
         std::cout << "[FFmpeg] Command: " << cmd.str() << std::endl;
 
-        pipe_ = popen(cmd.str().c_str(), "w");
-        if (!pipe_) {
-            std::cerr << "[FFmpeg] Failed to open pipe!" << std::endl;
+        int pipeFds[2] = {-1, -1};
+        if (pipe(pipeFds) != 0) {
+            std::cerr << "[FFmpeg] Failed to create pipe: " << std::strerror(errno) << std::endl;
             return false;
         }
-        const int fd = fileno(pipe_);
-        if (fd >= 0) {
-            constexpr int kTargetPipeSz = 1048576;
-            const int actual = fcntl(fd, F_SETPIPE_SZ, kTargetPipeSz);
-            if (actual > 0) {
-                std::cout << "[FFmpeg] Pipe buffer expanded to " << actual << " bytes" << std::endl;
+
+        const pid_t pid = fork();
+        if (pid < 0) {
+            std::cerr << "[FFmpeg] Failed to fork: " << std::strerror(errno) << std::endl;
+            close(pipeFds[0]);
+            close(pipeFds[1]);
+            return false;
+        }
+
+        if (pid == 0) {
+            setpgid(0, 0);
+            close(pipeFds[1]);
+            if (dup2(pipeFds[0], STDIN_FILENO) < 0) {
+                _exit(127);
             }
+            close(pipeFds[0]);
+            execl("/bin/sh", "sh", "-c", cmd.str().c_str(), static_cast<char*>(nullptr));
+            _exit(127);
+        }
+
+        setpgid(pid, pid);
+        close(pipeFds[0]);
+        pipeFd_ = pipeFds[1];
+        childPid_ = pid;
+
+        constexpr int kTargetPipeSz = 1048576;
+        const int actual = fcntl(pipeFd_, F_SETPIPE_SZ, kTargetPipeSz);
+        if (actual > 0) {
+            std::cout << "[FFmpeg] Pipe buffer expanded to " << actual << " bytes" << std::endl;
         }
         return true;
     }
 
     void Write(const uint8_t* data, size_t size) {
-        if (!pipe_ || data == nullptr || size == 0) {
+        if (pipeFd_ < 0 || data == nullptr || size == 0) {
             return;
         }
-        fwrite(data, 1, size, pipe_);
+        const uint8_t* cursor = data;
+        size_t remaining = size;
+        while (remaining > 0) {
+            const ssize_t written = write(pipeFd_, cursor, remaining);
+            if (written < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                if (errno == EPIPE) {
+                    std::cerr << "[FFmpeg] Encoder pipe closed." << std::endl;
+                    return;
+                }
+                std::cerr << "[FFmpeg] Pipe write failed: " << std::strerror(errno) << std::endl;
+                return;
+            }
+            if (written == 0) {
+                return;
+            }
+            cursor += written;
+            remaining -= static_cast<size_t>(written);
+        }
     }
 
     void Stop() {
-        if (pipe_) {
-            pclose(pipe_);
-            pipe_ = nullptr;
+        if (pipeFd_ >= 0) {
+            close(pipeFd_);
+            pipeFd_ = -1;
+        }
+        if (childPid_ > 0) {
+            const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            int status = 0;
+            while (std::chrono::steady_clock::now() < deadline) {
+                const pid_t result = waitpid(childPid_, &status, WNOHANG);
+                if (result == childPid_) {
+                    childPid_ = -1;
+                    std::cout << "[FFmpeg] Recording stopped." << std::endl;
+                    return;
+                }
+                if (result < 0 && errno == ECHILD) {
+                    childPid_ = -1;
+                    std::cout << "[FFmpeg] Recording stopped." << std::endl;
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+
+            std::cerr << "[FFmpeg] Encoder did not exit after stdin close; sending SIGTERM." << std::endl;
+            kill(-childPid_, SIGTERM);
+            const auto termDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+            while (std::chrono::steady_clock::now() < termDeadline) {
+                const pid_t result = waitpid(childPid_, &status, WNOHANG);
+                if (result == childPid_ || (result < 0 && errno == ECHILD)) {
+                    childPid_ = -1;
+                    std::cout << "[FFmpeg] Recording stopped." << std::endl;
+                    return;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+
+            std::cerr << "[FFmpeg] Encoder did not exit after SIGTERM; sending SIGKILL." << std::endl;
+            kill(-childPid_, SIGKILL);
+            waitpid(childPid_, &status, 0);
+            childPid_ = -1;
             std::cout << "[FFmpeg] Recording stopped." << std::endl;
         }
     }
 
 private:
-    FILE* pipe_;
+    int pipeFd_;
+    pid_t childPid_;
 };
 
 class FaysRecorder;
@@ -2309,6 +2390,7 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, signalHandler);
     std::signal(SIGTERM, signalHandler);
+    std::signal(SIGPIPE, SIG_IGN);
 
     FaysRecorder recorder(configPath.c_str(), videoFileName, mcapFileName, calibrationJsonPath, statusJsonPath);
     g_recorder = &recorder;

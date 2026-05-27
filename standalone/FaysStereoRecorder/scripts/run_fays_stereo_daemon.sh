@@ -25,6 +25,8 @@ SYMLINK_STABLE_SEC="${FAYS_STEREO_SYMLINK_STABLE_SEC:-1}"
 SYMLINK_STABLE_TIMEOUT_SEC="${FAYS_STEREO_SYMLINK_STABLE_TIMEOUT_SEC:-8}"
 EXIT_GRACE_SEC="${FAYS_STEREO_EXIT_GRACE_SEC:-2}"
 TERM_GRACE_SEC="${FAYS_STEREO_TERM_GRACE_SEC:-2}"
+PORT_FREE_TIMEOUT_SEC="${FAYS_STEREO_PORT_FREE_TIMEOUT_SEC:-3}"
+PORT_KILL_GRACE_SEC="${FAYS_STEREO_PORT_KILL_GRACE_SEC:-1}"
 
 LEFT_PID=""
 RIGHT_PID=""
@@ -40,6 +42,7 @@ LAST_SESSION_JSON="{}"
 LAST_HEALTH_CHECK_MS=0
 RECORDING=false
 FINALIZE_PENDING=false
+CLEANED_UP=false
 
 mark_session_error() {
     local message="$1"
@@ -393,6 +396,45 @@ wait_for_process_exit() {
     return 1
 }
 
+process_group_id() {
+    local pid="$1"
+    ps -o pgid= -p "$pid" 2>/dev/null | tr -d '[:space:]'
+}
+
+current_process_group_id() {
+    process_group_id "$$"
+}
+
+terminate_process_tree() {
+    local pid="$1"
+    local label="$2"
+    local pgid
+    local self_pgid
+
+    [ -n "$pid" ] || return 0
+    kill -0 "$pid" 2>/dev/null || return 0
+
+    pgid="$(process_group_id "$pid")"
+    self_pgid="$(current_process_group_id)"
+    echo "$label: sending SIGTERM to pid=$pid pgid=${pgid:-unknown}" >&2
+    if [ -n "$pgid" ] && [ "$pgid" != "$self_pgid" ]; then
+        kill -TERM "-$pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+    else
+        kill -TERM "$pid" 2>/dev/null || true
+    fi
+    if wait_for_process_exit "$pid" "$TERM_GRACE_SEC"; then
+        return 0
+    fi
+
+    echo "$label: sending SIGKILL to pid=$pid pgid=${pgid:-unknown}" >&2
+    if [ -n "$pgid" ] && [ "$pgid" != "$self_pgid" ]; then
+        kill -KILL "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
+    else
+        kill -KILL "$pid" 2>/dev/null || true
+    fi
+    wait_for_process_exit "$pid" 1 || true
+}
+
 config_value() {
     local config="$1"
     local key="$2"
@@ -405,6 +447,139 @@ config_value() {
             exit
         }
     ' "$config"
+}
+
+side_video_nodes() {
+    local config="$1"
+    local stereo_path imu_path resolved
+
+    stereo_path="$(config_value "$config" stereo_dev_port)"
+    imu_path="$(config_value "$config" imu_dev_port)"
+    for path in "$stereo_path" "$imu_path"; do
+        [ -n "$path" ] && [ "$path" != "NULL" ] || continue
+        [ -e "$path" ] || continue
+        resolved="$(readlink -f "$path" 2>/dev/null || true)"
+        [ -n "$resolved" ] || continue
+        printf '%s\n' "$resolved"
+    done | awk '!seen[$0]++'
+}
+
+fuser_pids_for_path() {
+    local path="$1"
+    fuser "$path" 2>/dev/null | tr ' ' '\n' | awk 'NF && $1 ~ /^[0-9]+$/'
+}
+
+log_side_port_users() {
+    local side="$1"
+    local config="$2"
+    local node
+
+    echo "$side Fays video port users:" >&2
+    while IFS= read -r node; do
+        [ -n "$node" ] || continue
+        echo "  $node" >&2
+        fuser -v "$node" >&2 2>&1 || true
+    done <<EOF
+$(side_video_nodes "$config")
+EOF
+}
+
+kill_side_port_users() {
+    local side="$1"
+    local config="$2"
+    local tracked_pid="${3:-}"
+    local pids pid
+
+    pids="$(
+        while IFS= read -r node; do
+            [ -n "$node" ] || continue
+            fuser_pids_for_path "$node"
+        done <<EOF
+$(side_video_nodes "$config")
+EOF
+    )"
+    pids="$(printf '%s\n' "$pids" | awk 'NF && !seen[$0]++')"
+    [ -n "$pids" ] || return 0
+
+    echo "$side Fays video ports still busy; killing holders before restart" >&2
+    printf '%s\n' "$pids" | while IFS= read -r pid; do
+        [ -n "$pid" ] || continue
+        [ "$pid" != "$$" ] || continue
+        if [ -n "$tracked_pid" ] && [ "$pid" = "$tracked_pid" ]; then
+            terminate_process_tree "$pid" "$side tracked Fays recorder"
+        else
+            terminate_process_tree "$pid" "$side stale Fays video-port holder"
+        fi
+    done
+}
+
+ports_are_free() {
+    local config="$1"
+    local node
+
+    while IFS= read -r node; do
+        [ -n "$node" ] || continue
+        if fuser "$node" >/dev/null 2>&1; then
+            return 1
+        fi
+    done <<EOF
+$(side_video_nodes "$config")
+EOF
+    return 0
+}
+
+wait_for_side_ports_free() {
+    local side="$1"
+    local config="$2"
+    local timeout_sec="${3:-$PORT_FREE_TIMEOUT_SEC}"
+    local deadline=$((SECONDS + timeout_sec))
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        ports_are_free "$config" && return 0
+        sleep 0.1
+    done
+    ports_are_free "$config"
+}
+
+wait_kill_and_confirm_side_ports_free() {
+    local side="$1"
+    local config="$2"
+    local tracked_pid="${3:-}"
+
+    if wait_for_side_ports_free "$side" "$config" "$PORT_FREE_TIMEOUT_SEC"; then
+        return 0
+    fi
+
+    echo "$side Fays video ports did not become free after ${PORT_FREE_TIMEOUT_SEC}s" >&2
+    log_side_port_users "$side" "$config"
+    kill_side_port_users "$side" "$config" "$tracked_pid"
+
+    if wait_for_side_ports_free "$side" "$config" "$PORT_KILL_GRACE_SEC"; then
+        return 0
+    fi
+
+    echo "$side Fays video ports are still busy after forced cleanup" >&2
+    log_side_port_users "$side" "$config"
+    return 1
+}
+
+cleanup_stale_fays_recorders() {
+    local executable="$BUILD_DIR/fays_record_example"
+    local pid cmd
+
+    [ -x "$executable" ] || return 0
+    ps -eo pid=,args= | while IFS= read -r line; do
+        pid="$(printf '%s\n' "$line" | awk '{print $1}')"
+        cmd="$(printf '%s\n' "$line" | sed 's/^[[:space:]]*[0-9][0-9]*[[:space:]]*//')"
+        [ -n "$pid" ] || continue
+        [ "$pid" != "$$" ] || continue
+        case "$cmd" in
+            *"$executable"*)
+                echo "stale Fays recorder found on daemon startup: pid=$pid cmd=$cmd" >&2
+                terminate_process_tree "$pid" "stale Fays recorder"
+                ;;
+        esac
+    done
 }
 
 check_side_device_paths() {
@@ -617,10 +792,11 @@ start_side_daemon() {
     fi
 
     wait_for_side_symlinks_stable "$side" "$config" || return 1
+    wait_kill_and_confirm_side_ports_free "$side" "$config" || return 1
     sleep "$START_DELAY_SEC"
     rm -f "$fifo"
     rm -f "$runtime_status_json"
-    "$RUN_FAYS_RECORD" \
+    setsid "$RUN_FAYS_RECORD" \
         --config "$config" \
         --control-fifo "$fifo" \
         --video-name "$video_name" \
@@ -631,12 +807,7 @@ start_side_daemon() {
     local pid="$!"
     if ! wait_for_fifo "$fifo"; then
         echo "Timed out waiting for $side Fays FIFO: $fifo" >&2
-        kill "$pid" 2>/dev/null || true
-        if ! wait_for_process_exit "$pid" "$TERM_GRACE_SEC"; then
-            echo "$side Fays recorder did not exit after failed startup; sending SIGKILL" >&2
-            kill -KILL "$pid" 2>/dev/null || true
-            wait_for_process_exit "$pid" 1 || true
-        fi
+        terminate_process_tree "$pid" "$side Fays recorder failed startup"
         return 1
     fi
 
@@ -653,6 +824,13 @@ stop_side_daemon() {
     local side="$1"
     local fifo="$2"
     local pid="$3"
+    local config=""
+
+    if [ "$side" = "left" ]; then
+        config="$LEFT_CONFIG"
+    else
+        config="$RIGHT_CONFIG"
+    fi
 
     if [ -p "$fifo" ]; then
         send_side_command "$fifo" exit >/dev/null 2>&1 || true
@@ -660,14 +838,10 @@ stop_side_daemon() {
     if [ -n "$pid" ]; then
         if ! wait_for_process_exit "$pid" "$EXIT_GRACE_SEC"; then
             echo "$side Fays recorder did not exit after EXIT command; sending SIGTERM" >&2
-            kill -TERM "$pid" 2>/dev/null || true
-            if ! wait_for_process_exit "$pid" "$TERM_GRACE_SEC"; then
-                echo "$side Fays recorder did not exit after SIGTERM; sending SIGKILL" >&2
-                kill -KILL "$pid" 2>/dev/null || true
-                wait_for_process_exit "$pid" 1 || true
-            fi
+            terminate_process_tree "$pid" "$side Fays recorder"
         fi
     fi
+    wait_kill_and_confirm_side_ports_free "$side" "$config" "$pid" || true
     rm -f "$fifo"
     rm -f "$(runtime_status_path "$side")"
 
@@ -755,7 +929,9 @@ clear_recovery_error_if_ready() {
 }
 
 start_daemons() {
+    cleanup_stale_fays_recorders
     rm -f "$LEFT_CALIB_JSON" "$RIGHT_CALIB_JSON"
+    rm -f "$LEFT_RUNTIME_STATUS_JSON" "$RIGHT_RUNTIME_STATUS_JSON"
 
     # Avoid creating extra short-lived SDK handles before the warmup daemons.
     # The vendor SDK can cross-bind or re-enumerate devices when calibration
@@ -1012,10 +1188,15 @@ drain_control_fifo() {
 
 cleanup() {
     set +e
+    if [ "$CLEANED_UP" = "true" ]; then
+        return 0
+    fi
+    CLEANED_UP=true
     exec 9>&- 2>/dev/null || true
     rm -f "$CONTROL_FIFO"
     stop_side_daemon left "$LEFT_FIFO" "$LEFT_PID"
     stop_side_daemon right "$RIGHT_FIFO" "$RIGHT_PID"
+    cleanup_stale_fays_recorders
 }
 
 trap cleanup EXIT
