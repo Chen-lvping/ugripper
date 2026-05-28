@@ -36,6 +36,8 @@ public:
     using AudioCommandFn = std::function<void(const std::string&)>;
     using LedStateFn = std::function<void(RuntimeLedState, double)>;
     using StereoSessionFn = std::function<bool(const std::string&, int64_t, std::string*)>;
+    using StartEgoRecordingFn = std::function<bool(const std::string&, int64_t, std::string*)>;
+    using StopEgoRecordingFn = std::function<bool(const std::string&, int64_t, std::string*)>;
     using WaitForFinalizeFn = std::function<bool(const std::string&, int, std::string*)>;
     using FlushEpisodeArtifactsFn = std::function<void(const std::string&, const char*)>;
     using WriteEpisodeMetadataFn = std::function<void(const std::string&, bool, const std::string&)>;
@@ -64,6 +66,9 @@ public:
         LedStateFn set_led_state;
         StereoSessionFn start_stereo_session;
         StereoSessionFn stop_stereo_session;
+        StartEgoRecordingFn start_ego_recording;
+        StopEgoRecordingFn stop_ego_recording;
+        WaitForFinalizeFn wait_for_ego_finalize;
         WaitForFinalizeFn wait_for_stereo_finalize;
         FlushEpisodeArtifactsFn flush_episode_artifacts;
         WriteEpisodeMetadataFn write_episode_metadata;

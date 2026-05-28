@@ -1,0 +1,10 @@
+#!/bin/sh
+SELF="$0"
+if command -v readlink >/dev/null 2>&1; then
+  RESOLVED="$(readlink -f "$SELF" 2>/dev/null || true)"
+  [ -n "$RESOLVED" ] && SELF="$RESOLVED"
+fi
+DIR="$(CDPATH= cd -- "$(dirname -- "$SELF")" && pwd)"
+ROOT="$DIR/root"
+export LD_LIBRARY_PATH="$ROOT/usr/lib/aarch64-linux-gnu:$ROOT/usr/lib/aarch64-linux-gnu/android:${LD_LIBRARY_PATH:-}"
+exec "$ROOT/usr/lib/android-sdk/platform-tools/adb" "$@"

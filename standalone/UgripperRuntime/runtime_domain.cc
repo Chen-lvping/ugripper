@@ -760,6 +760,17 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
     }
 
     state_.is_recording = true;
+    if (dependencies_.start_ego_recording != nullptr)
+    {
+        std::string ego_error;
+        if (!dependencies_.start_ego_recording(
+                state_.current_episode_dir, session_start_system_time_us, &ego_error))
+        {
+            CallLog(dependencies_.log_warn,
+                    "ego recording sidecar did not start: " +
+                        (ego_error.empty() ? std::string("unknown error") : ego_error));
+        }
+    }
     if (dependencies_.set_led_state != nullptr)
     {
         dependencies_.set_led_state(RuntimeLedState::Recording, 0.0);
@@ -878,6 +889,20 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
         dependencies_.set_led_state(RuntimeLedState::Init, 0.0);
     }
 
+    bool ego_stop_ok = true;
+    if (dependencies_.stop_ego_recording != nullptr)
+    {
+        std::string ego_stop_error;
+        ego_stop_ok = dependencies_.stop_ego_recording(
+            state_.current_episode_dir, stop_system_time_us, &ego_stop_error);
+        if (!ego_stop_ok)
+        {
+            CallLog(dependencies_.log_warn,
+                    "ego recording stop failed: " +
+                        (ego_stop_error.empty() ? std::string("unknown error") : ego_stop_error));
+        }
+    }
+
     const int64_t write_phase_start_ms = steady_ms_fn_ != nullptr ? steady_ms_fn_() : 0;
     CallPerfLog(dependencies_, "[PERF] writing phase begin: episode_dir=" + state_.current_episode_dir);
     if (dependencies_.flush_episode_artifacts != nullptr)
@@ -887,6 +912,24 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
 
     std::string stereo_finalize_error;
     std::string merge_error;
+    if (dependencies_.wait_for_ego_finalize != nullptr)
+    {
+        const int64_t ego_finalize_start_ms = steady_ms_fn_ != nullptr ? steady_ms_fn_() : 0;
+        std::string ego_finalize_error;
+        if (!dependencies_.wait_for_ego_finalize(
+                state_.current_episode_dir, options_.stereo_finalize_timeout_ms, &ego_finalize_error))
+        {
+            ego_stop_ok = false;
+            CallLog(dependencies_.log_warn,
+                    "ego recording finalize wait failed: " +
+                        (ego_finalize_error.empty() ? std::string("unknown error") : ego_finalize_error));
+        }
+        CallPerfLog(dependencies_,
+                "[PERF] ego finalize wait done: ok=" + std::string(ego_stop_ok ? "true" : "false") +
+                    " elapsed_ms=" +
+                    std::to_string((steady_ms_fn_ != nullptr ? steady_ms_fn_() : ego_finalize_start_ms) -
+                                   ego_finalize_start_ms));
+    }
     if (stereo_stop_ok && dependencies_.wait_for_stereo_finalize != nullptr)
     {
         const int64_t stereo_finalize_start_ms = steady_ms_fn_ != nullptr ? steady_ms_fn_() : 0;

@@ -31,6 +31,7 @@
 | 安全 NTP 同步 | `time_sync/safe_ntp_sync.sh` / `ugripper-ntp-sync.service` | 开机或安装后只在非录制态执行一次性时间同步，优先使用板端现有 `sntp -S`，再 fallback 到 `ntpd -q -g` / `timedatectl`；同步完成、超时或录制开始后停止常驻 NTP 服务 | `/tmp/umi_recording.lock`、`sntp`/`ntp` |
 | 相机录制 | `bin/CameraRecorder/CameraRecorder` | 普通录制模式下负责主摄/触觉会话录制；`--stereo-daemon` 模式下负责双目常驻预热、热插拔恢复与 session finalize | 8 路 `mkv`（默认） |
 | 传感器录制 | `bin/SensorRecorder/SensorRecorder` | 录制左右 IMU/encoder，按“采样入队 + 每侧独立 MCAP 写线程”分别输出 MCAP | `sensor_left.mcap`、`sensor_right.mcap` |
+| Ego 联动采集 | `bin/UgripperRuntime/ego/ego_recording_worker.py` + `bin/UgripperRuntime/adb/adb` | 录制起停阶段通过内置 ADB 联动 SXR ego app，按增量方式同步 ego episode 到当前 UGripper episode；当前不主动启动 app、不参与强校验 | `ego/`、`ego_sync.json` |
 | HMI 类库 | `standalone/GripperHmiTool` | 读取夹爪按键，并在驱动内部以单线程 owner 线程完成状态查询、灯效生成与 RGB 指令发送；默认由状态机切灯效，必要时仍可直接下发 RGB；当前也提供 SN 与 1024-byte 标定参数读写 API | 按键快照、RGB 指令、SN/标定参数读写 |
 | 音频播放 | `bin/UgripperRuntime/audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 优先从受支持 USB 耳机麦克风录音，无耳机时回退系统默认 source，供 pre/post 处理链路使用 | 临时 wav 文件 |
@@ -113,7 +114,8 @@
    - `camera_recorder --codec <codec> --output-dir <episode> --only left_cam_main,right_cam_main[,chest_cam_main],left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
    - `sensor_recorder <episode_dir>`
 8. 同时向 stereo warmup daemon 写入本次 session 控制文件；双目不重启采集管线，只把本次 session 窗口内的帧纳入当前 episode，由 session writer 抽帧并编码落盘。
-9. 切换到 `RECORDING` 状态并播放开始提示音。
+9. 若 USB 上存在 ego 设备，`record_runtime` 会拉起 `ego_recording_worker.py start`，worker 默认优先使用随包安装的 `bin/UgripperRuntime/adb/adb`：设备识别要求 `ro.product.manufacturer=SXR` 且 `ro.product.model/ro.product.device/ro.product.name/ro.build.product` 均为 `SXR_1`，随后向已运行的 `com.ssnwt.helloxr` app 广播 `START_RECORDING`，并把远端 `episode_*-temp` 增量同步到本条 UGripper episode 的 `ego/` 目录；当前不主动启动 ego app，找不到 ego 只写 `ego_sync.json` 或日志，不阻塞 UGripper 主录制。
+10. 切换到 `RECORDING` 状态并播放开始提示音。
 
 ### 6.2 相机链路
 - 配置入口：`config/camera_recorder.yaml`。
@@ -173,13 +175,14 @@
 2. 在 stereo daemon 收到 stop-session 后，`record_runtime` 并发停止普通录制模式下的 `camera_recorder` 与 `sensor_recorder`，降低两条独立链路顺序收尾带来的蓝灯等待。
 3. stereo daemon 收到 stop-session 后会先一次性冻结左右双目 session 的送帧边界，再逐路 finalize 文件，避免某一路在另一侧 finalize 期间继续长出额外尾巴；收尾完成后后台 warmup 继续运行。
 4. 先发送 `recording_stop`，随后立即切到 `writing`；提示音采用“后触发抢占前触发”的语义，因此 `writing` 会直接打断仍在播放的上一条提示。
-5. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行分阶段文件级 flush。所有 episode 产物都必须在所属阶段显式执行文件级 flush，再刷 episode 目录项；`pre_stereo_finalize` 只刷普通相机视频、左右 sensor MCAP、`calibration.json` 和可选音频；等待 stereo finalize 并合并 session 信息后，`final` 只刷 `stereo_*.mkv` 与 `fays_data_*.mcap`；`metadata_final` 只刷最终 `metadata.json`、失败时的 `validation_error.log` 和目录项，避免停录路径重复刷同一批媒体文件。停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
-6. `record_runtime` 等待 daemon 在状态文件中写出本次 `last_session`，再将其并入 `/dev/shm` 内部 timing 缓存。
-7. 先生成最终 `metadata.json`，其中 `video_details[].start_offset_us/duration_s` 来自 `/dev/shm` 内部 timing 缓存和视频轻量探测；随后执行稳定校验，校验只读取最终 `metadata.json` 与最终媒体/MCAP/`calibration.json`，不再直接依赖 shm 缓存。视频探测结果会尽量写入 `/dev/shm` 内部 timing 缓存的 `video_probes`，供同次 metadata 生成复用；若缓存写入失败，只记录告警，不作为 episode 硬校验失败原因。
-8. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 抽检：其一是“本次起录附近单帧 vs 插爪参考帧”的实时比较；其二是“本次起录附近单帧 vs 同 `serial` 的持久化 baseline”的慢变量比较。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
-9. 实时触觉抽检当前属于软告警而不是完整性失败：单次异常只更新该 tactile `serial` 的近期历史；当同一 `serial` 最近 `3` 个 episode 都判为异常时，空闲态切到黄灯闪烁，并播放对应 `left/right_tcam_*_damaged` 提示音。后台 tactile 校验最多保留一个待处理 episode；若下一次录制开始，会请求当前后台校验停止并清空待处理任务，避免干扰下一次录制。
-10. 持久化 baseline 当前按 `12h` 窗口维护：插爪阶段和停录阶段都会与上一份持久化 baseline 做比较；若超过阈值，则立即触发同一套 damaged 软告警并锁住该 `serial` 的持久化 baseline，不再自动刷新。只有服务重启一次后，下一次插爪才允许用当前图像重建该 `serial` 的持久化 baseline。
-11. 停录收尾完成后将 `episode_YYYYMMDD_NNNN-temp` rename 为 `episode_YYYYMMDD_NNNN`；无论质量成功或失败，只要收尾已完成就去掉 `-temp`，质量结果由 `metadata.json` 和 `validation_error.log` 表达。完整性成功且无触觉软告警则回到 `READY` 并播放 `ready`；完整性失败进入 `ERROR_1` 并播放 `validation_failed`；运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
+5. 若本条 episode 已拉起 ego sidecar，停录进入 `writing` 后会停止后台增量同步进程，向 ego app 广播 `STOP_RECORDING`，等待 ego 侧目录从 `episode_*-temp` rename 为最终目录并补齐最后一轮文件；随后 worker 会重新拉取 MP4/M4A finalize 后的头部 `moov` 区域并覆盖本地差异段，再修复 ego MP4 中 stop 后才可确定的 extended-size `mdat` 大小，使本地同步文件可被播放器按 box 边界读到。ego 失败当前只更新 `ego_sync.json` 与日志，不改变 UGripper `quality_check_status`。
+6. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行分阶段文件级 flush。所有 episode 产物都必须在所属阶段显式执行文件级 flush，再刷 episode 目录项；`pre_stereo_finalize` 只刷普通相机视频、左右 sensor MCAP、`calibration.json` 和可选音频；等待 ego/stereo finalize 并合并 session 信息后，`final` 刷 `stereo_*.mkv`、`fays_data_*.mcap`、`ego_sync.json` 与 `ego/` 下已同步文件，并额外刷 ego 子目录目录项；`metadata_final` 只刷最终 `metadata.json`、失败时的 `validation_error.log` 和目录项，避免停录路径重复刷同一批媒体文件。停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
+7. `record_runtime` 等待 daemon 在状态文件中写出本次 `last_session`，再将其并入 `/dev/shm` 内部 timing 缓存。
+8. 先生成最终 `metadata.json`，其中 `video_details[].start_offset_us/duration_s` 来自 `/dev/shm` 内部 timing 缓存和视频轻量探测；随后执行稳定校验，校验只读取最终 `metadata.json` 与最终媒体/MCAP/`calibration.json`，不再直接依赖 shm 缓存。视频探测结果会尽量写入 `/dev/shm` 内部 timing 缓存的 `video_probes`，供同次 metadata 生成复用；若缓存写入失败，只记录告警，不作为 episode 硬校验失败原因。
+9. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 抽检：其一是“本次起录附近单帧 vs 插爪参考帧”的实时比较；其二是“本次起录附近单帧 vs 同 `serial` 的持久化 baseline”的慢变量比较。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
+10. 实时触觉抽检当前属于软告警而不是完整性失败：单次异常只更新该 tactile `serial` 的近期历史；当同一 `serial` 最近 `3` 个 episode 都判为异常时，空闲态切到黄灯闪烁，并播放对应 `left/right_tcam_*_damaged` 提示音。后台 tactile 校验最多保留一个待处理 episode；若下一次录制开始，会请求当前后台校验停止并清空待处理任务，避免干扰下一次录制。
+11. 持久化 baseline 当前按 `12h` 窗口维护：插爪阶段和停录阶段都会与上一份持久化 baseline 做比较；若超过阈值，则立即触发同一套 damaged 软告警并锁住该 `serial` 的持久化 baseline，不再自动刷新。只有服务重启一次后，下一次插爪才允许用当前图像重建该 `serial` 的持久化 baseline。
+12. 停录收尾完成后将 `episode_YYYYMMDD_NNNN-temp` rename 为 `episode_YYYYMMDD_NNNN`；无论质量成功或失败，只要收尾已完成就去掉 `-temp`，质量结果由 `metadata.json` 和 `validation_error.log` 表达。完整性成功且无触觉软告警则回到 `READY` 并播放 `ready`；完整性失败进入 `ERROR_1` 并播放 `validation_failed`；运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
 
 ## 7. Episode 产物与检查
 ### 7.1 默认产物
@@ -205,6 +208,7 @@
   - `audio_pre.wav`
   - `audio_post.wav`
   - `validation_error.log`（校验失败时，记录失败原因）
+  - `ego_sync.json`、`ego/<ego_episode>/...`（检测到 SXR ego 并完成或尝试联动采集时；当前不进入强校验与 `require_files`）
 
 ### 7.2 metadata.json
 停录校验完成后，`record_runtime` 写入最终 `metadata.json`。当前顶层字段固定为：
@@ -308,6 +312,9 @@
 | `CAMERA_CODEC` | `camera_recorder` 启动参数 | 仅支持 `h264` / `h265` |
 | `ENABLE_CHEST_CAM_MAIN` | `record_runtime` 读取 | 默认启用胸部主摄；显式写成 `0/false/no/off/disable/disabled` 时关闭 |
 | `UGRIPPER_PERF_LOG` | `record_runtime` 读取 | 默认开启 `[PERF]` 耗时日志；显式写成 `0/false/no/off/disable/disabled` 时关闭 |
+| `UGRIPPER_EGO_SERIAL` | `ego_recording_worker.py` 读取 | 默认不指定 serial，自动扫描 `adb devices`；需要固定某台 ego 时可设置 |
+| `UGRIPPER_EGO_ADB` | `ego_recording_worker.py` 读取 | 覆盖 ADB 可执行文件路径；默认优先使用随包安装的 `bin/UgripperRuntime/adb/adb`，不可用时回退 `PATH` |
+| `UGRIPPER_EGO_SYNC_INTERVAL_SEC` | `ego_recording_worker.py` 读取 | ego 文件增量同步间隔，默认 `1s` |
 
 说明：当前录制与 U 盘导入流程都不再使用角色环境变量；episode `metadata.json` 也不再写角色字段。
 

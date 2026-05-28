@@ -60,6 +60,7 @@ constexpr uint64_t kAudioPlayerRestartIntervalMs = 2000;
 constexpr uint64_t kAudioPlayerReadyGraceMs = 3000;
 constexpr uint64_t kStereoDaemonRestartIntervalMs = 2000;
 constexpr uint64_t kStereoFinalizeWaitPollMs = 100;
+constexpr uint64_t kEgoFinalizeWaitPollMs = 100;
 constexpr uint64_t kHealthCheckIntervalMs = 1000;
 constexpr uint64_t kHmiActiveTimeoutMs = 2500;
 constexpr uint64_t kGripperRefreshActiveTimeoutMs = 1500;
@@ -99,6 +100,7 @@ constexpr int kTactileSnapshotTimeoutMs = 2500;
 constexpr uint64_t kTactilePersistentBaselineRefreshMs = 12ULL * 60ULL * 60ULL * 1000ULL;
 constexpr const char *kEpisodeTimingFileName = ".recording_timing.json";
 constexpr const char *kEpisodeTimingShmPrefix = "ugripper_recording_timing_";
+constexpr const char *kEgoSyncStatusFileName = "ego_sync.json";
 
 bool g_perfLogEnabled = true;
 
@@ -1410,6 +1412,61 @@ void flushEpisodeDirectoriesToDisk(const fs::path &episodeDir, const char *phase
     }
 }
 
+void flushDirectoryTreeToDisk(const fs::path &rootDir, const char *phaseLabel)
+{
+    if (rootDir.empty())
+    {
+        return;
+    }
+
+    std::error_code rootStatusError;
+    if (!fs::is_directory(rootDir, rootStatusError))
+    {
+        return;
+    }
+
+    std::vector<fs::path> directories;
+    directories.push_back(rootDir);
+
+    std::error_code walkError;
+    for (fs::recursive_directory_iterator it(rootDir, fs::directory_options::skip_permission_denied, walkError), end;
+         it != end;
+         it.increment(walkError))
+    {
+        if (walkError)
+        {
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to walk directory tree for flush: phase="
+                          << phaseLabel << " root=" << rootDir
+                          << " error=" << walkError.message() << std::endl).str());
+            walkError.clear();
+            continue;
+        }
+
+        std::error_code statusError;
+        if (it->is_directory(statusError))
+        {
+            directories.push_back(it->path());
+        }
+    }
+
+    for (auto rit = directories.rbegin(); rit != directories.rend(); ++rit)
+    {
+        const int64_t dirFlushStartMs = steadyNowMs();
+        std::error_code error;
+        if (!flushDirectoryToDisk(*rit, &error))
+        {
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to flush directory tree entry: phase="
+                          << phaseLabel << " path=" << *rit
+                          << " error=" << error.message() << std::endl).str());
+            continue;
+        }
+
+        logPerf((::DA::utils::LogString() << "[PERF] flush dir tree done: phase=" << phaseLabel
+                  << " path=" << *rit
+                  << " elapsed_ms=" << (steadyNowMs() - dirFlushStartMs)).str());
+    }
+}
+
 bool shouldFlushVideoArtifactForPhase(const EpisodeVideoArtifact &artifact, const std::string &phase)
 {
     const bool isStereo = std::string(artifact.fileName).find("stereo_") == 0;
@@ -1446,6 +1503,17 @@ bool shouldFlushPathForPhase(const fs::path &episodeDir,
     }
     if (phase == "final")
     {
+        if (fileName == kEgoSyncStatusFileName)
+        {
+            return true;
+        }
+        const fs::path egoRelativePath = path.lexically_relative(episodeDir / "ego");
+        if (!egoRelativePath.empty() &&
+            egoRelativePath != fs::path(".") &&
+            egoRelativePath.string().find("..") != 0)
+        {
+            return true;
+        }
         return fileName == "fays_data_left.mcap" ||
                fileName == "fays_data_right.mcap";
     }
@@ -1486,6 +1554,31 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
     paths.push_back(episodeDir / "metadata.json");
     paths.push_back(episodeDir / "calibration.json");
     paths.push_back(episodeDir / "validation_error.log");
+    paths.push_back(episodeDir / kEgoSyncStatusFileName);
+
+    const fs::path egoDir = episodeDir / "ego";
+    if (phase == "final" && fs::exists(egoDir))
+    {
+        std::error_code walkError;
+        for (fs::recursive_directory_iterator it(egoDir, fs::directory_options::skip_permission_denied, walkError), end;
+             it != end;
+             it.increment(walkError))
+        {
+            if (walkError)
+            {
+                DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to walk ego artifacts for flush: "
+                              << egoDir << " error=" << walkError.message() << std::endl).str());
+                walkError.clear();
+                continue;
+            }
+
+            std::error_code statusError;
+            if (it->is_regular_file(statusError))
+            {
+                paths.push_back(it->path());
+            }
+        }
+    }
 
     const fs::path audioPre = episodeDir / "audio_pre.wav";
     if (fs::exists(audioPre))
@@ -1537,6 +1630,10 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
                   << " elapsed_ms=" << (steadyNowMs() - artifactFlushStartMs)).str());
     }
 
+    if (phase == "final")
+    {
+        flushDirectoryTreeToDisk(egoDir, phaseLabel);
+    }
     flushEpisodeDirectoriesToDisk(episodeDir, phaseLabel);
 
     logPerf((::DA::utils::LogString() << "[PERF] flush end: phase=" << phaseLabel
@@ -3308,6 +3405,18 @@ bool RecordRuntime::initialize()
                     return stereoSessionClient_->StopSession(
                         episode_dir, stop_system_time_us, error_message);
                 },
+            .start_ego_recording =
+                [this](const std::string& episode_dir, int64_t start_system_time_us, std::string* error_message) {
+                    return startEgoRecording(episode_dir, start_system_time_us, error_message);
+                },
+            .stop_ego_recording =
+                [this](const std::string& episode_dir, int64_t stop_system_time_us, std::string* error_message) {
+                    return stopEgoRecording(episode_dir, stop_system_time_us, error_message);
+                },
+            .wait_for_ego_finalize =
+                [this](const std::string& episode_dir, int timeout_ms, std::string* error_message) {
+                    return waitForEgoFinalize(episode_dir, timeout_ms, error_message);
+                },
             .wait_for_stereo_finalize =
                 [this](const std::string& episode_dir, int timeout_ms, std::string* error_message) {
                     return waitForStereoFinalize(episode_dir, timeout_ms, error_message);
@@ -3477,6 +3586,15 @@ int RecordRuntime::run()
 void RecordRuntime::requestStop()
 {
     stopRequested_.store(true);
+    if (egoRecordingWorker_.has_value())
+    {
+        std::string ignoredError;
+        egoRecordingWorker_->Stop(
+            ugripper::runtime::ProcessStopMode::SigTermThenKill,
+            1000,
+            &ignoredError);
+        egoRecordingWorker_.reset();
+    }
 }
 
 bool RecordRuntime::startAudioPlayer()
@@ -3581,6 +3699,123 @@ bool RecordRuntime::waitForStereoFinalize(const std::string &episodeDir, int tim
         return false;
     }
     return stereoSessionClient_->WaitForFinalize(episodeDir, timeoutMs, errorMessage);
+}
+
+std::vector<std::string> egoWorkerArgs(const std::string &script,
+                                       const std::string &command,
+                                       const std::string &episodeDir)
+{
+    std::vector<std::string> args = resolvePythonCommand();
+    args.push_back(script);
+    args.push_back(command);
+    args.push_back("--episode-dir");
+    args.push_back(episodeDir);
+    args.push_back("--status-file");
+    args.push_back((fs::path(episodeDir) / kEgoSyncStatusFileName).string());
+    return args;
+}
+
+bool RecordRuntime::startEgoRecording(const std::string &episodeDir,
+                                      int64_t,
+                                      std::string *errorMessage)
+{
+    egoRecordingAttempted_ = false;
+    if (!fs::exists(options_.egoRecordingScript))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ego recording script not found: " + options_.egoRecordingScript;
+        }
+        return false;
+    }
+
+    if (egoRecordingWorker_.has_value())
+    {
+        std::string ignoredError;
+        egoRecordingWorker_->Stop(
+            ugripper::runtime::ProcessStopMode::SigTermThenKill,
+            1000,
+            &ignoredError);
+        egoRecordingWorker_.reset();
+    }
+
+    egoRecordingWorker_.emplace("ego_recording_worker");
+    egoRecordingAttempted_ = true;
+    if (!egoRecordingWorker_->Start(egoWorkerArgs(options_.egoRecordingScript, "start", episodeDir),
+                                   {},
+                                   errorMessage))
+    {
+        egoRecordingWorker_.reset();
+        egoRecordingAttempted_ = false;
+        return false;
+    }
+    return true;
+}
+
+bool RecordRuntime::stopEgoRecording(const std::string &episodeDir,
+                                     int64_t,
+                                     std::string *errorMessage)
+{
+    if (egoRecordingWorker_.has_value())
+    {
+        std::string ignoredError;
+        egoRecordingWorker_->Stop(
+            ugripper::runtime::ProcessStopMode::SigTermThenKill,
+            1500,
+            &ignoredError);
+        egoRecordingWorker_.reset();
+    }
+
+    if (!fs::exists(options_.egoRecordingScript))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ego recording script not found: " + options_.egoRecordingScript;
+        }
+        return false;
+    }
+
+    return runCommandSync(egoWorkerArgs(options_.egoRecordingScript, "stop", episodeDir));
+}
+
+bool RecordRuntime::waitForEgoFinalize(const std::string &episodeDir,
+                                       int timeoutMs,
+                                       std::string *errorMessage)
+{
+    if (!egoRecordingAttempted_)
+    {
+        return true;
+    }
+    const fs::path statusPath = fs::path(episodeDir) / kEgoSyncStatusFileName;
+    const uint64_t startMs = currentSteadyMs();
+    while ((currentSteadyMs() - startMs) < static_cast<uint64_t>(std::max(timeoutMs, 0)))
+    {
+        json status = json::object();
+        std::string loadError;
+        if (loadJsonFile(statusPath.string(), &status, &loadError) && status.is_object())
+        {
+            const std::string state = status.value("status", std::string());
+            if (state == "finalized" || state == "not_found" || state == "stop_no_remote_episode")
+            {
+                return true;
+            }
+            if (state == "finalize_timeout" || state == "error")
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage = status.value("error", state);
+                }
+                return false;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kEgoFinalizeWaitPollMs));
+    }
+
+    if (errorMessage != nullptr)
+    {
+        *errorMessage = "timed out waiting for ego finalize status";
+    }
+    return false;
 }
 
 bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const

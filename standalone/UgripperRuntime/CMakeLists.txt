@@ -154,6 +154,20 @@ install(DIRECTORY
     FILES_MATCHING PATTERN "*.wav"
 )
 
+install(DIRECTORY
+    ${CMAKE_CURRENT_SOURCE_DIR}/ego/
+    DESTINATION bin/UgripperRuntime/ego
+    USE_SOURCE_PERMISSIONS
+    PATTERN "__pycache__" EXCLUDE
+)
+
+install(DIRECTORY
+    ${CMAKE_CURRENT_SOURCE_DIR}/adb/
+    DESTINATION bin/UgripperRuntime/adb
+    USE_SOURCE_PERMISSIONS
+    PATTERN "__pycache__" EXCLUDE
+)
+
 install(FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/config/fakeCamCalib.json
     DESTINATION bin/UgripperRuntime/config

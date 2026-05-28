@@ -5,11 +5,14 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- 修复 ego MP4/M4A 停录后 `moov` 不可读问题：ego sidecar 在最终同步后会重新拉取 finalize 后的 MP4/M4A 头部 `moov` 区域并覆盖本地差异段，再按尾部 `moov` 起点回写本地 MP4 extended-size `mdat` 大小，并把修复结果记录到 `ego_sync.json`。
+- 修复 ego 联动采集文件未显式 flush 的落盘风险：停录 `final` 阶段会同步刷写 `ego_sync.json`、`ego/` 下已同步文件以及 ego 子目录目录项。
+- 新增 SXR ego ADB 联动采集 sidecar：随 `ugripper` 内置 arm64 ADB 运行包，按 `ro.product.manufacturer=SXR` 与 `ro.product.*=SXR_1` 自动识别 ego，录制起停时广播 `com.ssnwt.helloxr.START_RECORDING/STOP_RECORDING`，并把 ego episode 增量同步到当前 UGripper episode 的 `ego/` 目录；当前不主动启动 ego app，ego 数据暂不纳入强校验。
 - 内部录制 timing 缓存迁移到 `/dev/shm/ugripper_recording_timing_*.json`：不再在 U 盘 episode 目录写入或 flush 临时 timing JSON；停录硬校验只读取最终 `metadata.json` 与最终产物，shm 缓存仅用于生成 `metadata.json` 的视频 offset 与探测缓存。
 - SensorRecorder 的 encoder 起录连接增加 `1Mbps` 快速验证重试：首次无响应后额外重试 2 次，约 `150ms` 验证窗口内收敛临时串口通讯抖动，再回退 `115200`；同时收敛重试期间的重复无响应日志。
-- 停录阶段进一步缩短蓝灯等待：`camera_recorder` 与 `sensor_recorder` 改为并发 stop，并新增 `stop workers`、`stereo finalize wait`、`stereo merge` 分段耗时日志。
 - Fays recorder daemon 模式过滤 SDK 周期性 `Stereo FPS:` / `IMU FPS:` 行，避免相机帧率刷屏进入 `umi_sys_*.log`；其他 Fays 状态、告警和错误输出仍保留。
 - 修复 episode 分阶段 flush 的视频文件过滤错误：已按阶段选中的 `cam_*.mkv`、`tcam_*.mkv` 与 `stereo_*.mkv` 现在会真正执行文件级 flush，再刷目录项，保证所有 episode 产物都有显式落盘阶段。
+- 停录阶段进一步缩短蓝灯等待：`camera_recorder` 与 `sensor_recorder` 改为并发 stop，并新增 `stop workers`、`stereo finalize wait`、`stereo merge` 分段耗时日志。
 - 触觉状态抽检改为后台慢校验：停录硬校验不再等待 tactile 单帧抽取与 baseline 比对；后台任务只更新触觉软告警与历史状态，起录时会取消/丢弃后台任务以避免干扰下一次录制。
 - 停录收尾 flush 改为按阶段拆分：`pre_stereo_finalize` 不再提前刷 stereo/Fays 产物，`final` 只刷 stereo/Fays 和内部 timing，`metadata_final` 只刷最终 metadata/错误日志/目录；同时新增 `UGRIPPER_PERF_LOG` 开关控制 `[PERF]` 耗时日志。
 - episode validation 的 encoder/Fays tail check 改为 4 个只读任务并行执行，并统一输出一条 tail checks 总耗时与详情日志；validation 耗时日志收敛为 setup、video probe、tail checks、tactile validation 与总耗时。

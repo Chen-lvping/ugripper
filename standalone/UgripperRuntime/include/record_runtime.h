@@ -36,6 +36,7 @@ struct RecordRuntimeOptions
     std::string rightFaysControlFifo = "/tmp/umi_right_fays_cmd";
     std::string audioPlayScript = "./bin/UgripperRuntime/audio/audio_play.py";
     std::string audioRecordScript = "./bin/UgripperRuntime/audio/record_usb_audio.py";
+    std::string egoRecordingScript = "./bin/UgripperRuntime/ego/ego_recording_worker.py";
     std::string audioPipe = "/tmp/umi_audio_pipe";
     std::string audioReadyFile = "/tmp/umi_audio_ready";
     std::string audioTempDir = "/tmp/umi_audio";
@@ -327,6 +328,9 @@ private:
                             int64_t startSystemTimeUs,
                             int64_t stopSystemTimeUs);
     bool waitForStereoFinalize(const std::string &episodeDir, int timeoutMs, std::string *errorMessage);
+    bool startEgoRecording(const std::string &episodeDir, int64_t startSystemTimeUs, std::string *errorMessage);
+    bool stopEgoRecording(const std::string &episodeDir, int64_t stopSystemTimeUs, std::string *errorMessage);
+    bool waitForEgoFinalize(const std::string &episodeDir, int timeoutMs, std::string *errorMessage);
     bool mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const;
     bool syncRuntimeLogToDisk(const char *reason) const;
     void refreshTactileReferenceCachesForSide(const std::string &side);
@@ -417,6 +421,8 @@ private:
     std::unique_ptr<ugripper::runtime::AudioCoordinator> audioCoordinator_;
     std::unique_ptr<ugripper::runtime::StereoSessionClient> stereoSessionClient_;
     std::unique_ptr<ugripper::runtime::ShutdownRequestPort> shutdownRequestPort_;
+    std::optional<ugripper::runtime::SubprocessHandle> egoRecordingWorker_;
+    bool egoRecordingAttempted_ = false;
     std::unique_ptr<ugripper::runtime::RecordingOrchestrator> recordingOrchestrator_;
 };
 

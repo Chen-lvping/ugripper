@@ -440,6 +440,9 @@ copy_if_exists "config/ensure_main_camera_packet_size_once.sh" \
     "$TARGET_INSTALL_ROOT/config/ensure_main_camera_packet_size_once.sh"
 copy_if_exists "standalone/UgripperRuntime/audio" "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/audio"
 copy_if_exists "standalone/UgripperRuntime/audio_en" "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/audio_en"
+copy_if_exists "standalone/UgripperRuntime/ego" "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/ego"
+rm -rf "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/ego/__pycache__"
+copy_if_exists "standalone/UgripperRuntime/adb" "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/adb"
 copy_if_exists "standalone/UgripperRuntime/config/fakeCamCalib.json" \
     "$TARGET_INSTALL_ROOT/bin/UgripperRuntime/config/fakeCamCalib.json"
 

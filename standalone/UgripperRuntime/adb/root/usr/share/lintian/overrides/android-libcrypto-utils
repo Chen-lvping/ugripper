@@ -1,0 +1,5 @@
+# This library is not linked against libc.
+#
+# We guarantee this by explicitly checking for missing library references at link
+# time by using -Wl,-z,defs (see debian/libcrypto_utils.mk).
+library-not-linked-against-libc usr/lib/x86_64-linux-gnu/android/libcrypto_utils.so.*
