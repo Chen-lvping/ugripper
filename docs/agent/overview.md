@@ -181,7 +181,7 @@
 8. 先生成最终 `metadata.json`，其中 `video_details[].start_offset_us/duration_s` 来自 `/dev/shm` 内部 timing 缓存和视频轻量探测；随后执行稳定校验，校验只读取最终 `metadata.json` 与最终媒体/MCAP/`calibration.json`，不再直接依赖 shm 缓存。视频探测结果会尽量写入 `/dev/shm` 内部 timing 缓存的 `video_probes`，供同次 metadata 生成复用；若缓存写入失败，只记录告警，不作为 episode 硬校验失败原因。
 9. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 抽检：其一是“本次起录附近单帧 vs 插爪参考帧”的实时比较；其二是“本次起录附近单帧 vs 同 `serial` 的持久化 baseline”的慢变量比较。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
 10. 实时触觉抽检当前属于软告警而不是完整性失败：单次异常只更新该 tactile `serial` 的近期历史；当同一 `serial` 最近 `3` 个 episode 都判为异常时，空闲态切到黄灯闪烁，并播放对应 `left/right_tcam_*_damaged` 提示音。后台 tactile 校验最多保留一个待处理 episode；若下一次录制开始，会请求当前后台校验停止并清空待处理任务，避免干扰下一次录制。
-11. 持久化 baseline 当前按 `12h` 窗口维护：插爪阶段和停录阶段都会与上一份持久化 baseline 做比较；若超过阈值，则立即触发同一套 damaged 软告警并锁住该 `serial` 的持久化 baseline，不再自动刷新。只有服务重启一次后，下一次插爪才允许用当前图像重建该 `serial` 的持久化 baseline。
+11. 持久化 baseline 当前按 `12h` 窗口维护：插爪阶段会在缺失或超时后刷新同 `serial` 的持久化 baseline；停录后台校验会把本次起录附近单帧与持久化 baseline 比较，并维护独立的 `persistent_recent` 窗口。persistent 告警同样要求连续 `3` 个 episode 异常才置位，用于覆盖关机期间发生的盖板损坏；连续 `3` 个 clean episode 会清除该 persistent 告警。
 12. 停录收尾完成后将 `episode_YYYYMMDD_NNNN-temp` rename 为 `episode_YYYYMMDD_NNNN`；无论质量成功或失败，只要收尾已完成就去掉 `-temp`，质量结果由 `metadata.json` 和 `validation_error.log` 表达。完整性成功且无触觉软告警则回到 `READY` 并播放 `ready`；完整性失败进入 `ERROR_1` 并播放 `validation_failed`；运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
 
 ## 7. Episode 产物与检查
@@ -235,12 +235,12 @@
 - Fays MCAP 轻量完整性：左右 `fays_data_*.mcap` 必须能读取 summary，`i/c` 两类消息计数都必须非零，并且 summary/chunk 索引给出的消息覆盖跨度不能过短；该检查只读 MCAP summary 与尾部少量 chunk，不允许 fallback 全量扫描消息。
 - 条件产物：若执行了 pre/post 音频录制，对应 wav 仍需存在。
 - 触觉软校验：
-  - 每路 tactile 只取起录附近单帧，与插爪阶段缓存的同 `serial` 参考灰度帧比较 `mean_abs_diff / mask_ratio / correlation`；单次异常不让当前 episode 失败，仅用于连续 `3` 个 episode 的损坏提示。
-  - 同时还会与上一份 `12h` 持久化 baseline 比较；若超过阈值，则播放对应 damaged 语音并冻结该 `serial` 的持久化 baseline，避免把坏状态自动刷新成新基线；黄灯仍只由最近 `3` 次 runtime 抽检窗口控制。
+  - 每路 tactile 只取起录附近单帧，与插爪阶段缓存的同 `serial` 参考灰度帧计算 `robust_residual_area`：先按 baseline 对当前帧做全局亮度/对比度配准，再生成超过动态残差阈值的 mask；mask 会经过 `3x3` 邻域投票和最小连通域过滤，避免零散单点像素误差触发损坏；单次异常不让当前 episode 失败，仅用于连续 `3` 个 episode 的损坏提示。
+  - 同时还会与上一份 `12h` 持久化 baseline 比较；persistent 比较独立维护最近 `3` 次窗口，连续 `3` 次异常才播放对应 damaged 语音并置位，连续 `3` 次 clean 后清除。
 - 当前运行时轻量阈值口径：
-  - `mean_abs_diff >= 3.0`
-  - `mask_ratio >= 0.05`
-  - `correlation <= 0.94`
+  - `robust_residual_area >= 0.002`
+  - 动态残差阈值为 `max(20, median(residual) + 6 * 1.4826 * MAD(residual))`
+  - residual mask 过滤为：`3x3` 内异常像素数至少 `4`，且 `8` 连通域面积至少 `8 px`
 
 说明：当前不会为视频做全量逐帧扫描；强校验只读取容器元信息并消费内部 timing 字段，触觉软校验也只做单帧快速比较，优先保证现场稳定性与停录耗时可控。
 
@@ -248,7 +248,7 @@
 ### 8.1 当前状态灯语义
 - `INIT`：初始化或落盘阶段，蓝灯。
 - `READY`：可录制，绿色呼吸灯；当前基于单调时钟渲染，避免系统校时导致相位突变。
-- `WARNING`：触觉软告警，黄灯闪烁；当前只用于“同一 tactile serial 最近 3 个 episode 都异常”的 runtime 损坏提示。若后续一次录制把最近 `3` 次窗口刷回非全异常，黄灯会自动清除。持久化 baseline 超阈值仍会播放 damaged 语音并冻结 baseline，但不会单独把黄灯锁住。
+- `WARNING`：触觉软告警，黄灯闪烁；当前用于同一 tactile serial 的实时 reference 窗口或 persistent baseline 窗口连续 `3` 个 episode 异常。若后续连续 `3` 次 clean，相关窗口会清除告警并回到 READY。
 - `RECORDING`：录制中，绿色闪烁；当前只在亮灭边沿和低频补发时下发 RGB，避免高频重复写串口造成丢闪。
 - `CALIB_PRE` / `CALIB_RUN` / `CALIB_DONE`：供 USB 导入与校准脚本复用。
 - `ERROR_1` ~ `ERROR_5`：红灯长短码，分别用于完整性失败到运行时错误。硬件缺失类 `ERROR_2` 会按侧别提示：缺失侧夹爪闪烁 `ERROR_2`，另一侧红灯常亮；左右都缺失则两侧一起闪烁；无法归属左右侧时，两侧同步先闪一次 `ERROR_2` 完整序列，再红灯常亮相同时间并循环。

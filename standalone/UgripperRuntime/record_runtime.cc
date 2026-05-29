@@ -92,9 +92,12 @@ constexpr int kTactileFrameWidth = 160;
 constexpr int kTactileFrameHeight = 120;
 constexpr size_t kTactileFrameBytes = static_cast<size_t>(kTactileFrameWidth * kTactileFrameHeight);
 constexpr double kTactileEpisodeProbeSec = 0.12;
-constexpr double kTactileMeanAbsThreshold = 3.0;
-constexpr double kTactileMaskRatioThreshold = 0.05;
-constexpr double kTactileCorrelationThreshold = 0.94;
+constexpr double kTactileRobustResidualAreaThreshold = 0.002;
+constexpr double kTactileResidualFloorThreshold = 20.0;
+constexpr double kTactileResidualMadMultiplier = 6.0;
+constexpr double kTactileMadToSigma = 1.4826;
+constexpr int kTactileResidualMinNeighborCount = 4;
+constexpr size_t kTactileResidualMinComponentPixels = 8;
 constexpr size_t kTactileHistoryWindow = 3;
 constexpr int kTactileSnapshotTimeoutMs = 2500;
 constexpr uint64_t kTactilePersistentBaselineRefreshMs = 12ULL * 60ULL * 60ULL * 1000ULL;
@@ -244,9 +247,16 @@ struct CommandCaptureResult
 
 struct TactileFrameMetrics
 {
-    double meanAbsDiff = 0.0;
-    double maskRatio = 0.0;
-    double correlation = 1.0;
+    double robustResidualArea = 0.0;
+    double rawResidualArea = 0.0;
+    double residualThreshold = 0.0;
+    double residualMedian = 0.0;
+    double residualMad = 0.0;
+    double residualMean = 0.0;
+    double residualP99 = 0.0;
+    double gain = 1.0;
+    double offset = 0.0;
+    size_t maxResidualComponentPixels = 0;
     bool damaged = false;
 };
 
@@ -585,6 +595,152 @@ bool readBinaryFileExact(const fs::path &path,
     return true;
 }
 
+double percentileFromSorted(const std::vector<double> &sortedValues, double percentile)
+{
+    if (sortedValues.empty())
+    {
+        return 0.0;
+    }
+    if (sortedValues.size() == 1)
+    {
+        return sortedValues.front();
+    }
+
+    const double clamped = std::clamp(percentile, 0.0, 1.0);
+    const double position = clamped * static_cast<double>(sortedValues.size() - 1);
+    const size_t lower = static_cast<size_t>(std::floor(position));
+    const size_t upper = std::min(lower + 1, sortedValues.size() - 1);
+    const double weight = position - static_cast<double>(lower);
+    return sortedValues[lower] * (1.0 - weight) + sortedValues[upper] * weight;
+}
+
+std::vector<double> sortedFrameValues(const std::vector<uint8_t> &frame)
+{
+    std::vector<double> values;
+    values.reserve(frame.size());
+    for (const uint8_t value : frame)
+    {
+        values.push_back(static_cast<double>(value));
+    }
+    std::sort(values.begin(), values.end());
+    return values;
+}
+
+std::string formatTactileMetrics(const TactileFrameMetrics &metrics)
+{
+    return "robust_residual_area=" + formatFixed(metrics.robustResidualArea, 4) +
+           " area_threshold=" + formatFixed(kTactileRobustResidualAreaThreshold, 4) +
+           " raw_residual_area=" + formatFixed(metrics.rawResidualArea, 4) +
+           " residual_thr=" + formatFixed(metrics.residualThreshold, 2) +
+           " residual_median=" + formatFixed(metrics.residualMedian, 2) +
+           " residual_mad=" + formatFixed(metrics.residualMad, 2) +
+           " residual_p99=" + formatFixed(metrics.residualP99, 2) +
+           " max_component_px=" + std::to_string(metrics.maxResidualComponentPixels) +
+           " min_component_px=" + std::to_string(kTactileResidualMinComponentPixels) +
+           " gain=" + formatFixed(metrics.gain, 4) +
+           " offset=" + formatFixed(metrics.offset, 2);
+}
+
+size_t countFilteredResidualMask(const std::vector<uint8_t> &rawMask,
+                                 size_t width,
+                                 size_t height,
+                                 size_t minComponentPixels,
+                                 size_t *maxComponentPixels)
+{
+    if (rawMask.size() != width * height || rawMask.empty())
+    {
+        if (maxComponentPixels != nullptr)
+        {
+            *maxComponentPixels = 0;
+        }
+        return 0;
+    }
+
+    std::vector<uint8_t> neighborMask(rawMask.size(), 0);
+    for (size_t y = 0; y < height; ++y)
+    {
+        for (size_t x = 0; x < width; ++x)
+        {
+            const size_t index = y * width + x;
+            if (rawMask[index] == 0)
+            {
+                continue;
+            }
+            int neighborCount = 0;
+            const size_t yBegin = (y == 0) ? 0 : y - 1;
+            const size_t yEnd = std::min(height - 1, y + 1);
+            const size_t xBegin = (x == 0) ? 0 : x - 1;
+            const size_t xEnd = std::min(width - 1, x + 1);
+            for (size_t yy = yBegin; yy <= yEnd; ++yy)
+            {
+                for (size_t xx = xBegin; xx <= xEnd; ++xx)
+                {
+                    if (rawMask[yy * width + xx] != 0)
+                    {
+                        ++neighborCount;
+                    }
+                }
+            }
+            if (neighborCount >= kTactileResidualMinNeighborCount)
+            {
+                neighborMask[index] = 1;
+            }
+        }
+    }
+
+    std::vector<uint8_t> visited(rawMask.size(), 0);
+    std::vector<size_t> stack;
+    size_t retainedPixels = 0;
+    size_t maxComponent = 0;
+    for (size_t start = 0; start < neighborMask.size(); ++start)
+    {
+        if (neighborMask[start] == 0 || visited[start] != 0)
+        {
+            continue;
+        }
+
+        stack.clear();
+        stack.push_back(start);
+        visited[start] = 1;
+        size_t componentPixels = 0;
+        for (size_t cursor = 0; cursor < stack.size(); ++cursor)
+        {
+            const size_t index = stack[cursor];
+            ++componentPixels;
+            const size_t y = index / width;
+            const size_t x = index % width;
+            const size_t yBegin = (y == 0) ? 0 : y - 1;
+            const size_t yEnd = std::min(height - 1, y + 1);
+            const size_t xBegin = (x == 0) ? 0 : x - 1;
+            const size_t xEnd = std::min(width - 1, x + 1);
+            for (size_t yy = yBegin; yy <= yEnd; ++yy)
+            {
+                for (size_t xx = xBegin; xx <= xEnd; ++xx)
+                {
+                    const size_t next = yy * width + xx;
+                    if (neighborMask[next] != 0 && visited[next] == 0)
+                    {
+                        visited[next] = 1;
+                        stack.push_back(next);
+                    }
+                }
+            }
+        }
+
+        maxComponent = std::max(maxComponent, componentPixels);
+        if (componentPixels >= minComponentPixels)
+        {
+            retainedPixels += componentPixels;
+        }
+    }
+
+    if (maxComponentPixels != nullptr)
+    {
+        *maxComponentPixels = maxComponent;
+    }
+    return retainedPixels;
+}
+
 TactileFrameMetrics computeTactileFrameMetrics(const std::vector<uint8_t> &baseline,
                                                const std::vector<uint8_t> &current)
 {
@@ -592,59 +748,77 @@ TactileFrameMetrics computeTactileFrameMetrics(const std::vector<uint8_t> &basel
     if (baseline.size() != current.size() || baseline.empty())
     {
         metrics.damaged = true;
-        metrics.correlation = 0.0;
-        metrics.maskRatio = 1.0;
+        metrics.robustResidualArea = 1.0;
         return metrics;
     }
 
-    double sumBase = 0.0;
-    double sumCurrent = 0.0;
-    for (size_t index = 0; index < baseline.size(); ++index)
-    {
-        sumBase += static_cast<double>(baseline[index]);
-        sumCurrent += static_cast<double>(current[index]);
-    }
-    const double meanBase = sumBase / static_cast<double>(baseline.size());
-    const double meanCurrent = sumCurrent / static_cast<double>(current.size());
+    const auto baselineSorted = sortedFrameValues(baseline);
+    const auto currentSorted = sortedFrameValues(current);
+    const double baselineP5 = percentileFromSorted(baselineSorted, 0.05);
+    const double baselineP50 = percentileFromSorted(baselineSorted, 0.50);
+    const double baselineP95 = percentileFromSorted(baselineSorted, 0.95);
+    const double currentP5 = percentileFromSorted(currentSorted, 0.05);
+    const double currentP50 = percentileFromSorted(currentSorted, 0.50);
+    const double currentP95 = percentileFromSorted(currentSorted, 0.95);
+    const double currentSpan = std::max(1e-6, currentP95 - currentP5);
+    metrics.gain = (baselineP95 - baselineP5) / currentSpan;
+    metrics.offset = baselineP50 - metrics.gain * currentP50;
 
-    double absDiffSum = 0.0;
-    size_t maskCount = 0;
-    double covariance = 0.0;
-    double baseVariance = 0.0;
-    double currentVariance = 0.0;
+    std::vector<double> residuals;
+    residuals.reserve(baseline.size());
+    double residualSum = 0.0;
     for (size_t index = 0; index < baseline.size(); ++index)
     {
         const double baseValue = static_cast<double>(baseline[index]);
         const double currentValue = static_cast<double>(current[index]);
-        const double diff = std::fabs(baseValue - currentValue);
-        absDiffSum += diff;
-        if (diff >= 30.0)
+        const double correctedCurrent = std::clamp(currentValue * metrics.gain + metrics.offset, 0.0, 255.0);
+        const double residual = std::fabs(correctedCurrent - baseValue);
+        residuals.push_back(residual);
+        residualSum += residual;
+    }
+
+    metrics.residualMean = residualSum / static_cast<double>(baseline.size());
+    std::vector<double> sortedResiduals = residuals;
+    std::sort(sortedResiduals.begin(), sortedResiduals.end());
+    metrics.residualMedian = percentileFromSorted(sortedResiduals, 0.50);
+    metrics.residualP99 = percentileFromSorted(sortedResiduals, 0.99);
+
+    std::vector<double> absoluteMedianDeviations;
+    absoluteMedianDeviations.reserve(residuals.size());
+    for (const double residual : residuals)
+    {
+        absoluteMedianDeviations.push_back(std::fabs(residual - metrics.residualMedian));
+    }
+    std::sort(absoluteMedianDeviations.begin(), absoluteMedianDeviations.end());
+    metrics.residualMad = percentileFromSorted(absoluteMedianDeviations, 0.50);
+    metrics.residualThreshold = std::max(
+        kTactileResidualFloorThreshold,
+        metrics.residualMedian + kTactileResidualMadMultiplier * kTactileMadToSigma * metrics.residualMad);
+
+    std::vector<uint8_t> rawResidualMask;
+    rawResidualMask.reserve(residuals.size());
+    size_t rawResidualMaskCount = 0;
+    for (const double residual : residuals)
+    {
+        if (residual >= metrics.residualThreshold)
         {
-            ++maskCount;
+            rawResidualMask.push_back(1);
+            ++rawResidualMaskCount;
         }
-
-        const double baseCentered = baseValue - meanBase;
-        const double currentCentered = currentValue - meanCurrent;
-        covariance += baseCentered * currentCentered;
-        baseVariance += baseCentered * baseCentered;
-        currentVariance += currentCentered * currentCentered;
+        else
+        {
+            rawResidualMask.push_back(0);
+        }
     }
-
-    metrics.meanAbsDiff = absDiffSum / static_cast<double>(baseline.size());
-    metrics.maskRatio = static_cast<double>(maskCount) / static_cast<double>(baseline.size());
-    if (baseVariance > 0.0 && currentVariance > 0.0)
-    {
-        metrics.correlation = covariance / std::sqrt(baseVariance * currentVariance);
-    }
-    if (!std::isfinite(metrics.correlation))
-    {
-        metrics.correlation = 1.0;
-    }
-
-    metrics.damaged =
-        metrics.meanAbsDiff >= kTactileMeanAbsThreshold ||
-        metrics.maskRatio >= kTactileMaskRatioThreshold ||
-        metrics.correlation <= kTactileCorrelationThreshold;
+    metrics.rawResidualArea = static_cast<double>(rawResidualMaskCount) / static_cast<double>(baseline.size());
+    const size_t filteredResidualMaskCount = countFilteredResidualMask(
+        rawResidualMask,
+        static_cast<size_t>(kTactileFrameWidth),
+        static_cast<size_t>(kTactileFrameHeight),
+        kTactileResidualMinComponentPixels,
+        &metrics.maxResidualComponentPixels);
+    metrics.robustResidualArea = static_cast<double>(filteredResidualMaskCount) / static_cast<double>(baseline.size());
+    metrics.damaged = metrics.robustResidualArea >= kTactileRobustResidualAreaThreshold;
     return metrics;
 }
 
@@ -4577,6 +4751,7 @@ void RecordRuntime::refreshTactileReferenceCachesForSide(const std::string &side
 void RecordRuntime::applyTactileValidationFindings(
     const std::vector<EpisodeManager::TactileValidationFinding> &findings)
 {
+    bool warningActive = false;
     for (const auto &finding : findings)
     {
         if (tactileTriggeredAudioCommand_.empty() && finding.warningTriggered)
@@ -4585,9 +4760,10 @@ void RecordRuntime::applyTactileValidationFindings(
         }
         if (finding.warningActive)
         {
-            tactileWarningActive_ = true;
+            warningActive = true;
         }
     }
+    tactileWarningActive_ = warningActive;
 }
 
 void RecordRuntime::scheduleBackgroundTactileValidation(const std::string &episodeDir)
@@ -6299,6 +6475,7 @@ void RecordRuntime::EpisodeManager::refreshTactileReferenceCacheForSide(
                 cameraHistory["persistent_baseline_updated_at_ms"] = RecordRuntime::currentEpochMs();
                 cameraHistory["persistent_fault_active"] = false;
                 cameraHistory["persistent_fault_detail"] = "";
+                cameraHistory["persistent_recent"] = json::array();
                 historyDirty = true;
             }
         }
@@ -6700,9 +6877,14 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
         {
             cameraHistory["recent"] = json::array();
         }
+        if (!cameraHistory.contains("persistent_recent") || !cameraHistory["persistent_recent"].is_array())
+        {
+            cameraHistory["persistent_recent"] = json::array();
+        }
 
         const bool persistentWarningActiveBefore =
             cameraHistory.value("persistent_fault_active", false);
+        bool persistentWarningActiveAfter = persistentWarningActiveBefore;
         std::string persistentDetail =
             cameraHistory.value("persistent_fault_detail", std::string());
 
@@ -6741,36 +6923,60 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
         if (readBinaryFileExact(tactilePersistentRawPath(tactileStateDir_, *serial),
                                 kTactileFrameBytes,
                                 &persistentBaseline,
-                                &persistentBaselineError) &&
-            !persistentWarningActiveBefore)
+                                &persistentBaselineError))
         {
             const TactileFrameMetrics persistentMetrics =
                 computeTactileFrameMetrics(persistentBaseline, *currentFrame);
-            if (persistentMetrics.damaged)
+            json &persistentRecent = cameraHistory["persistent_recent"];
+            persistentRecent.push_back(persistentMetrics.damaged);
+            while (persistentRecent.size() > kTactileHistoryWindow)
             {
-                persistentWarningTriggered = true;
-                persistentDetail =
-                    "persistent_record mean_abs=" + formatFixed(persistentMetrics.meanAbsDiff, 2) +
-                    " mask_ratio=" + formatFixed(persistentMetrics.maskRatio, 4) +
-                    " corr=" + formatFixed(persistentMetrics.correlation, 4);
-                cameraHistory["persistent_fault_active"] = true;
-                cameraHistory["persistent_fault_detail"] = persistentDetail;
-                historyDirty = true;
+                persistentRecent.erase(persistentRecent.begin());
             }
+
+            bool persistentWindowActive = false;
+            bool persistentWindowClean = false;
+            if (persistentRecent.size() >= kTactileHistoryWindow)
+            {
+                persistentWindowActive = std::all_of(
+                    persistentRecent.begin(),
+                    persistentRecent.end(),
+                    [](const json &entry) { return entry.is_boolean() && entry.get<bool>(); });
+                persistentWindowClean = std::all_of(
+                    persistentRecent.begin(),
+                    persistentRecent.end(),
+                    [](const json &entry) { return entry.is_boolean() && !entry.get<bool>(); });
+            }
+
+            if (persistentWindowActive)
+            {
+                persistentDetail = "persistent_record " + formatTactileMetrics(persistentMetrics);
+                if (!persistentWarningActiveBefore)
+                {
+                    persistentWarningTriggered = true;
+                }
+                persistentWarningActiveAfter = true;
+            }
+            else if (persistentWindowClean)
+            {
+                persistentWarningActiveAfter = false;
+                persistentDetail.clear();
+            }
+
+            cameraHistory["persistent_fault_active"] = persistentWarningActiveAfter;
+            cameraHistory["persistent_fault_detail"] = persistentDetail;
+            historyDirty = true;
         }
 
         TactileValidationFinding finding;
         finding.cameraName = target.cameraName;
         finding.serialNumber = *serial;
         finding.damaged = metrics.damaged;
-        finding.warningActive = warningActive || persistentWarningActiveBefore;
+        finding.warningActive = warningActive || persistentWarningActiveAfter;
         finding.warningTriggered =
             (warningActive && !warningActiveBefore) || persistentWarningTriggered;
         finding.audioCommand = std::string(target.cameraName) + "_damaged";
-        finding.detail =
-            "mean_abs=" + formatFixed(metrics.meanAbsDiff, 2) +
-            " mask_ratio=" + formatFixed(metrics.maskRatio, 4) +
-            " corr=" + formatFixed(metrics.correlation, 4);
+        finding.detail = formatTactileMetrics(metrics);
         if (!persistentDetail.empty())
         {
             finding.detail += " | " + persistentDetail;

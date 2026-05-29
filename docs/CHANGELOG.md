@@ -5,6 +5,8 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- 触觉 persistent baseline 告警改为独立 `3` 次窗口：连续 `3` 个 episode 相对持久化 baseline 异常才置位，用于覆盖关机期间损坏；连续 `3` 个 clean episode 后自动清除，避免临时按压一次后长期黄灯。
+- 触觉损坏软校验替换为 `robust_residual_area` 单指标：当前帧按 baseline 做亮度/对比度配准后统计显著残差面积，默认阈值 `>= 0.002`，最小连通域 `8 px`；残差 mask 会先经过 `3x3` 邻域投票和最小连通域过滤，避免零散单点像素误差触发损坏；同步新增 `scripts/tactile_robust_residual_check.py`，支持输入 baseline/current 图像并通过 `--threshold` 调整判定阈值。
 - 修复 ego MP4/M4A 停录后 `moov` 不可读问题：ego sidecar 在最终同步后会重新拉取 finalize 后的 MP4/M4A 头部 `moov` 区域并覆盖本地差异段，再按尾部 `moov` 起点回写本地 MP4 extended-size `mdat` 大小，并把修复结果记录到 `ego_sync.json`。
 - 修复 ego 联动采集文件未显式 flush 的落盘风险：停录 `final` 阶段会同步刷写 `ego_sync.json`、`ego/` 下已同步文件以及 ego 子目录目录项。
 - 新增 SXR ego ADB 联动采集 sidecar：随 `ugripper` 内置 arm64 ADB 运行包，按 `ro.product.manufacturer=SXR` 与 `ro.product.*=SXR_1` 自动识别 ego，录制起停时广播 `com.ssnwt.helloxr.START_RECORDING/STOP_RECORDING`，并把 ego episode 增量同步到当前 UGripper episode 的 `ego/` 目录；当前不主动启动 ego app，ego 数据暂不纳入强校验。
