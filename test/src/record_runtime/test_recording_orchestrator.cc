@@ -58,6 +58,7 @@ struct RecordingHarness
     bool sensor_start_ok = true;
     bool write_lock_ok = true;
     std::string prepare_error = "prepare episode failed";
+    std::string validate_error = "episode validation failed";
     std::string merge_error = "merge episode info failed";
     std::string stereo_start_error = "stereo session start failed";
     std::string wait_finalize_error = "stereo finalize timeout";
@@ -88,8 +89,12 @@ struct RecordingHarness
                      return prepare_ok;
                  },
              .validate_episode =
-                 [this](const std::string&, std::string*) {
+                 [this](const std::string&, std::string* error) {
                      ++validate_calls;
+                     if (!validate_ok && error != nullptr)
+                     {
+                         *error = validate_error;
+                     }
                      return validate_ok;
                  },
              .prepare_sensor_start =
@@ -462,6 +467,47 @@ TEST(RecordingOrchestratorTest, StopRecordingDueToErrorMapsToErrorOutput)
     ASSERT_FALSE(harness.recovery_commands.empty());
     EXPECT_EQ(harness.recovery_commands.back(), "error");
     EXPECT_EQ(harness.sync_reason, "video stop");
+}
+
+TEST(RecordingOrchestratorTest, StopRecordingDueToDiskFaultMapsToError3Output)
+{
+    RecordingHarness harness;
+    auto orchestrator = harness.Make();
+    ASSERT_TRUE(orchestrator.StartRecording(false));
+
+    g_steady_ms += 100;
+    ASSERT_FALSE(orchestrator.StopRecording(
+        true,
+        "recording hardware fault (disk_full): Disk root has no available space: /mnt/data_disk"));
+    EXPECT_FALSE(orchestrator.state().is_recording);
+    ASSERT_FALSE(harness.led_states.empty());
+    EXPECT_EQ(harness.led_states.back(), RuntimeLedState::Error3);
+    ASSERT_FALSE(harness.audio_commands.empty());
+    EXPECT_EQ(harness.audio_commands.back(), "error");
+    ASSERT_FALSE(harness.recovery_commands.empty());
+    EXPECT_EQ(harness.recovery_commands.back(), "error");
+}
+
+TEST(RecordingOrchestratorTest, StopRecordingDiskValidationFailureMapsToError3Output)
+{
+    RecordingHarness harness;
+    harness.validate_ok = false;
+    harness.validate_error =
+        "failed to write temp file: /mnt/data_disk/test.tmp error=No space left on device";
+    auto orchestrator = harness.Make();
+    ASSERT_TRUE(orchestrator.StartRecording(false));
+
+    g_steady_ms += 100;
+    ASSERT_FALSE(orchestrator.StopRecording(false, "stop"));
+    EXPECT_FALSE(orchestrator.state().is_recording);
+    ASSERT_FALSE(harness.led_states.empty());
+    EXPECT_EQ(harness.led_states.back(), RuntimeLedState::Error3);
+    ASSERT_FALSE(harness.audio_commands.empty());
+    EXPECT_EQ(harness.audio_commands.back(), "error");
+    ASSERT_FALSE(harness.recovery_commands.empty());
+    EXPECT_EQ(harness.recovery_commands.back(), "error");
+    EXPECT_EQ(harness.last_validation_log,
+              "failed to write temp file: /mnt/data_disk/test.tmp error=No space left on device");
 }
 
 TEST(RecordingOrchestratorTest, StopRecordingMergeFailureMapsToValidationFailed)

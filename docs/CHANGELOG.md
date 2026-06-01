@@ -5,6 +5,7 @@
 > 本文件中的条目只用于追溯发布与实现演进；请不要直接把单条历史记录当作“当前系统行为”。
 
 ## Unreleased
+- 数据盘故障口径调整为 `ERROR_3`：`record_runtime` 现在把数据盘挂载丢失、不可写和写满统一归类为 `disk_mount_lost / disk_not_writable / disk_full`，错误停录与停录收尾里的相关失败优先落到 `ERROR_3` 而不是 `ERROR_1` 或 `ERROR_5`；同类 fault 持续期间不重复刷屏，只在首次出现和恢复时打关键日志。
 - 触觉 persistent baseline 告警改为独立 `3` 次窗口：连续 `3` 个 episode 相对持久化 baseline 异常才置位，用于覆盖关机期间损坏；连续 `3` 个 clean episode 后自动清除，避免临时按压一次后长期黄灯。
 - 触觉损坏软校验替换为 `robust_residual_area` 单指标：当前帧按 baseline 做亮度/对比度配准后统计显著残差面积，默认阈值 `>= 0.002`，最小连通域 `8 px`；残差 mask 会先经过 `3x3` 邻域投票和最小连通域过滤，避免零散单点像素误差触发损坏；同步新增 `scripts/tactile_robust_residual_check.py`，支持输入 baseline/current 图像并通过 `--threshold` 调整判定阈值。
 - 修复 ego MP4/M4A 停录后 `moov` 不可读问题：ego sidecar 在最终同步后会重新拉取 finalize 后的 MP4/M4A 头部 `moov` 区域并覆盖本地差异段，再按尾部 `moov` 起点回写本地 MP4 extended-size `mdat` 大小，并把修复结果记录到 `ego_sync.json`。

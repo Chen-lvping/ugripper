@@ -139,6 +139,101 @@ constexpr std::array<EpisodeVideoArtifact, 9> kAllEpisodeVideoArtifacts = {{
     {"right_tcam_r", "tcam_right_r.mkv"},
 }};
 
+std::optional<ugripper::runtime::HealthFault> MakeDiskHealthFault(const std::string &key,
+                                                                  const std::string &detail)
+{
+    return ugripper::runtime::HealthFault{
+        .led_state = ugripper::runtime::RuntimeLedState::Error3,
+        .side = ugripper::runtime::HardwareFaultSide::Unknown,
+        .key = key,
+        .detail = detail,
+    };
+}
+
+bool isMountedDiskRoot(const fs::path &diskRoot)
+{
+    std::ifstream mountInfo("/proc/self/mountinfo");
+    if (!mountInfo.is_open())
+    {
+        return false;
+    }
+
+    std::string line;
+    while (std::getline(mountInfo, line))
+    {
+        const size_t separator = line.find(" - ");
+        const std::string leftPart = separator == std::string::npos ? line : line.substr(0, separator);
+        std::istringstream fields(leftPart);
+        std::string mountId;
+        std::string parentId;
+        std::string majorMinor;
+        std::string root;
+        std::string mountPoint;
+        if (!(fields >> mountId >> parentId >> majorMinor >> root >> mountPoint))
+        {
+            continue;
+        }
+        if (mountPoint == diskRoot.string())
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::optional<ugripper::runtime::HealthFault> detectDiskHealthFault(const std::string &diskRootPath)
+{
+    if (diskRootPath.empty())
+    {
+        return MakeDiskHealthFault("disk_mount_lost", "Disk root path is empty");
+    }
+
+    const fs::path diskRoot(diskRootPath);
+    std::error_code pathError;
+    if (!fs::exists(diskRoot, pathError) || !fs::is_directory(diskRoot, pathError))
+    {
+        const std::string suffix = pathError ? " error=" + pathError.message() : "";
+        return MakeDiskHealthFault("disk_mount_lost",
+                                   "Disk root unavailable: " + diskRootPath + suffix);
+    }
+
+    if (!isMountedDiskRoot(diskRoot))
+    {
+        return MakeDiskHealthFault("disk_mount_lost", "Disk root is not mounted: " + diskRootPath);
+    }
+
+    errno = 0;
+    if (access(diskRoot.c_str(), W_OK) != 0)
+    {
+        const int savedErrno = errno;
+        const std::string errorText = std::strerror(savedErrno);
+        if (savedErrno == EROFS)
+        {
+            return MakeDiskHealthFault("disk_not_writable",
+                                       "Disk root is read-only: " + diskRootPath + " error=" + errorText);
+        }
+        return MakeDiskHealthFault("disk_not_writable",
+                                   "Disk root not writable: " + diskRootPath + " error=" + errorText);
+    }
+
+    std::error_code spaceError;
+    const fs::space_info spaceInfo = fs::space(diskRoot, spaceError);
+    if (spaceError)
+    {
+        return MakeDiskHealthFault("disk_space_unavailable",
+                                   "Disk root space info failed: " + diskRootPath + " error=" + spaceError.message());
+    }
+    if (spaceInfo.available == 0)
+    {
+        return MakeDiskHealthFault(
+            "disk_full",
+            "Disk root has no available space: " + diskRootPath +
+                " available_bytes=0 capacity_bytes=" + std::to_string(spaceInfo.capacity));
+    }
+
+    return std::nullopt;
+}
+
 constexpr std::array<const char *, 13> kAllCriticalDevicePaths = {{
     "/dev/cam_right",
     "/dev/cam_left",
@@ -844,9 +939,11 @@ bool writeTextFileAtomically(const fs::path &path, const std::string &content, s
         std::ofstream output(tempPath, std::ios::trunc);
         if (!output.is_open())
         {
+            const int savedErrno = errno;
             if (errorMessage != nullptr)
             {
-                *errorMessage = "cannot open temp file for write: " + tempPath.string();
+                *errorMessage = "cannot open temp file for write: " + tempPath.string() +
+                                (savedErrno != 0 ? " error=" + std::string(std::strerror(savedErrno)) : "");
             }
             return false;
         }
@@ -854,9 +951,12 @@ bool writeTextFileAtomically(const fs::path &path, const std::string &content, s
         output.flush();
         if (!output.good())
         {
+            const int savedErrno = errno;
             if (errorMessage != nullptr)
             {
-                *errorMessage = "failed to write temp file: " + tempPath.string();
+                *errorMessage = "failed to write temp file: " + tempPath.string() +
+                                (savedErrno != 0 ? " error=" + std::string(std::strerror(savedErrno))
+                                                 : " error=stream_write_failed");
             }
             output.close();
             fs::remove(tempPath, error);
@@ -3467,9 +3567,9 @@ bool RecordRuntime::initialize()
             .stereo_startup_grace_ms = 12000,
         },
         ugripper::runtime::HealthMonitor::Dependencies{
-            .is_disk_writable =
+            .get_disk_fault =
                 [](const std::string& path) {
-                    return access(path.c_str(), W_OK) == 0;
+                    return detectDiskHealthFault(path);
                 },
             .path_exists =
                 [](const std::string& path) {
@@ -5382,6 +5482,7 @@ void RecordRuntime::monitorHardwareHealth()
         return;
     }
 
+    const auto previousHealthState = healthState_;
     const auto result = healthMonitor_->Poll(healthState_);
     healthState_ = result.state;
     if (!result.checked)
@@ -5425,7 +5526,13 @@ void RecordRuntime::monitorHardwareHealth()
     if (result.recovered)
     {
         activeHardwareFault_.reset();
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << "hardware health recovered" << std::endl).str());
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+                           << "hardware health recovered"
+                           << (previousHealthState.last_error_key.empty()
+                                   ? std::string()
+                                   : " from " + previousHealthState.last_error_key)
+                           << std::endl)
+                              .str());
         DM_LOG_INFO("{}", (::DA::utils::LogString()
             << "[HMI_DIAG] category=health_recovered"
             << " recording=" << boolText(isRecordingActive())).str());

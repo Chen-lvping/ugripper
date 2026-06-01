@@ -182,7 +182,7 @@
 9. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 抽检：其一是“本次起录附近单帧 vs 插爪参考帧”的实时比较；其二是“本次起录附近单帧 vs 同 `serial` 的持久化 baseline”的慢变量比较。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
 10. 实时触觉抽检当前属于软告警而不是完整性失败：单次异常只更新该 tactile `serial` 的近期历史；当同一 `serial` 最近 `3` 个 episode 都判为异常时，空闲态切到黄灯闪烁，并播放对应 `left/right_tcam_*_damaged` 提示音。后台 tactile 校验最多保留一个待处理 episode；若下一次录制开始，会请求当前后台校验停止并清空待处理任务，避免干扰下一次录制。
 11. 持久化 baseline 当前按 `12h` 窗口维护：插爪阶段会在缺失或超时后刷新同 `serial` 的持久化 baseline；停录后台校验会把本次起录附近单帧与持久化 baseline 比较，并维护独立的 `persistent_recent` 窗口。persistent 告警同样要求连续 `3` 个 episode 异常才置位，用于覆盖关机期间发生的盖板损坏；连续 `3` 个 clean episode 会清除该 persistent 告警。
-12. 停录收尾完成后将 `episode_YYYYMMDD_NNNN-temp` rename 为 `episode_YYYYMMDD_NNNN`；无论质量成功或失败，只要收尾已完成就去掉 `-temp`，质量结果由 `metadata.json` 和 `validation_error.log` 表达。完整性成功且无触觉软告警则回到 `READY` 并播放 `ready`；完整性失败进入 `ERROR_1` 并播放 `validation_failed`；运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
+12. 停录收尾完成后将 `episode_YYYYMMDD_NNNN-temp` rename 为 `episode_YYYYMMDD_NNNN`；无论质量成功或失败，只要收尾已完成就去掉 `-temp`，质量结果由 `metadata.json` 和 `validation_error.log` 表达。完整性成功且无触觉软告警则回到 `READY` 并播放 `ready`；完整性失败进入 `ERROR_1` 并播放 `validation_failed`；数据盘挂载丢失 / 不可写 / 写满进入 `ERROR_3` 并播放 `error`；其他运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
 
 ## 7. Episode 产物与检查
 ### 7.1 默认产物
@@ -251,7 +251,7 @@
 - `WARNING`：触觉软告警，黄灯闪烁；当前用于同一 tactile serial 的实时 reference 窗口或 persistent baseline 窗口连续 `3` 个 episode 异常。若后续连续 `3` 次 clean，相关窗口会清除告警并回到 READY。
 - `RECORDING`：录制中，绿色闪烁；当前只在亮灭边沿和低频补发时下发 RGB，避免高频重复写串口造成丢闪。
 - `CALIB_PRE` / `CALIB_RUN` / `CALIB_DONE`：供 USB 导入与校准脚本复用。
-- `ERROR_1` ~ `ERROR_5`：红灯长短码，分别用于完整性失败到运行时错误。硬件缺失类 `ERROR_2` 会按侧别提示：缺失侧夹爪闪烁 `ERROR_2`，另一侧红灯常亮；左右都缺失则两侧一起闪烁；无法归属左右侧时，两侧同步先闪一次 `ERROR_2` 完整序列，再红灯常亮相同时间并循环。
+- `ERROR_1` ~ `ERROR_5`：红灯长短码。当前口径下，`ERROR_1` 用于完整性/校验失败，`ERROR_2` 用于关键设备/HMI/stereo 缺失或不活跃，`ERROR_3` 用于数据盘挂载丢失 / 不可写 / 写满，`ERROR_5` 用于其他运行时异常。硬件缺失类 `ERROR_2` 会按侧别提示：缺失侧夹爪闪烁 `ERROR_2`，另一侧红灯常亮；左右都缺失则两侧一起闪烁；无法归属左右侧时，两侧同步先闪一次 `ERROR_2` 完整序列，再红灯常亮相同时间并循环。
 - `EXIT`：关机退出阶段。
 
 ### 8.2 关键持久化与临时路径
@@ -296,7 +296,7 @@
 ### 8.6 硬件健康监控
 - `record_runtime` 当前参考 v1 口径保留低频硬件健康监控，约每 `1s` 检查一次关键硬件状态，而不是在主循环里做高频主动轮询。
 - 当前监控项包括：`/mnt/data_disk` 是否仍可写、8 路相机设备节点、左右 IMU/encoder 设备节点、stereo daemon `ready/not-ready` 状态，以及左右 HMI 串口是否仍连接、输入侧 HMI 是否持续有响应。
-- 发现磁盘异常时进入 `ERROR_1`；发现关键设备节点缺失、HMI 断连或 HMI 长时间无响应时进入 `ERROR_2`，并通过音频守护进程播报 `error`。`ERROR_2` 会根据缺失路径、stereo 状态或 HMI port 归属到左手、右手、双手或 unknown，用对应侧别灯效提示现场先看哪侧硬件。
+- 发现磁盘异常时进入 `ERROR_3`；当前会区分 `disk_mount_lost`、`disk_not_writable`、`disk_full` 等 fault key，并按“同类 fault 首次出现打错误日志、持续期间不重复刷屏、恢复时补一条 recovered”收敛日志。发现关键设备节点缺失、HMI 断连或 HMI 长时间无响应时进入 `ERROR_2`，并通过音频守护进程播报 `error`。`ERROR_2` 会根据缺失路径、stereo 状态或 HMI port 归属到左手、右手、双手或 unknown，用对应侧别灯效提示现场先看哪侧硬件。
 - 若录制中发现任意关键设备、HMI、数据盘或 stereo daemon 健康故障，当前 episode 会立即按错误停录收尾，写失败 `metadata.json` 和 `validation_error.log`，并将 `quality_check_err_type` 归类为 `device_disconnected` 或更具体的错误类型；设备后续恢复只影响下一次录制，不会把本条数据恢复成成功。
 - 若异常恢复发生在空闲态：回到 `READY` 并补播 `ready`。
 - `camera_recorder` 仍保持“单路 recorder 失败不立即主动终止整次录制”的容错语义；本次实现只加强停录阶段的子进程组回收与 stop 日志，不把启动期短暂抖动直接升级为全量停录。
@@ -429,7 +429,7 @@ tail -n 200 /mnt/data_disk/logs/umi_sys_<device_sn_lower>_$(date +%Y%m%d).log
 ### 10.6 快速定位建议
 - 不能启动：先看 `ugripper.service` 日志和 `record_runtime` 是否成功拉起。
 - 能录不能停：优先检查 HMI 按键事件、状态机和 `sensor_recorder` / `camera_recorder` 退出路径。
-- 少文件或校验失败：先核对默认八路视频、胸部主摄启用时的第九路视频、双 MCAP、`metadata.json`、`calibration.json` 是否完整；若已进入 `ERROR_1`，优先查看 episode 下的 `validation_error.log`。
+- 少文件或校验失败：先核对默认八路视频、胸部主摄启用时的第九路视频、双 MCAP、`metadata.json`、`calibration.json` 是否完整；若已进入 `ERROR_1`，优先查看 episode 下的 `validation_error.log`；若进入 `ERROR_3`，优先检查 `journalctl -u ugripper.service` 中的 `disk_mount_lost / disk_not_writable / disk_full` 日志。
 - warmup 一起双目就掉线：先查是否同时存在多份 `camera_recorder --stereo-daemon`。重复 warmup daemon 抢占同一批双目视频设备时，可能把双目打进 `recovering`，严重时会伴随 USB 侧重枚举；先清掉多余 daemon，再观察 `/tmp/umi_stereo_camera_status.json` 与 `journalctl -u ugripper.service -n 200`。
 - tactile serial 不对：先分别用 `udevadm info --attribute-walk --name=/dev/tcam_left_l`、`/dev/tcam_left_r`、`/dev/tcam_right_l`、`/dev/tcam_right_r` 向上核对 USB `ATTRS{serial}`，再对比 episode `calibration.json` 中 `observation.images.tcam_left_l.serial`、`tcam_left_r.serial`、`tcam_right_l.serial`、`tcam_right_r.serial`；当前口径只修正 episode，不回写 `/etc/ugripper/config/calibration/calibration.json`，且不再输出旧 tactile 键。
 - 进入错误灯效但录制进程还活着：优先检查 `/mnt/data_disk` 是否仍可写、关键 `/dev/*` 设备节点是否还在，以及 HMI 是否持续响应。

@@ -28,6 +28,7 @@ fs::path MakeTempDir()
 }
 
 using ugripper::runtime::HealthMonitor;
+using ugripper::runtime::HealthFault;
 using ugripper::runtime::HealthState;
 using ugripper::runtime::HealthStatus;
 using ugripper::runtime::HardwareFaultSide;
@@ -623,7 +624,56 @@ TEST(HealthMonitorTest, ReportsDiskNotWritableBeforeDeviceChecks)
     ASSERT_TRUE(result.checked);
     ASSERT_TRUE(result.fault.has_value());
     EXPECT_EQ(result.fault->key, "disk_not_writable");
-    EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error1);
+    EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error3);
+
+    fs::remove_all(temp_dir);
+}
+
+TEST(HealthMonitorTest, ReportsDiskFullBeforeDeviceChecks)
+{
+    const fs::path temp_dir = MakeTempDir();
+    const fs::path stereo_status = temp_dir / "stereo_status.json";
+    std::ofstream(stereo_status) << R"({"ready":true,"service_state":"ready"})";
+
+    HealthMonitor monitor(
+        {.disk_root = temp_dir.string(),
+         .stereo_status_file = stereo_status.string(),
+         .critical_device_paths = {"/dev/cam0"},
+         .poll_interval_ms = 1000,
+         .hmi_active_timeout_ms = 2500},
+        {.get_disk_fault =
+             [](const std::string& path) -> std::optional<HealthFault> {
+                 return HealthFault{
+                     .led_state = RuntimeLedState::Error3,
+                     .side = HardwareFaultSide::Unknown,
+                     .key = "disk_full",
+                     .detail = "Disk root has no available space: " + path,
+                 };
+             },
+         .path_exists =
+             [](const std::string&) {
+                 return false;
+             },
+         .get_process_status =
+             [](WorkerName) {
+                 return ProcessStatus{.state = ProcessState::Running, .running = true, .pid = 7};
+             },
+         .get_hmi_health =
+             [](uint64_t) {
+                 return HmiHealthSnapshot{
+                     .has_connected_device = true,
+                     .input_connected = true,
+                     .input_active = true,
+                 };
+             }},
+        &FakeNowMs);
+
+    g_now_ms = 1500;
+    const auto result = monitor.Poll(HealthState{});
+    ASSERT_TRUE(result.checked);
+    ASSERT_TRUE(result.fault.has_value());
+    EXPECT_EQ(result.fault->key, "disk_full");
+    EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error3);
 
     fs::remove_all(temp_dir);
 }

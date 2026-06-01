@@ -5,9 +5,12 @@
 #include <cstdint>
 #include <future>
 #include <fstream>
+#include <initializer_list>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <algorithm>
+#include <cctype>
 #include <utility>
 #include <vector>
 
@@ -98,6 +101,71 @@ void CallPerfLog(const ugripper::runtime::RecordingOrchestrator::Dependencies& d
                  const std::string& message)
 {
     CallLog(dependencies.log_perf, message);
+}
+
+std::string ToLowerAscii(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return text;
+}
+
+bool ContainsAnyToken(const std::string& text, std::initializer_list<const char*> tokens)
+{
+    for (const char* token : tokens)
+    {
+        if (token != nullptr && *token != '\0' && text.find(token) != std::string::npos)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsDiskFaultText(const std::string& text)
+{
+    if (text.empty())
+    {
+        return false;
+    }
+
+    const std::string lower = ToLowerAscii(text);
+    return ContainsAnyToken(
+        lower,
+        {
+            "disk_full",
+            "disk_mount_lost",
+            "disk_not_writable",
+            "disk_space_unavailable",
+            "disk root unavailable",
+            "disk root is not mounted",
+            "disk root not writable",
+            "disk root is read-only",
+            "disk root has no available space",
+            "mount lost",
+            "read-only file system",
+            "no space left on device",
+            "space info failed",
+            "/mnt/data_disk",
+        });
+}
+
+ugripper::runtime::RuntimeLedState SelectStopFailureLedState(bool due_to_error,
+                                                             const std::string& reason,
+                                                             const std::string& final_error_message)
+{
+    if (IsDiskFaultText(reason) || IsDiskFaultText(final_error_message))
+    {
+        return ugripper::runtime::RuntimeLedState::Error3;
+    }
+    return due_to_error ? ugripper::runtime::RuntimeLedState::Error5
+                        : ugripper::runtime::RuntimeLedState::Error1;
+}
+
+std::string SelectStopFailureAudioCommand(ugripper::runtime::RuntimeLedState led_state)
+{
+    return led_state == ugripper::runtime::RuntimeLedState::Error1 ? "validation_failed" : "error";
 }
 
 }  // namespace
@@ -283,14 +351,21 @@ HealthMonitor::PollResult HealthMonitor::Poll(const HealthState& current_state) 
 
 std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
 {
-    if (dependencies_.is_disk_writable != nullptr && !dependencies_.is_disk_writable(options_.disk_root))
+    if (dependencies_.get_disk_fault != nullptr)
     {
-            return HealthFault{
-                RuntimeLedState::Error1,
-                HardwareFaultSide::Unknown,
-                "disk_not_writable",
-                "Disk not writable or mount lost: " + options_.disk_root,
-            };
+        if (const std::optional<HealthFault> disk_fault = dependencies_.get_disk_fault(options_.disk_root))
+        {
+            return disk_fault;
+        }
+    }
+    else if (dependencies_.is_disk_writable != nullptr && !dependencies_.is_disk_writable(options_.disk_root))
+    {
+        return HealthFault{
+            RuntimeLedState::Error3,
+            HardwareFaultSide::Unknown,
+            "disk_not_writable",
+            "Disk not writable or mount lost: " + options_.disk_root,
+        };
     }
 
     if (dependencies_.path_exists != nullptr)
@@ -1082,19 +1157,23 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
         dependencies_.remove_recording_lock();
     }
 
+    const RuntimeLedState failure_led_state =
+        SelectStopFailureLedState(due_to_error, reason, final_error_message);
+    const std::string failure_audio_command = SelectStopFailureAudioCommand(failure_led_state);
+
     if (due_to_error)
     {
         if (dependencies_.set_led_state != nullptr)
         {
-            dependencies_.set_led_state(RuntimeLedState::Error5, 0.0);
+            dependencies_.set_led_state(failure_led_state, 0.0);
         }
         if (dependencies_.set_audio_recovery_command != nullptr)
         {
-            dependencies_.set_audio_recovery_command("error");
+            dependencies_.set_audio_recovery_command(failure_audio_command);
         }
         if (dependencies_.send_audio_command != nullptr)
         {
-            dependencies_.send_audio_command("error");
+            dependencies_.send_audio_command(failure_audio_command);
         }
         CallPerfLog(dependencies_,
                 "[PERF] stop phase end: due_to_error=true total_elapsed_ms=" +
@@ -1115,15 +1194,15 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     {
         if (dependencies_.set_led_state != nullptr)
         {
-            dependencies_.set_led_state(RuntimeLedState::Error1, 0.0);
+            dependencies_.set_led_state(failure_led_state, 0.0);
         }
         if (dependencies_.set_audio_recovery_command != nullptr)
         {
-            dependencies_.set_audio_recovery_command("validation_failed");
+            dependencies_.set_audio_recovery_command(failure_audio_command);
         }
         if (dependencies_.send_audio_command != nullptr)
         {
-            dependencies_.send_audio_command("validation_failed");
+            dependencies_.send_audio_command(failure_audio_command);
         }
         CallPerfLog(dependencies_,
             "[PERF] stop phase end: valid=false total_elapsed_ms=" +

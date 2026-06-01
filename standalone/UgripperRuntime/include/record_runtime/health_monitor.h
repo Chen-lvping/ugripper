@@ -26,12 +26,14 @@ class HealthMonitor
 public:
     using NowMsFn = uint64_t (*)();
     using DiskWritableFn = std::function<bool(const std::string&)>;
+    using DiskHealthFn = std::function<std::optional<HealthFault>(const std::string&)>;
     using PathExistsFn = std::function<bool(const std::string&)>;
     using GetProcessStatusFn = std::function<ProcessStatus(WorkerName)>;
     using GetHmiHealthFn = std::function<HmiHealthSnapshot(uint64_t)>;
 
     struct Dependencies
     {
+        DiskHealthFn get_disk_fault;
         DiskWritableFn is_disk_writable;
         PathExistsFn path_exists;
         GetProcessStatusFn get_process_status;
