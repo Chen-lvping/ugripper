@@ -439,6 +439,89 @@ bool CalibrationLooksValid(const AtrakCalibrationParam& calib) {
     return true;
 }
 
+std::string ExtractJsonStringValue(const std::string& content, const std::string& key) {
+    const std::string quotedKey = "\"" + key + "\"";
+    const size_t keyPos = content.find(quotedKey);
+    if (keyPos == std::string::npos) {
+        return "";
+    }
+    const size_t colonPos = content.find(':', keyPos + quotedKey.size());
+    if (colonPos == std::string::npos) {
+        return "";
+    }
+
+    size_t valuePos = colonPos + 1;
+    while (valuePos < content.size() && std::isspace(static_cast<unsigned char>(content[valuePos]))) {
+        ++valuePos;
+    }
+    if (valuePos >= content.size() || content[valuePos] != '"') {
+        return "";
+    }
+    ++valuePos;
+
+    std::string value;
+    bool escaped = false;
+    for (; valuePos < content.size(); ++valuePos) {
+        const char ch = content[valuePos];
+        if (escaped) {
+            value.push_back(ch);
+            escaped = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (ch == '"') {
+            return value;
+        }
+        value.push_back(ch);
+    }
+    return "";
+}
+
+std::string ReadCalibrationJsonSerial(const std::string& path, std::string* errorMessage) {
+    std::ifstream in(path);
+    if (!in.is_open()) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "cannot open cached calibration json: " + path;
+        }
+        return "";
+    }
+    const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    const std::string serial = TrimCopy(ExtractJsonStringValue(content, "serial_number"));
+    if (serial.empty() && errorMessage != nullptr) {
+        *errorMessage = "cached calibration json has empty serial_number: " + path;
+    }
+    return serial;
+}
+
+std::string GetFaysDeviceSerial(void* handle, std::string* errorMessage) {
+    if (handle == nullptr) {
+        if (errorMessage != nullptr) {
+            *errorMessage = "Fays handle is null";
+        }
+        return "";
+    }
+
+    ViKitDeviceInfo info{};
+    const int rc = FAYS_VIK_GetDeviceInfo(handle, &info);
+    if (rc != EXIT_SUCCESS) {
+        if (errorMessage != nullptr) {
+            std::ostringstream oss;
+            oss << "FAYS_VIK_GetDeviceInfo failed, rc=" << rc;
+            *errorMessage = oss.str();
+        }
+        return "";
+    }
+
+    const std::string serial = TrimCopy(info.serial_number);
+    if (serial.empty() && errorMessage != nullptr) {
+        *errorMessage = "Fays device serial is empty";
+    }
+    return serial;
+}
+
 void WriteFloatArray(std::ostream& out, const float* values, size_t count) {
     out << "[";
     for (size_t i = 0; i < count; ++i) {
@@ -1390,10 +1473,27 @@ public:
         if (!calibrationJsonPath_.empty() &&
             stat(calibrationJsonPath_.c_str(), &calibStat) == 0 &&
             calibStat.st_size > 0) {
-            calibrationDumped_.store(true, std::memory_order_release);
-            std::cout << "[FaysCalibration] Using pre-dumped calibration json: "
-                      << calibrationJsonPath_ << std::endl;
-        } else {
+            std::string currentSerialError;
+            const std::string currentSerial = GetFaysDeviceSerial(mptrHandle_, &currentSerialError);
+            std::string cachedSerialError;
+            const std::string cachedSerial = ReadCalibrationJsonSerial(calibrationJsonPath_, &cachedSerialError);
+            if (!currentSerial.empty() && !cachedSerial.empty() && currentSerial == cachedSerial) {
+                calibrationDumped_.store(true, std::memory_order_release);
+                std::cout << "[FaysCalibration] Using pre-dumped calibration json: "
+                          << calibrationJsonPath_
+                          << " serial=" << cachedSerial << std::endl;
+            } else {
+                std::cout << "[FaysCalibration] Discarding cached calibration json: "
+                          << calibrationJsonPath_
+                          << " cached_serial=" << (cachedSerial.empty() ? "<empty>" : cachedSerial)
+                          << " current_serial=" << (currentSerial.empty() ? "<empty>" : currentSerial)
+                          << " cached_error=" << cachedSerialError
+                          << " current_error=" << currentSerialError
+                          << std::endl;
+                unlink(calibrationJsonPath_.c_str());
+            }
+        }
+        if (!calibrationDumped_.load(std::memory_order_acquire)) {
             TryDumpCalibrationJson("startup");
         }
         std::cout << "[FaysRecorder] Created handle with config: " << configPath << std::endl;
