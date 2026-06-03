@@ -3505,6 +3505,7 @@ bool CameraRecorderManager::WriteInfoJson() const {
     output << "  \"boot_time_offset_us\": " << boot_time_offset_us;
 
     bool missing_offset = false;
+    std::vector<std::string> missing_cameras;
     for (const auto& recorder : recorders_) {
         auto offset_us = recorder->RecordTimeOffsetUs();
         if (!offset_us.has_value() && options_.codec == "h265" && IsMainCamera(recorder->config())) {
@@ -3516,6 +3517,7 @@ bool CameraRecorderManager::WriteInfoJson() const {
             DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] missing record time offset for "
                                   << recorder->config().name).str());
             missing_offset = true;
+            missing_cameras.push_back(recorder->config().name);
             continue;
         }
         output << ",\n"
@@ -3523,7 +3525,39 @@ bool CameraRecorderManager::WriteInfoJson() const {
                << *offset_us;
     }
     output << "\n}\n";
-    return !missing_offset;
+    output.flush();
+    if (!output.good()) {
+        DM_LOG_ERROR("{}", (::DA::utils::LogString()
+                            << "[camera_recorder] failed to flush recording timing file: "
+                            << info_json_path).str());
+        return false;
+    }
+    output.close();
+    if (!output) {
+        DM_LOG_ERROR("{}", (::DA::utils::LogString()
+                            << "[camera_recorder] failed to close recording timing file after write: "
+                            << info_json_path).str());
+        return false;
+    }
+    if (missing_offset) {
+        std::ostringstream oss;
+        for (size_t i = 0; i < missing_cameras.size(); ++i) {
+            if (i != 0) {
+                oss << ",";
+            }
+            oss << missing_cameras[i];
+        }
+        DM_LOG_ERROR("{}", (::DA::utils::LogString()
+                            << "[camera_recorder] recording timing file is incomplete: path="
+                            << info_json_path
+                            << " missing_record_time_offset_us="
+                            << oss.str()).str());
+        return false;
+    }
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+                       << "[camera_recorder] wrote recording timing file: "
+                       << info_json_path).str());
+    return true;
 }
 
 Options ParseArgs(int argc, char** argv) {

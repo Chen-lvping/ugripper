@@ -4101,7 +4101,8 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = std::string("cannot open internal timing file: ") + kEpisodeTimingFileName;
+            *errorMessage = std::string("cannot open internal timing shm file: ") + baseInfoPath.string() +
+                            " (legacy label " + kEpisodeTimingFileName + ")";
         }
         return false;
     }
@@ -4115,7 +4116,8 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = std::string("failed to parse episode info: ") + ex.what();
+            *errorMessage = std::string("failed to parse internal timing shm file: ") +
+                            baseInfoPath.string() + " error=" + ex.what();
         }
         return false;
     }
@@ -4199,7 +4201,8 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = std::string("cannot rewrite internal timing file: ") + kEpisodeTimingFileName;
+            *errorMessage = std::string("cannot rewrite internal timing shm file: ") + baseInfoPath.string() +
+                            " (legacy label " + kEpisodeTimingFileName + ")";
         }
         return false;
     }
