@@ -60,6 +60,9 @@ constexpr uint64_t kAudioPlayerRestartIntervalMs = 2000;
 constexpr uint64_t kAudioPlayerReadyGraceMs = 3000;
 constexpr uint64_t kStereoDaemonRestartIntervalMs = 2000;
 constexpr uint64_t kStereoFinalizeWaitPollMs = 100;
+constexpr uint64_t kRecordControlDebounceMs = 300;
+constexpr size_t kRecordControlMaxCommandsPerPoll = 8;
+constexpr size_t kRecordControlMaxBufferBytes = 4096;
 constexpr uint64_t kEgoFinalizeWaitPollMs = 100;
 constexpr uint64_t kHealthCheckIntervalMs = 1000;
 constexpr uint64_t kHmiActiveTimeoutMs = 2500;
@@ -3400,6 +3403,7 @@ RecordRuntime::~RecordRuntime()
 {
     requestStop();
     stopRecording(false, "shutdown");
+    closeRecordControlPipe();
     requestStopBackgroundTactileValidation();
     waitForMainCameraRefreshes();
     stopAudioPlayer();
@@ -3795,6 +3799,7 @@ bool RecordRuntime::initialize()
 
     startAudioPlayer();
     startStereoDaemon();
+    initializeRecordControlPipe();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     applyIdleState();
@@ -3832,11 +3837,15 @@ int RecordRuntime::run()
         panelManager_.poll(options_.pollMs, &buttons);
         handleGripperConnectionEvents();
         processPendingGripperRefreshes();
-        handleButtons(buttons);
-        ButtonSnapshot leftButtons;
-        if (panelManager_.getButtonsForPortToken("left_gripper", &leftButtons))
+        const bool recordControlAccepted = pollRecordControlPipe();
+        if (!recordControlAccepted)
         {
-            handleLeftButtons(leftButtons);
+            handleButtons(buttons);
+            ButtonSnapshot leftButtons;
+            if (panelManager_.getButtonsForPortToken("left_gripper", &leftButtons))
+            {
+                handleLeftButtons(leftButtons);
+            }
         }
 
         if (isRecordingActive() && !checkRecorderProcesses())
@@ -5471,6 +5480,214 @@ void RecordRuntime::handleLeftButtons(const ButtonSnapshot &buttons)
         leftDualLongHandled_ = false;
     }
     lastLeftButtons_ = buttons;
+}
+
+bool RecordRuntime::initializeRecordControlPipe()
+{
+    if (options_.recordControlPipe.empty())
+    {
+        return false;
+    }
+
+    std::error_code statusError;
+    if (fs::exists(options_.recordControlPipe, statusError) &&
+        !fs::is_fifo(fs::status(options_.recordControlPipe, statusError)))
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "record control path exists but is not a FIFO, software recording control disabled: "
+            << options_.recordControlPipe << std::endl).str());
+        return false;
+    }
+
+    if (!fs::exists(options_.recordControlPipe, statusError))
+    {
+        if (mkfifo(options_.recordControlPipe.c_str(), 0620) != 0 && errno != EEXIST)
+        {
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                << "failed to create record control FIFO: " << options_.recordControlPipe
+                << " errno=" << errno << " (" << std::strerror(errno) << ")" << std::endl).str());
+            return false;
+        }
+    }
+
+    chmod(options_.recordControlPipe.c_str(), 0620);
+    recordControlFd_ = open(options_.recordControlPipe.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (recordControlFd_ < 0)
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "failed to open record control FIFO: " << options_.recordControlPipe
+            << " errno=" << errno << " (" << std::strerror(errno) << ")" << std::endl).str());
+        return false;
+    }
+
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+        << "record control FIFO ready: " << options_.recordControlPipe << std::endl).str());
+    return true;
+}
+
+void RecordRuntime::closeRecordControlPipe()
+{
+    if (recordControlFd_ >= 0)
+    {
+        close(recordControlFd_);
+        recordControlFd_ = -1;
+    }
+}
+
+bool RecordRuntime::pollRecordControlPipe()
+{
+    if (recordControlFd_ < 0)
+    {
+        return false;
+    }
+
+    bool accepted = false;
+    std::array<char, 512> buffer{};
+    while (true)
+    {
+        const ssize_t count = read(recordControlFd_, buffer.data(), buffer.size());
+        if (count > 0)
+        {
+            recordControlBuffer_.append(buffer.data(), static_cast<size_t>(count));
+            if (recordControlBuffer_.size() > kRecordControlMaxBufferBytes)
+            {
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                    << "[CONTROL_DIAG] source=fifo result=ignored reason=buffer_overflow").str());
+                recordControlBuffer_.clear();
+                break;
+            }
+            continue;
+        }
+        if (count == 0 || errno == EAGAIN || errno == EWOULDBLOCK)
+        {
+            break;
+        }
+        if (errno == EINTR)
+        {
+            continue;
+        }
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "record control FIFO read failed: errno=" << errno
+            << " (" << std::strerror(errno) << ")" << std::endl).str());
+        closeRecordControlPipe();
+        return accepted;
+    }
+
+    size_t processed = 0;
+    while (processed < kRecordControlMaxCommandsPerPoll)
+    {
+        const size_t newline = recordControlBuffer_.find('\n');
+        if (newline == std::string::npos)
+        {
+            break;
+        }
+        std::string command = recordControlBuffer_.substr(0, newline);
+        recordControlBuffer_.erase(0, newline + 1);
+        if (!command.empty() && command.back() == '\r')
+        {
+            command.pop_back();
+        }
+        if (processRecordControlCommand(command))
+        {
+            accepted = true;
+        }
+        ++processed;
+    }
+    if (processed == kRecordControlMaxCommandsPerPoll && recordControlBuffer_.find('\n') != std::string::npos)
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "[CONTROL_DIAG] source=fifo result=deferred reason=command_limit").str());
+    }
+    return accepted;
+}
+
+bool RecordRuntime::processRecordControlCommand(const std::string &rawCommand)
+{
+    std::string command = trim(rawCommand);
+    std::transform(command.begin(), command.end(), command.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::toupper(ch));
+    });
+    if (command.empty())
+    {
+        return false;
+    }
+
+    const bool recording = isRecordingActive();
+    std::string eventName;
+    std::string action;
+    if (command == "SHORT_UP")
+    {
+        eventName = "ShortUpPressed";
+        action = "short_up";
+    }
+    else if (command == "SHORT_DOWN")
+    {
+        eventName = "ShortDownPressed";
+        action = "short_down";
+    }
+    else if (command == "START")
+    {
+        if (recording)
+        {
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "[CONTROL_DIAG] source=fifo command=" << command
+                << " result=ignored reason=already_recording").str());
+            return false;
+        }
+        eventName = "ShortUpPressed";
+        action = "start";
+    }
+    else if (command == "STOP")
+    {
+        if (!recording)
+        {
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "[CONTROL_DIAG] source=fifo command=" << command
+                << " result=ignored reason=not_recording").str());
+            return false;
+        }
+        eventName = "ShortDownPressed";
+        action = "stop";
+    }
+    else
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "[CONTROL_DIAG] source=fifo command=" << command
+            << " result=ignored reason=unknown_command").str());
+        return false;
+    }
+
+    const uint64_t nowMs = currentSteadyMs();
+    if (lastRecordControlActionMs_ > 0 && nowMs - lastRecordControlActionMs_ < kRecordControlDebounceMs)
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "[CONTROL_DIAG] source=fifo command=" << command
+            << " action=" << action
+            << " result=ignored reason=debounce").str());
+        return false;
+    }
+
+    lastRecordControlActionMs_ = nowMs;
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+        << "[CONTROL_DIAG] source=fifo command=" << command
+        << " action=" << action
+        << " result=accepted"
+        << " mapped_event=" << eventName).str());
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+        << "[HMI_DIAG] category=button_event"
+        << " source=fifo"
+        << " event=" << eventName
+        << " up=0 down=0").str());
+
+    if (eventName == "ShortUpPressed")
+    {
+        handleShortUpAction();
+    }
+    else
+    {
+        handleShortDownAction();
+    }
+    return true;
 }
 
 bool RecordRuntime::checkRecorderProcesses()

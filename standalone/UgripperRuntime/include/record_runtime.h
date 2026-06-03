@@ -40,6 +40,7 @@ struct RecordRuntimeOptions
     std::string audioPipe = "/tmp/umi_audio_pipe";
     std::string audioReadyFile = "/tmp/umi_audio_ready";
     std::string audioTempDir = "/tmp/umi_audio";
+    std::string recordControlPipe = "/tmp/umi_record_control.pipe";
     std::string recordingLockFile = "/tmp/umi_recording.lock";
     std::string noiseProfile = "./bin/UgripperRuntime/audio/noise.prof";
     std::string systemActionRequestFile = "/tmp/umi_system_action_request";
@@ -311,6 +312,10 @@ private:
     void handleDualShutdownAction();
     bool handleLeftDualUmountAction();
     void handleLeftButtons(const ButtonSnapshot &buttons);
+    bool initializeRecordControlPipe();
+    void closeRecordControlPipe();
+    bool pollRecordControlPipe();
+    bool processRecordControlCommand(const std::string &command);
     bool recordAudioClip(const std::string &audioType, bool monitorUpButton);
     bool attachPendingPreAudio(const std::string &episodeDir);
     bool writeRecordingLock(const std::string &episodeDir);
@@ -369,6 +374,9 @@ private:
     uint64_t leftBothPressedSinceMs_ = 0;
     bool leftDualChordActive_ = false;
     bool leftDualLongHandled_ = false;
+    int recordControlFd_ = -1;
+    std::string recordControlBuffer_;
+    uint64_t lastRecordControlActionMs_ = 0;
     bool tactileWarningActive_ = false;
     std::string tactileTriggeredAudioCommand_;
     struct BackgroundTactileValidationResult
