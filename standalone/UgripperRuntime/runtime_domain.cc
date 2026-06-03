@@ -585,12 +585,50 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
         return false;
     }
 
+    const int64_t session_start_system_time_us = epoch_us_fn_ != nullptr ? epoch_us_fn_() : 0;
+    bool ego_started_for_episode = false;
+    auto stop_ego_startup_rollback =
+        [&]() {
+            if (!ego_started_for_episode || dependencies_.stop_ego_recording == nullptr)
+            {
+                return;
+            }
+            std::string ego_stop_error;
+            if (!dependencies_.stop_ego_recording(
+                    state_.current_episode_dir,
+                    epoch_us_fn_ != nullptr ? epoch_us_fn_() : session_start_system_time_us,
+                    &ego_stop_error))
+            {
+                CallLog(dependencies_.log_warn,
+                        "ego recording startup rollback failed: " +
+                            (ego_stop_error.empty() ? std::string("unknown error") : ego_stop_error));
+            }
+            ego_started_for_episode = false;
+        };
+
+    if (dependencies_.start_ego_recording != nullptr)
+    {
+        std::string ego_error;
+        if (dependencies_.start_ego_recording(
+                state_.current_episode_dir, session_start_system_time_us, &ego_error))
+        {
+            ego_started_for_episode = true;
+        }
+        else
+        {
+            CallLog(dependencies_.log_warn,
+                    "ego recording sidecar did not start early: " +
+                        (ego_error.empty() ? std::string("unknown error") : ego_error));
+        }
+    }
+
     std::string local_error;
     const std::string reset_source = reset_recording ? state_.last_episode_dir : std::string();
     if (dependencies_.prepare_episode == nullptr ||
         !dependencies_.prepare_episode(state_.current_episode_dir, reset_recording, reset_source, &local_error))
     {
         CallLog(dependencies_.log_error, "prepare episode failed: " + local_error);
+        stop_ego_startup_rollback();
         if (dependencies_.set_led_state != nullptr)
         {
             dependencies_.set_led_state(RuntimeLedState::Error5, 0.0);
@@ -622,6 +660,7 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
     if (dependencies_.path_exists != nullptr && !dependencies_.path_exists(options_.camera_recorder_bin))
     {
         CallLog(dependencies_.log_error, "camera recorder binary not found: " + options_.camera_recorder_bin);
+        stop_ego_startup_rollback();
         if (dependencies_.set_led_state != nullptr)
         {
             dependencies_.set_led_state(RuntimeLedState::Error5, 0.0);
@@ -648,6 +687,7 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
     if (dependencies_.path_exists != nullptr && !dependencies_.path_exists(options_.sensor_recorder_bin))
     {
         CallLog(dependencies_.log_error, "sensor recorder binary not found: " + options_.sensor_recorder_bin);
+        stop_ego_startup_rollback();
         if (dependencies_.set_led_state != nullptr)
         {
             dependencies_.set_led_state(RuntimeLedState::Error5, 0.0);
@@ -676,6 +716,7 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
     {
         CallLog(dependencies_.log_error,
                 "failed to update recording lock for episode " + state_.current_episode_dir);
+        stop_ego_startup_rollback();
         if (dependencies_.remove_recording_lock != nullptr)
         {
             dependencies_.remove_recording_lock();
@@ -699,7 +740,6 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
         return false;
     }
 
-    const int64_t session_start_system_time_us = epoch_us_fn_ != nullptr ? epoch_us_fn_() : 0;
     const std::vector<std::string> camera_args = {
         options_.camera_recorder_bin,
         "--codec",
@@ -778,6 +818,7 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
         {
             dependencies_.stop_worker(WorkerName::SensorRecorder, "startup rollback", nullptr);
         }
+        stop_ego_startup_rollback();
         if (dependencies_.remove_recording_lock != nullptr)
         {
             dependencies_.remove_recording_lock();
@@ -811,6 +852,7 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
             dependencies_.stop_worker(WorkerName::CameraRecorder, "stereo session start failed", nullptr);
             dependencies_.stop_worker(WorkerName::SensorRecorder, "stereo session start failed", nullptr);
         }
+        stop_ego_startup_rollback();
         if (dependencies_.remove_recording_lock != nullptr)
         {
             dependencies_.remove_recording_lock();
@@ -835,17 +877,6 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
     }
 
     state_.is_recording = true;
-    if (dependencies_.start_ego_recording != nullptr)
-    {
-        std::string ego_error;
-        if (!dependencies_.start_ego_recording(
-                state_.current_episode_dir, session_start_system_time_us, &ego_error))
-        {
-            CallLog(dependencies_.log_warn,
-                    "ego recording sidecar did not start: " +
-                        (ego_error.empty() ? std::string("unknown error") : ego_error));
-        }
-    }
     if (dependencies_.set_led_state != nullptr)
     {
         dependencies_.set_led_state(RuntimeLedState::Recording, 0.0);
@@ -1037,6 +1068,20 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     if (dependencies_.flush_episode_artifacts != nullptr)
     {
         dependencies_.flush_episode_artifacts(state_.current_episode_dir, "final");
+    }
+    if (ego_stop_ok && dependencies_.cleanup_ego_remote != nullptr)
+    {
+        std::string cleanup_error;
+        if (!dependencies_.cleanup_ego_remote(state_.current_episode_dir, &cleanup_error))
+        {
+            CallLog(dependencies_.log_warn,
+                    "ego remote cleanup failed: " +
+                        (cleanup_error.empty() ? std::string("unknown error") : cleanup_error));
+        }
+        if (dependencies_.flush_episode_artifacts != nullptr)
+        {
+            dependencies_.flush_episode_artifacts(state_.current_episode_dir, "ego_cleanup");
+        }
     }
     CallPerfLog(dependencies_,
             "[PERF] writing phase end: episode_dir=" + state_.current_episode_dir +

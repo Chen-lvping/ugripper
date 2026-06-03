@@ -336,6 +336,7 @@ private:
     bool startEgoRecording(const std::string &episodeDir, int64_t startSystemTimeUs, std::string *errorMessage);
     bool stopEgoRecording(const std::string &episodeDir, int64_t stopSystemTimeUs, std::string *errorMessage);
     bool waitForEgoFinalize(const std::string &episodeDir, int timeoutMs, std::string *errorMessage);
+    bool cleanupEgoRemote(const std::string &episodeDir, std::string *errorMessage);
     bool mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const;
     bool syncRuntimeLogToDisk(const char *reason) const;
     void refreshTactileReferenceCachesForSide(const std::string &side);

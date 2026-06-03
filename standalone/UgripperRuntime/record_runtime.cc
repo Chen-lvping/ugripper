@@ -64,6 +64,8 @@ constexpr uint64_t kRecordControlDebounceMs = 300;
 constexpr size_t kRecordControlMaxCommandsPerPoll = 8;
 constexpr size_t kRecordControlMaxBufferBytes = 4096;
 constexpr uint64_t kEgoFinalizeWaitPollMs = 100;
+constexpr uint64_t kEgoStartAckWaitMs = 5000;
+constexpr uint64_t kEgoStartAckPollMs = 50;
 constexpr uint64_t kHealthCheckIntervalMs = 1000;
 constexpr uint64_t kHmiActiveTimeoutMs = 2500;
 constexpr uint64_t kGripperRefreshActiveTimeoutMs = 1500;
@@ -1778,11 +1780,12 @@ bool shouldFlushPathForPhase(const fs::path &episodeDir,
                fileName == "audio_pre.wav" ||
                fileName == "audio_post.wav";
     }
-    if (phase == "final")
+    if (phase == "final" || phase == "ego_cleanup")
     {
-        if (fileName == kEgoSyncStatusFileName)
+        if (phase == "ego_cleanup")
         {
-            return true;
+            const fs::path statusPath = episodeDir / "ego" / kEgoSyncStatusFileName;
+            return path == statusPath;
         }
         const fs::path egoRelativePath = path.lexically_relative(episodeDir / "ego");
         if (!egoRelativePath.empty() &&
@@ -1834,7 +1837,7 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
     paths.push_back(episodeDir / kEgoSyncStatusFileName);
 
     const fs::path egoDir = episodeDir / "ego";
-    if (phase == "final" && fs::exists(egoDir))
+    if ((phase == "final" || phase == "ego_cleanup") && fs::exists(egoDir))
     {
         std::error_code walkError;
         for (fs::recursive_directory_iterator it(egoDir, fs::directory_options::skip_permission_denied, walkError), end;
@@ -1907,7 +1910,7 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
                   << " elapsed_ms=" << (steadyNowMs() - artifactFlushStartMs)).str());
     }
 
-    if (phase == "final")
+    if (phase == "final" || phase == "ego_cleanup")
     {
         flushDirectoryTreeToDisk(egoDir, phaseLabel);
     }
@@ -3699,6 +3702,10 @@ bool RecordRuntime::initialize()
                 [this](const std::string& episode_dir, int timeout_ms, std::string* error_message) {
                     return waitForStereoFinalize(episode_dir, timeout_ms, error_message);
                 },
+            .cleanup_ego_remote =
+                [this](const std::string& episode_dir, std::string* error_message) {
+                    return cleanupEgoRemote(episode_dir, error_message);
+                },
             .flush_episode_artifacts =
                 [this](const std::string& episode_dir, const char* stage) {
                     flushEpisodeArtifactsToDisk(fs::path(episode_dir), chestCameraEnabled_, stage);
@@ -3994,7 +4001,7 @@ std::vector<std::string> egoWorkerArgs(const std::string &script,
     args.push_back("--episode-dir");
     args.push_back(episodeDir);
     args.push_back("--status-file");
-    args.push_back((fs::path(episodeDir) / kEgoSyncStatusFileName).string());
+    args.push_back((fs::path(episodeDir) / "ego" / kEgoSyncStatusFileName).string());
     return args;
 }
 
@@ -4032,6 +4039,70 @@ bool RecordRuntime::startEgoRecording(const std::string &episodeDir,
         egoRecordingAttempted_ = false;
         return false;
     }
+    const fs::path statusPath = fs::path(episodeDir) / "ego" / kEgoSyncStatusFileName;
+    const uint64_t startMs = currentSteadyMs();
+    while ((currentSteadyMs() - startMs) < kEgoStartAckWaitMs)
+    {
+        json status = json::object();
+        std::string loadError;
+        if (loadJsonFile(statusPath.string(), &status, &loadError) && status.is_object())
+        {
+            const std::string state = status.value("status", std::string());
+            if (state == "recording")
+            {
+                const std::string remoteEpisode = status.value("remote_episode", std::string());
+                if (!remoteEpisode.empty())
+                {
+                    return true;
+                }
+            }
+            if (status.contains("start_broadcast_returncode"))
+            {
+                const int returnCode = status.value("start_broadcast_returncode", -1);
+                if (returnCode != 0)
+                {
+                    if (errorMessage != nullptr)
+                    {
+                        *errorMessage = status.value("error", std::string("ego START_RECORDING broadcast failed"));
+                    }
+                    return false;
+                }
+            }
+            if (state == "not_found")
+            {
+                return true;
+            }
+            if (state == "start_timeout")
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage = status.value("error", std::string("ego app did not create episode_*-temp"));
+                }
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                    << "ego recording sidecar did not report remote episode before gripper start: "
+                    << status.value("error", std::string("start_timeout"))
+                    << std::endl).str());
+                return true;
+            }
+            if (state == "start_failed" || state == "error")
+            {
+                if (errorMessage != nullptr)
+                {
+                    *errorMessage = status.value("error", state);
+                }
+                return false;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(kEgoStartAckPollMs));
+    }
+
+    if (errorMessage != nullptr)
+    {
+        *errorMessage = "timed out waiting for ego remote episode status";
+    }
+    DM_LOG_WARN("{}", (::DA::utils::LogString()
+        << "ego recording sidecar did not report remote episode before gripper start"
+        << std::endl).str());
     return true;
 }
 
@@ -4061,6 +4132,24 @@ bool RecordRuntime::stopEgoRecording(const std::string &episodeDir,
     return runCommandSync(egoWorkerArgs(options_.egoRecordingScript, "stop", episodeDir));
 }
 
+bool RecordRuntime::cleanupEgoRemote(const std::string &episodeDir,
+                                     std::string *errorMessage)
+{
+    if (!egoRecordingAttempted_)
+    {
+        return true;
+    }
+    if (!fs::exists(options_.egoRecordingScript))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "ego recording script not found: " + options_.egoRecordingScript;
+        }
+        return false;
+    }
+    return runCommandSync(egoWorkerArgs(options_.egoRecordingScript, "cleanup", episodeDir));
+}
+
 bool RecordRuntime::waitForEgoFinalize(const std::string &episodeDir,
                                        int timeoutMs,
                                        std::string *errorMessage)
@@ -4069,7 +4158,7 @@ bool RecordRuntime::waitForEgoFinalize(const std::string &episodeDir,
     {
         return true;
     }
-    const fs::path statusPath = fs::path(episodeDir) / kEgoSyncStatusFileName;
+    const fs::path statusPath = fs::path(episodeDir) / "ego" / kEgoSyncStatusFileName;
     const uint64_t startMs = currentSteadyMs();
     while ((currentSteadyMs() - startMs) < static_cast<uint64_t>(std::max(timeoutMs, 0)))
     {
