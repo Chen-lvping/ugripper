@@ -119,6 +119,8 @@ def robust_residual_area(baseline: np.ndarray, current: np.ndarray) -> Tuple[flo
         "residual_p99": float(np.percentile(residual, 99)),
         "gain": gain,
         "offset": offset,
+        "residual_floor": RESIDUAL_FLOOR,
+        "mad_multiplier": MAD_MULTIPLIER,
         "min_neighbor_count": MIN_NEIGHBOR_COUNT,
         "min_component_pixels": MIN_COMPONENT_PIXELS,
         "max_component_pixels": max_component_pixels,
@@ -141,13 +143,24 @@ def save_overlay(path: Path, current: np.ndarray, baseline: np.ndarray, detail: 
 
 
 def main() -> int:
+    global RESIDUAL_FLOOR, MAD_MULTIPLIER, MIN_NEIGHBOR_COUNT, MIN_COMPONENT_PIXELS
+
     parser = argparse.ArgumentParser(description="Run tactile robust residual damage check.")
     parser.add_argument("--baseline", required=True, type=Path, help="Baseline image or 160x120 .gray file.")
     parser.add_argument("--current", required=True, type=Path, help="Current image or 160x120 .gray file.")
     parser.add_argument("--threshold", type=float, default=0.002, help="Damage threshold for robust_residual_area.")
+    parser.add_argument("--residual-floor", type=float, default=RESIDUAL_FLOOR, help="Minimum per-pixel residual threshold.")
+    parser.add_argument("--mad-multiplier", type=float, default=MAD_MULTIPLIER, help="MAD multiplier for adaptive residual threshold.")
+    parser.add_argument("--min-neighbor-count", type=int, default=MIN_NEIGHBOR_COUNT, help="Minimum active pixels in a 3x3 neighborhood.")
+    parser.add_argument("--min-component-pixels", type=int, default=MIN_COMPONENT_PIXELS, help="Minimum connected component size to keep in the residual mask.")
     parser.add_argument("--json", action="store_true", help="Print JSON only.")
     parser.add_argument("--overlay", type=Path, help="Optional output path for a red residual overlay PNG.")
     args = parser.parse_args()
+
+    RESIDUAL_FLOOR = args.residual_floor
+    MAD_MULTIPLIER = args.mad_multiplier
+    MIN_NEIGHBOR_COUNT = args.min_neighbor_count
+    MIN_COMPONENT_PIXELS = args.min_component_pixels
 
     baseline = load_tactile_frame(args.baseline)
     current = load_tactile_frame(args.current)
@@ -171,8 +184,10 @@ def main() -> int:
         print(f"raw_residual_area={detail['raw_residual_area']:.6f}")
         print(f"threshold={args.threshold:.6f}")
         print(f"residual_threshold={detail['residual_threshold']:.3f}")
+        print(f"residual_floor={detail['residual_floor']:.3f}")
         print(f"residual_median={detail['residual_median']:.3f}")
         print(f"residual_mad={detail['residual_mad']:.3f}")
+        print(f"mad_multiplier={detail['mad_multiplier']:.3f}")
         print(f"residual_p99={detail['residual_p99']:.3f}")
         print(f"max_component_pixels={detail['max_component_pixels']}")
         print(f"min_component_pixels={detail['min_component_pixels']}")
