@@ -28,6 +28,51 @@ fi
 color_ok() { printf '%sOK%s' "$GREEN" "$RESET"; }
 color_off() { printf '%sOFF%s' "$RED" "$RESET"; }
 color_warn() { printf '%sWARN%s' "$YELLOW" "$RESET"; }
+color_disabled() { printf '%s未启用%s' "$YELLOW" "$RESET"; }
+
+ENV_FILE="${UGRIPPER_ENV_FILE:-/etc/environment}"
+
+trim_value() {
+    local value="$1"
+    value="${value#"${value%%[![:space:]]*}"}"
+    value="${value%"${value##*[![:space:]]}"}"
+    value="${value%\"}"
+    value="${value#\"}"
+    value="${value%\'}"
+    value="${value#\'}"
+    printf '%s' "$value"
+}
+
+read_env_value() {
+    local key="$1"
+    local line value
+    if [ -n "${!key+x}" ]; then
+        printf '%s' "${!key}"
+        return
+    fi
+    [ -f "$ENV_FILE" ] || return 0
+    line="$(grep -E "^[[:space:]]*(export[[:space:]]+)?${key}=" "$ENV_FILE" 2>/dev/null | tail -n 1 || true)"
+    [ -n "$line" ] || return 0
+    value="${line#*=}"
+    trim_value "$value"
+}
+
+is_false_like() {
+    local value
+    value="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$value" in
+        0|false|no|off|disable|disabled)
+            return 0
+            ;;
+    esac
+    return 1
+}
+
+chest_cam_enabled() {
+    local value
+    value="$(read_env_value ENABLE_CHEST_CAM_MAIN)"
+    ! is_false_like "$value"
+}
 
 resolve_path() {
     local path="$1"
@@ -50,6 +95,8 @@ print_state() {
     local state="$1"
     if [ "$state" = "OK" ]; then
         printf '%s%-5s%s' "$GREEN" "$state" "$RESET"
+    elif [ "$state" = "未启用" ]; then
+        printf '%s%-5s%s' "$YELLOW" "$state" "$RESET"
     else
         printf '%s%-5s%s' "$RED" "$state" "$RESET"
     fi
@@ -57,6 +104,10 @@ print_state() {
 
 state_for_path() {
     local path="$1"
+    if [ "$path" = "/dev/cam_chest" ] && ! chest_cam_enabled; then
+        printf '未启用'
+        return
+    fi
     if is_online "$path"; then
         printf 'OK'
     else
@@ -67,6 +118,10 @@ state_for_path() {
 target_for_path() {
     local path="$1"
     local resolved=""
+    if [ "$path" = "/dev/cam_chest" ] && ! chest_cam_enabled; then
+        printf '未启用'
+        return
+    fi
     resolved="$(resolve_path "$path")"
     if [ -n "$resolved" ]; then
         printf '%s' "$resolved"
@@ -83,11 +138,31 @@ entry_path() {
     printf '%s' "${1%%|*}"
 }
 
+entry_enabled() {
+    local path
+    path="$(entry_path "$1")"
+    if [ "$path" = "/dev/cam_chest" ] && ! chest_cam_enabled; then
+        return 1
+    fi
+    return 0
+}
+
 count_online() {
     local count=0 entry path
     for entry in "$@"; do
+        entry_enabled "$entry" || continue
         path="$(entry_path "$entry")"
         if is_online "$path"; then
+            count=$((count + 1))
+        fi
+    done
+    printf '%s' "$count"
+}
+
+count_enabled() {
+    local count=0 entry
+    for entry in "$@"; do
+        if entry_enabled "$entry"; then
             count=$((count + 1))
         fi
     done
@@ -169,6 +244,7 @@ usb_items=(
 all_count=0
 online_count=0
 for path_label in "${left_items[@]}" "${right_items[@]}" "${camera_items[@]}" "${usb_items[@]}"; do
+    entry_enabled "$path_label" || continue
     if [ -e "${path_label%%|*}" ]; then
         online_count=$((online_count + 1))
     fi
@@ -204,10 +280,11 @@ done
 print_other_rule
 printf 'Other: %s/%s online\n' \
     "$(count_online "${camera_items[@]}" "${usb_items[@]}")" \
-    "$((${#camera_items[@]} + ${#usb_items[@]}))"
+    "$(count_enabled "${camera_items[@]}" "${usb_items[@]}")"
 
 missing_list=()
 for path_label in "${left_items[@]}" "${right_items[@]}" "${camera_items[@]}" "${usb_items[@]}"; do
+    entry_enabled "$path_label" || continue
     path="${path_label%%|*}"
     label="${path_label#*|}"
     [ -e "$path" ] && continue
