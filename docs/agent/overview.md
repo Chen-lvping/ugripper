@@ -476,4 +476,3 @@ PY
 - `info.json` 不再作为 episode 最终产物生成；时间偏移信息已迁移到 `metadata.json.video_details[].start_offset_us`。
 - 现场调试若需要同时访问不同子网设备，应由系统侧或人工维护额外地址/路由；主包不负责托管这些网络策略。
 - 校准、导入与恢复动作仍分散在多个 shell 脚本和 service 中；当前功能可用，但维护时需要注意入口分散。
-- 若设备已被错误部署且不希望覆盖当前 SN，可在交付侧仓库执行 `../firmwareburner/repair_v2_env.sh`，该脚本会重装环境与 `ugripper` 并修复持久化 `calibration.json`。
