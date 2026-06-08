@@ -3627,12 +3627,14 @@ bool RecordRuntime::initialize()
                                episode_dir, reset_recording, reset_source_dir, error_message);
                 },
             .validate_episode =
-                [this](const std::string& episode_dir, std::string* error_message) {
+                [this](const std::string& episode_dir,
+                       std::string* error_message,
+                       std::vector<std::string>* error_types) {
                     if (episodeManager_ == nullptr)
                     {
                         return false;
                     }
-                    return episodeManager_->validateEpisode(episode_dir, error_message, nullptr);
+                    return episodeManager_->validateEpisode(episode_dir, error_message, error_types, nullptr);
                 },
             .prepare_sensor_start = nullptr,
             .finalize_sensor_start = nullptr,
@@ -3711,13 +3713,21 @@ bool RecordRuntime::initialize()
                     flushEpisodeArtifactsToDisk(fs::path(episode_dir), chestCameraEnabled_, stage);
                 },
             .write_episode_metadata =
-                [this](const std::string& episode_dir, bool quality_ok, const std::string& error_message) {
+                [this](const std::string& episode_dir,
+                       bool quality_ok,
+                       const std::string& error_message,
+                       const std::string& error_type) {
                     if (episodeManager_ == nullptr)
                     {
                         return;
                     }
                     std::string metadataError;
-                    if (!episodeManager_->writeFinalMetadata(episode_dir, quality_ok, error_message, &metadataError))
+                    if (!episodeManager_->writeFinalMetadata(
+                            episode_dir,
+                            quality_ok,
+                            error_message,
+                            error_type,
+                            &metadataError))
                     {
                         DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write metadata.json: "
                                       << metadataError << std::endl).str());
@@ -3857,7 +3867,7 @@ int RecordRuntime::run()
 
         if (isRecordingActive() && !checkRecorderProcesses())
         {
-            stopRecording(true, "camera or sensor recorder exited unexpectedly");
+            stopRecording(true, "camera or sensor recorder exited unexpectedly", ugripper::runtime::kErrorTypeRuntimeError);
         }
 
         const uint64_t loopElapsedMs = currentSteadyMs() - loopStartMs;
@@ -5179,14 +5189,14 @@ bool RecordRuntime::startRecording(bool resetRecording)
     return recordingOrchestrator_->StartRecording(resetRecording, nullptr);
 }
 
-bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason)
+bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason, const std::string &errorType)
 {
     if (recordingOrchestrator_ == nullptr)
     {
         DM_LOG_ERROR("{}", (::DA::utils::LogString() << "recording orchestrator not initialized" << std::endl).str());
         return false;
     }
-    const bool ok = recordingOrchestrator_->StopRecording(dueToError, reason, nullptr);
+    const bool ok = recordingOrchestrator_->StopRecording(dueToError, reason, errorType, nullptr);
     const std::string completedEpisodeDir = lastEpisodeDir();
     if (ok && !dueToError && !completedEpisodeDir.empty())
     {
@@ -5815,7 +5825,7 @@ void RecordRuntime::monitorHardwareHealth()
                     << " led_state=" << ledStateName(toLedState(result.fault->led_state))
                     << " action=stop_recording").str());
             }
-            stopRecording(true, stopReason);
+            stopRecording(true, stopReason, result.fault->key);
             return;
         }
         if (result.should_notify_fault)
@@ -6938,8 +6948,31 @@ bool RecordRuntime::EpisodeManager::prepareEpisode(const std::string &episodeDir
     return true;
 }
 
+namespace
+{
+bool setEpisodeValidationFailure(std::string *errorMessage,
+                                 std::vector<std::string> *errorTypes,
+                                 const std::string &errorType,
+                                 const std::string &message)
+{
+    if (errorMessage != nullptr)
+    {
+        *errorMessage = message;
+    }
+    if (errorTypes != nullptr && !errorType.empty())
+    {
+        if (std::find(errorTypes->begin(), errorTypes->end(), errorType) == errorTypes->end())
+        {
+            errorTypes->push_back(errorType);
+        }
+    }
+    return false;
+}
+}
+
 bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDir,
                                                     std::string *errorMessage,
+                                                    std::vector<std::string> *errorTypes,
                                                     std::vector<TactileValidationFinding> *tactileFindings) const
 {
     const int64_t validateStartMs = steadyNowMs();
@@ -6957,11 +6990,11 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         const std::string path = episodeDir + "/" + artifact.fileName;
         if (!RecordRuntime::fileExistsAndNotEmpty(path))
         {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = "missing or empty video file: " + path;
-            }
-            return false;
+            return setEpisodeValidationFailure(
+                errorMessage,
+                errorTypes,
+                ugripper::runtime::kErrorTypeMissingFile,
+                "missing or empty video file: " + path);
         }
     }
 
@@ -6970,11 +7003,11 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         const std::string path = episodeDir + "/" + file;
         if (!RecordRuntime::fileExistsAndNotEmpty(path))
         {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = "missing or empty file: " + path;
-            }
-            return false;
+            return setEpisodeValidationFailure(
+                errorMessage,
+                errorTypes,
+                ugripper::runtime::kErrorTypeMissingFile,
+                "missing or empty file: " + path);
         }
     }
 
@@ -6986,46 +7019,46 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         }
         if (!state.present)
         {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = "main camera calibration cache invalid: camera=" + state.cameraName +
-                                " device=" + state.devicePath + " missing";
-            }
-            return false;
+            return setEpisodeValidationFailure(
+                errorMessage,
+                errorTypes,
+                ugripper::runtime::kErrorTypeCalibrationError,
+                "main camera calibration cache invalid: camera=" + state.cameraName +
+                    " device=" + state.devicePath + " missing");
         }
         if (!isYuzhouMainCameraSn(state.serialNumber))
         {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = "main camera SN cache invalid: camera=" + state.cameraName +
-                                " device=" + state.devicePath +
-                                " detail=" + (state.lastError.empty() ? "empty SN" : state.lastError);
-            }
-            return false;
+            return setEpisodeValidationFailure(
+                errorMessage,
+                errorTypes,
+                ugripper::runtime::kErrorTypeCalibrationError,
+                "main camera SN cache invalid: camera=" + state.cameraName +
+                    " device=" + state.devicePath +
+                    " detail=" + (state.lastError.empty() ? "empty SN" : state.lastError));
         }
         std::string calibrationDetail;
         if (!state.calibrationPayloadCached ||
             !validateYuzhouMainCameraCalibrationPayload(state.calibrationPayload, &calibrationDetail))
         {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = "main camera calibration cache invalid: camera=" + state.cameraName +
-                                " device=" + state.devicePath +
-                                " detail=" + (!calibrationDetail.empty()
-                                                   ? calibrationDetail
-                                                   : (state.lastError.empty() ? "empty calibration" : state.lastError));
-            }
-            return false;
+            return setEpisodeValidationFailure(
+                errorMessage,
+                errorTypes,
+                ugripper::runtime::kErrorTypeCalibrationError,
+                "main camera calibration cache invalid: camera=" + state.cameraName +
+                    " device=" + state.devicePath +
+                    " detail=" + (!calibrationDetail.empty()
+                                       ? calibrationDetail
+                                       : (state.lastError.empty() ? "empty calibration" : state.lastError)));
         }
     }
 
     if (!commandExists("ffprobe"))
     {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "ffprobe is required for episode validation but was not found in PATH";
-        }
-        return false;
+        return setEpisodeValidationFailure(
+            errorMessage,
+            errorTypes,
+            ugripper::runtime::kErrorTypeRuntimeError,
+            "ffprobe is required for episode validation but was not found in PATH");
     }
 
     std::string metadataError;
@@ -7033,11 +7066,11 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                                       artifacts,
                                       &metadataError))
     {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "metadata validation failed: " + metadataError;
-        }
-        return false;
+        return setEpisodeValidationFailure(
+            errorMessage,
+            errorTypes,
+            ugripper::runtime::kErrorTypeMissingFile,
+            "metadata validation failed: " + metadataError);
     }
 
     logPerf((::DA::utils::LogString() << "[PERF] validation setup done: episode_dir=" << episodeDir
@@ -7052,23 +7085,23 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     {
         if (!task.ok)
         {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = "video unreadable or missing timing metadata: " + task.probe.fileName +
-                                " (" + task.errorMessage + ")";
-            }
-            return false;
+            return setEpisodeValidationFailure(
+                errorMessage,
+                errorTypes,
+                ugripper::runtime::kErrorTypeMissingFile,
+                "video unreadable or missing timing metadata: " + task.probe.fileName +
+                    " (" + task.errorMessage + ")");
         }
 
         if (task.probe.spanSec < kMinReasonableVideoSpanSec)
         {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = "video span too short: " + task.probe.fileName +
-                                " span=" + formatSeconds(task.probe.spanSec) +
-                                "s, expected >=" + formatSeconds(kMinReasonableVideoSpanSec) + "s";
-            }
-            return false;
+            return setEpisodeValidationFailure(
+                errorMessage,
+                errorTypes,
+                ugripper::runtime::kErrorTypeCollectionDurationTooShort,
+                "video span too short: " + task.probe.fileName +
+                    " span=" + formatSeconds(task.probe.spanSec) +
+                    "s, expected >=" + formatSeconds(kMinReasonableVideoSpanSec) + "s");
         }
 
         referenceSpanSec = std::max(referenceSpanSec, task.probe.spanSec);
@@ -7090,14 +7123,14 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         const double gapSec = referenceSpanSec - probe.spanSec;
         if (gapSec > kMaxVideoSpanGapSec)
         {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = "video span gap too large: " + probe.fileName +
-                                " span=" + formatSeconds(probe.spanSec) +
-                                "s, reference=" + formatSeconds(referenceSpanSec) +
-                                "s, gap=" + formatSeconds(gapSec) + "s";
-            }
-            return false;
+            return setEpisodeValidationFailure(
+                errorMessage,
+                errorTypes,
+                ugripper::runtime::kErrorTypeFrameLoss,
+                "video span gap too large: " + probe.fileName +
+                    " span=" + formatSeconds(probe.spanSec) +
+                    "s, reference=" + formatSeconds(referenceSpanSec) +
+                    "s, gap=" + formatSeconds(gapSec) + "s");
         }
     }
 
@@ -7193,11 +7226,11 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
         TailCheckTaskResult result = future.get();
         if (!result.ok)
         {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = result.errorMessage.empty() ? "tail check failed" : result.errorMessage;
-            }
-            return false;
+            return setEpisodeValidationFailure(
+                errorMessage,
+                errorTypes,
+                ugripper::runtime::kErrorTypeFrameLoss,
+                result.errorMessage.empty() ? "tail check failed" : result.errorMessage);
         }
         tailDetails.push_back(result.detail);
     }
@@ -7450,14 +7483,6 @@ double roundToOneDecimal(double value)
     return std::round(value * 10.0) / 10.0;
 }
 
-std::string lowerCopy(std::string text)
-{
-    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return text;
-}
-
 std::string generateUuid()
 {
     std::ifstream input("/proc/sys/kernel/random/uuid");
@@ -7476,56 +7501,6 @@ std::string generateUuid()
     uuid_generate(fallbackUuid);
     uuid_unparse(fallbackUuid, uuidString);
     return std::string(uuidString);
-}
-
-std::string classifyQualityError(const std::string &message)
-{
-    const std::string lowered = lowerCopy(message);
-    if (lowered.find("recording hardware fault") != std::string::npos ||
-        lowered.find("disconnected") != std::string::npos ||
-        lowered.find("disconnect") != std::string::npos ||
-        lowered.find("disappeared") != std::string::npos ||
-        lowered.find("device node") != std::string::npos)
-    {
-        return "device_disconnected";
-    }
-    if (lowered.find("finalize") != std::string::npos ||
-        lowered.find("stereo session") != std::string::npos ||
-        lowered.find("fays recorder unhealthy") != std::string::npos ||
-        lowered.find("fays devices missing") != std::string::npos ||
-        lowered.find("duplicate fays serial") != std::string::npos ||
-        lowered.find("failed to stop") != std::string::npos ||
-        lowered.find("failed to start") != std::string::npos)
-    {
-        return "finalize_error";
-    }
-    if (lowered.find("main camera") != std::string::npos ||
-        lowered.find("calibration") != std::string::npos ||
-        lowered.find("mcal") != std::string::npos ||
-        lowered.find("yuzhou") != std::string::npos ||
-        lowered.find(" xu ") != std::string::npos ||
-        lowered.find(" sn ") != std::string::npos)
-    {
-        return "calibration_error";
-    }
-    if (lowered.find("missing") != std::string::npos ||
-        lowered.find("cannot open") != std::string::npos)
-    {
-        return "missing_file";
-    }
-    if (lowered.find("span too short") != std::string::npos ||
-        lowered.find("duration too short") != std::string::npos)
-    {
-        return "collection_duration_too_short";
-    }
-    if (lowered.find("gap") != std::string::npos ||
-        lowered.find("tail") != std::string::npos ||
-        lowered.find("lag too large") != std::string::npos ||
-        lowered.find("no samples near episode end") != std::string::npos)
-    {
-        return "frame_loss";
-    }
-    return "unknown";
 }
 
 double nominalFpsForCamera(const std::string &cameraName)
@@ -7574,6 +7549,7 @@ std::string jsonStringPath(const json &root, const std::string &path)
 bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episodeDir,
                                                        bool qualityOk,
                                                        const std::string &qualityErrorMessage,
+                                                       const std::string &qualityErrorType,
                                                        std::string *errorMessage) const
 {
     const fs::path episodePath(episodeDir);
@@ -7735,7 +7711,8 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
     metadata["data_uuid"] = existingMetadata.value("data_uuid", generateUuid());
     metadata["audio_uuid"] = hasAudio ? existingMetadata.value("audio_uuid", generateUuid()) : "";
     metadata["quality_check_status"] = qualityOk ? "success" : "fail";
-    metadata["quality_check_err_type"] = qualityOk ? "" : classifyQualityError(qualityErrorMessage);
+    metadata["quality_check_err_type"] =
+        qualityOk ? "" : (qualityErrorType.empty() ? ugripper::runtime::kErrorTypeUnknown : qualityErrorType);
     metadata["collection_duration_s"] = roundToOneDecimal(collectionDurationS);
     metadata["require_files"] = std::move(requiredFiles);
     metadata["video_details"] = std::move(videoDetails);

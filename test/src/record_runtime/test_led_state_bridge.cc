@@ -32,6 +32,7 @@ struct LedBridgeHarness
     bool validate_ok = true;
     bool camera_bin_exists = true;
     std::string validate_error = "episode validation failed";
+    std::vector<std::string> validate_error_types;
     std::vector<RuntimeLedState> led_states;
     std::vector<std::string> audio_commands;
     std::vector<std::string> recovery_commands;
@@ -52,10 +53,14 @@ struct LedBridgeHarness
                      return true;
                  },
              .validate_episode =
-                 [this](const std::string&, std::string* error) {
+                 [this](const std::string&, std::string* error, std::vector<std::string>* error_types) {
                      if (!validate_ok && error != nullptr)
                      {
                          *error = validate_error;
+                     }
+                     if (!validate_ok && error_types != nullptr)
+                     {
+                         *error_types = validate_error_types;
                      }
                      return validate_ok;
                  },
@@ -105,6 +110,8 @@ struct LedBridgeHarness
                  },
              .flush_episode_artifacts =
                  [](const std::string&, const char*) {},
+             .write_episode_metadata =
+                 [](const std::string&, bool, const std::string&, const std::string&) {},
              .write_validation_error_log =
                  [](const std::string&, const std::string&) {},
              .write_recording_lock =
@@ -208,6 +215,7 @@ TEST(LedStateBridgeTest, DiskValidationFailureMapsToError3Led)
     harness.validate_ok = false;
     harness.validate_error =
         "failed to write temp file: /mnt/data_disk/test.tmp error=No space left on device";
+    harness.validate_error_types = {"disk_full"};
     g_steady_ms += 100;
     ASSERT_FALSE(orchestrator.StopRecording(false, "stop"));
 

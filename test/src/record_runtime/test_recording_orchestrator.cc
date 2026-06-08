@@ -40,6 +40,8 @@ struct RecordingHarness
     std::vector<std::string> stop_reasons;
     std::vector<std::string> logs;
     std::vector<std::string> lock_events;
+    std::vector<std::string> validate_error_types;
+    std::vector<std::string> metadata_error_types;
     std::vector<std::string> sensor_args;
     std::vector<int> sensor_inherited_fds;
     std::string last_validation_log;
@@ -89,11 +91,15 @@ struct RecordingHarness
                      return prepare_ok;
                  },
              .validate_episode =
-                 [this](const std::string&, std::string* error) {
+                 [this](const std::string&, std::string* error, std::vector<std::string>* error_types) {
                      ++validate_calls;
                      if (!validate_ok && error != nullptr)
                      {
                          *error = validate_error;
+                     }
+                     if (!validate_ok && error_types != nullptr)
+                     {
+                         *error_types = validate_error_types;
                      }
                      return validate_ok;
                  },
@@ -170,6 +176,10 @@ struct RecordingHarness
              .flush_episode_artifacts =
                  [this](const std::string&, const char* stage) {
                      flushed_stages.emplace_back(stage);
+                 },
+             .write_episode_metadata =
+                 [this](const std::string&, bool, const std::string&, const std::string& error_type) {
+                     metadata_error_types.push_back(error_type);
                  },
              .write_validation_error_log =
                  [this](const std::string&, const std::string& error_message) {
@@ -478,7 +488,8 @@ TEST(RecordingOrchestratorTest, StopRecordingDueToDiskFaultMapsToError3Output)
     g_steady_ms += 100;
     ASSERT_FALSE(orchestrator.StopRecording(
         true,
-        "recording hardware fault (disk_full): Disk root has no available space: /mnt/data_disk"));
+        "recording hardware fault (disk_full): Disk root has no available space: /mnt/data_disk",
+        "disk_full"));
     EXPECT_FALSE(orchestrator.state().is_recording);
     ASSERT_FALSE(harness.led_states.empty());
     EXPECT_EQ(harness.led_states.back(), RuntimeLedState::Error3);
@@ -492,6 +503,7 @@ TEST(RecordingOrchestratorTest, StopRecordingDiskValidationFailureMapsToError3Ou
 {
     RecordingHarness harness;
     harness.validate_ok = false;
+    harness.validate_error_types = {"disk_full"};
     harness.validate_error =
         "failed to write temp file: /mnt/data_disk/test.tmp error=No space left on device";
     auto orchestrator = harness.Make();
@@ -508,6 +520,62 @@ TEST(RecordingOrchestratorTest, StopRecordingDiskValidationFailureMapsToError3Ou
     EXPECT_EQ(harness.recovery_commands.back(), "error");
     EXPECT_EQ(harness.last_validation_log,
               "failed to write temp file: /mnt/data_disk/test.tmp error=No space left on device");
+    ASSERT_FALSE(harness.metadata_error_types.empty());
+    EXPECT_EQ(harness.metadata_error_types.back(), "disk_full");
+}
+
+TEST(RecordingOrchestratorTest, StopRecordingMissingFileUnderDataDiskMapsToValidationFailed)
+{
+    RecordingHarness harness;
+    harness.validate_ok = false;
+    harness.validate_error_types = {ugripper::runtime::kErrorTypeMissingFile};
+    harness.validate_error =
+        "missing or empty video file: /mnt/data_disk/device/data/episode_0001-temp/cam_left.mkv";
+    auto orchestrator = harness.Make();
+    ASSERT_TRUE(orchestrator.StartRecording(false));
+
+    g_steady_ms += 100;
+    ASSERT_FALSE(orchestrator.StopRecording(false, "stop"));
+    EXPECT_FALSE(orchestrator.state().is_recording);
+    ASSERT_FALSE(harness.led_states.empty());
+    EXPECT_EQ(harness.led_states.back(), RuntimeLedState::Error1);
+    ASSERT_FALSE(harness.audio_commands.empty());
+    EXPECT_EQ(harness.audio_commands.back(), "validation_failed");
+    ASSERT_FALSE(harness.recovery_commands.empty());
+    EXPECT_EQ(harness.recovery_commands.back(), "validation_failed");
+    EXPECT_EQ(harness.last_validation_log,
+              "missing or empty video file: /mnt/data_disk/device/data/episode_0001-temp/cam_left.mkv");
+    ASSERT_FALSE(harness.metadata_error_types.empty());
+    EXPECT_EQ(harness.metadata_error_types.back(), ugripper::runtime::kErrorTypeMissingFile);
+}
+
+TEST(RecordingOrchestratorTest, StopRecordingMultipleErrorTypesSelectsMostImportantOutput)
+{
+    RecordingHarness harness;
+    harness.validate_ok = false;
+    harness.validate_error_types = {ugripper::runtime::kErrorTypeMissingFile};
+    harness.validate_error =
+        "missing or empty video file: /mnt/data_disk/device/data/episode_0001-temp/cam_left.mkv";
+    auto orchestrator = harness.Make();
+    ASSERT_TRUE(orchestrator.StartRecording(false));
+
+    g_steady_ms += 100;
+    ASSERT_FALSE(orchestrator.StopRecording(
+        true,
+        "recording hardware fault (disk_mount_lost): Disk root is not mounted",
+        "disk_mount_lost"));
+    EXPECT_FALSE(orchestrator.state().is_recording);
+    ASSERT_FALSE(harness.led_states.empty());
+    EXPECT_EQ(harness.led_states.back(), RuntimeLedState::Error3);
+    ASSERT_FALSE(harness.audio_commands.empty());
+    EXPECT_EQ(harness.audio_commands.back(), "error");
+    ASSERT_FALSE(harness.recovery_commands.empty());
+    EXPECT_EQ(harness.recovery_commands.back(), "error");
+    ASSERT_FALSE(harness.metadata_error_types.empty());
+    EXPECT_EQ(harness.metadata_error_types.back(), "disk_mount_lost");
+    EXPECT_EQ(harness.last_validation_log,
+              "recording hardware fault (disk_mount_lost): Disk root is not mounted; "
+              "missing or empty video file: /mnt/data_disk/device/data/episode_0001-temp/cam_left.mkv");
 }
 
 TEST(RecordingOrchestratorTest, StopRecordingMergeFailureMapsToValidationFailed)

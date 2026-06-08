@@ -103,61 +103,108 @@ void CallPerfLog(const ugripper::runtime::RecordingOrchestrator::Dependencies& d
     CallLog(dependencies.log_perf, message);
 }
 
-std::string ToLowerAscii(std::string text)
+bool HasErrorType(const std::vector<std::string>& error_types, const std::string& target)
 {
-    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return text;
+    return std::find(error_types.begin(), error_types.end(), target) != error_types.end();
 }
 
-bool ContainsAnyToken(const std::string& text, std::initializer_list<const char*> tokens)
+void AddErrorType(std::vector<std::string>* error_types, const std::string& error_type)
 {
-    for (const char* token : tokens)
+    if (error_types == nullptr || error_type.empty())
     {
-        if (token != nullptr && *token != '\0' && text.find(token) != std::string::npos)
+        return;
+    }
+    if (!HasErrorType(*error_types, error_type))
+    {
+        error_types->push_back(error_type);
+    }
+}
+
+void AddErrorTypes(std::vector<std::string>* error_types, const std::vector<std::string>& new_error_types)
+{
+    for (const std::string& error_type : new_error_types)
+    {
+        AddErrorType(error_types, error_type);
+    }
+}
+
+bool IsDiskErrorType(const std::string& error_type)
+{
+    return error_type == "disk_mount_lost" ||
+           error_type == "disk_not_writable" ||
+           error_type == "disk_full" ||
+           error_type == "disk_space_unavailable";
+}
+
+bool IsHardwareErrorType(const std::string& error_type)
+{
+    return error_type == "critical_devices_missing" ||
+           error_type == "stereo_daemon_not_running" ||
+           error_type == "stereo_status_missing" ||
+           error_type == "stereo_not_ready" ||
+           error_type == "stereo_status_invalid" ||
+           error_type == "hmi_all_disconnected" ||
+           error_type == "hmi_ports_disconnected" ||
+           error_type == "hmi_input_disconnected" ||
+           error_type == "hmi_input_inactive" ||
+           error_type == "hmi_ports_inactive" ||
+           error_type == ugripper::runtime::kErrorTypeDeviceDisconnected;
+}
+
+std::string SelectPrimaryErrorType(const std::vector<std::string>& error_types)
+{
+    for (const std::string& error_type : error_types)
+    {
+        if (IsDiskErrorType(error_type))
         {
-            return true;
+            return error_type;
         }
     }
-    return false;
-}
-
-bool IsDiskFaultText(const std::string& text)
-{
-    if (text.empty())
+    for (const std::string& error_type : error_types)
     {
-        return false;
-    }
-
-    const std::string lower = ToLowerAscii(text);
-    return ContainsAnyToken(
-        lower,
+        if (IsHardwareErrorType(error_type))
         {
-            "disk_full",
-            "disk_mount_lost",
-            "disk_not_writable",
-            "disk_space_unavailable",
-            "disk root unavailable",
-            "disk root is not mounted",
-            "disk root not writable",
-            "disk root is read-only",
-            "disk root has no available space",
-            "mount lost",
-            "read-only file system",
-            "no space left on device",
-            "space info failed",
-            "/mnt/data_disk",
-        });
+            return error_type;
+        }
+    }
+    for (const char* preferred : {
+             ugripper::runtime::kErrorTypeRuntimeError,
+             ugripper::runtime::kErrorTypeFinalizeError,
+             ugripper::runtime::kErrorTypeCalibrationError,
+             ugripper::runtime::kErrorTypeMissingFile,
+             ugripper::runtime::kErrorTypeCollectionDurationTooShort,
+             ugripper::runtime::kErrorTypeFrameLoss,
+             ugripper::runtime::kErrorTypeUnknown,
+         })
+    {
+        if (HasErrorType(error_types, preferred))
+        {
+            return preferred;
+        }
+    }
+    return error_types.empty() ? std::string(ugripper::runtime::kErrorTypeUnknown) : error_types.front();
 }
 
-ugripper::runtime::RuntimeLedState SelectStopFailureLedState(bool due_to_error,
-                                                             const std::string& reason,
-                                                             const std::string& final_error_message)
+ugripper::runtime::RuntimeLedState SelectFailureLedState(const std::vector<std::string>& error_types,
+                                                         bool due_to_error)
 {
-    if (IsDiskFaultText(reason) || IsDiskFaultText(final_error_message))
+    for (const std::string& error_type : error_types)
     {
-        return ugripper::runtime::RuntimeLedState::Error3;
+        if (IsDiskErrorType(error_type))
+        {
+            return ugripper::runtime::RuntimeLedState::Error3;
+        }
+    }
+    for (const std::string& error_type : error_types)
+    {
+        if (IsHardwareErrorType(error_type))
+        {
+            return ugripper::runtime::RuntimeLedState::Error2;
+        }
+    }
+    if (HasErrorType(error_types, ugripper::runtime::kErrorTypeRuntimeError))
+    {
+        return ugripper::runtime::RuntimeLedState::Error5;
     }
     return due_to_error ? ugripper::runtime::RuntimeLedState::Error5
                         : ugripper::runtime::RuntimeLedState::Error1;
@@ -895,6 +942,7 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
 
 bool RecordingOrchestrator::StopRecording(bool due_to_error,
                                           const std::string& reason,
+                                          const std::string& error_type,
                                           std::string* error_message)
 {
     if (!state_.is_recording)
@@ -923,6 +971,11 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
 
     const int64_t stop_start_ms = steady_ms_fn_ != nullptr ? steady_ms_fn_() : 0;
     const int64_t stop_system_time_us = epoch_us_fn_ != nullptr ? epoch_us_fn_() : 0;
+    std::vector<std::string> error_types;
+    if (due_to_error)
+    {
+        AddErrorType(&error_types, error_type.empty() ? kErrorTypeRuntimeError : error_type);
+    }
     CallLog(dependencies_.log_info, "stopping recording: " + reason);
     CallPerfLog(dependencies_,
             "[PERF] stop phase begin: reason=" + reason + " episode_dir=" + state_.current_episode_dir);
@@ -1093,6 +1146,7 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     std::string final_error_message = due_to_error ? reason : std::string();
     if (!stereo_stop_ok)
     {
+        AddErrorType(&error_types, kErrorTypeFinalizeError);
         std::string stereo_failure;
         if (!stereo_finalize_error.empty())
         {
@@ -1126,14 +1180,27 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     }
     if (dependencies_.write_episode_metadata != nullptr)
     {
-        dependencies_.write_episode_metadata(state_.current_episode_dir, stereo_stop_ok, final_error_message);
+        dependencies_.write_episode_metadata(
+            state_.current_episode_dir,
+            !due_to_error && stereo_stop_ok,
+            final_error_message,
+            SelectPrimaryErrorType(error_types));
     }
+    std::vector<std::string> episode_validation_error_types;
     const bool episode_valid =
         skip_episode_validation ||
         (dependencies_.validate_episode != nullptr &&
-         dependencies_.validate_episode(state_.current_episode_dir, &episode_validation_error));
+         dependencies_.validate_episode(
+             state_.current_episode_dir,
+             &episode_validation_error,
+             &episode_validation_error_types));
     if (!episode_valid)
     {
+        AddErrorTypes(&error_types, episode_validation_error_types);
+        if (episode_validation_error_types.empty())
+        {
+            AddErrorType(&error_types, kErrorTypeUnknown);
+        }
         if (final_error_message.empty())
         {
             final_error_message =
@@ -1144,7 +1211,7 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
             final_error_message += "; " + episode_validation_error;
         }
     }
-    const bool valid = stereo_stop_ok && episode_valid;
+    const bool valid = !due_to_error && stereo_stop_ok && episode_valid;
     CallPerfLog(dependencies_,
             "[PERF] validation phase end: episode_dir=" + state_.current_episode_dir +
                 " valid=" + std::string(valid ? "true" : "false") + " elapsed_ms=" +
@@ -1152,7 +1219,11 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
                                validate_phase_start_ms));
     if (!valid && dependencies_.write_episode_metadata != nullptr)
     {
-        dependencies_.write_episode_metadata(state_.current_episode_dir, false, final_error_message);
+        dependencies_.write_episode_metadata(
+            state_.current_episode_dir,
+            false,
+            final_error_message,
+            SelectPrimaryErrorType(error_types));
     }
     if (!valid)
     {
@@ -1171,6 +1242,7 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
             dependencies_.finalize_episode_dir(state_.current_episode_dir, &finalize_dir_error);
         if (renamed_episode_dir.empty())
         {
+            AddErrorType(&error_types, kErrorTypeFinalizeError);
             episode_dir_finalized = false;
             CallLog(dependencies_.log_error, "failed to finalize episode directory: " + finalize_dir_error);
             if (final_error_message.empty())
@@ -1183,7 +1255,11 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
             }
             if (dependencies_.write_episode_metadata != nullptr)
             {
-                dependencies_.write_episode_metadata(state_.current_episode_dir, false, final_error_message);
+                dependencies_.write_episode_metadata(
+                    state_.current_episode_dir,
+                    false,
+                    final_error_message,
+                    SelectPrimaryErrorType(error_types));
             }
             if (dependencies_.write_validation_error_log != nullptr)
             {
@@ -1202,8 +1278,7 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
         dependencies_.remove_recording_lock();
     }
 
-    const RuntimeLedState failure_led_state =
-        SelectStopFailureLedState(due_to_error, reason, final_error_message);
+    const RuntimeLedState failure_led_state = SelectFailureLedState(error_types, due_to_error);
     const std::string failure_audio_command = SelectStopFailureAudioCommand(failure_led_state);
 
     if (due_to_error)

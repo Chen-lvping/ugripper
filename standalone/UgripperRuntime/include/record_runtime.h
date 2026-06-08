@@ -242,12 +242,14 @@ private:
                             std::string *errorMessage) const;
         bool validateEpisode(const std::string &episodeDir,
                              std::string *errorMessage,
+                             std::vector<std::string> *errorTypes = nullptr,
                              std::vector<TactileValidationFinding> *tactileFindings = nullptr) const;
         void validateTactileEpisode(const std::string &episodeDir,
                                     std::vector<TactileValidationFinding> *tactileFindings) const;
         bool writeFinalMetadata(const std::string &episodeDir,
                                 bool qualityOk,
                                 const std::string &qualityErrorMessage,
+                                const std::string &qualityErrorType,
                                 std::string *errorMessage) const;
         std::string finalizeEpisodeDir(const std::string &episodeDir, std::string *errorMessage) const;
         const std::string &dataRoot() const;
@@ -303,7 +305,7 @@ private:
     void syncMainCameraRuntimeStatesToEpisodeManager();
     void waitForMainCameraRefreshes();
     bool startRecording(bool resetRecording);
-    bool stopRecording(bool dueToError, const std::string &reason);
+    bool stopRecording(bool dueToError, const std::string &reason, const std::string &errorType = "");
     void handleButtons(const ButtonSnapshot &buttons);
     bool handleShortUpAction();
     bool handleShortDownAction();

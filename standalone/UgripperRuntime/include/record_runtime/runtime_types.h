@@ -6,6 +6,15 @@
 
 namespace ugripper::runtime {
 
+inline constexpr const char* kErrorTypeUnknown = "unknown";
+inline constexpr const char* kErrorTypeRuntimeError = "runtime_error";
+inline constexpr const char* kErrorTypeMissingFile = "missing_file";
+inline constexpr const char* kErrorTypeFinalizeError = "finalize_error";
+inline constexpr const char* kErrorTypeCalibrationError = "calibration_error";
+inline constexpr const char* kErrorTypeDeviceDisconnected = "device_disconnected";
+inline constexpr const char* kErrorTypeCollectionDurationTooShort = "collection_duration_too_short";
+inline constexpr const char* kErrorTypeFrameLoss = "frame_loss";
+
 enum class RuntimeLedState
 {
     Init,

@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace ugripper::runtime {
 
@@ -26,7 +27,7 @@ public:
     using SteadyMsFn = int64_t (*)();
     using EpisodeDirFn = std::function<std::string()>;
     using PrepareEpisodeFn = std::function<bool(const std::string&, bool, const std::string&, std::string*)>;
-    using ValidateEpisodeFn = std::function<bool(const std::string&, std::string*)>;
+    using ValidateEpisodeFn = std::function<bool(const std::string&, std::string*, std::vector<std::string>*)>;
     using PrepareSensorStartFn = std::function<void(std::vector<std::string>*, std::vector<int>*)>;
     using FinalizeSensorStartFn = std::function<void()>;
     using AttachPendingPreAudioFn = std::function<bool(const std::string&)>;
@@ -41,7 +42,7 @@ public:
     using WaitForFinalizeFn = std::function<bool(const std::string&, int, std::string*)>;
     using CleanupEgoRemoteFn = std::function<bool(const std::string&, std::string*)>;
     using FlushEpisodeArtifactsFn = std::function<void(const std::string&, const char*)>;
-    using WriteEpisodeMetadataFn = std::function<void(const std::string&, bool, const std::string&)>;
+    using WriteEpisodeMetadataFn = std::function<void(const std::string&, bool, const std::string&, const std::string&)>;
     using WriteValidationErrorLogFn = std::function<void(const std::string&, const std::string&)>;
     using FinalizeEpisodeDirFn = std::function<std::string(const std::string&, std::string*)>;
     using WriteRecordingLockFn = std::function<bool(const std::string&)>;
@@ -94,7 +95,10 @@ public:
                           SteadyMsFn steady_ms_fn);
 
     bool StartRecording(bool reset_recording, std::string* error_message = nullptr);
-    bool StopRecording(bool due_to_error, const std::string& reason, std::string* error_message = nullptr);
+    bool StopRecording(bool due_to_error,
+                       const std::string& reason,
+                       const std::string& error_type = "",
+                       std::string* error_message = nullptr);
     bool CheckRecorderProcesses() const;
 
     const RecordingState& state() const;
