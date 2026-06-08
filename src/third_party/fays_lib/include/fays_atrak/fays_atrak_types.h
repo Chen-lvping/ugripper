@@ -30,9 +30,9 @@ typedef unsigned long        ulong;
 typedef unsigned long long   ull;
 
 /**
- * @brief
- * 6DOF State.
- * 4 bits: bit0 - idle(0) / running(1), bit1 - normal(0) / error(1),
+ * @brief 
+ * 6DOF State. 
+ * 4 bits: bit0 - idle(0) / running(1), bit1 - normal(0) / error(1), 
  *         bit2 & bit3 holds pose type:
  *             01 - Initializing (external pose only in fusion mode / no pose in vio-only mode)
  *             10 - Vio pose only (external pose has been missing for a while if in fusion mode)
@@ -102,7 +102,7 @@ typedef struct AtrakDeviceInfo {
 
 /**
  * @brief 6DOF pose
- *
+ * 
  */
 typedef struct AtrakPose
 {
@@ -129,8 +129,8 @@ typedef struct AtrakImage
 typedef struct AtrakIMU
 {
     ull timestamp;    // unit: nanosencond
-    double gyro[3];
-    double acc[3];
+    double gyro[3];   
+    double acc[3];    
 } AtrakIMU;
 
 typedef struct AtrakGNSS
@@ -167,7 +167,7 @@ typedef struct AtrakMap
 } AtrakMap;
 
 
-/****************************************** template tracking *******************************************/
+/****************************************** template tracking *******************************************/ 
 typedef struct AtrakTempTrackConfig
 {
     ull timestamp;                    // unit: nanosencond
@@ -184,11 +184,11 @@ typedef struct AtrakObject2D
     int id;                           // instance id if available
     float confidence;                 // detection confidence 0.~1.
     float bbox[4];                    // bounding box in image pixel coordinates: center x, center y, width, height
-    uint32_t extra_info_mask;         // extra info mask. 0: no extra info; 1: position available. Bit(L-->H): position, orientation, angle in image
+    uint32_t extra_info_mask;         // extra info mask. 0: no extra info; 1: position available. Bit(L-->H): position, orientation, angle in image 
     float pose[7];                    // px, py, pz, qw, qx, qy, qz
     float angle;                      // rotation angle in image if available. uint: degree
 } AtrakObject2D;
-
+                                    
 typedef struct AtrakObject2DDets
 {
     ull timestamp;                    // unit: nanosencond
@@ -198,7 +198,7 @@ typedef struct AtrakObject2DDets
 } AtrakObject2DDets;
 
 
-/****************************************** AprilTag tracking *******************************************/
+/****************************************** AprilTag tracking *******************************************/ 
 
 enum ATRAK_TAG_FAMILY : uint {
     ATF_36H11 = 0,
@@ -238,7 +238,7 @@ typedef struct AtrakAprilTagDets
 } AtrakAprilTagDets;
 
 
-/****************************************** Stereo depth *******************************************/
+/****************************************** Stereo depth *******************************************/ 
 
 typedef struct AtrakDepthImage
 {
@@ -251,7 +251,7 @@ typedef struct AtrakDepthImage
     short encoding;
     int step;
     uint bytes;       // bytes of data array (sizeof(float) * length)
-    float* data;      // pointer to the pre-allocated depth image buffer
+    float* data;      // pointer to the pre-allocated depth image buffer 
 } AtrakDepthImage;
 
 typedef struct AtrakRectifyInfo
@@ -269,7 +269,7 @@ typedef struct AtrakRectifyInfo
 } AtrakRectifyInfo;
 
 
-/****************************************** Calibration info *******************************************/
+/****************************************** Calibration info *******************************************/ 
 
 typedef struct AtrakIntrinsics {
     ATRAK_CAM_MODEL cam_model;
@@ -289,7 +289,7 @@ typedef struct AtrakIntrinsics {
  * @brief 6-DoF transformation (rotation/translation)
  */
 typedef struct AtrakExtrinsics {
-    float rot[9];                                       // row-major rotation matrix
+    float rot[9];                                       // row-major rotation matrix 
     float trans[3];                                     // translation vector
 } AtrakExtrinsics;
 
@@ -318,11 +318,11 @@ typedef struct AtrakCamChainParam {
  * @brief IMU calib parameters
  */
 typedef struct AtrakImuParam{
-    double accelerometer_noise_density;
-    double accelerometer_random_walk;
-    double gyroscope_noise_density;
-    double gyroscope_random_walk;
-    float update_rate;
+    double accelerometer_noise_density;  
+    double accelerometer_random_walk;    
+    double gyroscope_noise_density;      
+    double gyroscope_random_walk;       
+    float update_rate;             
 } AtrakImuParam;
 
 /**
@@ -339,9 +339,9 @@ typedef struct AtrakCalibrationParam{
 typedef struct ViKitDeviceInfo
 {
     char firmware_version[16];
-    char device_model[16];
-    char serial_number[32];
+    char device_model[16];            
+    char serial_number[32];         
     uint32_t camera_nums;
-    uint32_t imu_nums;
+    uint32_t imu_nums;           
     uint32_t reserved[32];
 } ViKitDeviceInfo;

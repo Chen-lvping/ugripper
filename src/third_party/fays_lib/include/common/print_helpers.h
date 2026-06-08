@@ -19,10 +19,10 @@ bool PrintDeviceInfo(void *handle) {
 void printTransform(const std::string& name, const AtrakExtrinsics& transform) {
     std::cout << std::fixed << std::setprecision(6);
     std::cout << "  " << name << ":" << std::endl;
-
+    
     for (int j = 0; j < 9; ++j) {
         std::cout << std::setw(10) << transform.rot[j] << " ";
-
+        
         if ((j + 1) % 3 == 0) {
             std::cout << std::setw(10) << transform.trans[j/3] << std::endl;
         }
