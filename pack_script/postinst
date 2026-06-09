@@ -103,10 +103,72 @@ stop_service_fast() {
 
     timeout "${timeout_sec}s" systemctl stop "$service_name" >/dev/null 2>&1 || true
 
-    if systemctl is-active --quiet "$service_name"; then
-        echo "Warning: $service_name stop timeout, force killing..."
-        systemctl kill "$service_name" >/dev/null 2>&1 || true
+    if wait_service_stopped "$service_name" "$timeout_sec"; then
+        return 0
     fi
+
+    echo "Warning: $service_name stop timeout, force killing..."
+    systemctl kill "$service_name" >/dev/null 2>&1 || true
+
+    if ! wait_service_stopped "$service_name" 3; then
+        echo "Warning: $service_name is still not fully stopped after kill."
+    fi
+}
+
+service_active_state() {
+    local service_name="$1"
+    systemctl show -p ActiveState --value "$service_name" 2>/dev/null || printf '%s\n' "unknown"
+}
+
+wait_service_stopped() {
+    local service_name="$1"
+    local timeout_sec="${2:-6}"
+    local deadline=$((SECONDS + timeout_sec))
+    local state=""
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        state="$(service_active_state "$service_name")"
+        case "$state" in
+            active|activating|reloading|deactivating)
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+        sleep 0.2
+    done
+
+    state="$(service_active_state "$service_name")"
+    case "$state" in
+        active|activating|reloading|deactivating)
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
+
+wait_service_active() {
+    local service_name="$1"
+    local timeout_sec="${2:-8}"
+    local deadline=$((SECONDS + timeout_sec))
+    local state=""
+
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        state="$(service_active_state "$service_name")"
+        case "$state" in
+            active)
+                return 0
+                ;;
+            failed)
+                return 1
+                ;;
+        esac
+        sleep 0.2
+    done
+
+    [ "$(service_active_state "$service_name")" = "active" ]
 }
 
 disable_continuous_ntp_services() {
@@ -278,6 +340,8 @@ chmod 0555 "$DATA_MOUNT_POINT" >/dev/null 2>&1 || true
 
 systemctl daemon-reload
 
+stop_service_fast "$SERVICE_NAME" 10
+
 udevadm control --reload-rules
 # 仅重触发视频/声音设备，应用相机与 USB 音频相关 udev 规则；避免触发 block add 导致升级期间重复执行 usb-auto-update
 # Fays SDK 读取 serial/calibration 时还会打开 /dev/bus/usb 下的 FTDI
@@ -311,7 +375,14 @@ systemctl start --no-block "$NTP_SYNC_SERVICE" || echo "Warning: failed to start
 
 # 主应用服务
 systemctl enable "$SERVICE_NAME"
-systemctl restart "$SERVICE_NAME"
+echo "Starting $SERVICE_NAME after udev triggers completed..."
+systemctl start "$SERVICE_NAME"
+if ! wait_service_active "$SERVICE_NAME" 10; then
+    echo "Error: $SERVICE_NAME did not become active after postinst start."
+    systemctl status "$SERVICE_NAME" --no-pager -l || true
+    exit 1
+fi
+echo "[$SERVICE_NAME] Started successfully after udev triggers."
 
 # 网线监测服务最后启动，降低安装窗口内竞态
 systemctl enable "$NETWORK_MONITOR_SERVICE"
