@@ -36,6 +36,7 @@ public:
     using RecoveryCommandFn = std::function<void(const std::string&)>;
     using AudioCommandFn = std::function<void(const std::string&)>;
     using LedStateFn = std::function<void(RuntimeLedState, double)>;
+    using HardwareFaultLedFn = std::function<void(const HealthFault&)>;
     using StereoSessionFn = std::function<bool(const std::string&, int64_t, std::string*)>;
     using StartEgoRecordingFn = std::function<bool(const std::string&, int64_t, std::string*)>;
     using StopEgoRecordingFn = std::function<bool(const std::string&, int64_t, std::string*)>;
@@ -66,6 +67,7 @@ public:
         RecoveryCommandFn set_audio_recovery_command;
         AudioCommandFn send_audio_command;
         LedStateFn set_led_state;
+        HardwareFaultLedFn set_hardware_fault_led_state;
         StereoSessionFn start_stereo_session;
         StereoSessionFn stop_stereo_session;
         StartEgoRecordingFn start_ego_recording;

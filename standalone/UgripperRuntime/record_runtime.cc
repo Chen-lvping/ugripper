@@ -19,6 +19,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fcntl.h>
 #include <filesystem>
 #include <fstream>
@@ -49,7 +50,6 @@ using ordered_json = nlohmann::ordered_json;
 
 namespace {
 constexpr const char *kChestCameraEnvKey = "ENABLE_CHEST_CAM_MAIN";
-constexpr const char *kPerfLogEnvKey = "UGRIPPER_PERF_LOG";
 constexpr uint64_t kActionDebounceMs = 250;
 constexpr uint64_t kLongPressThresholdMs = 800;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
@@ -98,11 +98,11 @@ constexpr int kTactileFrameHeight = 120;
 constexpr size_t kTactileFrameBytes = static_cast<size_t>(kTactileFrameWidth * kTactileFrameHeight);
 constexpr double kTactileEpisodeProbeSec = 0.12;
 constexpr double kTactileRobustResidualAreaThreshold = 0.002;
-constexpr double kTactileResidualFloorThreshold = 20.0;
+constexpr double kTactileResidualFloorThreshold = 24.0;
 constexpr double kTactileResidualMadMultiplier = 6.0;
 constexpr double kTactileMadToSigma = 1.4826;
 constexpr int kTactileResidualMinNeighborCount = 3;
-constexpr size_t kTactileResidualMinComponentPixels = 8;
+constexpr size_t kTactileResidualMinComponentPixels = 16;
 constexpr size_t kTactileHistoryWindow = 3;
 constexpr int kTactileSnapshotTimeoutMs = 2500;
 constexpr uint64_t kTactilePersistentBaselineRefreshMs = 12ULL * 60ULL * 60ULL * 1000ULL;
@@ -110,7 +110,12 @@ constexpr const char *kEpisodeTimingFileName = ".recording_timing.json";
 constexpr const char *kEpisodeTimingShmPrefix = "ugripper_recording_timing_";
 constexpr const char *kEgoSyncStatusFileName = "ego_sync.json";
 
-bool g_perfLogEnabled = true;
+#ifndef UGRIPPER_ENABLE_PERF_LOG
+#define UGRIPPER_ENABLE_PERF_LOG 0
+#endif
+
+constexpr bool kPerfLogEnabled = UGRIPPER_ENABLE_PERF_LOG != 0;
+bool g_perfLogEnabled = kPerfLogEnabled;
 
 bool perfLogEnabled()
 {
@@ -324,10 +329,12 @@ constexpr std::array<FaysTailCheckTarget, 2> kFaysTailCheckTargets = {{
 struct FaysMcapSummary
 {
     uint64_t lastImuLogTimeNs = 0;
+    uint64_t firstCameraLogTimeNs = 0;
     uint64_t lastCameraLogTimeNs = 0;
     uint64_t imuMessageCount = 0;
     uint64_t cameraMessageCount = 0;
     uint64_t spanNs = 0;
+    uint64_t cameraSpanNs = 0;
 };
 
 struct TailCheckTaskResult
@@ -456,6 +463,22 @@ fs::path tactileReferenceMetaPath(const fs::path &root, const std::string &seria
 fs::path tactilePersistentRawPath(const fs::path &root, const std::string &serial)
 {
     return tactilePersistentDir(root) / (sanitizeFileComponent(serial) + ".gray");
+}
+
+bool writeTactileReferenceMeta(const fs::path &root,
+                               const std::string &serial,
+                               const TactileCalibrationTarget &target,
+                               uint64_t updatedAtMs,
+                               std::string *errorMessage)
+{
+    json meta = {
+        {"serial", serial},
+        {"camera_name", target.cameraName},
+        {"device_path", target.devicePath},
+        {"updated_at_ms", updatedAtMs},
+    };
+    return writeTextFileAtomically(
+        tactileReferenceMetaPath(root, serial), meta.dump(2) + "\n", errorMessage);
 }
 
 std::string formatFixed(double value, int precision)
@@ -2024,6 +2047,65 @@ std::string trim(std::string text)
     return text.substr(first, last - first + 1);
 }
 
+std::string asciiLower(std::string text)
+{
+    std::transform(text.begin(), text.end(), text.begin(), [](unsigned char value) {
+        return static_cast<char>(std::tolower(value));
+    });
+    return text;
+}
+
+std::string resolveEgoAdbCommand(const std::string &egoRecordingScript)
+{
+    fs::path bundled;
+    if (!egoRecordingScript.empty())
+    {
+        bundled = fs::path(egoRecordingScript).parent_path().parent_path() / "adb" / "adb";
+    }
+    if (!bundled.empty() && access(bundled.c_str(), X_OK) == 0)
+    {
+        return bundled.string();
+    }
+    return "adb";
+}
+
+std::string readTrimmedSysfsText(const fs::path &path)
+{
+    std::ifstream input(path);
+    std::string value;
+    if (!std::getline(input, value))
+    {
+        return {};
+    }
+    return asciiLower(trim(value));
+}
+
+bool hasAdbUsbInterface()
+{
+    std::error_code error;
+    const fs::path usbRoot("/sys/bus/usb/devices");
+    if (!fs::exists(usbRoot, error))
+    {
+        return true;
+    }
+
+    for (const auto &entry : fs::directory_iterator(usbRoot, fs::directory_options::skip_permission_denied, error))
+    {
+        const std::string interfaceClass = readTrimmedSysfsText(entry.path() / "bInterfaceClass");
+        const std::string interfaceSubClass = readTrimmedSysfsText(entry.path() / "bInterfaceSubClass");
+        const std::string interfaceProtocol = readTrimmedSysfsText(entry.path() / "bInterfaceProtocol");
+        if (interfaceClass == "ff" && interfaceSubClass == "42" && interfaceProtocol == "01")
+        {
+            return true;
+        }
+    }
+    if (error)
+    {
+        return true;
+    }
+    return false;
+}
+
 std::string formatSeconds(double value)
 {
     std::ostringstream stream;
@@ -3179,11 +3261,42 @@ bool loadFaysMcapSummary(const std::string &mcapPath,
         return '\0';
     };
     bool foundImu = false;
+    bool foundFirstCamera = false;
     bool foundCamera = false;
     auto *dataSource = reader.dataSource();
     const auto &chunkIndexes = reader.chunkIndexes();
     if (dataSource != nullptr && !chunkIndexes.empty())
     {
+        for (auto it = chunkIndexes.begin();
+             it != chunkIndexes.end() && !foundFirstCamera;
+             ++it)
+        {
+            mcap::TypedRecordReader recordReader(
+                *dataSource,
+                it->chunkStartOffset,
+                it->chunkStartOffset + it->chunkLength);
+            recordReader.onMessage = [&](const mcap::Message &message,
+                                         mcap::ByteOffset,
+                                         std::optional<mcap::ByteOffset>) {
+                const char kind = classifyFaysMessage(message);
+                if (kind == 'c' &&
+                    (!foundFirstCamera || message.logTime < summary->firstCameraLogTimeNs))
+                {
+                    summary->firstCameraLogTimeNs = message.logTime;
+                    foundFirstCamera = true;
+                }
+            };
+
+            while (recordReader.next())
+            {
+            }
+
+            if (!recordReader.status().ok() && errorMessage != nullptr && errorMessage->empty())
+            {
+                *errorMessage = "failed to read Fays head chunk: " + recordReader.status().message;
+            }
+        }
+
         size_t scannedChunks = 0;
         for (auto it = chunkIndexes.rbegin();
              it != chunkIndexes.rend() && scannedChunks < kFaysTailChunkScanLimit && !(foundImu && foundCamera);
@@ -3233,16 +3346,22 @@ bool loadFaysMcapSummary(const std::string &mcapPath,
         }
         return false;
     }
-    if (!foundImu || !foundCamera)
+    if (!foundImu || !foundCamera || !foundFirstCamera)
     {
         if (errorMessage != nullptr)
         {
             *errorMessage = "Fays topic has zero messages: imu=" +
                             std::string(foundImu ? "present" : "zero") +
                             ", camera=" +
-                            std::string(foundCamera ? "present" : "zero");
+                            std::string(foundCamera ? "present" : "zero") +
+                            ", first_camera=" +
+                            std::string(foundFirstCamera ? "present" : "zero");
         }
         return false;
+    }
+    if (summary->lastCameraLogTimeNs > summary->firstCameraLogTimeNs)
+    {
+        summary->cameraSpanNs = summary->lastCameraLogTimeNs - summary->firstCameraLogTimeNs;
     }
     if (summary->spanNs == 0 && !reader.chunkIndexes().empty())
     {
@@ -3264,6 +3383,15 @@ bool loadFaysMcapSummary(const std::string &mcapPath,
             summary->spanNs = lastChunkMessageNs - firstChunkMessageNs;
         }
     }
+    if (summary->cameraSpanNs < static_cast<uint64_t>(kFaysMcapMinSpanNs))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "Fays camera span too short: camera_span_ns=" + std::to_string(summary->cameraSpanNs) +
+                            ", threshold_ns=" + std::to_string(kFaysMcapMinSpanNs);
+        }
+        return false;
+    }
     if (summary->spanNs < static_cast<uint64_t>(kFaysMcapMinSpanNs))
     {
         if (errorMessage != nullptr)
@@ -3272,6 +3400,73 @@ bool loadFaysMcapSummary(const std::string &mcapPath,
                             ", threshold_ns=" + std::to_string(kFaysMcapMinSpanNs);
         }
         return false;
+    }
+    return true;
+}
+
+const FaysTailCheckTarget *faysTargetForStereoCamera(const std::string &cameraName)
+{
+    if (cameraName == "left_stereo")
+    {
+        return &kFaysTailCheckTargets[0];
+    }
+    if (cameraName == "right_stereo")
+    {
+        return &kFaysTailCheckTargets[1];
+    }
+    return nullptr;
+}
+
+bool loadEffectiveVideoDurationSec(const std::string &episodeDir,
+                                   const EpisodeVideoArtifact &artifact,
+                                   const VideoProbeResult &probe,
+                                   double fallbackSec,
+                                   double *durationSec,
+                                   std::string *source,
+                                   std::string *errorMessage)
+{
+    if (durationSec == nullptr)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "internal error: missing duration output slot";
+        }
+        return false;
+    }
+
+    *durationSec = fallbackSec;
+    if (source != nullptr)
+    {
+        *source = "mkv_probe";
+    }
+
+    const FaysTailCheckTarget *target = faysTargetForStereoCamera(artifact.cameraName);
+    if (target == nullptr)
+    {
+        return true;
+    }
+
+    FaysMcapSummary summary;
+    std::string faysError;
+    if (!loadFaysMcapSummary(
+            (fs::path(episodeDir) / target->mcapFileName).string(),
+            target->imuTopic,
+            target->cameraTopic,
+            &summary,
+            &faysError))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to load stereo Fays camera duration for " +
+                            std::string(artifact.fileName) + ": " + faysError;
+        }
+        return false;
+    }
+
+    *durationSec = static_cast<double>(summary.cameraSpanNs) / 1000000000.0;
+    if (source != nullptr)
+    {
+        *source = std::string("fays_mcap_camera:") + target->mcapFileName;
     }
     return true;
 }
@@ -3447,9 +3642,9 @@ bool RecordRuntime::initialize()
     DM_LOG_INFO("{}", (::DA::utils::LogString() << kChestCameraEnvKey << "="
                          << (chestCameraEnabled_ ? "true" : "false") << std::endl).str());
 
-    perfLogEnabled_ = !isFalseLikeValue(readEnvValue(options_.envFile, kPerfLogEnvKey));
+    perfLogEnabled_ = kPerfLogEnabled;
     g_perfLogEnabled = perfLogEnabled_;
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << kPerfLogEnvKey << "="
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "UGRIPPER_ENABLE_PERF_LOG="
                          << (perfLogEnabled_ ? "true" : "false") << std::endl).str());
 
     hardwareVersion_ = readEnvValue(options_.envFile, "UGRIPPER_HARDWARE_VERSION");
@@ -3662,6 +3857,10 @@ bool RecordRuntime::initialize()
                 [this](ugripper::runtime::RuntimeLedState state, double progress) {
                     setLedState(toLedState(state), progress);
                 },
+            .set_hardware_fault_led_state =
+                [this](const ugripper::runtime::HealthFault& fault) {
+                    setHardwareFaultLedState(fault);
+                },
             .start_stereo_session =
                 [this](const std::string& episode_dir, int64_t start_system_time_us, std::string* error_message) {
                     if (stereoSessionClient_ == nullptr)
@@ -3806,7 +4005,7 @@ bool RecordRuntime::initialize()
 
     for (const std::string side : {"left", "right"})
     {
-        refreshGripperRuntimeStateForSide(side);
+        refreshGripperRuntimeStateForSide(side, false);
     }
     if (episodeManager_ != nullptr)
     {
@@ -4027,6 +4226,14 @@ bool RecordRuntime::startEgoRecording(const std::string &episodeDir,
             *errorMessage = "ego recording script not found: " + options_.egoRecordingScript;
         }
         return false;
+    }
+
+    if (!hasAdbUsbInterface())
+    {
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+            << "skip ego recording sidecar: no ADB USB interface detected"
+            << std::endl).str());
+        return true;
     }
 
     if (egoRecordingWorker_.has_value())
@@ -4696,7 +4903,7 @@ void RecordRuntime::processPendingGripperRefreshes()
 
         if (action == ugripper::runtime::GripperRefreshAction::RefreshRuntimeState)
         {
-            refreshGripperRuntimeStateForSide(side);
+            refreshGripperRuntimeStateForSide(side, true);
         }
         updatedAny = true;
     }
@@ -4720,7 +4927,8 @@ void RecordRuntime::clearGripperRuntimeStateForSide(const std::string &side,
     state.lastError = errorMessage;
 }
 
-void RecordRuntime::refreshGripperRuntimeStateForSide(const std::string &side)
+void RecordRuntime::refreshGripperRuntimeStateForSide(const std::string &side,
+                                                      bool markTactileReferencePending)
 {
     auto &state = gripperRuntimeStates_[gripperStateIndexForSide(side)];
     clearGripperRuntimeStateForSide(side, true, "refreshing", "");
@@ -4750,7 +4958,10 @@ void RecordRuntime::refreshGripperRuntimeStateForSide(const std::string &side)
         << " has_sn=" << boolText(hasSerialNumber)
         << " sn=" << state.serialNumber
         << std::endl).str());
-    refreshTactileReferenceCachesForSide(side);
+    if (ugripper::runtime::ShouldMarkTactileReferencePending(markTactileReferencePending))
+    {
+        markTactileReferencePendingForSide(side, "gripper_reconnected");
+    }
 }
 
 void RecordRuntime::initializeMainCameraRuntimeStates()
@@ -4938,25 +5149,14 @@ void RecordRuntime::waitForMainCameraRefreshes()
     }
 }
 
-void RecordRuntime::refreshTactileReferenceCachesForSide(const std::string &side)
+void RecordRuntime::markTactileReferencePendingForSide(const std::string &side,
+                                                       const std::string &reason)
 {
     if (episodeManager_ == nullptr)
     {
         return;
     }
-    std::vector<EpisodeManager::TactileValidationFinding> findings;
-    episodeManager_->refreshTactileReferenceCacheForSide(side, &findings);
-    for (const auto &finding : findings)
-    {
-        if (tactileTriggeredAudioCommand_.empty() && finding.warningTriggered)
-        {
-            tactileTriggeredAudioCommand_ = finding.audioCommand;
-        }
-        if (finding.warningActive)
-        {
-            tactileWarningActive_ = true;
-        }
-    }
+    episodeManager_->markTactileReferencePendingForSide(side, reason);
 }
 
 void RecordRuntime::applyTactileValidationFindings(
@@ -5202,7 +5402,7 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason, co
     {
         scheduleBackgroundTactileValidation(completedEpisodeDir);
     }
-    if (ok && dueToError && activeHardwareFault_.has_value())
+    if (dueToError && activeHardwareFault_.has_value())
     {
         setHardwareFaultLedState(*activeHardwareFault_);
     }
@@ -5918,30 +6118,34 @@ void RecordRuntime::setLedState(LedState state, double progress)
 
 void RecordRuntime::setHardwareFaultLedState(const ugripper::runtime::HealthFault &fault)
 {
-    if (fault.led_state != ugripper::runtime::RuntimeLedState::Error2 || !ledController_)
+    const bool side_specific_error = fault.led_state == ugripper::runtime::RuntimeLedState::Error2 ||
+                                     fault.led_state == ugripper::runtime::RuntimeLedState::Error4;
+    if (!side_specific_error || !ledController_)
     {
         setLedState(toLedState(fault.led_state));
         return;
     }
 
-    const GripperLedEffect missingEffect{GripperLedEffectState::Error2, 0.0};
+    const GripperLedEffect faultEffect = makeLedEffect(toLedState(fault.led_state), 0.0);
     const GripperLedEffect unknownEffect{GripperLedEffectState::Error2Unknown, 0.0};
     switch (fault.side)
     {
     case ugripper::runtime::HardwareFaultSide::Left:
-        panelManager_.setLedEffectForSide("left", missingEffect);
+        panelManager_.setLedEffectForSide("left", faultEffect);
         panelManager_.setLedColorForSide("right", 255, 0, 0);
         break;
     case ugripper::runtime::HardwareFaultSide::Right:
         panelManager_.setLedColorForSide("left", 255, 0, 0);
-        panelManager_.setLedEffectForSide("right", missingEffect);
+        panelManager_.setLedEffectForSide("right", faultEffect);
         break;
     case ugripper::runtime::HardwareFaultSide::Both:
-        panelManager_.setLedEffect(missingEffect);
+        panelManager_.setLedEffect(faultEffect);
         break;
     case ugripper::runtime::HardwareFaultSide::Unknown:
     default:
-        panelManager_.setLedEffect(unknownEffect);
+        panelManager_.setLedEffect(fault.led_state == ugripper::runtime::RuntimeLedState::Error2
+                                       ? unknownEffect
+                                       : faultEffect);
         break;
     }
 }
@@ -6779,9 +6983,9 @@ std::string RecordRuntime::EpisodeManager::createNextEpisodeDir()
     return episodePath.string();
 }
 
-void RecordRuntime::EpisodeManager::refreshTactileReferenceCacheForSide(
+void RecordRuntime::EpisodeManager::markTactileReferencePendingForSide(
     const std::string &side,
-    std::vector<TactileValidationFinding> *findings)
+    const std::string &reason)
 {
     json tactileHistory = json::object();
     {
@@ -6810,6 +7014,7 @@ void RecordRuntime::EpisodeManager::refreshTactileReferenceCacheForSide(
     }
 
     bool historyDirty = false;
+    const uint64_t nowMs = RecordRuntime::currentEpochMs();
     for (const auto &target : kTactileCalibrationTargets)
     {
         if (side != target.side)
@@ -6821,58 +7026,11 @@ void RecordRuntime::EpisodeManager::refreshTactileReferenceCacheForSide(
         const auto serial = probeUsbSerialForDeviceNode(target.devicePath, &serialDetail);
         if (!serial.has_value() || serial->empty())
         {
-            DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile reference cache skipped: camera=" << target.cameraName
+            DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile reference pending skipped: camera=" << target.cameraName
                                  << " reason="
                                  << (serialDetail.empty() ? "missing tactile serial" : serialDetail)
                                  << std::endl).str());
             continue;
-        }
-
-        std::string captureError;
-        const auto frame = captureTactileGrayFrame(
-            {
-                "-f",
-                "video4linux2",
-                "-input_format",
-                "mjpeg",
-                "-video_size",
-                "640x480",
-                "-framerate",
-                "120",
-                "-i",
-                target.devicePath,
-            },
-            0.0,
-            &captureError);
-        if (!frame.has_value())
-        {
-            DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile reference capture failed: camera=" << target.cameraName
-                                 << " serial=" << *serial
-                                 << " reason=" << captureError << std::endl).str());
-            continue;
-        }
-
-        std::string writeError;
-        if (!writeBinaryFile(tactileReferenceRawPath(tactileStateDir_, *serial), *frame, &writeError))
-        {
-            DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile reference write failed: camera=" << target.cameraName
-                                 << " serial=" << *serial
-                                 << " reason=" << writeError << std::endl).str());
-            continue;
-        }
-
-        json meta = {
-            {"serial", *serial},
-            {"camera_name", target.cameraName},
-            {"device_path", target.devicePath},
-            {"updated_at_ms", RecordRuntime::currentEpochMs()},
-        };
-        if (!writeTextFileAtomically(
-                tactileReferenceMetaPath(tactileStateDir_, *serial), meta.dump(2) + "\n", &writeError))
-        {
-            DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile reference meta write failed: camera=" << target.cameraName
-                                 << " serial=" << *serial
-                                 << " reason=" << writeError << std::endl).str());
         }
 
         json &cameraHistory = tactileHistory["cameras"][*serial];
@@ -6881,43 +7039,23 @@ void RecordRuntime::EpisodeManager::refreshTactileReferenceCacheForSide(
             cameraHistory = json::object();
         }
         cameraHistory["camera_name"] = target.cameraName;
-
-        std::vector<uint8_t> persistentBaseline;
-        std::string persistentBaselineError;
-        const bool hasPersistentBaseline = readBinaryFileExact(
-            tactilePersistentRawPath(tactileStateDir_, *serial),
-            kTactileFrameBytes,
-            &persistentBaseline,
-            &persistentBaselineError);
-        const uint64_t persistentBaselineUpdatedAtMs =
-            cameraHistory.value("persistent_baseline_updated_at_ms", static_cast<uint64_t>(0));
-
-        if (!hasPersistentBaseline || persistentBaselineUpdatedAtMs == 0 ||
-            (RecordRuntime::currentEpochMs() - persistentBaselineUpdatedAtMs) >=
-                kTactilePersistentBaselineRefreshMs)
-        {
-            if (writeBinaryFile(tactilePersistentRawPath(tactileStateDir_, *serial), *frame, &writeError))
-            {
-                cameraHistory["persistent_baseline_updated_at_ms"] = RecordRuntime::currentEpochMs();
-                cameraHistory["persistent_fault_active"] = false;
-                cameraHistory["persistent_fault_detail"] = "";
-                cameraHistory["persistent_recent"] = json::array();
-                historyDirty = true;
-            }
-        }
-
-        const bool persistentFaultActive = cameraHistory.value("persistent_fault_active", false);
-        if (persistentFaultActive && findings != nullptr)
-        {
-            TactileValidationFinding finding;
-            finding.cameraName = target.cameraName;
-            finding.serialNumber = *serial;
-            finding.warningActive = true;
-            finding.audioCommand = std::string(target.cameraName) + "_damaged";
-            finding.detail = cameraHistory.value(
-                "persistent_fault_detail", std::string("persistent baseline mismatch"));
-            findings->push_back(std::move(finding));
-        }
+        cameraHistory["reference_pending"] = true;
+        cameraHistory["reference_pending_reason"] = reason;
+        cameraHistory["reference_pending_at_ms"] = nowMs;
+        cameraHistory["persistent_baseline_pending"] = true;
+        cameraHistory["persistent_baseline_pending_reason"] = reason;
+        cameraHistory["persistent_baseline_pending_at_ms"] = nowMs;
+        cameraHistory["recent"] = json::array();
+        cameraHistory["persistent_recent"] = json::array();
+        cameraHistory["persistent_fault_active"] = false;
+        cameraHistory["persistent_fault_detail"] = "";
+        historyDirty = true;
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+            << "tactile reference pending: camera=" << target.cameraName
+            << " side=" << side
+            << " serial=" << *serial
+            << " reason=" << reason
+            << std::endl).str());
     }
 
     if (historyDirty)
@@ -7080,6 +7218,8 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
     const int64_t videoProbeStartMs = steadyNowMs();
     const auto probeTasks = probeVideoFilesParallel(episodeDir, artifacts);
     std::vector<VideoProbeResult> probes;
+    std::map<std::string, double> effectiveSpanByFile;
+    std::map<std::string, std::string> effectiveSpanSourceByFile;
     probes.reserve(probeTasks.size());
     for (const auto &task : probeTasks)
     {
@@ -7093,18 +7233,41 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                     " (" + task.errorMessage + ")");
         }
 
-        if (task.probe.spanSec < kMinReasonableVideoSpanSec)
+        const EpisodeVideoArtifact artifact{task.probe.cameraName.c_str(), task.probe.fileName.c_str()};
+        double effectiveSpanSec = task.probe.spanSec;
+        std::string effectiveSpanSource;
+        std::string effectiveSpanError;
+        if (!loadEffectiveVideoDurationSec(
+                episodeDir,
+                artifact,
+                task.probe,
+                task.probe.spanSec,
+                &effectiveSpanSec,
+                &effectiveSpanSource,
+                &effectiveSpanError))
+        {
+            return setEpisodeValidationFailure(
+                errorMessage,
+                errorTypes,
+                ugripper::runtime::kErrorTypeFrameLoss,
+                effectiveSpanError);
+        }
+
+        if (effectiveSpanSec < kMinReasonableVideoSpanSec)
         {
             return setEpisodeValidationFailure(
                 errorMessage,
                 errorTypes,
                 ugripper::runtime::kErrorTypeCollectionDurationTooShort,
-                "video span too short: " + task.probe.fileName +
-                    " span=" + formatSeconds(task.probe.spanSec) +
-                    "s, expected >=" + formatSeconds(kMinReasonableVideoSpanSec) + "s");
+                "video effective span too short: " + task.probe.fileName +
+                    " span=" + formatSeconds(effectiveSpanSec) +
+                    "s, source=" + effectiveSpanSource +
+                    ", expected >=" + formatSeconds(kMinReasonableVideoSpanSec) + "s");
         }
 
-        referenceSpanSec = std::max(referenceSpanSec, task.probe.spanSec);
+        referenceSpanSec = std::max(referenceSpanSec, effectiveSpanSec);
+        effectiveSpanByFile[task.probe.fileName] = effectiveSpanSec;
+        effectiveSpanSourceByFile[task.probe.fileName] = effectiveSpanSource;
         probes.push_back(task.probe);
     }
     logPerf((::DA::utils::LogString() << "[PERF] parallel video probe done: episode_dir=" << episodeDir
@@ -7120,7 +7283,13 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
 
     for (const auto &probe : probes)
     {
-        const double gapSec = referenceSpanSec - probe.spanSec;
+        const auto effectiveIt = effectiveSpanByFile.find(probe.fileName);
+        const double effectiveSpanSec =
+            effectiveIt != effectiveSpanByFile.end() ? effectiveIt->second : probe.spanSec;
+        const auto sourceIt = effectiveSpanSourceByFile.find(probe.fileName);
+        const std::string effectiveSpanSource =
+            sourceIt != effectiveSpanSourceByFile.end() ? sourceIt->second : "mkv_probe";
+        const double gapSec = referenceSpanSec - effectiveSpanSec;
         if (gapSec > kMaxVideoSpanGapSec)
         {
             return setEpisodeValidationFailure(
@@ -7128,8 +7297,9 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                 errorTypes,
                 ugripper::runtime::kErrorTypeFrameLoss,
                 "video span gap too large: " + probe.fileName +
-                    " span=" + formatSeconds(probe.spanSec) +
-                    "s, reference=" + formatSeconds(referenceSpanSec) +
+                    " span=" + formatSeconds(effectiveSpanSec) +
+                    "s, source=" + effectiveSpanSource +
+                    ", reference=" + formatSeconds(referenceSpanSec) +
                     "s, gap=" + formatSeconds(gapSec) + "s");
         }
     }
@@ -7211,6 +7381,8 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                                  << "{imu_count=" << faysSummary.imuMessageCount
                                  << ", camera_count=" << faysSummary.cameraMessageCount
                                  << ", span_ms=" << (faysSummary.spanNs / 1000000.0)
+                                 << ", camera_span_ms=" << (faysSummary.cameraSpanNs / 1000000.0)
+                                 << ", first_camera_ns=" << faysSummary.firstCameraLogTimeNs
                                  << ", last_camera_ns=" << faysSummary.lastCameraLogTimeNs
                                  << ", last_imu_ns=" << faysSummary.lastImuLogTimeNs
                                  << ", lag_ms=" << (lagNs / 1000000.0)
@@ -7290,16 +7462,6 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
             continue;
         }
 
-        std::vector<uint8_t> baselineFrame;
-        std::string baselineError;
-        if (!readBinaryFileExact(tactileReferenceRawPath(tactileStateDir_, *serial),
-                                 kTactileFrameBytes,
-                                 &baselineFrame,
-                                 &baselineError))
-        {
-            continue;
-        }
-
         std::string frameError;
         const char *fileName = episodeVideoFileNameForCamera(target.cameraName);
         if (fileName == nullptr || *fileName == '\0')
@@ -7313,10 +7475,21 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
             &frameError);
         if (!currentFrame.has_value())
         {
+            const json &cameraHistory = tactileHistory["cameras"][*serial];
+            if (cameraHistory.is_object() &&
+                (cameraHistory.value("reference_pending", false) ||
+                 cameraHistory.value("persistent_baseline_pending", false)))
+            {
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                    << "tactile reference deferred: camera=" << target.cameraName
+                    << " serial=" << *serial
+                    << " episode=" << episodeDir
+                    << " reason=" << frameError
+                    << std::endl).str());
+            }
             continue;
         }
 
-        const TactileFrameMetrics metrics = computeTactileFrameMetrics(baselineFrame, *currentFrame);
         json &cameraHistory = tactileHistory["cameras"][*serial];
         if (!cameraHistory.is_object())
         {
@@ -7330,6 +7503,59 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
         {
             cameraHistory["persistent_recent"] = json::array();
         }
+        cameraHistory["camera_name"] = target.cameraName;
+        cameraHistory["updated_at_ms"] = RecordRuntime::currentEpochMs();
+
+        std::vector<uint8_t> baselineFrame;
+        std::string baselineError;
+        const bool hasReferenceBaseline =
+            readBinaryFileExact(tactileReferenceRawPath(tactileStateDir_, *serial),
+                                kTactileFrameBytes,
+                                &baselineFrame,
+                                &baselineError);
+        const bool referencePending = cameraHistory.value("reference_pending", false);
+        bool initializedReferenceFromEpisode = false;
+        if (!hasReferenceBaseline || referencePending)
+        {
+            std::string writeError;
+            if (writeBinaryFile(tactileReferenceRawPath(tactileStateDir_, *serial),
+                                *currentFrame,
+                                &writeError) &&
+                writeTactileReferenceMeta(tactileStateDir_,
+                                          *serial,
+                                          target,
+                                          RecordRuntime::currentEpochMs(),
+                                          &writeError))
+            {
+                cameraHistory["reference_pending"] = false;
+                cameraHistory["reference_pending_reason"] = "";
+                cameraHistory["reference_pending_at_ms"] = 0;
+                cameraHistory["reference_updated_at_ms"] = RecordRuntime::currentEpochMs();
+                cameraHistory["recent"] = json::array();
+                historyDirty = true;
+                initializedReferenceFromEpisode = true;
+                DM_LOG_INFO("{}", (::DA::utils::LogString()
+                    << "tactile reference initialized from episode: camera=" << target.cameraName
+                    << " serial=" << *serial
+                    << " episode=" << episodeDir
+                    << (referencePending ? " reason=pending" : " reason=missing")
+                    << std::endl).str());
+            }
+            else
+            {
+                cameraHistory["reference_pending"] = true;
+                cameraHistory["reference_pending_reason"] =
+                    referencePending ? cameraHistory.value("reference_pending_reason", std::string("write_failed"))
+                                     : std::string("missing_reference_write_failed");
+                historyDirty = true;
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                    << "tactile reference deferred: camera=" << target.cameraName
+                    << " serial=" << *serial
+                    << " episode=" << episodeDir
+                    << " reason=" << writeError
+                    << std::endl).str());
+            }
+        }
 
         const bool persistentWarningActiveBefore =
             cameraHistory.value("persistent_fault_active", false);
@@ -7337,6 +7563,75 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
         std::string persistentDetail =
             cameraHistory.value("persistent_fault_detail", std::string());
 
+        bool persistentWarningTriggered = false;
+        std::vector<uint8_t> persistentBaseline;
+        std::string persistentBaselineError;
+        const bool hasPersistentBaseline =
+            readBinaryFileExact(tactilePersistentRawPath(tactileStateDir_, *serial),
+                                kTactileFrameBytes,
+                                &persistentBaseline,
+                                &persistentBaselineError);
+        const uint64_t persistentBaselineUpdatedAtMs =
+            cameraHistory.value("persistent_baseline_updated_at_ms", static_cast<uint64_t>(0));
+        const bool persistentPending = cameraHistory.value("persistent_baseline_pending", false);
+        const bool persistentExpired =
+            hasPersistentBaseline &&
+            persistentBaselineUpdatedAtMs != 0 &&
+            (RecordRuntime::currentEpochMs() - persistentBaselineUpdatedAtMs) >=
+                kTactilePersistentBaselineRefreshMs;
+        const bool persistentNeedsUpdate =
+            !hasPersistentBaseline || persistentBaselineUpdatedAtMs == 0 ||
+            persistentPending || persistentExpired;
+        bool initializedPersistentFromEpisode = false;
+        if (persistentNeedsUpdate)
+        {
+            std::string writeError;
+            if (writeBinaryFile(tactilePersistentRawPath(tactileStateDir_, *serial),
+                                *currentFrame,
+                                &writeError))
+            {
+                cameraHistory["persistent_baseline_pending"] = false;
+                cameraHistory["persistent_baseline_pending_reason"] = "";
+                cameraHistory["persistent_baseline_pending_at_ms"] = 0;
+                cameraHistory["persistent_baseline_updated_at_ms"] = RecordRuntime::currentEpochMs();
+                cameraHistory["persistent_fault_active"] = false;
+                cameraHistory["persistent_fault_detail"] = "";
+                cameraHistory["persistent_recent"] = json::array();
+                persistentWarningActiveAfter = false;
+                persistentDetail.clear();
+                historyDirty = true;
+                initializedPersistentFromEpisode = true;
+                DM_LOG_INFO("{}", (::DA::utils::LogString()
+                    << "tactile persistent baseline initialized from episode: camera=" << target.cameraName
+                    << " serial=" << *serial
+                    << " episode=" << episodeDir
+                    << " reason="
+                    << (persistentPending ? "pending" :
+                        (!hasPersistentBaseline || persistentBaselineUpdatedAtMs == 0 ? "missing" : "expired"))
+                    << std::endl).str());
+            }
+            else
+            {
+                cameraHistory["persistent_baseline_pending"] = true;
+                cameraHistory["persistent_baseline_pending_reason"] =
+                    persistentPending ? cameraHistory.value("persistent_baseline_pending_reason", std::string("write_failed"))
+                                      : std::string("persistent_write_failed");
+                historyDirty = true;
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                    << "tactile persistent baseline deferred: camera=" << target.cameraName
+                    << " serial=" << *serial
+                    << " episode=" << episodeDir
+                    << " reason=" << writeError
+                    << std::endl).str());
+            }
+        }
+
+        if (!hasReferenceBaseline || referencePending || initializedReferenceFromEpisode)
+        {
+            continue;
+        }
+
+        const TactileFrameMetrics metrics = computeTactileFrameMetrics(baselineFrame, *currentFrame);
         bool warningActiveBefore = false;
         const json &recentBefore = cameraHistory["recent"];
         if (recentBefore.size() >= kTactileHistoryWindow)
@@ -7353,8 +7648,6 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
         {
             recent.erase(recent.begin());
         }
-        cameraHistory["camera_name"] = target.cameraName;
-        cameraHistory["updated_at_ms"] = RecordRuntime::currentEpochMs();
         historyDirty = true;
 
         bool warningActive = false;
@@ -7366,13 +7659,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
                 [](const json &entry) { return entry.is_boolean() && entry.get<bool>(); });
         }
 
-        bool persistentWarningTriggered = false;
-        std::vector<uint8_t> persistentBaseline;
-        std::string persistentBaselineError;
-        if (readBinaryFileExact(tactilePersistentRawPath(tactileStateDir_, *serial),
-                                kTactileFrameBytes,
-                                &persistentBaseline,
-                                &persistentBaselineError))
+        if (hasPersistentBaseline && !persistentNeedsUpdate && !initializedPersistentFromEpisode)
         {
             const TactileFrameMetrics persistentMetrics =
                 computeTactileFrameMetrics(persistentBaseline, *currentFrame);
@@ -7657,6 +7944,24 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
             }
         }
 
+        double detailDurationSec = probe.durationSec;
+        std::string durationSource;
+        std::string durationError;
+        if (!loadEffectiveVideoDurationSec(
+                episodeDir,
+                artifact,
+                probe,
+                probe.durationSec,
+                &detailDurationSec,
+                &durationSource,
+                &durationError))
+        {
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                               << "failed to load effective video duration, falling back to mkv probe: "
+                               << durationError << std::endl).str());
+            detailDurationSec = probe.durationSec;
+        }
+
         const auto offsetIt = offsetByCamera.find(artifact.cameraName);
         const int64_t startOffsetUs =
             offsetIt != offsetByCamera.end() && minOffsetUs > 0
@@ -7666,10 +7971,10 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
         ordered_json detail = ordered_json::object();
         detail["name"] = artifact.fileName;
         detail["fps"] = roundToOneDecimal(nominalFpsForCamera(artifact.cameraName));
-        detail["duration_s"] = roundToOneDecimal(probe.durationSec);
+        detail["duration_s"] = roundToOneDecimal(detailDurationSec);
         detail["start_offset_us"] = startOffsetUs;
         videoDetails.push_back(std::move(detail));
-        collectionDurationS = std::max(collectionDurationS, probe.durationSec);
+        collectionDurationS = std::max(collectionDurationS, detailDurationSec);
     }
 
     ordered_json requiredFiles = ordered_json::array({

@@ -16,6 +16,14 @@ CALIB_JSON_PATH=""
 STATUS_JSON_PATH=""
 CMD_SEND_TIMEOUT_SEC="${FAYS_CMD_TIMEOUT_SEC:-0.35}"
 
+fays_ts() {
+    date +"%H:%M:%S.%6N"
+}
+
+fays_log() {
+    printf '[FAYS_TS %s] [fays_record_wrapper] %s\n' "$(fays_ts)" "$*" >&2
+}
+
 append_ld_library_path() {
     local path_to_add="$1"
     if [ -d "$path_to_add" ]; then
@@ -118,7 +126,7 @@ send_control_cmd() {
         return 1
     fi
 
-    echo "[Control] Sent: $cmd"
+    fays_log "control command sent: fifo=$CMD_FIFO cmd=$cmd"
     return 0
 }
 
@@ -182,9 +190,7 @@ case "$MODE" in
         IMU_SYMLINK=$(sed -n 's/^imu_dev_port:[[:space:]]*//p' "$CONFIG_FILE" | head -n1 | tr -d '"' | xargs)
         ensure_fixed_fays_symlinks "$STEREO_SYMLINK" "$IMU_SYMLINK" || exit 1
         verify_config_uses_fixed_symlinks "$STEREO_SYMLINK" "$IMU_SYMLINK" || exit 1
-        echo "Starting Fays daemon mode..."
-        echo "  Config file: $CONFIG_FILE"
-        echo "  Control FIFO: $CMD_FIFO"
+        fays_log "daemon exec: config=$CONFIG_FILE fifo=$CMD_FIFO video=$VIDEO_NAME mcap=$MCAP_NAME"
         args=("$CONFIG_FILE" --control-fifo "$CMD_FIFO" --video-name "$VIDEO_NAME" --mcap-name "$MCAP_NAME")
         if [ -n "$CALIB_JSON_PATH" ]; then
             args+=(--calib-json "$CALIB_JSON_PATH")

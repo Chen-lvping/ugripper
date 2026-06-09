@@ -27,6 +27,8 @@ using ugripper::runtime::ProcessState;
 using ugripper::runtime::ProcessStatus;
 using ugripper::runtime::RecordingOrchestrator;
 using ugripper::runtime::RuntimeLedState;
+using ugripper::runtime::HardwareFaultSide;
+using ugripper::runtime::HealthFault;
 using ugripper::runtime::WorkerName;
 
 struct RecordingHarness
@@ -36,6 +38,7 @@ struct RecordingHarness
     std::vector<std::string> audio_commands;
     std::vector<std::string> recovery_commands;
     std::vector<RuntimeLedState> led_states;
+    std::vector<HealthFault> hardware_fault_led_states;
     std::vector<std::string> flushed_stages;
     std::vector<std::string> stop_reasons;
     std::vector<std::string> logs;
@@ -152,6 +155,11 @@ struct RecordingHarness
              .set_led_state =
                  [this](RuntimeLedState state, double) {
                      led_states.push_back(state);
+                 },
+             .set_hardware_fault_led_state =
+                 [this](const HealthFault& fault) {
+                     hardware_fault_led_states.push_back(fault);
+                     led_states.push_back(fault.led_state);
                  },
              .start_stereo_session =
                  [this](const std::string&, int64_t, std::string* error) {
@@ -382,6 +390,31 @@ TEST(RecordingOrchestratorTest, StopRecordingStereoFinalizeFailureMapsToValidati
     EXPECT_EQ(harness.last_validation_log, "stereo finalize timeout");
     EXPECT_EQ(harness.validate_calls, 0);
     EXPECT_EQ(harness.sync_reason, "video stop");
+}
+
+TEST(RecordingOrchestratorTest, StopRecordingRightStereoControlFailureMapsToError4)
+{
+    RecordingHarness harness;
+    harness.wait_finalize_ok = false;
+    harness.wait_finalize_error = "right Fays recorder unhealthy during session";
+    auto orchestrator = harness.Make();
+    ASSERT_TRUE(orchestrator.StartRecording(false));
+
+    g_steady_ms += 100;
+    ASSERT_FALSE(orchestrator.StopRecording(false, "stop"));
+    EXPECT_FALSE(orchestrator.state().is_recording);
+    EXPECT_EQ(harness.led_states.back(), RuntimeLedState::Error4);
+    ASSERT_FALSE(harness.hardware_fault_led_states.empty());
+    EXPECT_EQ(harness.hardware_fault_led_states.back().side, HardwareFaultSide::Right);
+    EXPECT_EQ(harness.hardware_fault_led_states.back().key,
+              ugripper::runtime::kErrorTypeStereoControlFailed);
+    EXPECT_EQ(harness.audio_commands.back(), "error");
+    EXPECT_EQ(harness.recovery_commands.back(), "error");
+    EXPECT_NE(harness.last_validation_log.find("unplug/replug the right gripper"), std::string::npos);
+    ASSERT_FALSE(harness.metadata_error_types.empty());
+    EXPECT_EQ(harness.metadata_error_types.back(),
+              ugripper::runtime::kErrorTypeStereoControlFailed);
+    EXPECT_EQ(harness.validate_calls, 0);
 }
 
 TEST(RecordingOrchestratorTest, StartRecordingMissingCameraBinaryMapsToError)

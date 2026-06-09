@@ -8,7 +8,7 @@
 - 主控制链路当前以 `run_record.sh -> /opt/ugripper/bin/UgripperRuntime/UgripperRuntime` 作为安装入口。
 - 默认录制产物为 **2 路主相机 + 2 路 stereo + 4 路触觉相机 + 左右两份传感器 MCAP**。
 - HMI 按键、RGB 灯效、提示音、pre/post 音频录制、停录校验，以及右手双键关机/左手双键卸载数据盘请求都已纳入当前运行时。
-- U 盘流程统一负责 `deb` 升级/重装、`config.txt` 导入、标定数据导入和 encoder 零位校准触发；当前自动安装名单已覆盖 `das-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint` 与 `device-ota-mender`，并会在整批安装完成后通过 PulseAudio 播放 `upgrade_completed.wav`。
+- U 盘流程统一负责 `deb` 升级/重装、`config.txt` 导入、标定数据导入和 encoder 零位校准触发；当前自动安装名单已覆盖 `das-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint` 与 `device-ota-mender`，deb 安装窗口会复用 HMI 灯效提示安装中/失败/完成状态，并会在整批安装完成后通过 PulseAudio 播放 `upgrade_completed.wav`。
 
 ## 2. 安装布局与入口
 - 安装目录：`/opt/ugripper`
@@ -27,17 +27,17 @@
 | --- | --- | --- | --- |
 | systemd 主服务 | `pack_script/ugripper.service` | 以 `ubuntu` 用户拉起录制服务 | `/opt/ugripper/run_record.sh` |
 | 薄壳启动脚本 | `run_record.sh` | 切到安装目录、等待 `/mnt/data_disk` 可写、维护本地 `/tmp` 到 `/mnt/data_disk/logs` 的增量日志同步，再拉起 `record_runtime` | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/umi_sys_<sn>_<date>.log` |
-| 主运行时 | `bin/UgripperRuntime/UgripperRuntime` | HMI 按键状态机、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
+| 主运行时 | `bin/UgripperRuntime/UgripperRuntime` | HMI 按键状态机、软件录制控制、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_record_control.pipe`、`/tmp/umi_shutdown_request` |
 | 安全 NTP 同步 | `time_sync/safe_ntp_sync.sh` / `ugripper-ntp-sync.service` | 开机或安装后只在非录制态执行一次性时间同步，优先使用板端现有 `sntp -S`，再 fallback 到 `ntpd -q -g` / `timedatectl`；同步完成、超时或录制开始后停止常驻 NTP 服务 | `/tmp/umi_recording.lock`、`sntp`/`ntp` |
 | 相机录制 | `bin/CameraRecorder/CameraRecorder` | 普通录制模式下负责主摄/触觉会话录制；`--stereo-daemon` 模式下负责双目常驻预热、热插拔恢复与 session finalize | 8 路 `mkv`（默认） |
 | 传感器录制 | `bin/SensorRecorder/SensorRecorder` | 录制左右 IMU/encoder，按“采样入队 + 每侧独立 MCAP 写线程”分别输出 MCAP | `sensor_left.mcap`、`sensor_right.mcap` |
-| Ego 联动采集 | `bin/UgripperRuntime/ego/ego_recording_worker.py` + `bin/UgripperRuntime/adb/adb` | 录制起停阶段通过内置 ADB 联动 SXR ego app，按增量方式同步 ego episode 到当前 UGripper episode；当前不主动启动 app、不参与强校验 | `ego/`、`ego_sync.json` |
+| Ego 联动采集 | `bin/UgripperRuntime/ego/ego_recording_worker.py` + `bin/UgripperRuntime/adb/adb` | 录制起停阶段通过内置 ADB 联动 SXR ego app，起录前同步 ego 系统时间并按增量方式同步 ego episode 到当前 UGripper episode；当前不主动启动 app、不参与强校验 | `ego/`、`ego/ego_sync.json` |
 | HMI 类库 | `standalone/GripperHmiTool` | 读取夹爪按键，并在驱动内部以单线程 owner 线程完成状态查询、灯效生成与 RGB 指令发送；默认由状态机切灯效，必要时仍可直接下发 RGB；当前也提供 SN 与 1024-byte 标定参数读写 API | 按键快照、RGB 指令、SN/标定参数读写 |
 | 音频播放 | `bin/UgripperRuntime/audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 优先从受支持 USB 耳机麦克风录音，无耳机时回退系统默认 source，供 pre/post 处理链路使用 | 临时 wav 文件 |
 | 数据盘挂载 | `config/99-fixed-usb-map.rules` | 限定允许物理 USB 口，使用独立 mount helper 将数据盘挂到 `/mnt/data_disk`；主包只负责挂载/卸载，不再直接拉起 updater | `/mnt/data_disk` |
 | 硬件健康检查 | `scripts/hws` / `/usr/local/bin/hws` | 一行命令列出左右手全部传感器、胸部相机与数据盘 symlink 的在线状态，便于现场快速确认是否全部在线 | 终端状态表 |
-| USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级/重装、配置导入、标定数据导入、encoder 校准触发；当前会按固定名单自动安装 `das-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`，只要 U 盘根目录存在名单内包就执行安装，同版本也会强制重装；全部安装完成后再通过 PulseAudio 播放 `upgrade_completed.wav`；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload。该脚本及其 `/usr/local/bin` + systemd unit 触发链归属可选独立包 `das-usb-updater` | `/etc/environment`、`calibration.json`、夹爪 HMI |
+| USB 导入/升级 | `auto_update/usb_auto_update.sh` | 处理 `deb` 升级/重装、配置导入、标定数据导入、encoder 校准触发；当前会按固定名单自动安装 `das-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender`，只要 U 盘根目录存在名单内包就执行安装，同版本也会强制重装；deb 安装窗口会显示 `CALIB_RUN` 黄灯快闪且至少保持 `3s`，任一包失败显示 `ERROR_1` 红灯 `3s`，全部包处理成功显示 `CALIB_DONE` 绿灯 `3s`；全部安装完成后再通过 PulseAudio 播放 `upgrade_completed.wav`；其中标定导入会同时刷新主机侧主相机参数和夹爪侧 RGB/stereo/IMU payload。该脚本及其 `/usr/local/bin` + systemd unit 触发链归属可选独立包 `das-usb-updater` | `/etc/environment`、`calibration.json`、夹爪 HMI |
 | 校准执行 | `auto_calibration/run_calibration.sh` | 在 `calibration.txt` 存在时停止业务、复用 `/mnt/data_disk` 触发左右编码器并行 zeroing、恢复服务 | `bin/SensorRecorder/zeroing` |
 
 ## 4. 启动链路
@@ -58,7 +58,7 @@
 - `standalone/GripperHmiTool` 当前新增了 UMI SN / 标定参数协议封装：SN 固定为 32-byte 字段（当前现场 SN 文本示例为 16-char，尾部补 `0x00`），标定参数固定为 `1024 byte` 严格对齐结构；当前 payload 已覆盖 RGB 主相机、双目 `cam0/cam1`、`cam->imu` 外参、IMU 离散噪声/随机游走与残差统计，其中 header 会保留内部有效数据长度，但当前 `V1.1` 固件写入时仍必须补满 `64 x 16B` 数据包，具体协议见 `docs/umi_calibration_protocol.md`。
 - UMI 标定写入当前增加了异常恢复口径：若写入阶段收到 `0xFE`（当前 chunk 零数据校验错误），驱动会优先重发当前 chunk；若连续出现 `0xFE`，或后续读 SN / 读标定返回 `0xF3/0xFE`，则会发送一次 `AbortWriteInData` 清理固件残留写入状态后再重试。
 11. 初始化成功后进入 `READY` 状态并等待右手夹爪按键事件。
-12. `record_runtime` 初始化阶段会额外拉起一个常驻 Fays stereo daemon；该 daemon 分别以左右配置启动两份 Fays recorder，通过 `/tmp/umi_stereo_camera_status.json` 暴露 `ready/not-ready` 状态。当前 `ready=true` 需要左右 recorder 进程/FIFO 在线、左右 calibration 有效、左右 SDK serial 非空且不同、左右 stereo/IMU symlink 实时存在；Fays SDK 仍按其限制使用启动时解析出的 `/dev/videoN` 端口，但 handle 创建后会复查 symlink 目标，若初始化期间 videoN 漂移则让当前 recorder 失败退出并由外层 daemon 重启。外层 daemon 还会按低频检查每侧 recorder 工作状态：进程、FIFO、calibration/serial、stereo/IMU symlink 和最近实际 warmup frame 刷新任一异常都会按单侧重启；若异常发生在录制中，则只记录当前 session 错误并等待停录快速失败，不把重连后的设备续写回本条 episode。若左右 serial 重复，则重启两侧。左右 calibration JSON 由对应的常驻 recorder handle 写出，运行时 frame 刷新状态写到 `/dev/shm/umi_left_fays_runtime_status.json` / `/dev/shm/umi_right_fays_runtime_status.json`，不在外层脚本中额外创建短生命周期 SDK probe。Fays `VideoFrameQueue` 默认容量为 128，用于吸收录制切换和编码启动期间的短时背压。
+12. `record_runtime` 初始化阶段会额外拉起一个常驻 Fays stereo daemon；该 daemon 分别以左右配置启动两份 Fays recorder，通过 `/tmp/umi_stereo_camera_status.json` 暴露 `ready/not-ready` 状态。当前 `ready=true` 需要左右 recorder 进程/FIFO 在线、左右 calibration 有效、左右 SDK serial 非空且不同、左右 stereo/IMU symlink 实时存在；Fays SDK 仍按其限制使用启动时解析出的 `/dev/videoN` 端口，但 handle 创建后会复查 symlink 目标，若初始化期间 videoN 漂移则让当前 recorder 失败退出并由外层 daemon 重启。外层 daemon 还会按低频检查每侧 recorder 工作状态：进程、FIFO、calibration/serial、stereo/IMU symlink 和最近实际 warmup frame 刷新任一异常都会按单侧重启；若异常发生在录制中，则只记录当前 session 错误并等待停录快速失败，不把重连后的设备续写回本条 episode。若左右 serial 重复，则重启两侧。左右 calibration JSON 由对应的常驻 recorder handle 写出，运行时 frame 刷新状态写到 `/dev/shm/umi_left_fays_runtime_status.json` / `/dev/shm/umi_right_fays_runtime_status.json`，不在外层脚本中额外创建短生命周期 SDK probe；已有 calibration JSON 只有在 `device_info.serial_number` 与当前 recorder handle 读到的 SDK serial 一致时才复用，否则启动时会丢弃旧 JSON 并从当前 handle 重新拉取标定，避免热插拔或 videoN 漂移后视频与旧标定错配。Fays `VideoFrameQueue` 默认容量为 128，用于吸收录制切换和编码启动期间的短时背压。
 13. `record_runtime` 当前按 recorder 进程组而不是单一父 PID 回收 `camera_recorder` / `sensor_recorder`；当停录或异常收尾时，会向整组发送退出信号，降低内部 `ffmpeg`/`gst` 子进程残留导致后续卡死的概率。
 14. `ugripper-ntp-sync.service` 属于独立 oneshot 辅助服务：安装后和开机后异步启动，不阻塞 `ugripper.service` 主链路；脚本先停止 `ntp.service` / `chrony.service` / `systemd-timesyncd.service` 这类常驻校时服务，再检查 `/tmp/umi_recording.lock`，录制中直接跳过，空闲时优先用 `sntp -S` 做一次性校时，再 fallback 到 `ntpd -q -g` 或 `timedatectl`。同步完成、超时、失败或检测到录制开始后都会再次停止常驻 NTP 服务，避免录制时间轴被系统时间校准跳变影响。
 
@@ -109,12 +109,13 @@
    - `boot_time_offset_us`
    - 8 路基础 `<camera>_record_time_offset_us`，启用 `chest_cam_main` 时额外包含该路 offset。
    - `video_probes`：停录校验阶段并行 `ffprobe` 后写入的内部缓存，仅供同次 `metadata.json` 生成复用，不进入最终 episode。
+   - 若现场日志出现 timing 打开失败，优先按日志里的真实 `/dev/shm/ugripper_recording_timing_*.json` 路径排查；旧字符串 `.recording_timing.json` 只保留为兼容性提示，不代表当前会在 episode 目录生成该文件。
 6. 若已准备 pre audio，则移动到本次 episode 的 `audio_pre.wav`。
-7. 并行启动：
+7. 起录前 `record_runtime` 会先用随包 ADB 做一次短窗口在线设备预检；若明确没有任何 `adb devices` 的 `device` 状态设备，则直接跳过 ego sidecar，避免未连接 ego 时首次录制被 ADB/SXR 识别拖慢。若预检发现设备或预检结果不确定，则保持原 ego 流程：在 gripper 相机/传感器启动前拉起 `ego_recording_worker.py start`，等待 worker 完成 ADB 检测、起录前系统时间同步、发送 `START_RECORDING` 广播且拿到本次远端 `episode_*-temp` 后再继续本机录制链路；若短等待窗口内仍未拿到远端 episode，则记录告警但仍不阻塞 UGripper 主录制。worker 默认优先使用随包安装的 `bin/UgripperRuntime/adb/adb`：设备识别要求 `ro.product.manufacturer=SXR` 且 `ro.product.model/ro.product.device/ro.product.name/ro.build.product` 均为 `SXR_1`，随后通过 `cmd alarm set-time` 对 ego 执行一次短校时，向已运行的 `com.ssnwt.helloxr` app 广播 `START_RECORDING`，并把远端新生成的 `episode_*-temp` 文件扁平同步到本条 UGripper episode 的 `ego/` 目录；`ego/ego_sync.json` 只保留 ego `serial`、起停状态、远端/本地 episode、时间同步摘要、finalize 状态和远端清理状态，时间同步失败不阻塞主录制。当前不主动启动 ego app，找不到 ego 只写 `ego/ego_sync.json` 或日志，不阻塞 UGripper 主录制。
+8. 并行启动：
    - `camera_recorder --codec <codec> --output-dir <episode> --only left_cam_main,right_cam_main[,chest_cam_main],left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
    - `sensor_recorder <episode_dir>`
-8. 同时向 stereo warmup daemon 写入本次 session 控制文件；双目不重启采集管线，只把本次 session 窗口内的帧纳入当前 episode，由 session writer 抽帧并编码落盘。
-9. 若 USB 上存在 ego 设备，`record_runtime` 会拉起 `ego_recording_worker.py start`，worker 默认优先使用随包安装的 `bin/UgripperRuntime/adb/adb`：设备识别要求 `ro.product.manufacturer=SXR` 且 `ro.product.model/ro.product.device/ro.product.name/ro.build.product` 均为 `SXR_1`，随后向已运行的 `com.ssnwt.helloxr` app 广播 `START_RECORDING`，并把远端 `episode_*-temp` 增量同步到本条 UGripper episode 的 `ego/` 目录；当前不主动启动 ego app，找不到 ego 只写 `ego_sync.json` 或日志，不阻塞 UGripper 主录制。
+9. 同时向 stereo warmup daemon 写入本次 session 控制文件；双目不重启采集管线，只把本次 session 窗口内的帧纳入当前 episode，由 session writer 抽帧并编码落盘。
 10. 切换到 `RECORDING` 状态并播放开始提示音。
 
 ### 6.2 相机链路
@@ -124,10 +125,10 @@
   - stereo 与 CH9344 串口桥允许同侧 hub 的内部端口 `.1/.2` 互换；
   - tactile `l/r` 仍按左右侧固定 kernel 路径命名，不做跨侧互换；
   - 左侧更换新 hub 后，左主摄与左触觉 `l` 不再只按 `.4.2/.4.4` 固定口位判断，当前优先按设备类型识别：`27c2:0530` 归 `/dev/cam_left`，`0bda:5846` 归 `/dev/tcam_left_l`，USB2 口位仅用于限定属于左侧链路；
-  - `/dev/tcam_left_r` 当前同时兼容旧 hub 的 `.4.1` 和新 hub 的 `.3` 口位，保证新旧左手 hub 共存。
+  - 左手新 hub 的 tactile 口位与右手保持同构：`.3 -> /dev/tcam_left_l`、`.4 -> /dev/tcam_left_r`；同时继续兼容旧特殊 hub 的 `/dev/tcam_left_r <- .3`。
 - 当前运行时默认录制全部 8 路：左右主摄 + 左右 stereo + 4 路触觉。
 - 普通录制阶段的 `camera_recorder` 当前会直接起左右主摄与 4 路触觉；左右 stereo 继续由单独的 warmup daemon 常驻管理。
-- 夹爪热插拔恢复完成后，`record_runtime` 当前会在该侧关键设备全部 ready、并完成 gripper runtime refresh 之后，按 tactile 相机 USB `serial` 抓取并刷新一份轻量参考灰度帧缓存；同时还会维护一份按 `serial` 绑定的持久化 baseline。二者都只用于后续触觉状态抽检，不参与 episode 产物落盘。
+- 夹爪热插拔恢复完成后，`record_runtime` 当前会在该侧关键设备全部 ready、并完成 gripper runtime refresh 之后，只按 tactile 相机 USB `serial` 标记该侧实时参考帧与持久化 baseline 待更新；服务初始化阶段不会直接打开触觉相机抓参考帧。待更新参考帧统一由后续首个可用 episode 的触觉视频截帧生成，若该 episode 缺失、损坏或截帧失败则顺延到下一条 episode。二者都只用于后续触觉状态抽检，不参与 episode 产物落盘。
 - warmup daemon 在空闲态持续常驻打开需要预热的相机设备；当前仅左右双目继续消费 `MJPEG 60fps` 预热流。开始录制时只为 stereo 新建 session writer，把会话窗口内帧写入最终 `mkv`；主摄则在普通录制阶段直接冷启动采集并写入最终文件。
 - warmup daemon 当前按单实例口径运行；若服务内 daemon 尚未退出又手工再起第二个 `camera_recorder --stereo-daemon` 去抢同一批双目设备，可能诱发设备忙、节点缺失或整条 USB 链路重枚举。当前实现已增加 `/tmp/umi_camera_warmup_daemon.lock` 单实例锁，第二个 warmup daemon 会直接拒绝启动。
 - 停录阶段也会并发向各路相机子进程发 stop，并在全部 stop 返回后统一 poll 状态，降低多路顺序收尾导致内部 timing 文件缺失或容器未 finalize 的风险。
@@ -144,14 +145,17 @@
   - 单侧设备缺失时只停止该侧 Fays recorder，保留另一侧 recorder 与 daemon 主循环；状态降为 `not-ready`，双手模式下仍要求左右都 ready 才允许录制。
   - 设备重新枚举后自动重建该侧 MJPEG warmup 取流并重新进入预热态；若掉线发生在录制中，则当前 stereo session 会被标记失败并在停录阶段显式报错，避免静默产出错位文件。
   - recorder 会低频刷新 `/dev/shm/umi_left_fays_runtime_status.json` / `/dev/shm/umi_right_fays_runtime_status.json`，只记录最近 warmup frame 时间、最近编码 frame 时间和当前录制 session id 等事实调试变量；daemon 用最近 frame freshness 判断 warmup 拉流是否真的存活，不额外引入“session writer 确认”状态。
-  - 录制中若某侧 recorder 工作状态异常，daemon 会立即记录当前 session 的 `last_finalize_error`，停录阶段快速返回失败；finalize 等待视频/MCAP 文件期间也会被已知错误打断，不再等缺失文件触发完整超时。
+  - 录制中若某侧 recorder 工作状态异常，daemon 会立即记录当前 session 的单侧 stereo 控制错误，停录阶段快速返回失败；finalize 等待视频/MCAP 文件期间也会被已知错误打断，不再等缺失文件触发完整超时。若该侧 Fays 相机/IMU symlink 本身识别不到，仍按关键设备缺失进入 `ERROR_2`；若设备已在线但 recorder/FIFO/control 链路失效，则进入 `ERROR_4` 并提示拔插对应侧夹爪，软件复位不作为有效恢复手段。
   - 每次拉起单侧 Fays recorder 前会先等待该侧 stereo/IMU symlink 解析目标稳定，随后默认再延迟 `1.5s`，可通过 `FAYS_STEREO_START_DELAY_SEC` 覆盖，避免设备刚枚举完成或 videoN 仍在漂移时被 SDK 过快打开。
   - 单侧 recorder 清理优先走 FIFO `EXIT` 触发进程内 `Stop()`，该路径会唤醒视频、IMU、MCAP 和编码队列；若 SDK 线程仍未退出，再依次用 `SIGTERM` 和 `SIGKILL` 兜底，避免外层 daemon 因无界 `wait` 卡住。
+  - Fays recorder 重启不会主动执行 USB `unbind/bind`、USB reset 或 udev 规则重载；它会关闭旧进程持有的 SDK/video/IMU handle，再重新拉起 recorder 并由 SDK 打开当前 symlink 指向的设备节点。外层 daemon 在启动/重启前会用 `fuser` 检查该侧 stereo/IMU 实际节点是否仍被占用，必要时会终止占用这些节点的进程；因此日志中可能看到 video port 占用清理，但这不是内核 USB 设备 reset。
+  - Fays 相关关键事件日志统一带 `[FAYS_TS <HH:MM:SS.usec>]` 前缀，便于和 `dmesg -T` 的内核日志对齐。当前覆盖 stereo daemon 的 recorder start/stop/restart、video port busy/forced cleanup、session start/stop/finalize error，以及 `fays_record_example` 的进程启动、SDK handle 创建失败、控制 FIFO `START/STOP/EXIT` 和进程退出。
   - 最终 `stereo_left.mkv` / `stereo_right.mkv` 始终直接由录制会话写入单文件；不会在 episode 目录生成 `stereo_info.json`、`.concat.txt` 或后台 segment cache 文件。
-- 内部 `.recording_timing.json` 的时间字段由 `camera_recorder` 负责写出，而不是在停录校验阶段回填：
+- 内部 `/dev/shm/ugripper_recording_timing_*.json` 的时间字段由 `camera_recorder` 负责写出，而不是在停录校验阶段回填：
   - `boot_time_offset`
   - `boot_time_offset_us`
   - 8 路 `<camera>_record_time_offset_us`
+  - 若写出失败，`camera_recorder` 会区分记录“打开文件失败 / flush-close 失败 / 缺少哪一路 `record_time_offset_us`”，便于直接判断是 shm 写失败还是某路 recorder 未产出 offset。
 - 双目当前实现为“后台 MJPEG warmup + 录制时编码写最终文件”：空闲态不再保留 UDP / MPEG-TS live relay；按下录制后，session writer 只消费当前会话的 MJPEG 帧，抽帧后编码写入 `stereo_left.mkv` / `stereo_right.mkv`。
 - stereo 内部 `<camera>_record_time_offset_us` 与主摄/触觉保持同一语义：都以“本次最终输出首个写入帧”的 `PTS -> 系统时间` 映射为准。
 
@@ -175,14 +179,14 @@
 2. 在 stereo daemon 收到 stop-session 后，`record_runtime` 并发停止普通录制模式下的 `camera_recorder` 与 `sensor_recorder`，降低两条独立链路顺序收尾带来的蓝灯等待。
 3. stereo daemon 收到 stop-session 后会先一次性冻结左右双目 session 的送帧边界，再逐路 finalize 文件，避免某一路在另一侧 finalize 期间继续长出额外尾巴；收尾完成后后台 warmup 继续运行。
 4. 先发送 `recording_stop`，随后立即切到 `writing`；提示音采用“后触发抢占前触发”的语义，因此 `writing` 会直接打断仍在播放的上一条提示。
-5. 若本条 episode 已拉起 ego sidecar，停录进入 `writing` 后会停止后台增量同步进程，向 ego app 广播 `STOP_RECORDING`，等待 ego 侧目录从 `episode_*-temp` rename 为最终目录并补齐最后一轮文件；随后 worker 会重新拉取 MP4/M4A finalize 后的头部 `moov` 区域并覆盖本地差异段，再修复 ego MP4 中 stop 后才可确定的 extended-size `mdat` 大小，使本地同步文件可被播放器按 box 边界读到。ego 失败当前只更新 `ego_sync.json` 与日志，不改变 UGripper `quality_check_status`。
-6. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行分阶段文件级 flush。所有 episode 产物都必须在所属阶段显式执行文件级 flush，再刷 episode 目录项；`pre_stereo_finalize` 只刷普通相机视频、左右 sensor MCAP、`calibration.json` 和可选音频；等待 ego/stereo finalize 并合并 session 信息后，`final` 刷 `stereo_*.mkv`、`fays_data_*.mcap`、`ego_sync.json` 与 `ego/` 下已同步文件，并额外刷 ego 子目录目录项；`metadata_final` 只刷最终 `metadata.json`、失败时的 `validation_error.log` 和目录项，避免停录路径重复刷同一批媒体文件。停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
+5. 若本条 episode 已拉起 ego sidecar，停录进入 `writing` 后会停止后台增量同步进程，向 ego app 广播 `STOP_RECORDING`，等待 ego 侧目录从 `episode_*-temp` rename 为最终目录并补齐最后一轮文件；若起录阶段还未写出本次 `remote_episode`，stop 只会从 START 前不存在的新 `episode_*-temp` 中选择，避免把 ego 设备上的历史遗留 temp 目录同步进本条 episode。随后 worker 会重新拉取 MP4/M4A finalize 后的头部 `moov` 区域并覆盖本地差异段，再修复 ego MP4 中 stop 后才可确定的 extended-size `mdat` 大小，使本地同步文件可被播放器按 box 边界读到。ego 失败当前只更新 `ego/ego_sync.json` 与日志，不改变 UGripper `quality_check_status`。
+6. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行分阶段文件级 flush。所有 episode 产物都必须在所属阶段显式执行文件级 flush，再刷 episode 目录项；`pre_stereo_finalize` 只刷普通相机视频、左右 sensor MCAP、`calibration.json` 和可选音频；等待 ego/stereo finalize 并合并 session 信息后，`final` 刷 `stereo_*.mkv`、`fays_data_*.mcap` 与 `ego/` 下已同步文件，并额外刷 ego 子目录目录项；`final` flush 完成后才允许 worker 删除 ego 设备上的同名远端原始 episode，且只删除已 finalize、非 `-temp`、远端/本地文件大小一致的 `episode_*` 目录；删除结果写入 `ego/ego_sync.json.remote_cleanup` 后会再补刷 `ego/ego_sync.json` 和 `ego/` 目录项。`metadata_final` 只刷最终 `metadata.json`、失败时的 `validation_error.log` 和目录项，避免停录路径重复刷同一批媒体文件。停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
 7. `record_runtime` 等待 daemon 在状态文件中写出本次 `last_session`，再将其并入 `/dev/shm` 内部 timing 缓存。
 8. 先生成最终 `metadata.json`，其中 `video_details[].start_offset_us/duration_s` 来自 `/dev/shm` 内部 timing 缓存和视频轻量探测；随后执行稳定校验，校验只读取最终 `metadata.json` 与最终媒体/MCAP/`calibration.json`，不再直接依赖 shm 缓存。视频探测结果会尽量写入 `/dev/shm` 内部 timing 缓存的 `video_probes`，供同次 metadata 生成复用；若缓存写入失败，只记录告警，不作为 episode 硬校验失败原因。
-9. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 抽检：其一是“本次起录附近单帧 vs 插爪参考帧”的实时比较；其二是“本次起录附近单帧 vs 同 `serial` 的持久化 baseline”的慢变量比较。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
+9. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 处理：其一是“本次起录附近单帧 vs 同 `serial` 实时参考帧”的比较；其二是“本次起录附近单帧 vs 同 `serial` 持久化 baseline”的慢变量比较。若夹爪刚重连、参考帧缺失或持久化 baseline 缺失/过期，则优先用本次 episode 的起录附近单帧初始化对应参考帧，本轮不计入对应 damaged 窗口；若视频缺失、损坏或截帧失败，则保留待更新标记并顺延到下一条 episode。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
 10. 实时触觉抽检当前属于软告警而不是完整性失败：单次异常只更新该 tactile `serial` 的近期历史；当同一 `serial` 最近 `3` 个 episode 都判为异常时，空闲态切到黄灯闪烁，并播放对应 `left/right_tcam_*_damaged` 提示音。后台 tactile 校验最多保留一个待处理 episode；若下一次录制开始，会请求当前后台校验停止并清空待处理任务，避免干扰下一次录制。
-11. 持久化 baseline 当前按 `12h` 窗口维护：插爪阶段会在缺失或超时后刷新同 `serial` 的持久化 baseline；停录后台校验会把本次起录附近单帧与持久化 baseline 比较，并维护独立的 `persistent_recent` 窗口。persistent 告警同样要求连续 `3` 个 episode 异常才置位，用于覆盖关机期间发生的盖板损坏；连续 `3` 个 clean episode 会清除该 persistent 告警。
-12. 停录收尾完成后将 `episode_YYYYMMDD_NNNN-temp` rename 为 `episode_YYYYMMDD_NNNN`；无论质量成功或失败，只要收尾已完成就去掉 `-temp`，质量结果由 `metadata.json` 和 `validation_error.log` 表达。完整性成功且无触觉软告警则回到 `READY` 并播放 `ready`；完整性失败进入 `ERROR_1` 并播放 `validation_failed`；数据盘挂载丢失 / 不可写 / 写满进入 `ERROR_3` 并播放 `error`；其他运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
+11. 持久化 baseline 当前按 `12h` 窗口维护：缺失、过期或夹爪重连后只标记待更新，不在插爪阶段直接打开触觉相机；停录后台校验会从首个可用 episode 截帧刷新同 `serial` 的持久化 baseline，后续再与本次起录附近单帧比较，并维护独立的 `persistent_recent` 窗口。persistent 告警同样要求连续 `3` 个 episode 异常才置位，用于覆盖关机期间发生的盖板损坏；连续 `3` 个 clean episode 会清除该 persistent 告警。
+12. 停录收尾完成后将 `episode_YYYYMMDD_NNNN-temp` rename 为 `episode_YYYYMMDD_NNNN`；无论质量成功或失败，只要收尾已完成就去掉 `-temp`，质量结果由 `metadata.json` 和 `validation_error.log` 表达。运行时内部允许同一条 episode 同时携带多个显式 `error_type`，不再从错误文本或路径猜测类别；`metadata.json.quality_check_err_type` 仍保持旧字段，只写最高优先级的一个主错误类型。完整性成功且无触觉软告警则回到 `READY` 并播放 `ready`；完整性失败进入 `ERROR_1` 并播放 `validation_failed`；关键设备/HMI/stereo 缺失或不活跃进入 `ERROR_2` 并播放 `error`；设备已识别但单侧 stereo/Fays recorder、FIFO 或控制链路失效进入 `ERROR_4` 并播放 `error`；数据盘挂载丢失 / 不可写 / 写满进入 `ERROR_3` 并播放 `error`；其他运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
 
 ## 7. Episode 产物与检查
 ### 7.1 默认产物
@@ -208,7 +212,7 @@
   - `audio_pre.wav`
   - `audio_post.wav`
   - `validation_error.log`（校验失败时，记录失败原因）
-  - `ego_sync.json`、`ego/<ego_episode>/...`（检测到 SXR ego 并完成或尝试联动采集时；当前不进入强校验与 `require_files`）
+  - `ego/ego_sync.json`、`ego/rgb.mp4`、`ego/tracking.mp4`、`ego/ctrl.mp4`、`ego/audio.m4a`、`ego/sensor.mcap`、`ego/calibration.json`、`ego/metadata.json`（检测到 SXR ego 并完成或尝试联动采集时；当前不进入强校验与 `require_files`）
 
 ### 7.2 metadata.json
 停录校验完成后，`record_runtime` 写入最终 `metadata.json`。当前顶层字段固定为：
@@ -219,8 +223,8 @@
 - `data_uuid` 使用系统随机 UUID；若 `/proc/sys/kernel/random/uuid` 不可用则回退 `libuuid` 的 `uuid_generate/uuid_unparse`。无音频文件时 `audio_uuid` 允许为空字符串。
 - `hardware_version` 默认 `v2.5`，可通过 `UGRIPPER_HARDWARE_VERSION` 覆盖；`software_version` 来自 ugripper 主包版本并带 `v` 前缀；`das_usb_updater_version` 优先读取 `das-usb-updater` 包版本。
 - `hardware_list` 只存各硬件 SN：左右 gripper、左右主摄、可选胸部主摄、四路 tactile、左右 stereo。左右 gripper SN 在 gripper 插入并完成运行时 refresh 后缓存，拔出后清理；写 metadata 时只使用该缓存，不再额外同步读串口。gripper HMI 不再参与 calibration 读取，后续标定完全从相机侧读取。主摄/胸部相机 SN 同样只使用插入/目标变化时通过 Yuzhou UVC XU 维护的运行时缓存，读取失败写空字符串，不回退 USB serial；tactile 使用 USB serial；stereo 使用 Fays daemon 状态中的 SDK serial。`video_details` 不再重复写 `serial`。
-- `quality_check_status` 取值为 `success` / `fail` / 空字符串；`quality_check_err_type` 当前枚举为 `missing_file`、`collection_duration_too_short`、`frame_loss`、`finalize_error`、`calibration_error`、`device_disconnected`，无法归类时写 `unknown`。
-- `collection_duration_s` 取最终视频时长最大值，保留 1 位小数；`video_details[].fps` 与 `duration_s` 也保留 1 位小数；正常收尾时优先复用停录校验阶段的 `video_probes` 缓存，缺失时才兜底重新探测视频。
+- `quality_check_status` 取值为 `success` / `fail` / 空字符串；`quality_check_err_type` 保持单字段兼容，只写本次失败的主 `error_type`。常见取值包括 `missing_file`、`collection_duration_too_short`、`frame_loss`、`finalize_error`、`stereo_control_failed`、`calibration_error`、`runtime_error`、`device_disconnected`，以及健康监控直接上报的 `disk_mount_lost`、`disk_not_writable`、`disk_full`、`critical_devices_missing`、`stereo_not_ready`、`hmi_*` 等 fault key；无法归类时写 `unknown`。
+- `collection_duration_s` 取最终视频有效时长最大值，保留 1 位小数；`video_details[].fps` 与 `duration_s` 也保留 1 位小数；普通相机与触觉相机的时长优先复用停录校验阶段的 `video_probes` 缓存，缺失时兜底重新探测视频；左右 stereo 的 `duration_s` 使用对应 `fays_data_*.mcap` 中 camera 帧首尾 logTime 跨度，避免轻微双目丢帧导致 MKV 容器时长偏短时误判轨迹数据不可用。
 - `video_details[].start_offset_us` 由内部 timing 字段折算而来，单位为微秒，字段名带 `_us` 后缀；计算时以本 episode 最早一路视频 offset 为 0。
 - `require_files` 使用当前新命名文件：`metadata.json`、`calibration.json`、八路基础视频、左右 sensor、左右 Fays MCAP；启用胸部主摄时追加 `cam_chest.mkv`。
 
@@ -229,18 +233,19 @@
 - 若 stereo daemon 已明确返回 finalize/session 错误，则直接记录失败、写 `metadata.json` 与 `validation_error.log`，跳过后续完整性强校验，避免对已知缺失的 stereo 文件重复等待。
 - 在线主摄、胸部主摄必须已有合法运行时缓存：SN 必须为 Yuzhou XU 中的 `FE...` 字段，标定必须为合法 `MCAL` V1 payload。缺任一项即校验失败，并写 `quality_check_err_type=calibration_error`。
 - 文件存在性：八路 `mkv`、`sensor_left.mcap`、`sensor_right.mcap`、`fays_data_left.mcap`、`fays_data_right.mcap`、`calibration.json`、`metadata.json` 必须存在且非空；其中 `metadata.json` 会先于稳定校验写出，供校验阶段读取最终 metadata 语义。
-- 内部 timing 缓存：停录收尾期间由 `/dev/shm/ugripper_recording_timing_*.json` 暂存 `boot_time_offset`、`boot_time_offset_us`、各路 `<camera>_record_time_offset_us` 和 `video_probes`，只用于生成最终 metadata；该文件不落到 episode，不作为硬校验对象，完成后清理。
-- metadata 与视频可读性：最终 `metadata.json` 必须存在且包含可用的 `video_details[].start_offset_us/duration_s`；每路 `mkv` 都必须能被并行 `ffprobe` 读出首个视频流与 `start_time/duration`。
-- 时长合理性：每路视频跨度都必须大于最小阈值，且不能比本次 episode 的最长视频短超过 `5s`。
-- Fays MCAP 轻量完整性：左右 `fays_data_*.mcap` 必须能读取 summary，`i/c` 两类消息计数都必须非零，并且 summary/chunk 索引给出的消息覆盖跨度不能过短；该检查只读 MCAP summary 与尾部少量 chunk，不允许 fallback 全量扫描消息。
+- 内部 timing 缓存：停录收尾期间由 `/dev/shm/ugripper_recording_timing_*.json` 暂存 `boot_time_offset`、`boot_time_offset_us`、各路 `<camera>_record_time_offset_us` 和 `video_probes`，只用于生成最终 metadata；该文件不落到 episode，不作为硬校验对象，完成后清理。若 `mergeEpisodeInfo()` 提示 timing 打开失败，应优先结合 `camera_recorder` 的“wrote timing file / missing_record_time_offset_us / flush-close failed”日志一起判断根因。
+- metadata 与视频可读性：最终 `metadata.json` 必须存在且包含可用的 `video_details[].start_offset_us/duration_s`；每路 `mkv` 都必须能被并行 `ffprobe` 读出首个视频流与 `start_time/duration`，但左右 stereo 的后续时长判断不再使用 MKV 容器时长。
+- 时长合理性：每路视频有效跨度都必须大于最小阈值，且不能比本次 episode 的最长有效视频跨度短超过 `5s`；其中普通相机与触觉相机使用 MKV probe span，左右 stereo 使用对应 Fays MCAP camera 帧首尾 logTime 跨度。
+- Fays MCAP 轻量完整性：左右 `fays_data_*.mcap` 必须能读取 summary，`i/c` 两类消息计数都必须非零，并且 summary/chunk 索引给出的消息覆盖跨度与 camera 帧覆盖跨度都不能过短；该检查只读 MCAP summary、头部首个 camera 帧和尾部少量 chunk，不允许 fallback 全量扫描消息。
 - 条件产物：若执行了 pre/post 音频录制，对应 wav 仍需存在。
 - 触觉软校验：
-  - 每路 tactile 只取起录附近单帧，与插爪阶段缓存的同 `serial` 参考灰度帧计算 `robust_residual_area`：先按 baseline 对当前帧做全局亮度/对比度配准，再生成超过动态残差阈值的 mask；mask 会经过 `3x3` 邻域投票和最小连通域过滤，避免零散单点像素误差触发损坏；单次异常不让当前 episode 失败，仅用于连续 `3` 个 episode 的损坏提示。
-  - 同时还会与上一份 `12h` 持久化 baseline 比较；persistent 比较独立维护最近 `3` 次窗口，连续 `3` 次异常才播放对应 damaged 语音并置位，连续 `3` 次 clean 后清除。
+  - 每路 tactile 只取起录附近单帧；若同 `serial` 实时参考帧缺失或处于夹爪重连待更新状态，则用本帧建立参考帧并跳过本轮实时 damaged 对比，失败则顺延到下一条 episode。已有实时参考帧时，按 baseline 对当前帧做全局亮度/对比度配准，再计算 `robust_residual_area`；mask 会经过 `3x3` 邻域投票和最小连通域过滤，避免零散单点像素误差触发损坏；单次异常不让当前 episode 失败，仅用于连续 `3` 个 episode 的损坏提示。
+  - 同时还会与同 `serial` 的 `12h` 持久化 baseline 比较；若 baseline 缺失、过期或处于夹爪重连待更新状态，则用本帧刷新 baseline 并跳过本轮 persistent 对比，失败则顺延到下一条 episode。persistent 比较独立维护最近 `3` 次窗口，连续 `3` 次异常才播放对应 damaged 语音并置位，连续 `3` 次 clean 后清除。
 - 当前运行时轻量阈值口径：
   - `robust_residual_area >= 0.002`
-  - 动态残差阈值为 `max(20, median(residual) + 6 * 1.4826 * MAD(residual))`
-  - residual mask 过滤为：`3x3` 内异常像素数至少 `3`，且 `8` 连通域面积至少 `8 px`
+  - 动态残差阈值为 `max(24, median(residual) + 6 * 1.4826 * MAD(residual))`
+  - residual mask 过滤为：`3x3` 内异常像素数至少 `3`，且 `8` 连通域面积至少 `16 px`
+  - 该口径用于过滤轻微灰度波动和很小的孤立/半孤立连通区域，避免正常触觉图像的边缘像素漂移连续触发 damaged 软告警。
 
 说明：当前不会为视频做全量逐帧扫描；强校验只读取容器元信息并消费内部 timing 字段，触觉软校验也只做单帧快速比较，优先保证现场稳定性与停录耗时可控。
 
@@ -250,14 +255,15 @@
 - `READY`：可录制，绿色呼吸灯；当前基于单调时钟渲染，避免系统校时导致相位突变。
 - `WARNING`：触觉软告警，黄灯闪烁；当前用于同一 tactile serial 的实时 reference 窗口或 persistent baseline 窗口连续 `3` 个 episode 异常。若后续连续 `3` 次 clean，相关窗口会清除告警并回到 READY。
 - `RECORDING`：录制中，绿色闪烁；当前只在亮灭边沿和低频补发时下发 RGB，避免高频重复写串口造成丢闪。
-- `CALIB_PRE` / `CALIB_RUN` / `CALIB_DONE`：供 USB 导入与校准脚本复用。
-- `ERROR_1` ~ `ERROR_5`：红灯长短码。当前口径下，`ERROR_1` 用于完整性/校验失败，`ERROR_2` 用于关键设备/HMI/stereo 缺失或不活跃，`ERROR_3` 用于数据盘挂载丢失 / 不可写 / 写满，`ERROR_5` 用于其他运行时异常。硬件缺失类 `ERROR_2` 会按侧别提示：缺失侧夹爪闪烁 `ERROR_2`，另一侧红灯常亮；左右都缺失则两侧一起闪烁；无法归属左右侧时，两侧同步先闪一次 `ERROR_2` 完整序列，再红灯常亮相同时间并循环。
+- `CALIB_PRE` / `CALIB_RUN` / `CALIB_DONE`：供 USB 导入、deb 安装与校准脚本复用；deb 安装窗口使用 `CALIB_RUN` 表示安装中、`CALIB_DONE` 表示全部包处理完成。
+- `ERROR_1` ~ `ERROR_5`：红灯长短码。当前口径下，`ERROR_1` 用于完整性/校验失败，`ERROR_2` 用于关键设备/HMI/stereo 缺失或不活跃，`ERROR_3` 用于数据盘挂载丢失 / 不可写 / 写满，`ERROR_4` 用于 Fays 相机已识别但单侧 stereo/Fays recorder、FIFO 或控制链路失效，`ERROR_5` 用于其他运行时异常。同一条 episode 可同时存在多个内部 `error_type`，最终灯效只按优先级播报一个：磁盘类优先 `ERROR_3`，关键设备缺失优先 `ERROR_2`，stereo 控制失效为 `ERROR_4`，运行时异常为 `ERROR_5`，普通校验失败为 `ERROR_1`。硬件缺失类 `ERROR_2` 和控制链路类 `ERROR_4` 都会按侧别提示：故障侧夹爪闪烁对应错误码，另一侧红灯常亮；左右都故障则两侧一起闪烁；`ERROR_2` 无法归属左右侧时，两侧同步先闪一次完整序列，再红灯常亮相同时间并循环。
 - `EXIT`：关机退出阶段。
 
 ### 8.2 关键持久化与临时路径
 - 持久化标定：`/etc/ugripper/config/calibration/calibration.json`
 - USB 标定导入阶段会在 `/etc/ugripper/config/calibration/.import_stage.*` 下生成临时 `calibration.json` 与夹爪 `payload bin`；由于 HMI helper 当前会以 `ubuntu` 用户运行，stage 目录需保持可遍历、payload bin 需保持可读，否则会出现“bin 已生成但 helper 无法读取”的写入失败。
 - 运行时音频 FIFO：`/tmp/umi_audio_pipe`
+- 运行时软件录制控制 FIFO：`/tmp/umi_record_control.pipe`
 - 音频临时目录：`/tmp/umi_audio`
 - 系统动作请求文件：`/tmp/umi_system_action_request`
 - 系统动作结果文件：`/tmp/umi_system_action_result`
@@ -269,12 +275,27 @@
 - `/mnt/data_disk` 只作为固定挂载点使用：安装阶段会预创建为 `root:root 0555`，业务不会把本地空目录当成数据目录；只有真实数据盘挂载成功后才允许继续启动录制服务。
 - 运行日志维护当前参考 V1 口径：本地先写 `/tmp`，在视频停录、音频停录和运行时退出时增量同步到 `/mnt/data_disk/logs`，并只保留当天同 SN 日志。
 
-### 8.3 PERF 日志
+### 8.3 软件录制控制
+- `record_runtime` 启动后会创建并非阻塞打开 `/tmp/umi_record_control.pipe`，供本机受控脚本触发录制起停；若 FIFO 创建或打开失败，只记录告警并继续保留原有 HMI 按键控制能力。
+- `test/src/gripper_disconnect_repro_sop/` 提供可单独打包的现场复现工具，主机侧 `./scripts/prepare_240_repro.sh` 会通过 SSH 下发板端 worker，并复用该 FIFO 做连续软件录制与错误现场抓取；系统/服务实时日志仍建议测试人员另开终端手动观察。
+- FIFO 按行接收文本命令，当前支持：
+  - `SHORT_UP`：严格模拟右手上键短按语义；空闲时起录，录制中停录。
+  - `SHORT_DOWN`：严格模拟右手下键短按语义；空闲且存在上一条 episode 时重录，录制中停录。
+  - `START`：仅空闲时接受，并映射到 `ShortUpPressed`；录制中会忽略并记录 `[CONTROL_DIAG] ... reason=already_recording`。
+  - `STOP`：仅录制中接受，并映射到 `ShortDownPressed`；空闲时会忽略并记录 `[CONTROL_DIAG] ... reason=not_recording`。
+- 被接受的软件命令会在同一主循环内复用 `handleShortUpAction()` / `handleShortDownAction()`，因此停录会进入与按键短按相同的 stop、finalize、merge、validation、LED/audio 恢复路径；不要通过直接写 stereo FIFO、kill recorder 或删除 lock 文件来替代停录。
+- 控制入口带 `300ms` 防抖，单轮主循环最多处理 `8` 条命令，避免外部脚本重复写入导致 start/stop 连续抖动；同一轮中若已接受软件控制命令，会跳过本轮物理按键事件处理，降低叠加触发风险。
+- 建议使用示例：
+  - `echo START > /tmp/umi_record_control.pipe`
+  - `echo STOP > /tmp/umi_record_control.pipe`
+  - 如需严格模拟按键：`echo SHORT_UP > /tmp/umi_record_control.pipe`、`echo SHORT_DOWN > /tmp/umi_record_control.pipe`
+
+### 8.4 PERF 日志
 - 停录收尾、文件 flush、视频探测和 episode validation 会输出 `[PERF]` 耗时日志，用于现场拆分蓝灯延迟。
-- 可通过 `/etc/environment` 设置 `UGRIPPER_PERF_LOG=0/false/no/off` 关闭这类耗时日志；不影响错误日志、校验失败记录和必要状态日志。
+- `[PERF]` 日志由编译包决定，默认发布包关闭；需要开启时在构建时定义 `UGRIPPER_ENABLE_PERF_LOG=1`。运行时不再读取 `/etc/environment` 开关；错误日志、校验失败记录和必要状态日志不受影响，关闭时会同步压低 ffmpeg/gst/MPP 等编码链路噪声，`[FAYS_TS ...]` 事件日志仍会输出。
 - validation 耗时当前按粗粒度输出：setup、并行视频 probe、并行 tail checks 与总耗时。其中 encoder/Fays tail checks 会作为 4 个只读任务并行执行，并统一打一条总耗时与详情日志；后台 tactile 慢校验另行输出 queued/start/end/applied/cancel 相关 PERF。
 
-### 8.4 音频链路关键行为
+### 8.5 音频链路关键行为
 - `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音，并优先绑定 PulseAudio 中受支持的 USB 音频设备；当前兼容 `0020:0b21 (liyuany USB Audio)` 与 `0023:0b23 (liyuany USB PnP Sound Device)`。若无耳机，则回退系统默认 sink/source；耳机晚于服务启动才出现时，守护进程会先启动 FIFO 和监听线程，再在耳机出现后自动切回耳机。
 - 提示音主线程通过 FIFO 收命令后使用 `pygame.mixer` 播放到当前选中的 PulseAudio sink；启动时只做一次短静音预热、每段提示音前补前导静音，不再维持常驻静音 keepalive。
 - `audio/audio_play.py` 只有在真实绑定到一个可用的 PulseAudio 播放目标并完成后端初始化后才会写 `/tmp/umi_audio_ready`；当前无论是受支持 USB 耳机还是系统默认声卡，都需要建好 backend 才会进入 ready，backend teardown 时会移除该标记，避免业务把“进程活着”误判成“提示音已可播放”。
@@ -287,17 +308,17 @@
 - 回滚方式：若需恢复 PulseAudio 默认模块状态，可重启当前用户的 PulseAudio 会话，或重启 `ugripper.service` 让音频守护进程重新按默认环境启动；无需在运行期反复手工切换 `module-suspend-on-idle`。
 - 现场 5 步回归 SOP：1）确认耳机已识别且服务正常，观察 `journalctl -u ugripper.service -n 100` 是否出现 USB 音频初始化日志；2）空闲 3~5 分钟后执行 `python3 py_script/usb_audio_play_test.py`，确认首个测试音不吞头；3）再次空闲 3~5 分钟后执行 `python3 py_script/usb_audio_mic_test.py --playback`，确认录音回放起始段不被截断；4）若需覆盖热恢复，再做一次耳机热插拔后重复步骤 2/3；5）若结果异常，记录 `pactl list short modules`、`pactl list short sinks`、`pactl list short sources` 与 `journalctl -u ugripper.service -n 200` 作为现场。
 
-### 8.5 相关辅助单元
+### 8.6 相关辅助单元
 - `auto_update/umi-shutdown-trigger.path`：监控 `/tmp/umi_system_action_request`。
 - `auto_update/umi-shutdown-trigger.service`：检测到触发文件后执行统一 helper；当前支持 `shutdown` 与 `umount` 两类动作，并把执行结果写回 `/tmp/umi_system_action_result`。
 - `auto_calibration/ugripper-network-monitor.service`：监听网线插拔，当前仅在拔线时重启 `ugripper.service`。
 - `auto_update/boot_check_install.sh`：开机时检查 `/opt/backup` 中的 `deb` 是否需要恢复或升级。
 
-### 8.6 硬件健康监控
+### 8.7 硬件健康监控
 - `record_runtime` 当前参考 v1 口径保留低频硬件健康监控，约每 `1s` 检查一次关键硬件状态，而不是在主循环里做高频主动轮询。
 - 当前监控项包括：`/mnt/data_disk` 是否仍可写、8 路相机设备节点、左右 IMU/encoder 设备节点、stereo daemon `ready/not-ready` 状态，以及左右 HMI 串口是否仍连接、输入侧 HMI 是否持续有响应。
-- 发现磁盘异常时进入 `ERROR_3`；当前会区分 `disk_mount_lost`、`disk_not_writable`、`disk_full` 等 fault key，并按“同类 fault 首次出现打错误日志、持续期间不重复刷屏、恢复时补一条 recovered”收敛日志。发现关键设备节点缺失、HMI 断连或 HMI 长时间无响应时进入 `ERROR_2`，并通过音频守护进程播报 `error`。`ERROR_2` 会根据缺失路径、stereo 状态或 HMI port 归属到左手、右手、双手或 unknown，用对应侧别灯效提示现场先看哪侧硬件。
-- 若录制中发现任意关键设备、HMI、数据盘或 stereo daemon 健康故障，当前 episode 会立即按错误停录收尾，写失败 `metadata.json` 和 `validation_error.log`，并将 `quality_check_err_type` 归类为 `device_disconnected` 或更具体的错误类型；设备后续恢复只影响下一次录制，不会把本条数据恢复成成功。
+- 发现磁盘异常时进入 `ERROR_3`；当前会区分 `disk_mount_lost`、`disk_not_writable`、`disk_full` 等 fault key，并按“同类 fault 首次出现打错误日志、持续期间不重复刷屏、恢复时补一条 recovered”收敛日志。发现关键设备节点缺失、HMI 断连或 HMI 长时间无响应时进入 `ERROR_2`，并通过音频守护进程播报 `error`。`ERROR_2` 会根据缺失路径、stereo 状态或 HMI port 归属到左手、右手、双手或 unknown，用对应侧别灯效提示现场先看哪侧硬件。若 Fays stereo/IMU symlink 在线但单侧 recorder、控制 FIFO 或 START/STOP 控制链路失效，则进入 `ERROR_4`，提示拔插对应侧夹爪；此类问题不建议用软件复位作为恢复动作。
+- 若录制中发现任意关键设备、HMI、数据盘或 stereo daemon 健康故障，当前 episode 会立即按错误停录收尾，写失败 `metadata.json` 和 `validation_error.log`，并把健康监控 fault key 作为显式 `error_type` 进入本条 episode；若停录后又发现文件缺失、finalize 失败等问题，会同时记录内部错误类型，但 `quality_check_err_type` 只保留最高优先级主类型。设备后续恢复只影响下一次录制，不会把本条数据恢复成成功。
 - 若异常恢复发生在空闲态：回到 `READY` 并补播 `ready`。
 - `camera_recorder` 仍保持“单路 recorder 失败不立即主动终止整次录制”的容错语义；本次实现只加强停录阶段的子进程组回收与 stop 日志，不把启动期短暂抖动直接升级为全量停录。
 
@@ -311,7 +332,6 @@
 | `UGRIPPER_LANG` | 提示音语言 | 由 `config.txt` 导入 |
 | `CAMERA_CODEC` | `camera_recorder` 启动参数 | 仅支持 `h264` / `h265` |
 | `ENABLE_CHEST_CAM_MAIN` | `record_runtime` 读取 | 默认启用胸部主摄；显式写成 `0/false/no/off/disable/disabled` 时关闭 |
-| `UGRIPPER_PERF_LOG` | `record_runtime` 读取 | 默认开启 `[PERF]` 耗时日志；显式写成 `0/false/no/off/disable/disabled` 时关闭 |
 | `UGRIPPER_EGO_SERIAL` | `ego_recording_worker.py` 读取 | 默认不指定 serial，自动扫描 `adb devices`；需要固定某台 ego 时可设置 |
 | `UGRIPPER_EGO_ADB` | `ego_recording_worker.py` 读取 | 覆盖 ADB 可执行文件路径；默认优先使用随包安装的 `bin/UgripperRuntime/adb/adb`，不可用时回退 `PATH` |
 | `UGRIPPER_EGO_SYNC_INTERVAL_SEC` | `ego_recording_worker.py` 读取 | ego 文件增量同步间隔，默认 `1s` |
@@ -338,6 +358,7 @@
 - 配置导入：根目录 `config.txt`。
 - 标定数据导入：`ugripper_calib/<DEVICE_SN>/`，通过文件名后缀 `_left` / `_right` 区分左右主相机 `camchain`；对应夹爪侧 RGB/stereo/IMU payload 则按现场读出的 gripper SN 文本在该目录下递归匹配，优先 `.bin`，其次包含 `summary/imucam` 关键词的 `.md` 或当前 raw 目录（`rgb_video_ros-camchain.yaml + output-results-imucam.txt`），并按 `rgb_video_ros_imucam_parameter_summary.md` 口径生成 `1024-byte` 对齐数据结构；当前固件写入时固定补满 `64 x 16B` 传输窗口。
 - encoder 零位校准触发：根目录 `calibration.txt`。
+- deb 安装灯效：当本次 U 盘里实际存在目标软件包并进入安装窗口后，`usb_auto_update.sh` 会停止业务栈并通过 HMI helper 显示 `CALIB_RUN` 黄灯快闪；安装中灯效至少保持 `3s`，避免短安装或主包资源替换导致肉眼不可见；任一包安装或安装后置处理失败时显示 `ERROR_1` 红灯 `3s` 并退出；全部目标包处理成功后显示 `CALIB_DONE` 绿灯 `3s`，随后先恢复业务服务，确认服务恢复后再继续升级完成提示音。
 - 安装完成提示音：当本次 U 盘里实际出现的目标软件包全部安装/重装完成后，`usb_auto_update.sh` 会直接从新安装的 `/opt/ugripper/audio*/upgrade_completed.wav` 里选取对应语言资源，并以 `paplay` + PulseAudio 播放升级完成提示音；当前不要求自动安装名单里的包必须全部同时出现在 U 盘。若现场没有可用 PulseAudio sink，则只记日志，不把安装流程判失败。
 
 ### 9.4 U 盘同次插入顺序
@@ -347,19 +368,21 @@
 3. 只有当本次目标侧都完成 gripper SN 匹配后，才开始写入对应夹爪的整套 RGB/stereo/IMU 标定；任一侧匹配失败或写入失败时，本次不会把旧 persist calibration 当作成功结果继续保留
 4. U 盘导入当前负责“匹配并写入夹爪标定 + 保存导入归档”；主机侧持久化 `calibration.json` 由 `record_runtime` 在 gripper 后续插入/重连时按实际读回的 SN 与 calibration payload 刷新
 5. 若存在 `calibration.txt`，则跳过中间重启，直接进入左右编码器并行校准流程
-6. 若未触发 `calibration.txt`，则开始按固定名单依次处理 `das-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender` 的 `.deb`；每个包都会先按 Debian 包名读取版本，U 盘内若存在多个候选文件则取最高版本；只要名单内包在 U 盘根目录存在，就执行安装，同版本也会强制重装
+6. 若未触发 `calibration.txt`，则开始按固定名单依次处理 `das-usb-updater`、`ugripper`、`bluetooth-gatt-server`、`databot-device-joint`、`device-ota-mender` 的 `.deb`；每个包都会先按 Debian 包名读取版本，U 盘内若存在多个候选文件则取最高版本；只要名单内包在 U 盘根目录存在，就执行安装，同版本也会强制重装；进入 deb 安装窗口后显示 `CALIB_RUN` 黄灯快闪且至少保持 `3s`，任一包失败显示 `ERROR_1` 红灯 `3s` 并退出
 7. 若 updater 在第 6 步先完成自升级，则安装后的新脚本会在同一次插盘流程里继续执行剩余自动安装名单，避免必须二次插盘才能让新名单生效
-8. 全部目标软件包安装完成后，若新主包已提供 `upgrade_completed.wav` 且现场存在可用 PulseAudio sink，则播放升级完成提示音
-9. 恢复 `ugripper.service`
+8. 全部目标软件包安装完成后，先显示 `CALIB_DONE` 绿灯 `3s`
+9. 恢复 `ugripper.service` 并确认业务服务可启动；若恢复失败，本次升级按失败处理，不播放完成提示音
+10. 若新主包已提供 `upgrade_completed.wav` 且现场存在可用 PulseAudio sink，则播放升级完成提示音
 
 ### 9.5 安装脚本与网络行为
 `pack_script/postinst` 当前会：
 - 停掉旧的录制相关进程。
 - 初始化持久化标定目录；若 `calibration.json` 缺失、空文件或非法 JSON，则自动用 `bin/UgripperRuntime/config/fakeCamCalib.json` 修复。
 - 自动配置 exfat 提前加载：若现场仍使用 `/home/user/lib/exfat.ko` 外部模块，安装时会把它复制进 `/lib/modules/<kernel>/extra/`、写入 `/etc/modules-load.d/ugripper-exfat.conf`，并在本次安装窗口内尝试立即加载。
-- 重新加载 udev 规则。
+- 在重放相机/音频/串口 udev 规则前再次停止 `ugripper.service` 并等待停稳，避免 Fays warmup daemon 持有 stereo/IMU video 节点时被 trigger 扰动。
+- 重新加载 udev 规则，并只重放 Fays USB、video4linux、sound、input 与已枚举 CH9344 tty 事件；不主动触发 block add，避免升级期间重复拉起 USB updater。
 - 启用 `umi-shutdown-trigger.path`。
-- 启用并重启 `ugripper.service`。
+- udev trigger 完成后手动 `start ugripper.service`，并等待服务进入 active；若启动失败，主包 postinst 直接失败，由 U 盘升级流程按安装失败处理。
 - 启用并重启 `ugripper-network-monitor.service`。
 
 网络相关当前行为：
@@ -466,6 +489,9 @@ PY
   - `testVideoPipe.sh`：快速枚举指定 `/dev/video*` 节点的视频格式能力。
   - `scan_main_camera_mkv_issues.py`：递归扫描 `cam_left.mkv` / `cam_right.mkv`，并发检查主摄 `mkv` 的包时间戳异常、显著时间洞与可疑解码错误，并对齐同目录左右主摄的异常时间点。
 - 建议从仓库根目录显式执行 `bash test/scripts/<script>.sh`；详细参数与注意事项见 `test/README.md`。
+- `py_script/read_ugripper_mcap.txt` 是给数据使用者参考的通用 MCAP 读取示例；文件后缀使用 `.txt`，方便在会拦截或加密 `.py` 的环境中发送，但内容仍是 Python 代码。它可直接输入单个 `.mcap` 或完整 episode 目录；episode 模式会自动读取 `sensor_left/right.mcap`、`fays_data_left/right.mcap` 与可选 `ego/sensor.mcap`，并解码当前 UGripper encoder 与 Fays `i/c` 二进制 payload。配套说明见 `py_script/README_read_ugripper_mcap.txt`。示例：
+  `python3 py_script/read_ugripper_mcap.txt /mnt/data_disk/<device_sn_lower>/data/episode_<date>_<index> --json-out /tmp/ugripper_mcap_report.json`。
+- 当前 UGripper MCAP 是通用 MCAP 容器，不是 ROS 2 bag；不要用 `ros2 bag info` 或 Foxglove 的 ROS bag 可视化入口作为数据是否正常的判断依据。若要可视化，需要按脚本里的 payload 定义转换成 Foxglove/ROS 可识别 schema 后再导入。
 - 若现场需要脱离主服务、单独向夹爪 HMI 写入 SN / 标定，可使用 `py_script/hmi_sn_batch_writer.py`：脚本直接读取一个或多个 `.xlsx` 的多 sheet `SN码` 列，支持操作员输入 SN 后 4 位或任意连续片段做唯一匹配，自动扫描 CH9344 相关串口确认可用 HMI 口，并在匹配到目标 SN 后写入 SN 与可选 `1024-byte` 标定 payload。
 - `py_script/hmi_sn_batch_writer.py` 默认会在启动时把自身和本次使用的 `.xlsx` 同步复制到 `/mnt/data_disk/hmi_sn_writer/`；标定源目录可通过 `--calib-root` 指向包含 `.bin`、summary `.md` 或 `rgb_video_ros-camchain.yaml + output-results-imucam.txt` 的目录。若未找到目标 SN 对应标定文件，脚本会只写 SN，并在控制台用黄色提示“未写标定”。
 

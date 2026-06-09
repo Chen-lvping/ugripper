@@ -403,8 +403,9 @@
 - 当前主包安装的 udev 规则：
   - `/etc/udev/rules.d/99-fixed-usb-map.rules`
   - `/etc/udev/rules.d/99-serial.rules`
-- 当前 `postinst` 会 enable + restart：
+- 当前 `postinst` 会 enable 并按 stop/trigger/start 顺序恢复：
   - `ugripper.service`
+- 当前 `postinst` 会 enable + restart：
   - `ugripper-network-monitor.service`
   - `umi-shutdown-trigger.service`
   - `umi-shutdown-trigger.path`

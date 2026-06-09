@@ -52,6 +52,30 @@ std::string ToLowerCopy(std::string value) {
     return value;
 }
 
+std::string FaysReadableTimestamp() {
+    const auto now = std::chrono::system_clock::now();
+    const auto us = std::chrono::duration_cast<std::chrono::microseconds>(
+        now.time_since_epoch()).count();
+    const std::time_t seconds = std::chrono::system_clock::to_time_t(now);
+    std::tm localTime {};
+    localtime_r(&seconds, &localTime);
+    std::ostringstream out;
+    out << std::put_time(&localTime, "%H:%M:%S") << "."
+        << std::setw(6) << std::setfill('0') << (us % 1000000);
+    return out.str();
+}
+
+void FaysEventLog(const std::string& component, const std::string& message) {
+    std::cerr << "[FAYS_TS " << FaysReadableTimestamp() << "] [" << component << "] "
+              << message << std::endl;
+}
+
+#ifndef UGRIPPER_ENABLE_PERF_LOG
+#define UGRIPPER_ENABLE_PERF_LOG 0
+#endif
+
+constexpr bool kPerfLogEnabled = UGRIPPER_ENABLE_PERF_LOG != 0;
+
 std::string JsonEscape(const std::string& value) {
     std::ostringstream out;
     for (const unsigned char ch : value) {
@@ -789,6 +813,7 @@ std::string ReadCameraCodecFromEnvironmentFile() {
 
     return defaultCodec;
 }
+
 }  // namespace
 
 struct FaysImuSample {
@@ -1277,6 +1302,7 @@ public:
 
         const std::string cameraCodec = ReadCameraCodecFromEnvironmentFile();
         const std::string ffmpegEncoder = (cameraCodec == "h265") ? "hevc_rkmpp" : "h264_rkmpp";
+        const bool perfLogEnabled = kPerfLogEnabled;
 
         std::stringstream cmd;
         cmd << "ffmpeg -hide_banner -loglevel error -nostats -y "
@@ -1320,6 +1346,16 @@ public:
                 _exit(127);
             }
             close(pipeFds[0]);
+            if (!perfLogEnabled) {
+                const int devNull = open("/dev/null", O_WRONLY);
+                if (devNull >= 0) {
+                    dup2(devNull, STDOUT_FILENO);
+                    dup2(devNull, STDERR_FILENO);
+                    if (devNull > STDERR_FILENO) {
+                        close(devNull);
+                    }
+                }
+            }
             execl("/bin/sh", "sh", "-c", cmd.str().c_str(), static_cast<char*>(nullptr));
             _exit(127);
         }
@@ -1449,6 +1485,7 @@ public:
           hasImuTimeOffset_(false) {
         statusIntervalNs_ = ReadEnvUInt64("FAYS_RUNTIME_STATUS_INTERVAL_MS", 1000) * 1000000ULL;
         mImgData_.data = new uchar[FAYS_ATRAK_MONO_MAX_BYTES * 3];
+        FaysEventLog("fays_recorder", "construct begin config=" + configPath_);
 
         FaysConfigDevices configDevices;
         std::string configError;
@@ -1456,6 +1493,7 @@ public:
                 configPath_, &mptrHandle_, &configDevices, &sdkConfigPath_, &sdkConfigTempPath_, &configError)) {
             delete[] mImgData_.data;
             mImgData_.data = nullptr;
+            FaysEventLog("fays_recorder", "construct failed config=" + configPath_ + " error=" + configError);
             throw std::runtime_error(configError);
         }
         std::cout << "[FaysConfig] Config: " << configPath << std::endl;
@@ -1496,6 +1534,10 @@ public:
         if (!calibrationDumped_.load(std::memory_order_acquire)) {
             TryDumpCalibrationJson("startup");
         }
+        FaysEventLog("fays_recorder",
+                     "handle created config=" + configPath_ +
+                         " stereo=" + configDevices.stereoResolved +
+                         " imu=" + configDevices.imuResolved);
         std::cout << "[FaysRecorder] Created handle with config: " << configPath << std::endl;
         std::cout << "[FaysRecorder] Standby mode ready. Waiting for START command." << std::endl;
 
@@ -1507,6 +1549,7 @@ public:
     }
 
     ~FaysRecorder() {
+        FaysEventLog("fays_recorder", "destroy begin config=" + configPath_);
         StopRecordingSession();
         mbIsRunning_ = false;
 
@@ -1542,6 +1585,7 @@ public:
                   << videoFrameQueue_.GetDropCount() << std::endl;
 
         FAYS_VIK_DestroyHandle(mptrHandle_);
+        FaysEventLog("fays_recorder", "handle destroyed config=" + configPath_);
         std::cout << "[FaysRecorder] Destroyed handle" << std::endl;
         CleanupSdkTempConfig(&sdkConfigTempPath_);
         delete[] mImgData_.data;
@@ -1551,6 +1595,7 @@ public:
     bool IsRunning() const { return mbIsRunning_; }
 
     void Stop() {
+        FaysEventLog("fays_recorder", "stop requested config=" + configPath_);
         mbIsRunning_.store(false, std::memory_order_release);
         StopRecordingSession();
         videoFrameQueue_.Stop();
@@ -1571,6 +1616,9 @@ public:
         hasImuTimeOffset_.store(false, std::memory_order_release);
         mcapControlQueue_.PushStart(sessionId, mcapPath);
 
+        FaysEventLog("fays_recorder",
+                     "recording start session_id=" + std::to_string(sessionId) +
+                         " output_dir=" + recordingOutputDir_);
         std::cout << "[Control] START recording. Output directory: " << recordingOutputDir_ << std::endl;
         std::cout << "[Control] MCAP output: " << mcapPath << std::endl;
         WriteRuntimeStatus(true);
@@ -1580,6 +1628,9 @@ public:
         bool wasRecording = recordingEnabled_.exchange(false, std::memory_order_acq_rel);
         const uint64_t stoppedSessionId = recordingSessionId_.exchange(0, std::memory_order_acq_rel);
         if (wasRecording) {
+            FaysEventLog("fays_recorder",
+                         "recording stop session_id=" + std::to_string(stoppedSessionId) +
+                             " output_dir=" + recordingOutputDir_);
             std::cout << "[Control] STOP recording." << std::endl;
         }
         mcapControlQueue_.PushStop(stoppedSessionId);
@@ -2347,6 +2398,7 @@ static bool EnsureControlFifo(const std::string& fifoPath) {
 }
 
 static void RunControlLoop(FaysRecorder& recorder, const std::string& fifoPath) {
+    FaysEventLog("fays_recorder", "control loop enter fifo=" + fifoPath);
     std::cout << "[Control] Entering command loop. FIFO: " << fifoPath << std::endl;
     std::cout << "[Control] Supported commands: START|<output_dir>, STOP, EXIT" << std::endl;
 
@@ -2364,6 +2416,7 @@ static void RunControlLoop(FaysRecorder& recorder, const std::string& fifoPath) 
         std::string pending;
         while (recorder.IsRunning()) {
             if (ConsumeStopRequested()) {
+                FaysEventLog("fays_recorder", "signal stop requested");
                 std::cout << "\n[Signal] Stop requested, stopping recorder..." << std::endl;
                 recorder.Stop();
                 break;
@@ -2396,16 +2449,21 @@ static void RunControlLoop(FaysRecorder& recorder, const std::string& fifoPath) 
                 if (cmd.rfind("START|", 0) == 0) {
                     std::string outputDir = Trim(cmd.substr(6));
                     if (outputDir.empty()) {
+                        FaysEventLog("fays_recorder", "control START rejected: missing output directory");
                         std::cerr << "[Control] START command missing output directory." << std::endl;
                         continue;
                     }
+                    FaysEventLog("fays_recorder", "control START output_dir=" + outputDir);
                     recorder.StartRecording(outputDir);
                 } else if (cmd == "STOP") {
+                    FaysEventLog("fays_recorder", "control STOP");
                     recorder.StopRecordingSession();
                 } else if (cmd == "EXIT") {
+                    FaysEventLog("fays_recorder", "control EXIT");
                     recorder.Stop();
                     break;
                 } else {
+                    FaysEventLog("fays_recorder", "control unknown cmd=" + cmd);
                     std::cerr << "[Control] Unknown command: " << cmd << std::endl;
                 }
             }
@@ -2413,6 +2471,7 @@ static void RunControlLoop(FaysRecorder& recorder, const std::string& fifoPath) 
 
         close(fd);
         if (ConsumeStopRequested()) {
+            FaysEventLog("fays_recorder", "signal stop requested");
             std::cout << "\n[Signal] Stop requested, stopping recorder..." << std::endl;
             recorder.Stop();
         }
@@ -2475,6 +2534,11 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    FaysEventLog("fays_recorder",
+                 "process start config=" + configPath +
+                     " control_mode=" + std::string(controlMode ? "true" : "false") +
+                     " dump_calib=" + std::string(dumpCalibJsonMode ? "true" : "false"));
+
     if (dumpCalibJsonMode) {
         if (controlMode) {
             std::cerr << "--dump-calib-json cannot be combined with --control-fifo" << std::endl;
@@ -2482,9 +2546,11 @@ int main(int argc, char** argv) {
         }
         std::string errorMessage;
         if (!DumpCalibrationJson(configPath, dumpCalibJsonPath, &errorMessage)) {
+            FaysEventLog("fays_recorder", "dump calibration failed: " + errorMessage);
             std::cerr << "[FaysCalibration] ERROR: " << errorMessage << std::endl;
             return 1;
         }
+        FaysEventLog("fays_recorder", "dump calibration ok path=" + dumpCalibJsonPath);
         return 0;
     }
 
@@ -2492,34 +2558,43 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, signalHandler);
     std::signal(SIGPIPE, SIG_IGN);
 
-    FaysRecorder recorder(configPath.c_str(), videoFileName, mcapFileName, calibrationJsonPath, statusJsonPath);
-    g_recorder = &recorder;
+    try {
+        FaysRecorder recorder(configPath.c_str(), videoFileName, mcapFileName, calibrationJsonPath, statusJsonPath);
+        g_recorder = &recorder;
 
-    if (controlMode) {
-        if (!EnsureControlFifo(controlFifoPath)) {
-            g_recorder = nullptr;
-            return 1;
-        }
-        RunControlLoop(recorder, controlFifoPath);
-    } else {
-        recorder.StartRecording(outputDir);
-        std::string normalizedOutputDir = outputDir;
-        if (!normalizedOutputDir.empty() && normalizedOutputDir.back() != '/') {
-            normalizedOutputDir += '/';
+        if (controlMode) {
+            if (!EnsureControlFifo(controlFifoPath)) {
+                FaysEventLog("fays_recorder", "failed to ensure control fifo=" + controlFifoPath);
+                g_recorder = nullptr;
+                return 1;
+            }
+            RunControlLoop(recorder, controlFifoPath);
+        } else {
+            recorder.StartRecording(outputDir);
+            std::string normalizedOutputDir = outputDir;
+            if (!normalizedOutputDir.empty() && normalizedOutputDir.back() != '/') {
+                normalizedOutputDir += '/';
+            }
+
+            std::cout << "========================================" << std::endl;
+            std::cout << "   Stereo Recorder (Headless) Started" << std::endl;
+            std::cout << "   Video: " << normalizedOutputDir << videoFileName << std::endl;
+            std::cout << "   Data : " << normalizedOutputDir << mcapFileName << std::endl;
+            std::cout << "   Press Ctrl+C to stop recording" << std::endl;
+            std::cout << "========================================" << std::endl;
+
+            while (recorder.IsRunning()) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
         }
 
-        std::cout << "========================================" << std::endl;
-        std::cout << "   Stereo Recorder (Headless) Started" << std::endl;
-        std::cout << "   Video: " << normalizedOutputDir << videoFileName << std::endl;
-        std::cout << "   Data : " << normalizedOutputDir << mcapFileName << std::endl;
-        std::cout << "   Press Ctrl+C to stop recording" << std::endl;
-        std::cout << "========================================" << std::endl;
-
-        while (recorder.IsRunning()) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
+        g_recorder = nullptr;
+        FaysEventLog("fays_recorder", "process exit ok config=" + configPath);
+        return 0;
+    } catch (const std::exception& exc) {
+        g_recorder = nullptr;
+        FaysEventLog("fays_recorder", "process exit exception config=" + configPath + " error=" + exc.what());
+        std::cerr << "[FaysRecorder] ERROR: " << exc.what() << std::endl;
+        return 1;
     }
-
-    g_recorder = nullptr;
-    return 0;
 }

@@ -193,6 +193,39 @@ TEST(StereoSessionClientTest, ReportsFinalizeErrorFromStatusFile)
     EXPECT_EQ(error, "stereo finalize failed");
 }
 
+TEST(StereoSessionClientTest, ReportsFinalizeErrorWhileDaemonIsStillFinalizing)
+{
+    auto fake_port = std::make_unique<FakeStereoSessionPort>();
+    FakeStereoSessionPort* fake_port_ptr = fake_port.get();
+    fake_port->statuses.push_back({
+        .finalize_pending = true,
+        .last_finalize_error = "left Fays warmup frame stale during session",
+        .active_episode_dir = "/tmp/episode-pending-error",
+        .last_finalized_episode_dir = "",
+        .has_last_session = false,
+        .last_session_episode_dir = "",
+    });
+
+    ugripper::runtime::ProcessSupervisor supervisor;
+    ugripper::runtime::StereoSessionClient client(
+        &supervisor,
+        {
+            .daemon_arguments = {"/bin/sh", "-c", "sleep 5"},
+            .control_pipe = "/tmp/unused-control.pipe",
+            .status_file = "/tmp/unused-status.json",
+            .daemon_stop_timeout_ms = 500,
+            .restart_interval_ms = 50,
+            .finalize_wait_poll_ms = 10,
+        },
+        &utils::CurrentSteadyMs,
+        std::move(fake_port));
+
+    std::string error;
+    EXPECT_FALSE(client.WaitForFinalize("/tmp/episode-pending-error", 1000, &error));
+    EXPECT_EQ(error, "left Fays warmup frame stale during session");
+    EXPECT_TRUE(fake_port_ptr->statuses.empty());
+}
+
 TEST(StereoSessionClientTest, UsesInjectedSessionPortForCommandsAndStatus)
 {
     auto fake_port = std::make_unique<FakeStereoSessionPort>();

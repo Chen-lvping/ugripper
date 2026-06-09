@@ -234,8 +234,8 @@ private:
         std::string createNextEpisodeDir();
         void setGripperRuntimeStates(const std::array<GripperRuntimeState, 2> &states);
         void setMainCameraRuntimeStates(const std::array<MainCameraRuntimeState, 3> &states);
-        void refreshTactileReferenceCacheForSide(const std::string &side,
-                                                std::vector<TactileValidationFinding> *findings = nullptr);
+        void markTactileReferencePendingForSide(const std::string &side,
+                                                const std::string &reason);
         bool prepareEpisode(const std::string &episodeDir,
                             bool resetRecording,
                             const std::string &resetSourceDir,
@@ -293,7 +293,8 @@ private:
 
     void handleGripperConnectionEvents();
     void processPendingGripperRefreshes();
-    void refreshGripperRuntimeStateForSide(const std::string &side);
+    void refreshGripperRuntimeStateForSide(const std::string &side,
+                                           bool markTactileReferencePending);
     void clearGripperRuntimeStateForSide(const std::string &side,
                                          bool connected,
                                          const std::string &status,
@@ -341,7 +342,8 @@ private:
     bool cleanupEgoRemote(const std::string &episodeDir, std::string *errorMessage);
     bool mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const;
     bool syncRuntimeLogToDisk(const char *reason) const;
-    void refreshTactileReferenceCachesForSide(const std::string &side);
+    void markTactileReferencePendingForSide(const std::string &side,
+                                            const std::string &reason);
     void scheduleBackgroundTactileValidation(const std::string &episodeDir);
     void maintainBackgroundTactileValidation();
     void cancelBackgroundTactileValidation();
@@ -363,7 +365,7 @@ private:
     std::string deviceSn_;
     std::string language_;
     bool chestCameraEnabled_ = true;
-    bool perfLogEnabled_ = true;
+    bool perfLogEnabled_ = false;
     std::string hardwareVersion_;
     std::string packageVersion_;
     std::string updaterVersion_;

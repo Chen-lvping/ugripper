@@ -92,6 +92,10 @@ target_link_libraries(fays_record_example
         fays_mcap
         Threads::Threads
 )
+target_compile_definitions(fays_record_example
+    PRIVATE
+        UGRIPPER_ENABLE_PERF_LOG=$<BOOL:${UGRIPPER_ENABLE_PERF_LOG}>
+)
 
 file(COPY "${CMAKE_CURRENT_SOURCE_DIR}/config"
      DESTINATION "${CMAKE_CURRENT_BINARY_DIR}"

@@ -88,4 +88,9 @@ inline GripperRefreshAction AdvancePendingGripperRefresh(GripperRefreshRuntimeVi
     return GripperRefreshAction::RefreshRuntimeState;
 }
 
+inline bool ShouldMarkTactileReferencePending(bool refresh_from_reconnect)
+{
+    return refresh_from_reconnect;
+}
+
 }  // namespace ugripper::runtime

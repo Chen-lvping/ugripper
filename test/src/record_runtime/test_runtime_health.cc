@@ -851,6 +851,131 @@ TEST(HealthMonitorTest, ReportsStereoNotReady)
     fs::remove_all(temp_dir);
 }
 
+TEST(HealthMonitorTest, ReportsRecognizedFaysControlFailureAsError4)
+{
+    const fs::path temp_dir = MakeTempDir();
+    const fs::path stereo_status = temp_dir / "stereo_status.json";
+    std::ofstream(stereo_status) << R"({
+        "ready": false,
+        "service_state": "not-ready",
+        "cameras": {
+            "left_stereo": {
+                "ready": true,
+                "state": "ready",
+                "stereo_symlink_online": true,
+                "imu_symlink_online": true
+            },
+            "right_stereo": {
+                "ready": false,
+                "state": "process-not-ready",
+                "stereo_symlink_online": true,
+                "imu_symlink_online": true
+            }
+        }
+    })";
+
+    HealthMonitor monitor(
+        {.disk_root = temp_dir.string(),
+         .stereo_status_file = stereo_status.string(),
+         .critical_device_paths = {"/dev/cam0"},
+         .poll_interval_ms = 1000,
+         .hmi_active_timeout_ms = 2500},
+        {.is_disk_writable =
+             [](const std::string&) {
+                 return true;
+             },
+         .path_exists =
+             [](const std::string&) {
+                 return true;
+             },
+         .get_process_status =
+             [](WorkerName) {
+                 return ProcessStatus{.state = ProcessState::Running, .running = true, .pid = 7};
+             },
+         .get_hmi_health =
+             [](uint64_t) {
+                 return HmiHealthSnapshot{
+                     .has_connected_device = true,
+                     .input_connected = true,
+                     .input_active = true,
+                 };
+             }},
+        &FakeNowMs);
+
+    g_now_ms = 1500;
+    const auto result = monitor.Poll(HealthState{});
+    ASSERT_TRUE(result.checked);
+    ASSERT_TRUE(result.fault.has_value());
+    EXPECT_EQ(result.fault->key, ugripper::runtime::kErrorTypeStereoControlFailed);
+    EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error4);
+    EXPECT_EQ(result.fault->side, HardwareFaultSide::Right);
+    EXPECT_NE(result.fault->detail.find("unplug/replug the right gripper"), std::string::npos);
+
+    fs::remove_all(temp_dir);
+}
+
+TEST(HealthMonitorTest, ReportsMissingRecognizedFaysCameraAsError2)
+{
+    const fs::path temp_dir = MakeTempDir();
+    const fs::path stereo_status = temp_dir / "stereo_status.json";
+    std::ofstream(stereo_status) << R"({
+        "ready": false,
+        "service_state": "not-ready",
+        "cameras": {
+            "left_stereo": {
+                "ready": false,
+                "state": "stereo-symlink-missing",
+                "stereo_symlink_online": false,
+                "imu_symlink_online": true
+            },
+            "right_stereo": {
+                "ready": true,
+                "state": "ready",
+                "stereo_symlink_online": true,
+                "imu_symlink_online": true
+            }
+        }
+    })";
+
+    HealthMonitor monitor(
+        {.disk_root = temp_dir.string(),
+         .stereo_status_file = stereo_status.string(),
+         .critical_device_paths = {"/dev/cam0"},
+         .poll_interval_ms = 1000,
+         .hmi_active_timeout_ms = 2500},
+        {.is_disk_writable =
+             [](const std::string&) {
+                 return true;
+             },
+         .path_exists =
+             [](const std::string&) {
+                 return true;
+             },
+         .get_process_status =
+             [](WorkerName) {
+                 return ProcessStatus{.state = ProcessState::Running, .running = true, .pid = 7};
+             },
+         .get_hmi_health =
+             [](uint64_t) {
+                 return HmiHealthSnapshot{
+                     .has_connected_device = true,
+                     .input_connected = true,
+                     .input_active = true,
+                 };
+             }},
+        &FakeNowMs);
+
+    g_now_ms = 1500;
+    const auto result = monitor.Poll(HealthState{});
+    ASSERT_TRUE(result.checked);
+    ASSERT_TRUE(result.fault.has_value());
+    EXPECT_EQ(result.fault->key, "stereo_not_ready");
+    EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error2);
+    EXPECT_EQ(result.fault->side, HardwareFaultSide::Left);
+
+    fs::remove_all(temp_dir);
+}
+
 TEST(HealthMonitorTest, ClassifiesUnknownStereoNotReadyWithoutSideDetails)
 {
     const fs::path temp_dir = MakeTempDir();

@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+"""
+Read UGripper MCAP files as plain MCAP data.
+
+This script is intentionally a small, readable example for data consumers. It
+does not treat UGripper MCAP files as ROS 2 bags. Current UGripper episode MCAP
+files are generic MCAP containers with compact binary payloads:
+
+- sensor_left.mcap / sensor_right.mcap:
+  topic encoder_left / encoder_right, payload little-endian int32 raw + float32 rad
+- fays_data_left.mcap / fays_data_right.mcap:
+  topic i, payload little-endian float64[6] gx,gy,gz,ax,ay,az
+  topic c, payload little-endian uint32 frame_index
+- ego/sensor.mcap:
+  optional external ego data; decoded generically unless its payload is JSON/text
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as _dt
+import json
+import math
+import struct
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+try:
+    from mcap.reader import make_reader
+    from mcap.stream_reader import StreamReader
+except ImportError as exc:
+    raise SystemExit(
+        "Missing python mcap package. Install it with: python3 -m pip install --user mcap"
+    ) from exc
+
+
+EPISODE_MCAP_NAMES = (
+    "sensor_left.mcap",
+    "sensor_right.mcap",
+    "fays_data_left.mcap",
+    "fays_data_right.mcap",
+    "ego/sensor.mcap",
+)
+
+
+@dataclass
+class TopicStats:
+    topic: str
+    message_encoding: str = ""
+    schema_name: str = ""
+    schema_encoding: str = ""
+    count: int = 0
+    first_log_time_ns: int | None = None
+    last_log_time_ns: int | None = None
+    first_publish_time_ns: int | None = None
+    last_publish_time_ns: int | None = None
+    min_payload_bytes: int | None = None
+    max_payload_bytes: int = 0
+    total_payload_bytes: int = 0
+    max_gap_ns: int = 0
+    timestamp_regressions: int = 0
+    samples: list[dict[str, Any]] = field(default_factory=list)
+
+    def observe_time(self, log_time_ns: int, publish_time_ns: int | None) -> None:
+        if self.first_log_time_ns is None:
+            self.first_log_time_ns = log_time_ns
+        if self.last_log_time_ns is not None:
+            if log_time_ns < self.last_log_time_ns:
+                self.timestamp_regressions += 1
+            else:
+                self.max_gap_ns = max(self.max_gap_ns, log_time_ns - self.last_log_time_ns)
+        self.last_log_time_ns = log_time_ns
+
+        if publish_time_ns is not None:
+            if self.first_publish_time_ns is None:
+                self.first_publish_time_ns = publish_time_ns
+            self.last_publish_time_ns = publish_time_ns
+
+    def observe_payload(self, payload_size: int) -> None:
+        self.min_payload_bytes = (
+            payload_size if self.min_payload_bytes is None else min(self.min_payload_bytes, payload_size)
+        )
+        self.max_payload_bytes = max(self.max_payload_bytes, payload_size)
+        self.total_payload_bytes += payload_size
+
+    def to_json(self) -> dict[str, Any]:
+        span_ns = 0
+        if self.first_log_time_ns is not None and self.last_log_time_ns is not None:
+            span_ns = max(0, self.last_log_time_ns - self.first_log_time_ns)
+        hz = self.count / (span_ns / 1e9) if span_ns > 0 else 0.0
+        avg_payload = self.total_payload_bytes / self.count if self.count else 0.0
+        return {
+            "topic": self.topic,
+            "message_encoding": self.message_encoding,
+            "schema_name": self.schema_name,
+            "schema_encoding": self.schema_encoding,
+            "count": self.count,
+            "first_log_time_ns": self.first_log_time_ns,
+            "last_log_time_ns": self.last_log_time_ns,
+            "span_ns": span_ns,
+            "hz": hz,
+            "first_publish_time_ns": self.first_publish_time_ns,
+            "last_publish_time_ns": self.last_publish_time_ns,
+            "min_payload_bytes": self.min_payload_bytes or 0,
+            "max_payload_bytes": self.max_payload_bytes,
+            "avg_payload_bytes": avg_payload,
+            "max_gap_ns": self.max_gap_ns,
+            "timestamp_regressions": self.timestamp_regressions,
+            "samples": self.samples,
+        }
+
+
+def ns_to_text(ns: int | None) -> str:
+    if ns is None:
+        return "-"
+    try:
+        return _dt.datetime.fromtimestamp(ns / 1e9).strftime("%Y-%m-%d %H:%M:%S.%f")
+    except (OSError, OverflowError, ValueError):
+        return str(ns)
+
+
+def time_domain_hint(topic: str, log_time_ns: int) -> str:
+    if topic in {"i", "c"} and log_time_ns < 10_000_000_000_000_000:
+        return "device_time_ns"
+    return "unix_time_ns"
+
+
+def finite_float(value: float) -> float | str:
+    return value if math.isfinite(value) else str(value)
+
+
+def decode_payload(topic: str, payload: bytes, message_encoding: str, schema_name: str) -> tuple[str, Any]:
+    if topic.startswith("encoder_") and len(payload) >= 8:
+        raw, rad = struct.unpack("<if", payload[:8])
+        return "ugripper.encoder", {
+            "raw": int(raw),
+            "rad": finite_float(float(rad)),
+        }
+
+    if topic == "i" and len(payload) >= 48:
+        gx, gy, gz, ax, ay, az = struct.unpack("<6d", payload[:48])
+        return "ugripper.fays_imu", {
+            "gyro_rad_s": [finite_float(gx), finite_float(gy), finite_float(gz)],
+            "accel_m_s2": [finite_float(ax), finite_float(ay), finite_float(az)],
+        }
+
+    if topic == "c" and len(payload) >= 4:
+        (frame_index,) = struct.unpack("<I", payload[:4])
+        return "ugripper.fays_camera_ts", {"frame_index": int(frame_index)}
+
+    if message_encoding.lower().startswith("json") or schema_name.lower().endswith("json"):
+        try:
+            return "json", json.loads(payload.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+
+    try:
+        text = payload.decode("utf-8")
+        if all((ch == "\n" or ch == "\r" or ch == "\t" or ord(ch) >= 32) for ch in text):
+            return "text", text[:240]
+    except UnicodeDecodeError:
+        pass
+
+    return "binary", {
+        "size": len(payload),
+        "hex_prefix": payload[:32].hex(),
+    }
+
+
+def discover_mcap_paths(path: Path) -> list[Path]:
+    path = path.expanduser().resolve()
+    if path.is_file():
+        return [path]
+    if not path.is_dir():
+        raise FileNotFoundError(path)
+
+    episode_paths = [path / name for name in EPISODE_MCAP_NAMES if (path / name).is_file()]
+    if episode_paths:
+        return episode_paths
+
+    return sorted(path.rglob("*.mcap"))
+
+
+def iter_messages_with_fallback(path: Path):
+    with path.open("rb") as stream:
+        reader = make_reader(stream)
+        yielded = False
+        try:
+            for schema, channel, message in reader.iter_messages():
+                yielded = True
+                yield schema, channel, message
+        except Exception:
+            if yielded:
+                raise
+
+        if yielded:
+            return
+
+        stream.seek(0)
+        schemas = {}
+        channels = {}
+        for record in StreamReader(stream).records:
+            name = type(record).__name__
+            if name == "Schema":
+                schemas[record.id] = record
+            elif name == "Channel":
+                channels[record.id] = record
+            elif name == "Message":
+                channel = channels.get(record.channel_id)
+                if channel is not None:
+                    yield schemas.get(channel.schema_id), channel, record
+
+
+def read_mcap(path: Path, sample_limit: int, topic_filters: set[str] | None) -> dict[str, Any]:
+    topics: dict[str, TopicStats] = {}
+    file_error = None
+
+    try:
+        for schema, channel, message in iter_messages_with_fallback(path):
+            topic = getattr(channel, "topic", "")
+            if topic_filters and topic not in topic_filters:
+                continue
+
+            message_encoding = getattr(channel, "message_encoding", "") or ""
+            schema_name = getattr(schema, "name", "") if schema is not None else ""
+            schema_encoding = getattr(schema, "encoding", "") if schema is not None else ""
+            stats = topics.setdefault(
+                topic,
+                TopicStats(
+                    topic=topic,
+                    message_encoding=message_encoding,
+                    schema_name=schema_name,
+                    schema_encoding=schema_encoding,
+                ),
+            )
+
+            payload = bytes(getattr(message, "data", b""))
+            log_time_ns = int(getattr(message, "log_time", getattr(message, "logTime", 0)))
+            publish_time_ns = getattr(message, "publish_time", getattr(message, "publishTime", None))
+            publish_time_ns = int(publish_time_ns) if publish_time_ns is not None else None
+
+            stats.count += 1
+            stats.observe_time(log_time_ns, publish_time_ns)
+            stats.observe_payload(len(payload))
+
+            if len(stats.samples) < sample_limit:
+                decode_kind, decoded = decode_payload(topic, payload, message_encoding, schema_name)
+                sample = {
+                    "sequence": int(getattr(message, "sequence", 0)),
+                    "log_time_ns": log_time_ns,
+                    "log_time_text": ns_to_text(log_time_ns),
+                    "time_domain": time_domain_hint(topic, log_time_ns),
+                    "publish_time_ns": publish_time_ns,
+                    "decode": decode_kind,
+                    "payload_bytes": len(payload),
+                    "data": decoded,
+                }
+                if publish_time_ns is not None:
+                    sample["publish_minus_log_ms"] = (publish_time_ns - log_time_ns) / 1e6
+                stats.samples.append(sample)
+    except Exception as exc:
+        file_error = str(exc)
+
+    topic_values = [stats.to_json() for stats in sorted(topics.values(), key=lambda item: item.topic)]
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "size_bytes": path.stat().st_size if path.exists() else 0,
+        "error": file_error,
+        "topics": topic_values,
+    }
+
+
+def print_report(report: dict[str, Any], show_samples: bool) -> None:
+    for file_report in report["files"]:
+        print(f"\n== {file_report['path']}")
+        print(f"size={file_report['size_bytes']} bytes")
+        if file_report["error"]:
+            print(f"ERROR: {file_report['error']}")
+            continue
+        if not file_report["topics"]:
+            print("No messages matched.")
+            continue
+
+        header = (
+            f"{'topic':<18} {'count':>10} {'span(s)':>10} {'hz':>10} "
+            f"{'payload':>17} {'max_gap(ms)':>12} {'reg':>4}"
+        )
+        print(header)
+        print("-" * len(header))
+        for topic in file_report["topics"]:
+            span_s = topic["span_ns"] / 1e9
+            max_gap_ms = topic["max_gap_ns"] / 1e6
+            payload_range = f"{topic['min_payload_bytes']}-{topic['max_payload_bytes']}"
+            print(
+                f"{topic['topic']:<18} {topic['count']:>10} {span_s:>10.3f} "
+                f"{topic['hz']:>10.2f} {payload_range:>17} {max_gap_ms:>12.3f} "
+                f"{topic['timestamp_regressions']:>4}"
+            )
+
+            if show_samples:
+                for sample in topic["samples"]:
+                    print(
+                        "  "
+                        f"seq={sample['sequence']} "
+                        f"log={sample['log_time_text']} "
+                        f"time_domain={sample['time_domain']} "
+                        f"decode={sample['decode']} "
+                        f"data={json.dumps(sample['data'], ensure_ascii=False, separators=(',', ':'))}"
+                    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Read UGripper MCAP files or an episode directory as plain MCAP."
+    )
+    parser.add_argument("path", type=Path, help="MCAP file, episode directory, or directory containing MCAP files")
+    parser.add_argument("--topic", action="append", help="Topic to include; may be repeated")
+    parser.add_argument("--limit", type=int, default=3, help="Sample messages to decode per topic (default: 3)")
+    parser.add_argument("--no-samples", action="store_true", help="Only print topic summary")
+    parser.add_argument("--json-out", type=Path, help="Write full report JSON to this path")
+    args = parser.parse_args()
+
+    topic_filters = set(args.topic) if args.topic else None
+    try:
+        paths = discover_mcap_paths(args.path)
+    except Exception as exc:
+        print(f"failed to discover MCAP files: {exc}", file=sys.stderr)
+        return 2
+
+    report = {
+        "input": str(args.path),
+        "files": [read_mcap(path, max(0, args.limit), topic_filters) for path in paths],
+    }
+    print_report(report, show_samples=not args.no_samples)
+
+    if args.json_out:
+        args.json_out.parent.mkdir(parents=True, exist_ok=True)
+        args.json_out.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\njson_out={args.json_out}")
+
+    return 1 if any(file_report["error"] for file_report in report["files"]) else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

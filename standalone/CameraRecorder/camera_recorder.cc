@@ -78,6 +78,12 @@ constexpr int kStereoSessionMaxRestartAttempts = 2;
 constexpr int64_t kUsPerSecond = 1'000'000;
 constexpr uint64_t kMainCameraLeakyQueueMaxTimeNs = 5ULL * 1000ULL * 1000ULL * 1000ULL;
 
+#ifndef UGRIPPER_ENABLE_PERF_LOG
+#define UGRIPPER_ENABLE_PERF_LOG 0
+#endif
+
+constexpr bool kPerfLogEnabled = UGRIPPER_ENABLE_PERF_LOG != 0;
+
 void SignalHandler(int) {
     g_stop_requested.store(true, std::memory_order_relaxed);
 }
@@ -325,6 +331,32 @@ std::string ReadEnvFileValue(const std::string& key) {
         return value;
     }
     return "";
+}
+
+bool PerfLogEnabled() {
+    return kPerfLogEnabled;
+}
+
+bool ContainsAny(const std::string& text, const std::vector<std::string>& needles) {
+    return std::any_of(needles.begin(), needles.end(), [&text](const std::string& needle) {
+        return text.find(needle) != std::string::npos;
+    });
+}
+
+bool IsNoisyRecorderLogLine(const std::string& line) {
+    if (line.rfind("frame=", 0) == 0 ||
+        line.rfind("fps=", 0) == 0 ||
+        line.rfind("out_time_us=", 0) == 0 ||
+        line.rfind("out_time_ms=", 0) == 0 ||
+        line.rfind("progress=", 0) == 0) {
+        return true;
+    }
+    static const std::vector<std::string> noisyTokens = {
+        "MPP", "mpp", "rk_mpp", "rkmpp", "RGA", "rga",
+        "Stereo FPS:", "IMU FPS:", "GST_DEBUG", "Redistribute latency",
+        "Pipeline is PREROLLING", "Pipeline is PLAYING", "New clock:"
+    };
+    return ContainsAny(line, noisyTokens);
 }
 
 std::string ResolveCodec(const std::string& cli_codec) {
@@ -782,6 +814,9 @@ protected:
             return;
         }
 
+        if (!PerfLogEnabled() && IsNoisyRecorderLogLine(line)) {
+            return;
+        }
         DM_LOG_INFO("{}", (::DA::utils::LogString() << "[" << config_.name << "] " << line).str());
     }
 
@@ -1100,9 +1135,9 @@ private:
         RetryIoctl(fd_, VIDIOC_S_PARM, &streamparm);
 
         v4l2_requestbuffers request{};
-        // Keep a deeper V4L2 compressed buffer pool so short user-space stalls
-        // under multi-camera contention are less likely to drop reference units.
-        request.count = 32;
+        // Keep enough compressed V4L2 buffers to absorb short stalls while
+        // reducing contiguous DMA pressure during multi-camera startup.
+        request.count = 24;
         request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         request.memory = V4L2_MEMORY_MMAP;
         if (!RetryIoctl(fd_, VIDIOC_REQBUFS, &request) || request.count < 2) {

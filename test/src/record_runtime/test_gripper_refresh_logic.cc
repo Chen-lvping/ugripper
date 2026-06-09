@@ -8,6 +8,7 @@ using ugripper::runtime::AdvancePendingGripperRefresh;
 using ugripper::runtime::ApplyGripperConnectionEvent;
 using ugripper::runtime::GripperRefreshAction;
 using ugripper::runtime::GripperRefreshRuntimeView;
+using ugripper::runtime::ShouldMarkTactileReferencePending;
 
 TEST(GripperRefreshLogicTest, ConnectedEventMarksStateAsReconnectingAndPending)
 {
@@ -108,6 +109,12 @@ TEST(GripperRefreshLogicTest, NoPendingRefreshProducesNoAction)
     EXPECT_EQ(action, GripperRefreshAction::None);
     EXPECT_FALSE(pending_refresh);
     EXPECT_TRUE(state.connected);
+}
+
+TEST(GripperRefreshLogicTest, TactileReferencePendingOnlyFollowsReconnectRefresh)
+{
+    EXPECT_FALSE(ShouldMarkTactileReferencePending(false));
+    EXPECT_TRUE(ShouldMarkTactileReferencePending(true));
 }
 
 }  // namespace

@@ -151,6 +151,79 @@ bool IsHardwareErrorType(const std::string& error_type)
            error_type == ugripper::runtime::kErrorTypeDeviceDisconnected;
 }
 
+bool IsStereoControlErrorType(const std::string& error_type)
+{
+    return error_type == ugripper::runtime::kErrorTypeStereoControlFailed;
+}
+
+bool ContainsAny(const std::string& text, std::initializer_list<const char*> needles)
+{
+    for (const char* needle : needles)
+    {
+        if (needle != nullptr && *needle != '\0' && text.find(needle) != std::string::npos)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsStereoDeviceMissingFailure(const std::string& text)
+{
+    return ContainsAny(text,
+                       {
+                           "devices missing",
+                           "symlink missing",
+                           "stereo-symlink-missing",
+                           "imu-symlink-missing",
+                           "Critical device nodes missing",
+                       });
+}
+
+bool IsStereoControlFailureText(const std::string& text)
+{
+    if (text.empty() || IsStereoDeviceMissingFailure(text))
+    {
+        return false;
+    }
+    return ContainsAny(text,
+                       {
+                           "Fays recorder unhealthy",
+                           "recorder unhealthy",
+                           "failed to start left Fays daemon",
+                           "failed to start right Fays daemon",
+                           "failed to start left Fays session",
+                           "failed to start right Fays session",
+                           "failed to stop left Fays recorder",
+                           "failed to stop right Fays recorder",
+                           "control FIFO startup timeout",
+                           "startup timeout waiting FIFO",
+                           "FIFO missing while device paths are online",
+                           "process-not-ready",
+                           "warmup frame stale",
+                           "runtime-status-missing",
+                           "calibration-",
+                           "serial-missing",
+                           "calibration/serial not ready",
+                       });
+}
+
+std::string StereoControlReconnectHint(ugripper::runtime::HardwareFaultSide side)
+{
+    switch (side)
+    {
+    case ugripper::runtime::HardwareFaultSide::Left:
+        return "left stereo control failed; unplug/replug the left gripper. Software reset is not expected to recover it.";
+    case ugripper::runtime::HardwareFaultSide::Right:
+        return "right stereo control failed; unplug/replug the right gripper. Software reset is not expected to recover it.";
+    case ugripper::runtime::HardwareFaultSide::Both:
+        return "both stereo controls failed; unplug/replug the affected grippers. Software reset is not expected to recover it.";
+    case ugripper::runtime::HardwareFaultSide::Unknown:
+    default:
+        return "stereo control failed; unplug/replug the affected gripper. Software reset is not expected to recover it.";
+    }
+}
+
 std::string SelectPrimaryErrorType(const std::vector<std::string>& error_types)
 {
     for (const std::string& error_type : error_types)
@@ -167,8 +240,16 @@ std::string SelectPrimaryErrorType(const std::vector<std::string>& error_types)
             return error_type;
         }
     }
+    for (const std::string& error_type : error_types)
+    {
+        if (IsStereoControlErrorType(error_type))
+        {
+            return error_type;
+        }
+    }
     for (const char* preferred : {
              ugripper::runtime::kErrorTypeRuntimeError,
+             ugripper::runtime::kErrorTypeStereoControlFailed,
              ugripper::runtime::kErrorTypeFinalizeError,
              ugripper::runtime::kErrorTypeCalibrationError,
              ugripper::runtime::kErrorTypeMissingFile,
@@ -202,6 +283,13 @@ ugripper::runtime::RuntimeLedState SelectFailureLedState(const std::vector<std::
             return ugripper::runtime::RuntimeLedState::Error2;
         }
     }
+    for (const std::string& error_type : error_types)
+    {
+        if (IsStereoControlErrorType(error_type))
+        {
+            return ugripper::runtime::RuntimeLedState::Error4;
+        }
+    }
     if (HasErrorType(error_types, ugripper::runtime::kErrorTypeRuntimeError))
     {
         return ugripper::runtime::RuntimeLedState::Error5;
@@ -213,6 +301,27 @@ ugripper::runtime::RuntimeLedState SelectFailureLedState(const std::vector<std::
 std::string SelectStopFailureAudioCommand(ugripper::runtime::RuntimeLedState led_state)
 {
     return led_state == ugripper::runtime::RuntimeLedState::Error1 ? "validation_failed" : "error";
+}
+
+void ApplyFailureLedState(const ugripper::runtime::RecordingOrchestrator::Dependencies& dependencies,
+                          ugripper::runtime::RuntimeLedState led_state,
+                          ugripper::runtime::HardwareFaultSide side)
+{
+    if (led_state == ugripper::runtime::RuntimeLedState::Error4 &&
+        dependencies.set_hardware_fault_led_state != nullptr)
+    {
+        dependencies.set_hardware_fault_led_state(ugripper::runtime::HealthFault{
+            led_state,
+            side,
+            ugripper::runtime::kErrorTypeStereoControlFailed,
+            StereoControlReconnectHint(side),
+        });
+        return;
+    }
+    if (dependencies.set_led_state != nullptr)
+    {
+        dependencies.set_led_state(led_state, 0.0);
+    }
 }
 
 }  // namespace
@@ -374,7 +483,8 @@ HealthMonitor::PollResult HealthMonitor::Poll(const HealthState& current_state) 
             (result.fault->key == "stereo_daemon_not_running" ||
              result.fault->key == "stereo_status_missing" ||
              result.fault->key == "stereo_status_invalid" ||
-             result.fault->key == "stereo_not_ready");
+             result.fault->key == "stereo_not_ready" ||
+             result.fault->key == ugripper::runtime::kErrorTypeStereoControlFailed);
         if (startup_grace_active)
         {
             result.fault.reset();
@@ -469,6 +579,7 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
         if (!stereo_status.value("ready", false))
         {
             HardwareFaultSide side = HardwareFaultSide::Unknown;
+            HardwareFaultSide control_failure_side = HardwareFaultSide::Unknown;
             if (stereo_status.contains("cameras") && stereo_status["cameras"].is_object())
             {
                 const json& cameras = stereo_status["cameras"];
@@ -476,12 +587,39 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
                     !cameras["left_stereo"].value("ready", false))
                 {
                     side = MergeSides(side, HardwareFaultSide::Left);
+                    const json& camera = cameras["left_stereo"];
+                    const bool devices_online = camera.value("stereo_symlink_online", false) &&
+                                                camera.value("imu_symlink_online", false);
+                    const std::string state = camera.value("state", std::string());
+                    if (devices_online && IsStereoControlFailureText(state))
+                    {
+                        control_failure_side = MergeSides(control_failure_side, HardwareFaultSide::Left);
+                    }
                 }
                 if (cameras.contains("right_stereo") && cameras["right_stereo"].is_object() &&
                     !cameras["right_stereo"].value("ready", false))
                 {
                     side = MergeSides(side, HardwareFaultSide::Right);
+                    const json& camera = cameras["right_stereo"];
+                    const bool devices_online = camera.value("stereo_symlink_online", false) &&
+                                                camera.value("imu_symlink_online", false);
+                    const std::string state = camera.value("state", std::string());
+                    if (devices_online && IsStereoControlFailureText(state))
+                    {
+                        control_failure_side = MergeSides(control_failure_side, HardwareFaultSide::Right);
+                    }
                 }
+            }
+            if (control_failure_side != HardwareFaultSide::Unknown)
+            {
+                return HealthFault{
+                    RuntimeLedState::Error4,
+                    control_failure_side,
+                    ugripper::runtime::kErrorTypeStereoControlFailed,
+                    "Stereo warmup control failed: " +
+                        stereo_status.value("service_state", std::string("unknown")) + "; " +
+                        StereoControlReconnectHint(control_failure_side),
+                };
             }
             return HealthFault{
                 RuntimeLedState::Error2,
@@ -894,6 +1032,9 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
     {
         CallLog(dependencies_.log_error,
                 "failed to start stereo session for episode " + state_.current_episode_dir);
+        const bool stereo_control_failed = IsStereoControlFailureText(local_error);
+        const HardwareFaultSide stereo_failure_side =
+            stereo_control_failed ? SideForText(local_error) : HardwareFaultSide::Unknown;
         if (dependencies_.stop_worker != nullptr)
         {
             dependencies_.stop_worker(WorkerName::CameraRecorder, "stereo session start failed", nullptr);
@@ -904,10 +1045,9 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
         {
             dependencies_.remove_recording_lock();
         }
-        if (dependencies_.set_led_state != nullptr)
-        {
-            dependencies_.set_led_state(RuntimeLedState::Error5, 0.0);
-        }
+        ApplyFailureLedState(dependencies_,
+                             stereo_control_failed ? RuntimeLedState::Error4 : RuntimeLedState::Error5,
+                             stereo_failure_side);
         if (dependencies_.set_audio_recovery_command != nullptr)
         {
             dependencies_.set_audio_recovery_command("error");
@@ -1144,13 +1284,17 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
 
     std::string episode_validation_error;
     std::string final_error_message = due_to_error ? reason : std::string();
+    HardwareFaultSide stereo_control_failure_side = HardwareFaultSide::Unknown;
     if (!stereo_stop_ok)
     {
-        AddErrorType(&error_types, kErrorTypeFinalizeError);
         std::string stereo_failure;
         if (!stereo_finalize_error.empty())
         {
             stereo_failure = stereo_finalize_error;
+        }
+        else if (!stereo_error.empty())
+        {
+            stereo_failure = stereo_error;
         }
         else if (!merge_error.empty())
         {
@@ -1159,6 +1303,21 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
         else
         {
             stereo_failure = "stereo session finalize failed";
+        }
+
+        if (IsStereoControlFailureText(stereo_failure))
+        {
+            AddErrorType(&error_types, kErrorTypeStereoControlFailed);
+            stereo_control_failure_side = SideForText(stereo_failure);
+            const std::string reconnect_hint = StereoControlReconnectHint(stereo_control_failure_side);
+            if (stereo_failure.find(reconnect_hint) == std::string::npos)
+            {
+                stereo_failure += "; " + reconnect_hint;
+            }
+        }
+        else
+        {
+            AddErrorType(&error_types, kErrorTypeFinalizeError);
         }
 
         if (final_error_message.empty())
@@ -1285,7 +1444,7 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     {
         if (dependencies_.set_led_state != nullptr)
         {
-            dependencies_.set_led_state(failure_led_state, 0.0);
+            ApplyFailureLedState(dependencies_, failure_led_state, stereo_control_failure_side);
         }
         if (dependencies_.set_audio_recovery_command != nullptr)
         {
@@ -1314,7 +1473,7 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     {
         if (dependencies_.set_led_state != nullptr)
         {
-            dependencies_.set_led_state(failure_led_state, 0.0);
+            ApplyFailureLedState(dependencies_, failure_led_state, stereo_control_failure_side);
         }
         if (dependencies_.set_audio_recovery_command != nullptr)
         {

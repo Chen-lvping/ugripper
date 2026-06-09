@@ -134,6 +134,10 @@ target_link_libraries(${APP_NAME}
         Threads::Threads
         ${UUID_LIBRARY}
 )
+target_compile_definitions(${APP_NAME}
+    PRIVATE
+        UGRIPPER_ENABLE_PERF_LOG=$<BOOL:${UGRIPPER_ENABLE_PERF_LOG}>
+)
 
 install(TARGETS ${APP_NAME}
     RUNTIME DESTINATION bin/UgripperRuntime

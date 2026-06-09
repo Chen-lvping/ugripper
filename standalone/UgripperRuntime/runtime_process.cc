@@ -1089,7 +1089,7 @@ bool StereoSessionClient::WaitForFinalize(const std::string& episode_dir,
                 return false;
             }
 
-            if (!status.last_finalize_error.empty() && !status.finalize_pending &&
+            if (!status.last_finalize_error.empty() &&
                 (status.active_episode_dir.empty() || status.active_episode_dir == episode_dir))
             {
                 if (error_message != nullptr)

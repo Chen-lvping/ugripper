@@ -57,6 +57,14 @@ now_ms() {
     date +%s%3N
 }
 
+fays_ts() {
+    date +"%H:%M:%S.%6N"
+}
+
+fays_log() {
+    printf '[FAYS_TS %s] [fays_stereo_daemon] %s\n' "$(fays_ts)" "$*" >&2
+}
+
 usage() {
     cat <<'EOF'
 Usage:
@@ -273,6 +281,10 @@ def camera_state(name, process_ready, config_path, calibration, runtime):
         state = "serial-missing"
     elif process_ready and not calibration.get("valid"):
         state = "calibration-" + str(calibration.get("status", "invalid"))
+    elif process_ready and runtime.get("status") in ("missing", "disabled"):
+        state = "runtime-status-missing"
+    elif not process_ready and stereo_online and imu_online:
+        state = "process-not-ready"
     elif not process_ready:
         state = "process-not-ready"
     return {
@@ -368,12 +380,30 @@ PY
 
 wait_for_fifo() {
     local fifo="$1"
-    local deadline=$((SECONDS + 8))
+    local timeout_sec="${2:-8}"
+    local deadline=$((SECONDS + timeout_sec))
     while [ "$SECONDS" -lt "$deadline" ]; do
         [ -p "$fifo" ] && return 0
         sleep 0.1
     done
     return 1
+}
+
+log_fifo_startup_timeout() {
+    local side="$1"
+    local fifo="$2"
+    local pid="$3"
+    local config="$4"
+    local runtime_status_json="$5"
+    local process_alive=false
+    local stereo_path imu_path stereo_resolved="" imu_resolved=""
+
+    kill -0 "$pid" 2>/dev/null && process_alive=true
+    stereo_path="$(config_value "$config" stereo_dev_port)"
+    imu_path="$(config_value "$config" imu_dev_port)"
+    [ -n "$stereo_path" ] && stereo_resolved="$(readlink -f "$stereo_path" 2>/dev/null || true)"
+    [ -n "$imu_path" ] && imu_resolved="$(readlink -f "$imu_path" 2>/dev/null || true)"
+    fays_log "$side stereo control FIFO startup timeout: fifo=$fifo pid=$pid process_alive=$process_alive runtime_status_exists=$([ -f "$runtime_status_json" ] && echo true || echo false) stereo=${stereo_path:-<empty>} resolved_stereo=${stereo_resolved:-<missing>} imu=${imu_path:-<empty>} resolved_imu=${imu_resolved:-<missing>}"
 }
 
 wait_for_process_exit() {
@@ -416,7 +446,7 @@ terminate_process_tree() {
 
     pgid="$(process_group_id "$pid")"
     self_pgid="$(current_process_group_id)"
-    echo "$label: sending SIGTERM to pid=$pid pgid=${pgid:-unknown}" >&2
+    fays_log "$label: SIGTERM pid=$pid pgid=${pgid:-unknown}"
     if [ -n "$pgid" ] && [ "$pgid" != "$self_pgid" ]; then
         kill -TERM "-$pgid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
     else
@@ -426,7 +456,7 @@ terminate_process_tree() {
         return 0
     fi
 
-    echo "$label: sending SIGKILL to pid=$pid pgid=${pgid:-unknown}" >&2
+    fays_log "$label: SIGKILL pid=$pid pgid=${pgid:-unknown}"
     if [ -n "$pgid" ] && [ "$pgid" != "$self_pgid" ]; then
         kill -KILL "-$pgid" 2>/dev/null || kill -KILL "$pid" 2>/dev/null || true
     else
@@ -474,7 +504,7 @@ log_side_port_users() {
     local config="$2"
     local node
 
-    echo "$side Fays video port users:" >&2
+    fays_log "$side video port users:"
     while IFS= read -r node; do
         [ -n "$node" ] || continue
         echo "  $node" >&2
@@ -501,7 +531,7 @@ EOF
     pids="$(printf '%s\n' "$pids" | awk 'NF && !seen[$0]++')"
     [ -n "$pids" ] || return 0
 
-    echo "$side Fays video ports still busy; killing holders before restart" >&2
+    fays_log "$side video ports still busy; killing holders before restart"
     printf '%s\n' "$pids" | while IFS= read -r pid; do
         [ -n "$pid" ] || continue
         [ "$pid" != "$$" ] || continue
@@ -550,7 +580,7 @@ wait_kill_and_confirm_side_ports_free() {
         return 0
     fi
 
-    echo "$side Fays video ports did not become free after ${PORT_FREE_TIMEOUT_SEC}s" >&2
+    fays_log "$side video ports did not become free after ${PORT_FREE_TIMEOUT_SEC}s"
     log_side_port_users "$side" "$config"
     kill_side_port_users "$side" "$config" "$tracked_pid"
 
@@ -558,7 +588,7 @@ wait_kill_and_confirm_side_ports_free() {
         return 0
     fi
 
-    echo "$side Fays video ports are still busy after forced cleanup" >&2
+    fays_log "$side video ports are still busy after forced cleanup"
     log_side_port_users "$side" "$config"
     return 1
 }
@@ -575,7 +605,7 @@ cleanup_stale_fays_recorders() {
         [ "$pid" != "$$" ] || continue
         case "$cmd" in
             *"$executable"*)
-                echo "stale Fays recorder found on daemon startup: pid=$pid cmd=$cmd" >&2
+                fays_log "stale recorder found on daemon startup: pid=$pid cmd=$cmd"
                 terminate_process_tree "$pid" "stale Fays recorder"
                 ;;
         esac
@@ -593,15 +623,15 @@ check_side_device_paths() {
     imu_path="$(config_value "$config" imu_dev_port)"
 
     if [ -z "$stereo_path" ] || [ "$stereo_path" = "NULL" ] || [ ! -e "$stereo_path" ]; then
-        [ "$quiet" = "true" ] || echo "$side Fays stereo symlink missing: ${stereo_path:-<empty>}" >&2
+        [ "$quiet" = "true" ] || fays_log "$side stereo symlink missing: ${stereo_path:-<empty>}"
         return 1
     fi
     if [ -z "$imu_path" ] || [ "$imu_path" = "NULL" ] || [ ! -e "$imu_path" ]; then
-        [ "$quiet" = "true" ] || echo "$side Fays IMU symlink missing: ${imu_path:-<empty>}" >&2
+        [ "$quiet" = "true" ] || fays_log "$side IMU symlink missing: ${imu_path:-<empty>}"
         return 1
     fi
     if [ "$require_fifo" = "true" ] && [ ! -p "$fifo" ]; then
-        [ "$quiet" = "true" ] || echo "$side Fays FIFO missing: $fifo" >&2
+        [ "$quiet" = "true" ] || fays_log "$side FIFO missing: $fifo"
         return 1
     fi
     return 0
@@ -651,7 +681,7 @@ wait_for_side_symlinks_stable() {
         sleep 0.1
     done
 
-    echo "$side Fays symlinks did not become stable before daemon start: stereo=${stereo_path:-<empty>} imu=${imu_path:-<empty>}" >&2
+    fays_log "$side symlinks did not become stable before daemon start: stereo=${stereo_path:-<empty>} imu=${imu_path:-<empty>}"
     return 1
 }
 
@@ -739,7 +769,7 @@ check_side_working_state() {
         return 1
     fi
     if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-        [ "$quiet" = "true" ] || echo "$side Fays process not running" >&2
+        [ "$quiet" = "true" ] || fays_log "$side process not running"
         return 1
     fi
     if calibration_serial "$calib_json" >/dev/null 2>&1; then
@@ -749,13 +779,13 @@ check_side_working_state() {
         if side_in_health_grace "$side"; then
             return 0
         fi
-        [ "$quiet" = "true" ] || echo "$side Fays warmup frame stale after ${FRAME_STALE_SEC}s" >&2
+        [ "$quiet" = "true" ] || fays_log "$side warmup frame stale after ${FRAME_STALE_SEC}s"
         return 1
     fi
     if side_in_health_grace "$side"; then
         return 0
     fi
-    [ "$quiet" = "true" ] || echo "$side Fays calibration/serial not ready after ${HEALTH_GRACE_SEC}s: $calib_json" >&2
+    [ "$quiet" = "true" ] || fays_log "$side calibration/serial not ready after ${HEALTH_GRACE_SEC}s: $calib_json"
     return 1
 }
 
@@ -766,7 +796,7 @@ dump_side_calibration() {
 
     rm -f "$calib_json"
     if ! "$RUN_FAYS_RECORD" --config "$config" --calib-json "$calib_json" dump-calib-json; then
-        echo "Warning: failed to dump $side Fays calibration before daemon start: $calib_json" >&2
+        fays_log "warning: failed to dump $side calibration before daemon start: $calib_json"
         return 1
     fi
     return 0
@@ -793,6 +823,7 @@ start_side_daemon() {
 
     wait_for_side_symlinks_stable "$side" "$config" || return 1
     wait_kill_and_confirm_side_ports_free "$side" "$config" || return 1
+    fays_log "$side recorder start requested: config=$config fifo=$fifo video=$video_name mcap=$mcap_name delay_s=$START_DELAY_SEC"
     sleep "$START_DELAY_SEC"
     rm -f "$fifo"
     rm -f "$runtime_status_json"
@@ -805,8 +836,8 @@ start_side_daemon() {
         --status-json "$runtime_status_json" \
         daemon &
     local pid="$!"
-    if ! wait_for_fifo "$fifo"; then
-        echo "Timed out waiting for $side Fays FIFO: $fifo" >&2
+    if ! wait_for_fifo "$fifo" 8; then
+        log_fifo_startup_timeout "$side" "$fifo" "$pid" "$config" "$runtime_status_json"
         terminate_process_tree "$pid" "$side Fays recorder failed startup"
         return 1
     fi
@@ -818,6 +849,7 @@ start_side_daemon() {
         RIGHT_PID="$pid"
         RIGHT_STARTED_AT="$SECONDS"
     fi
+    fays_log "$side recorder started: pid=$pid fifo=$fifo"
 }
 
 stop_side_daemon() {
@@ -833,11 +865,12 @@ stop_side_daemon() {
     fi
 
     if [ -p "$fifo" ]; then
+        fays_log "$side recorder stop requested via FIFO: pid=${pid:-none} fifo=$fifo"
         send_side_command "$fifo" exit >/dev/null 2>&1 || true
     fi
     if [ -n "$pid" ]; then
         if ! wait_for_process_exit "$pid" "$EXIT_GRACE_SEC"; then
-            echo "$side Fays recorder did not exit after EXIT command; sending SIGTERM" >&2
+            fays_log "$side recorder did not exit after EXIT command; escalating pid=$pid"
             terminate_process_tree "$pid" "$side Fays recorder"
         fi
     fi
@@ -865,7 +898,7 @@ maintain_side_daemon() {
 
     if ! check_side_device_paths "$side" "$config" "$fifo" false true; then
         if [ -n "$pid" ] || [ -p "$fifo" ]; then
-            echo "$side Fays devices disappeared; stopping only $side recorder" >&2
+            fays_log "$side devices disappeared; stopping recorder pid=${pid:-none}"
             stop_side_daemon "$side" "$fifo" "$pid"
         fi
         mark_session_error "$side Fays devices missing"
@@ -878,17 +911,22 @@ maintain_side_daemon() {
     fi
 
     if [ -n "$pid" ] || [ -p "$fifo" ]; then
-        echo "$side Fays recorder is not healthy; restarting only $side recorder" >&2
+        fays_log "$side recorder unhealthy; restarting pid=${pid:-none} recording=$RECORDING finalizing=$FINALIZE_PENDING"
         mark_session_error "$side Fays recorder unhealthy during session"
         stop_side_daemon "$side" "$fifo" "$pid"
     fi
 
     if start_side_daemon "$side" "$config" "$fifo" "$video_name" "$mcap_name" "$calib_json"; then
-        echo "$side Fays recorder started" >&2
+        fays_log "$side recorder maintain start ok"
         return 0
     fi
 
-    mark_session_error "failed to start $side Fays daemon"
+    if check_side_device_paths "$side" "$config" "$fifo" false true; then
+        mark_session_error "$side stereo control FIFO startup timeout"
+    else
+        mark_session_error "failed to start $side Fays daemon"
+    fi
+    fays_log "$side recorder maintain start failed"
     stop_side_daemon "$side" "$fifo" "$pid"
     return 0
 }
@@ -906,7 +944,7 @@ handle_multi_device_health() {
     left_serial="$(calibration_serial "$LEFT_CALIB_JSON" 2>/dev/null || true)"
     right_serial="$(calibration_serial "$RIGHT_CALIB_JSON" 2>/dev/null || true)"
     if [ -n "$left_serial" ] && [ "$left_serial" = "$right_serial" ]; then
-        echo "Fays serial collision detected; restarting both recorders: $left_serial" >&2
+        fays_log "serial collision detected; restarting both recorders: serial=$left_serial"
         mark_session_error "duplicate Fays serial detected during session: $left_serial"
         stop_side_daemon left "$LEFT_FIFO" "$LEFT_PID"
         stop_side_daemon right "$RIGHT_FIFO" "$RIGHT_PID"
@@ -1003,11 +1041,13 @@ check_runtime_health_during_finalize() {
     fi
     if ! runtime_frame_fresh left; then
         LAST_FINALIZE_ERROR="left Fays warmup frame stale during session"
+        fays_log "finalize health error: $LAST_FINALIZE_ERROR episode=$ACTIVE_EPISODE_DIR"
         write_status
         return 0
     fi
     if ! runtime_frame_fresh right; then
         LAST_FINALIZE_ERROR="right Fays warmup frame stale during session"
+        fays_log "finalize health error: $LAST_FINALIZE_ERROR episode=$ACTIVE_EPISODE_DIR"
         write_status
         return 0
     fi
@@ -1050,22 +1090,37 @@ PY
 handle_start() {
     local episode_dir="$1"
     local start_us="$2"
+    local missing_fifos=()
 
     LAST_FINALIZE_ERROR=""
     LAST_SESSION_JSON="{}"
     FINALIZE_PENDING=false
+    fays_log "session start requested: episode=$episode_dir start_us=$start_us"
     if [ ! -p "$LEFT_FIFO" ] || [ ! -p "$RIGHT_FIFO" ]; then
-        LAST_FINALIZE_ERROR="cannot start stereo session before both Fays recorders are ready"
+        [ -p "$LEFT_FIFO" ] || missing_fifos+=("left")
+        [ -p "$RIGHT_FIFO" ] || missing_fifos+=("right")
+        if [ "${#missing_fifos[@]}" -eq 1 ] &&
+           check_side_device_paths "${missing_fifos[0]}" \
+               "$([ "${missing_fifos[0]}" = "left" ] && echo "$LEFT_CONFIG" || echo "$RIGHT_CONFIG")" \
+               "$([ "${missing_fifos[0]}" = "left" ] && echo "$LEFT_FIFO" || echo "$RIGHT_FIFO")" \
+               false true; then
+            LAST_FINALIZE_ERROR="${missing_fifos[0]} FIFO missing while device paths are online"
+        else
+            LAST_FINALIZE_ERROR="cannot start stereo session before both Fays recorders are ready"
+        fi
+        fays_log "session start failed: $LAST_FINALIZE_ERROR"
         write_status
         return 1
     fi
     send_side_start "$LEFT_FIFO" "$episode_dir" || {
         LAST_FINALIZE_ERROR="failed to start left Fays session"
+        fays_log "session start failed: $LAST_FINALIZE_ERROR"
         write_status
         return 1
     }
     send_side_start "$RIGHT_FIFO" "$episode_dir" || {
         LAST_FINALIZE_ERROR="failed to start right Fays session"
+        fays_log "session start failed: $LAST_FINALIZE_ERROR"
         write_status
         return 1
     }
@@ -1073,6 +1128,7 @@ handle_start() {
     ACTIVE_START_US="$start_us"
     ACTIVE_STOP_US=0
     RECORDING=true
+    fays_log "session started: episode=$episode_dir"
     write_status
 }
 
@@ -1087,38 +1143,61 @@ handle_stop() {
     RECORDING=false
     FINALIZE_PENDING=true
     ACTIVE_STOP_US="$stop_us"
+    fays_log "session stop requested: episode=$episode_dir stop_us=$stop_us"
     write_status
+    check_runtime_health_during_finalize
+    [ -z "$LAST_FINALIZE_ERROR" ] || write_status
 
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        send_side_command "$LEFT_FIFO" stop || LAST_FINALIZE_ERROR="failed to stop left Fays recorder"
+        send_side_command "$LEFT_FIFO" stop || {
+            LAST_FINALIZE_ERROR="failed to stop left Fays recorder"
+            fays_log "session stop error: $LAST_FINALIZE_ERROR"
+        }
     else
         send_side_command "$LEFT_FIFO" stop >/dev/null 2>&1 || true
     fi
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        send_side_command "$RIGHT_FIFO" stop || LAST_FINALIZE_ERROR="failed to stop right Fays recorder"
+        send_side_command "$RIGHT_FIFO" stop || {
+            LAST_FINALIZE_ERROR="failed to stop right Fays recorder"
+            fays_log "session stop error: $LAST_FINALIZE_ERROR"
+        }
     else
         send_side_command "$RIGHT_FIFO" stop >/dev/null 2>&1 || true
     fi
 
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        wait_for_file_nonempty "$episode_dir/stereo_left.mkv" || LAST_FINALIZE_ERROR="stereo_left.mkv missing or empty"
+        wait_for_file_nonempty "$episode_dir/stereo_left.mkv" || {
+            LAST_FINALIZE_ERROR="stereo_left.mkv missing or empty"
+            fays_log "session finalize error: $LAST_FINALIZE_ERROR"
+        }
     fi
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        wait_for_file_nonempty "$episode_dir/stereo_right.mkv" || LAST_FINALIZE_ERROR="stereo_right.mkv missing or empty"
+        wait_for_file_nonempty "$episode_dir/stereo_right.mkv" || {
+            LAST_FINALIZE_ERROR="stereo_right.mkv missing or empty"
+            fays_log "session finalize error: $LAST_FINALIZE_ERROR"
+        }
     fi
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        wait_for_mcap_complete "$episode_dir/fays_data_left.mcap" || LAST_FINALIZE_ERROR="fays_data_left.mcap missing or incomplete"
+        wait_for_mcap_complete "$episode_dir/fays_data_left.mcap" || {
+            LAST_FINALIZE_ERROR="fays_data_left.mcap missing or incomplete"
+            fays_log "session finalize error: $LAST_FINALIZE_ERROR"
+        }
     fi
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
-        wait_for_mcap_complete "$episode_dir/fays_data_right.mcap" || LAST_FINALIZE_ERROR="fays_data_right.mcap missing or incomplete"
+        wait_for_mcap_complete "$episode_dir/fays_data_right.mcap" || {
+            LAST_FINALIZE_ERROR="fays_data_right.mcap missing or incomplete"
+            fays_log "session finalize error: $LAST_FINALIZE_ERROR"
+        }
     fi
 
     if [ -z "$LAST_FINALIZE_ERROR" ]; then
         LAST_SESSION_JSON="$(build_last_session_json "$episode_dir" "$ACTIVE_START_US" "$stop_us")"
         LAST_FINALIZED_EPISODE_DIR="$episode_dir"
+        fays_log "session finalized: episode=$episode_dir"
     else
         LAST_SESSION_JSON="{}"
         LAST_FINALIZED_EPISODE_DIR="$episode_dir"
+        fays_log "session finalized with error: episode=$episode_dir error=$LAST_FINALIZE_ERROR"
     fi
 
     FINALIZE_PENDING=false
