@@ -14,6 +14,10 @@
 - `test/src/gripper_hmi/`
   - 当前更接近串口调试/工具程序。
   - 它不属于正式 host-only 单元测试集合。
+- `test/src/gripper_disconnect_repro_sop/`
+  - 夹爪掉线复现与日志采集包，可单独打包给测试同学使用。
+  - 主机侧从该文件夹根目录执行 `./scripts/prepare_240_repro.sh`，脚本会通过 SSH 下发板端 worker、连续触发软件录制，并在本地实时刷新板端 `hws` 状态；报错时自动抓取现场快照并暂停等待恢复。
+  - 系统日志和 `ugripper.service` 实时日志由测试同学按 README 指令另开终端手动观察。
 - `test/scripts/*`
   - 现场验证或 field test 脚本。
   - 这些脚本不进入正式 host-only 单测集合。

@@ -34,6 +34,13 @@ sudo journalctl -u ugripper.service -f
 ## 仓库内测试脚本
 `test/scripts/` 目前收纳现场验证脚本，不属于默认安装主链路，也不会随当前 `deb` 默认安装到 `/opt/ugripper`。
 
+`test/src/gripper_disconnect_repro_sop/` 是可单独打包给测试同学的夹爪掉线复现包。进入该文件夹后可在主机侧一键启动自动软件录制压力测试，实时刷新板端 `hws` 状态，并在报错时抓取现场快照：
+
+```bash
+cd test/src/gripper_disconnect_repro_sop
+./scripts/prepare_240_repro.sh
+```
+
 常见入口：
 
 ```bash
