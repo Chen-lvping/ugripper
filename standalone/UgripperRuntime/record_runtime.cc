@@ -97,12 +97,14 @@ constexpr int kTactileFrameWidth = 160;
 constexpr int kTactileFrameHeight = 120;
 constexpr size_t kTactileFrameBytes = static_cast<size_t>(kTactileFrameWidth * kTactileFrameHeight);
 constexpr double kTactileEpisodeProbeSec = 0.12;
-constexpr double kTactileRobustResidualAreaThreshold = 0.002;
+constexpr double kTactileRobustResidualAreaThreshold = 0.003;
 constexpr double kTactileResidualFloorThreshold = 24.0;
 constexpr double kTactileResidualMadMultiplier = 6.0;
 constexpr double kTactileMadToSigma = 1.4826;
 constexpr int kTactileResidualMinNeighborCount = 3;
-constexpr size_t kTactileResidualMinComponentPixels = 16;
+constexpr size_t kTactileResidualMinComponentPixels = 8;
+constexpr double kTactileSmallResidualAreaThreshold = 0.0004;
+constexpr size_t kTactileSmallResidualComponentPixels = 8;
 constexpr size_t kTactileHistoryWindow = 3;
 constexpr int kTactileSnapshotTimeoutMs = 2500;
 constexpr uint64_t kTactilePersistentBaselineRefreshMs = 12ULL * 60ULL * 60ULL * 1000ULL;
@@ -760,6 +762,8 @@ std::string formatTactileMetrics(const TactileFrameMetrics &metrics)
            " residual_p99=" + formatFixed(metrics.residualP99, 2) +
            " max_component_px=" + std::to_string(metrics.maxResidualComponentPixels) +
            " min_component_px=" + std::to_string(kTactileResidualMinComponentPixels) +
+           " small_area_threshold=" + formatFixed(kTactileSmallResidualAreaThreshold, 4) +
+           " small_component_px=" + std::to_string(kTactileSmallResidualComponentPixels) +
            " gain=" + formatFixed(metrics.gain, 4) +
            " offset=" + formatFixed(metrics.offset, 2);
 }
@@ -921,9 +925,9 @@ TactileFrameMetrics computeTactileFrameMetrics(const std::vector<uint8_t> &basel
     std::vector<uint8_t> rawResidualMask;
     rawResidualMask.reserve(residuals.size());
     size_t rawResidualMaskCount = 0;
-    for (const double residual : residuals)
+    for (size_t index = 0; index < residuals.size(); ++index)
     {
-        if (residual >= metrics.residualThreshold)
+        if (residuals[index] >= metrics.residualThreshold)
         {
             rawResidualMask.push_back(1);
             ++rawResidualMaskCount;
@@ -941,7 +945,11 @@ TactileFrameMetrics computeTactileFrameMetrics(const std::vector<uint8_t> &basel
         kTactileResidualMinComponentPixels,
         &metrics.maxResidualComponentPixels);
     metrics.robustResidualArea = static_cast<double>(filteredResidualMaskCount) / static_cast<double>(baseline.size());
-    metrics.damaged = metrics.robustResidualArea >= kTactileRobustResidualAreaThreshold;
+    const bool areaDamaged = metrics.robustResidualArea >= kTactileRobustResidualAreaThreshold;
+    const bool smallComponentDamaged =
+        metrics.rawResidualArea >= kTactileSmallResidualAreaThreshold &&
+        metrics.maxResidualComponentPixels >= kTactileSmallResidualComponentPixels;
+    metrics.damaged = areaDamaged || smallComponentDamaged;
     return metrics;
 }
 
@@ -2293,7 +2301,7 @@ std::optional<std::vector<uint8_t>> captureTactileGrayFrame(const std::vector<st
     arguments.push_back("-frames:v");
     arguments.push_back("1");
     arguments.push_back("-vf");
-    arguments.push_back("crop=iw*0.84:ih*0.84:iw*0.08:ih*0.08,boxblur=2:1,scale=160:120,format=gray");
+    arguments.push_back("crop=iw*0.92:ih:iw*0.08:0,scale=160:120,format=gray");
     arguments.push_back("-f");
     arguments.push_back("rawvideo");
     arguments.push_back("-");
