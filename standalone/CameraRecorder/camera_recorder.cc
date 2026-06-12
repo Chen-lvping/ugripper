@@ -77,6 +77,12 @@ constexpr auto kStereoSessionSigtermTimeout = std::chrono::milliseconds(400);
 constexpr int kStereoSessionMaxRestartAttempts = 2;
 constexpr int64_t kUsPerSecond = 1'000'000;
 constexpr uint64_t kMainCameraLeakyQueueMaxTimeNs = 5ULL * 1000ULL * 1000ULL * 1000ULL;
+constexpr uint64_t kMainCameraQueueInfoThresholdNs = 1ULL * 1000ULL * 1000ULL * 1000ULL;
+constexpr uint64_t kMainCameraQueueWarnThresholdNs = 4ULL * 1000ULL * 1000ULL * 1000ULL;
+constexpr auto kMainCameraQueueDiagInterval = std::chrono::milliseconds(1000);
+constexpr auto kMainCameraPushWarnThreshold = std::chrono::milliseconds(200);
+constexpr auto kMainCameraStopEosGrace = std::chrono::milliseconds(500);
+constexpr auto kMainCameraStopPollInterval = std::chrono::milliseconds(10);
 
 #ifndef UGRIPPER_ENABLE_PERF_LOG
 #define UGRIPPER_ENABLE_PERF_LOG 0
@@ -105,6 +111,57 @@ bool ConfigureManagedChildProcessGroup() {
     }
     return true;
 }
+
+#if CAMERA_RECORDER_HAS_GSTREAMER
+std::optional<uint64_t> ReadGObjectUintProperty(GObject* object, const char* property_name) {
+    if (object == nullptr || property_name == nullptr) {
+        return std::nullopt;
+    }
+    GParamSpec* spec = g_object_class_find_property(G_OBJECT_GET_CLASS(object), property_name);
+    if (spec == nullptr) {
+        return std::nullopt;
+    }
+
+    GValue value = G_VALUE_INIT;
+    g_value_init(&value, G_PARAM_SPEC_VALUE_TYPE(spec));
+    g_object_get_property(object, property_name, &value);
+
+    std::optional<uint64_t> result;
+    if (G_VALUE_HOLDS_UINT64(&value)) {
+        result = g_value_get_uint64(&value);
+    } else if (G_VALUE_HOLDS_UINT(&value)) {
+        result = g_value_get_uint(&value);
+    } else if (G_VALUE_HOLDS_ULONG(&value)) {
+        result = g_value_get_ulong(&value);
+    } else if (G_VALUE_HOLDS_INT64(&value)) {
+        const gint64 raw = g_value_get_int64(&value);
+        if (raw >= 0) {
+            result = static_cast<uint64_t>(raw);
+        }
+    } else if (G_VALUE_HOLDS_INT(&value)) {
+        const gint raw = g_value_get_int(&value);
+        if (raw >= 0) {
+            result = static_cast<uint64_t>(raw);
+        }
+    } else if (G_VALUE_HOLDS_LONG(&value)) {
+        const glong raw = g_value_get_long(&value);
+        if (raw >= 0) {
+            result = static_cast<uint64_t>(raw);
+        }
+    }
+
+    g_value_unset(&value);
+    return result;
+}
+
+std::string GstMessageSourceName(GstMessage* message) {
+    if (message == nullptr || GST_MESSAGE_SRC(message) == nullptr) {
+        return "unknown";
+    }
+    const gchar* name = GST_OBJECT_NAME(GST_MESSAGE_SRC(message));
+    return (name != nullptr && *name != '\0') ? std::string(name) : "unknown";
+}
+#endif
 
 std::string Trim(const std::string& input) {
     const std::string whitespace = " \t\r\n";
@@ -964,6 +1021,7 @@ public:
         started_ = true;
         running_ = true;
         stop_requested_.store(false, std::memory_order_release);
+        capture_thread_done_.store(false, std::memory_order_release);
         capture_thread_ = std::thread([this]() { CaptureLoop(); });
         return true;
     }
@@ -976,15 +1034,38 @@ public:
     }
 
     void Stop() override {
+        const auto stop_start = std::chrono::steady_clock::now();
         stop_requested_.store(true, std::memory_order_release);
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+                           << "[camera_recorder][main_stop_diag] category=stop_begin"
+                           << " name=" << config_.name
+                           << " capture_joinable=" << (capture_thread_.joinable() ? "true" : "false")
+                           << " capture_done=" << (capture_thread_done_.load(std::memory_order_acquire) ? "true" : "false")
+                           << " appsrc=" << (appsrc_ != nullptr ? "true" : "false")
+                           << " pipeline=" << (pipeline_ != nullptr ? "true" : "false")).str());
         if (capture_thread_.joinable()) {
+            RequestAppsrcEosForStop();
+            if (!WaitForCaptureThreadDone(kMainCameraStopEosGrace)) {
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                                   << "[camera_recorder][main_stop_diag] category=eos_grace_timeout"
+                                   << " name=" << config_.name
+                                   << " grace_ms=" << kMainCameraStopEosGrace.count()
+                                   << " capture_done=false").str());
+                RequestPipelineFlushForStop();
+            }
             capture_thread_.join();
-        }
-
-        if (appsrc_ != nullptr) {
+            const auto join_elapsed = std::chrono::steady_clock::now() - stop_start;
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                               << "[camera_recorder][main_stop_diag] category=capture_joined"
+                               << " name=" << config_.name
+                               << " stop_elapsed_ms="
+                               << std::chrono::duration_cast<std::chrono::milliseconds>(join_elapsed).count()
+                               << " capture_done=" << (capture_thread_done_.load(std::memory_order_acquire) ? "true" : "false")).str());
+        } else if (appsrc_ != nullptr) {
             gst_app_src_end_of_stream(GST_APP_SRC(appsrc_));
         }
         if (bus_ != nullptr) {
+            const auto bus_wait_start = std::chrono::steady_clock::now();
             GstMessage* message = gst_bus_timed_pop_filtered(
                 bus_,
                 static_cast<GstClockTime>(kRecorderStopSigintTimeout.count()) * GST_MSECOND,
@@ -992,12 +1073,27 @@ public:
             if (message != nullptr) {
                 HandleBusMessage(message);
                 gst_message_unref(message);
+            } else {
+                const auto bus_wait_elapsed = std::chrono::steady_clock::now() - bus_wait_start;
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                                   << "[camera_recorder][main_stop_diag] category=bus_wait_timeout"
+                                   << " name=" << config_.name
+                                   << " wait_elapsed_ms="
+                                   << std::chrono::duration_cast<std::chrono::milliseconds>(bus_wait_elapsed).count()).str());
             }
         }
 
         CleanupPipeline();
         CleanupDevice();
         running_ = false;
+        const auto stop_elapsed = std::chrono::steady_clock::now() - stop_start;
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+                           << "[camera_recorder][main_stop_diag] category=stop_end"
+                           << " name=" << config_.name
+                           << " stop_elapsed_ms="
+                           << std::chrono::duration_cast<std::chrono::milliseconds>(stop_elapsed).count()
+                           << " failure=" << (failure_ ? "true" : "false")
+                           << " exit_code=" << exit_code_.value_or(-1)).str());
     }
 
     bool IsRunning() const override {
@@ -1224,6 +1320,7 @@ private:
                      nullptr);
         g_object_set(G_OBJECT(mux), "timecodescale", 1000LL, nullptr);
         g_object_set(G_OBJECT(sink), "location", output_path_.c_str(), nullptr);
+        queue_ = queue;
 
         gst_bin_add_many(GST_BIN(pipeline_), appsrc_, queue, parser, mux, sink, nullptr);
         if (!gst_element_link_many(appsrc_, queue, parser, mux, sink, nullptr)) {
@@ -1327,11 +1424,26 @@ private:
             GST_BUFFER_DTS(gst_buffer) = static_cast<GstClockTime>(pts_us) * 1000ULL;
             GST_BUFFER_DURATION(gst_buffer) = static_cast<GstClockTime>(NominalFrameDurationUs()) * 1000ULL;
 
+            MaybeLogQueueBeforePush(pts_us, buffer.bytesused);
+            const auto push_start = std::chrono::steady_clock::now();
             const GstFlowReturn push_result = gst_app_src_push_buffer(GST_APP_SRC(appsrc_), gst_buffer);
+            const auto push_elapsed = std::chrono::steady_clock::now() - push_start;
+            if (push_elapsed >= kMainCameraPushWarnThreshold) {
+                LogQueueDiag("push_slow", pts_us, buffer.bytesused, push_elapsed, true);
+            }
             if (push_result != GST_FLOW_OK) {
+                LogQueueDiag("push_failed", pts_us, buffer.bytesused, push_elapsed, true);
+                RetryIoctl(fd_, VIDIOC_QBUF, &buffer);
+                if (stop_requested_.load(std::memory_order_acquire)) {
+                    DM_LOG_INFO("{}", (::DA::utils::LogString()
+                                       << "[camera_recorder][main_stop_diag] category=push_stopped"
+                                       << " name=" << config_.name
+                                       << " flow=" << gst_flow_get_name(push_result)
+                                       << " flow_code=" << static_cast<int>(push_result)).str());
+                    break;
+                }
                 SetFailure("gst_app_src_push_buffer failed for " + config_.name +
                            " flow=" + std::to_string(push_result));
-                RetryIoctl(fd_, VIDIOC_QBUF, &buffer);
                 break;
             }
 
@@ -1343,6 +1455,16 @@ private:
 
         running_ = false;
         exit_code_ = failure_ ? -1 : 0;
+        capture_thread_done_.store(true, std::memory_order_release);
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+                           << "[camera_recorder][main_stop_diag] category=capture_loop_exit"
+                           << " name=" << config_.name
+                           << " stop_requested=" << (stop_requested_.load(std::memory_order_acquire) ? "true" : "false")
+                           << " failure=" << (failure_ ? "true" : "false")
+                           << " exit_code=" << exit_code_.value_or(-1)
+                           << " frame_count=" << frame_count_
+                           << " last_pts_us=" << LastFramePtsUs().value_or(-1)
+                           << " last_system_time_us=" << LastFrameSystemTimeUs().value_or(-1)).str());
     }
 
     int64_t NominalFrameDurationUs() const {
@@ -1402,6 +1524,12 @@ private:
             if (debug != nullptr) {
                 g_free(debug);
             }
+            DM_LOG_ERROR("{}", (::DA::utils::LogString()
+                                << "[camera_recorder][main_bus_diag] category=bus_error"
+                                << " name=" << config_.name
+                                << " source=" << GstMessageSourceName(message)
+                                << " message=\"" << text << "\"").str());
+            LogQueueDiag("bus_error", LastFramePtsUs().value_or(-1), 0, std::chrono::steady_clock::duration::zero(), true);
             SetFailure("main camera pipeline error for " + config_.name + ": " + text);
             break;
         }
@@ -1409,9 +1537,16 @@ private:
             GError* warning = nullptr;
             gchar* debug = nullptr;
             gst_message_parse_warning(message, &warning, &debug);
-            DM_LOG_WARN("{}", (::DA::utils::LogString() << "[camera_recorder] warning from main camera pipeline "
-                                 << config_.name << ": "
-                                 << (warning != nullptr ? warning->message : "unknown")).str());
+            std::string text = warning != nullptr ? warning->message : "unknown";
+            if (debug != nullptr && *debug != '\0') {
+                text += " debug=" + std::string(debug);
+            }
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                                << "[camera_recorder][main_bus_diag] category=bus_warning"
+                                << " name=" << config_.name
+                                << " source=" << GstMessageSourceName(message)
+                                << " message=\"" << text << "\"").str());
+            LogQueueDiag("bus_warning", LastFramePtsUs().value_or(-1), 0, std::chrono::steady_clock::duration::zero(), false);
             if (warning != nullptr) {
                 g_error_free(warning);
             }
@@ -1421,10 +1556,123 @@ private:
             break;
         }
         case GST_MESSAGE_EOS:
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                               << "[camera_recorder][main_bus_diag] category=bus_eos"
+                               << " name=" << config_.name
+                               << " source=" << GstMessageSourceName(message)).str());
             break;
         default:
             break;
         }
+    }
+
+    struct QueueLevels {
+        uint64_t buffers = 0;
+        uint64_t bytes = 0;
+        uint64_t time_ns = 0;
+    };
+
+    QueueLevels ReadQueueLevels() const {
+        QueueLevels levels;
+        if (queue_ == nullptr) {
+            return levels;
+        }
+        levels.buffers = ReadGObjectUintProperty(G_OBJECT(queue_), "current-level-buffers").value_or(0);
+        levels.bytes = ReadGObjectUintProperty(G_OBJECT(queue_), "current-level-bytes").value_or(0);
+        levels.time_ns = ReadGObjectUintProperty(G_OBJECT(queue_), "current-level-time").value_or(0);
+        return levels;
+    }
+
+    void MaybeLogQueueBeforePush(int64_t pts_us, uint32_t bytesused) {
+        const QueueLevels levels = ReadQueueLevels();
+        if (levels.time_ns < kMainCameraQueueInfoThresholdNs) {
+            return;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now - last_queue_diag_log_ < kMainCameraQueueDiagInterval) {
+            return;
+        }
+        last_queue_diag_log_ = now;
+        LogQueueDiag("pre_push_queue_high",
+                     pts_us,
+                     bytesused,
+                     std::chrono::steady_clock::duration::zero(),
+                     levels.time_ns >= kMainCameraQueueWarnThresholdNs);
+    }
+
+    void LogQueueDiag(const char* reason,
+                      int64_t pts_us,
+                      uint32_t bytesused,
+                      std::chrono::steady_clock::duration push_elapsed,
+                      bool warn) const {
+        const QueueLevels levels = ReadQueueLevels();
+        const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(push_elapsed).count();
+        auto stream = ::DA::utils::LogString();
+        stream << "[camera_recorder][main_queue_diag]"
+               << " category=" << reason
+               << " name=" << config_.name
+               << " pts_us=" << pts_us
+               << " frame_bytes=" << bytesused
+               << " push_elapsed_ms=" << elapsed_ms
+               << " queue_buffers=" << levels.buffers
+               << " queue_bytes=" << levels.bytes
+               << " queue_time_ns=" << levels.time_ns
+               << " queue_time_ms=" << (levels.time_ns / 1000000ULL)
+               << " queue_limit_time_ns=" << kMainCameraLeakyQueueMaxTimeNs;
+        if (warn) {
+            DM_LOG_WARN("{}", stream.str());
+        } else {
+            DM_LOG_INFO("{}", stream.str());
+        }
+    }
+
+    bool WaitForCaptureThreadDone(std::chrono::milliseconds timeout) const {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (!capture_thread_done_.load(std::memory_order_acquire)) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(kMainCameraStopPollInterval);
+        }
+        return true;
+    }
+
+    void RequestAppsrcEosForStop() {
+        if (appsrc_ == nullptr) {
+            return;
+        }
+        const GstFlowReturn eos_result = gst_app_src_end_of_stream(GST_APP_SRC(appsrc_));
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+                           << "[camera_recorder][main_stop_diag] category=pre_join_eos"
+                           << " name=" << config_.name
+                           << " flow=" << gst_flow_get_name(eos_result)
+                           << " flow_code=" << static_cast<int>(eos_result)
+                           << " capture_done=" << (capture_thread_done_.load(std::memory_order_acquire) ? "true" : "false")).str());
+        LogQueueDiag("pre_join_eos",
+                     LastFramePtsUs().value_or(-1),
+                     0,
+                     std::chrono::steady_clock::duration::zero(),
+                     false);
+    }
+
+    void RequestPipelineFlushForStop() {
+        if (pipeline_ == nullptr) {
+            return;
+        }
+        const gboolean flush_start_sent = gst_element_send_event(pipeline_, gst_event_new_flush_start());
+        const gboolean flush_stop_sent = gst_element_send_event(pipeline_, gst_event_new_flush_stop(FALSE));
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+                           << "[camera_recorder][main_stop_diag] category=pre_join_flush"
+                           << " name=" << config_.name
+                           << " flush_start_sent=" << (flush_start_sent ? "true" : "false")
+                           << " flush_stop_sent=" << (flush_stop_sent ? "true" : "false")
+                           << " capture_done=" << (capture_thread_done_.load(std::memory_order_acquire) ? "true" : "false")).str());
+        LogQueueDiag("pre_join_flush",
+                     LastFramePtsUs().value_or(-1),
+                     0,
+                     std::chrono::steady_clock::duration::zero(),
+                     true);
     }
 
     void CleanupPipeline() {
@@ -1436,6 +1684,7 @@ private:
             bus_ = nullptr;
         }
         appsrc_ = nullptr;
+        queue_ = nullptr;
         if (pipeline_ != nullptr) {
             gst_object_unref(pipeline_);
             pipeline_ = nullptr;
@@ -1481,12 +1730,15 @@ private:
     bool failure_ = false;
     std::optional<int> exit_code_;
     std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> capture_thread_done_{true};
     std::thread capture_thread_;
     std::vector<MmapBuffer> buffers_;
     GstElement* pipeline_ = nullptr;
     GstElement* appsrc_ = nullptr;
+    GstElement* queue_ = nullptr;
     GstBus* bus_ = nullptr;
     std::string last_error_;
+    std::chrono::steady_clock::time_point last_queue_diag_log_{};
     mutable std::mutex timing_mutex_;
     std::optional<int64_t> first_frame_pts_us_;
     std::optional<int64_t> first_frame_system_time_us_;
