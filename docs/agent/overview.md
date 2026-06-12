@@ -128,7 +128,7 @@
   - 左手新 hub 的 tactile 口位与右手保持同构：`.3 -> /dev/tcam_left_l`、`.4 -> /dev/tcam_left_r`；同时继续兼容旧特殊 hub 的 `/dev/tcam_left_r <- .3`。
 - 当前运行时默认录制全部 8 路：左右主摄 + 左右 stereo + 4 路触觉。
 - 普通录制阶段的 `camera_recorder` 当前会直接起左右主摄与 4 路触觉；左右 stereo 继续由单独的 warmup daemon 常驻管理。
-- 夹爪热插拔恢复完成后，`record_runtime` 当前会在该侧关键设备全部 ready、并完成 gripper runtime refresh 之后，只按 tactile 相机 USB `serial` 标记该侧实时参考帧与持久化 baseline 待更新；服务初始化阶段不会直接打开触觉相机抓参考帧。待更新参考帧统一由后续首个可用 episode 的触觉视频截帧生成，若该 episode 缺失、损坏或截帧失败则顺延到下一条 episode。二者都只用于后续触觉状态抽检，不参与 episode 产物落盘。
+- 夹爪热插拔恢复完成后，`record_runtime` 当前会在该侧关键设备全部 ready、并完成 gripper runtime refresh 之后，只按 tactile 相机 USB `serial` 标记该侧实时参考帧待更新；服务初始化阶段不会直接打开触觉相机抓参考帧。待更新实时参考帧统一由后续首个可用 episode 的触觉视频截帧生成，若该 episode 缺失、损坏或截帧失败则顺延到下一条 episode。持久化 baseline 不因夹爪重连刷新，避免覆盖关机期间发生的盖板损坏。
 - warmup daemon 在空闲态持续常驻打开需要预热的相机设备；当前仅左右双目继续消费 `MJPEG 60fps` 预热流。开始录制时只为 stereo 新建 session writer，把会话窗口内帧写入最终 `mkv`；主摄则在普通录制阶段直接冷启动采集并写入最终文件。
 - warmup daemon 当前按单实例口径运行；若服务内 daemon 尚未退出又手工再起第二个 `camera_recorder --stereo-daemon` 去抢同一批双目设备，可能诱发设备忙、节点缺失或整条 USB 链路重枚举。当前实现已增加 `/tmp/umi_camera_warmup_daemon.lock` 单实例锁，第二个 warmup daemon 会直接拒绝启动。
 - 停录阶段也会并发向各路相机子进程发 stop，并在全部 stop 返回后统一 poll 状态，降低多路顺序收尾导致内部 timing 文件缺失或容器未 finalize 的风险。
@@ -183,9 +183,9 @@
 6. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行分阶段文件级 flush。所有 episode 产物都必须在所属阶段显式执行文件级 flush，再刷 episode 目录项；`pre_stereo_finalize` 只刷普通相机视频、左右 sensor MCAP、`calibration.json` 和可选音频；等待 ego/stereo finalize 并合并 session 信息后，`final` 刷 `stereo_*.mkv`、`fays_data_*.mcap` 与 `ego/` 下已同步文件，并额外刷 ego 子目录目录项；`final` flush 完成后才允许 worker 删除 ego 设备上的同名远端原始 episode，且只删除已 finalize、非 `-temp`、远端/本地文件大小一致的 `episode_*` 目录；删除结果写入 `ego/ego_sync.json.remote_cleanup` 后会再补刷 `ego/ego_sync.json` 和 `ego/` 目录项。`metadata_final` 只刷最终 `metadata.json`、失败时的 `validation_error.log` 和目录项，避免停录路径重复刷同一批媒体文件。停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
 7. `record_runtime` 在 writing 阶段等待左右 `stereo_*.mkv` 非空且 `fays_data_*.mcap` 完整后，本地生成本次 stereo session 摘要并并入 `/dev/shm` 内部 timing 缓存；该等待发生在原有 stereo finalize 阶段，不阻塞前面的 stop 命令并发发送。
 8. 先生成最终 `metadata.json`，其中 `video_details[].start_offset_us/duration_s` 来自 `/dev/shm` 内部 timing 缓存和视频轻量探测；随后执行稳定校验，校验只读取最终 `metadata.json` 与最终媒体/MCAP/`calibration.json`，不再直接依赖 shm 缓存。视频探测结果会尽量写入 `/dev/shm` 内部 timing 缓存的 `video_probes`，供同次 metadata 生成复用；若缓存写入失败，只记录告警，不作为 episode 硬校验失败原因。
-9. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 处理：其一是“本次起录附近单帧 vs 同 `serial` 实时参考帧”的比较；其二是“本次起录附近单帧 vs 同 `serial` 持久化 baseline”的慢变量比较。若夹爪刚重连、参考帧缺失或持久化 baseline 缺失/过期，则优先用本次 episode 的起录附近单帧初始化对应参考帧，本轮不计入对应 damaged 窗口；若视频缺失、损坏或截帧失败，则保留待更新标记并顺延到下一条 episode。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
+9. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 处理：其一是“本次起录附近单帧 vs 同 `serial` 实时参考帧”的比较；其二是“本次起录附近单帧 vs 同 `serial` 持久化 baseline”的慢变量比较。若夹爪刚重连或实时参考帧缺失，则优先用本次 episode 的起录附近单帧初始化实时参考帧，本轮不计入实时 damaged 窗口；若持久化 baseline 缺失，则用本帧初始化持久化 baseline。若视频缺失、损坏或截帧失败，则保留待更新标记并顺延到下一条 episode。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
 10. 实时触觉抽检当前属于软告警而不是完整性失败：单次异常只更新该 tactile `serial` 的近期历史；当同一 `serial` 最近 `3` 个 episode 都判为异常时，空闲态切到黄灯闪烁，并播放对应 `left/right_tcam_*_damaged` 提示音。后台 tactile 校验最多保留一个待处理 episode；若下一次录制开始，会请求当前后台校验停止并清空待处理任务，避免干扰下一次录制。
-11. 持久化 baseline 当前按 `12h` 窗口维护：缺失、过期或夹爪重连后只标记待更新，不在插爪阶段直接打开触觉相机；停录后台校验会从首个可用 episode 截帧刷新同 `serial` 的持久化 baseline，后续再与本次起录附近单帧比较，并维护独立的 `persistent_recent` 窗口。persistent 告警同样要求连续 `3` 个 episode 异常才置位，用于覆盖关机期间发生的盖板损坏；连续 `3` 个 clean episode 会清除该 persistent 告警。
+11. 持久化 baseline 用于覆盖关机期间发生的盖板损坏：缺失时会由首个可用 episode 截帧初始化；已存在时不会因夹爪重连、服务重启或固定时间到期自动刷新。persistent 告警连续 `3` 个 episode 异常后置位，并记录当前系统 `boot_id`；只有该告警触发后，且设备经历一次重新开关机导致 `boot_id` 变化，下一条可用 episode 才会刷新同 `serial` 的持久化 baseline。连续 `3` 个 clean episode 会清除该 persistent 告警，但不会自动刷新 baseline。
 12. 停录收尾完成后将 `episode_YYYYMMDD_NNNN-temp` rename 为 `episode_YYYYMMDD_NNNN`；无论质量成功或失败，只要收尾已完成就去掉 `-temp`，质量结果由 `metadata.json` 和 `validation_error.log` 表达。运行时内部允许同一条 episode 同时携带多个显式 `error_type`，不再从错误文本或路径猜测类别；`metadata.json.quality_check_err_type` 仍保持旧字段，只写最高优先级的一个主错误类型。完整性成功且无触觉软告警则回到 `READY` 并播放 `ready`；完整性失败进入 `ERROR_1` 并播放 `validation_failed`；关键设备/HMI/stereo 缺失或不活跃进入 `ERROR_2` 并播放 `error`；设备已识别但单侧 stereo/Fays recorder、FIFO 或控制链路失效进入 `ERROR_4` 并播放 `error`；数据盘挂载丢失 / 不可写 / 写满进入 `ERROR_3` 并播放 `error`；其他运行时异常进入 `ERROR_5` 并播放 `error`。这些后续提示同样会直接抢占当前播放中的 `writing`。
 
 ## 7. Episode 产物与检查
@@ -239,14 +239,13 @@
 - Fays MCAP 轻量完整性：左右 `fays_data_*.mcap` 必须能读取 summary，`i/c` 两类消息计数都必须非零，并且 summary/chunk 索引给出的消息覆盖跨度与 camera 帧覆盖跨度都不能过短；该检查只读 MCAP summary、头部首个 camera 帧和尾部少量 chunk，不允许 fallback 全量扫描消息。
 - 条件产物：若执行了 pre/post 音频录制，对应 wav 仍需存在。
 - 触觉软校验：
-  - 每路 tactile 只取起录附近单帧；若同 `serial` 实时参考帧缺失或处于夹爪重连待更新状态，则用本帧建立参考帧并跳过本轮实时 damaged 对比，失败则顺延到下一条 episode。已有实时参考帧时，按 baseline 对当前帧做全局亮度/对比度配准，再计算 `robust_residual_area`；mask 会经过 `3x3` 邻域投票和最小连通域过滤，避免零散单点像素误差触发损坏；单次异常不让当前 episode 失败，仅用于连续 `3` 个 episode 的损坏提示。
-  - 同时还会与同 `serial` 的 `12h` 持久化 baseline 比较；若 baseline 缺失、过期或处于夹爪重连待更新状态，则用本帧刷新 baseline 并跳过本轮 persistent 对比，失败则顺延到下一条 episode。persistent 比较独立维护最近 `3` 次窗口，连续 `3` 次异常才播放对应 damaged 语音并置位，连续 `3` 次 clean 后清除。
+  - 每路 tactile 只取起录附近单帧；预处理只裁掉左侧约 `12%` 光源区域，不裁上边、右边和下边，也不做额外模糊，避免漏掉上方或右上方盖板损坏。若同 `serial` 实时参考帧缺失或处于夹爪重连待更新状态，则用本帧建立参考帧并跳过本轮实时 damaged 对比，失败则顺延到下一条 episode。已有实时参考帧时，按 baseline 对当前帧做全局亮度/对比度配准，再做直接 residual 差分；residual mask 经过 `3x3` 邻域投票和连通域过滤，单次异常不让当前 episode 失败，仅用于连续 `3` 个 episode 的损坏提示。
+  - 同时还会与同 `serial` 的持久化 baseline 比较；若 baseline 缺失，则用本帧初始化 baseline 并跳过本轮 persistent 对比，失败则顺延到下一条 episode。已有 baseline 不会因为夹爪重连或时间到期刷新；persistent 比较独立维护最近 `3` 次窗口，连续 `3` 次异常才播放对应 damaged 语音并置位，并登记“下次重新开关机后允许刷新 baseline”。重新开关机后，下一条可用 episode 会刷新该路持久化 baseline；连续 `3` 次 clean 后清除告警但不刷新 baseline。
 - 当前运行时轻量阈值口径：
   - `robust_residual_area >= 0.003`
-  - 小损伤兜底：`raw_residual_area >= 0.0004` 且最大连通域面积至少 `8 px`
-  - 动态残差阈值为 `max(24, median(residual) + 6 * 1.4826 * MAD(residual))`
+  - 动态残差阈值为 `max(10, median(residual) + 6 * 1.4826 * MAD(residual))`
   - residual mask 过滤为：`3x3` 内异常像素数至少 `3`，且 `8` 连通域面积至少 `8 px`
-  - 该口径用于过滤轻微灰度波动和孤立点，同时保留上方、右上方这类面积较小但连通性明确的盖板损伤。
+  - 该口径用于过滤轻微灰度波动、孤立点和边缘残差；不再启用 small-damage 兜底，避免边线清晰或光源残留图像误触发。
 
 说明：当前不会为视频做全量逐帧扫描；强校验只读取容器元信息并消费内部 timing 字段，触觉软校验也只做单帧快速比较，优先保证现场稳定性与停录耗时可控。
 
@@ -274,6 +273,7 @@
 - stereo daemon 状态：`/tmp/umi_stereo_camera_status.json`
 - 左右 Fays recorder 控制 FIFO：`/tmp/umi_left_fays_cmd`、`/tmp/umi_right_fays_cmd`
 - stereo daemon 顶层控制 FIFO：`/tmp/umi_stereo_camera_control.pipe`（保留兼容入口，当前普通录制起停由 `record_runtime` 直接写左右 Fays recorder FIFO）
+- 触觉传感器持久化状态：`/var/lib/ugripper/tactile_state`（包含 `reference/`、`persistent/`子目录与 `history.json`；`persistent/` 存放跨关机有效的长周期 baseline）
 - `/mnt/data_disk` 只作为固定挂载点使用：安装阶段会预创建为 `root:root 0555`，业务不会把本地空目录当成数据目录；只有真实数据盘挂载成功后才允许继续启动录制服务。
 - 运行日志维护当前参考 V1 口径：本地先写 `/tmp`，在视频停录、音频停录和运行时退出时增量同步到 `/mnt/data_disk/logs`，并只保留当天同 SN 日志。
 

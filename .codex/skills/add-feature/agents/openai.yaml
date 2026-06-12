@@ -1,4 +1,4 @@
 interface:
   display_name: "Add Feature"
-  short_description: "先规划后实现，并在收尾决策主包/Updater版本号"
-  default_prompt: "Use $add-feature to plan first, implement after confirmation, sync docs/agent updates, then decide whether to bump build_deb.sh/usb_updater_build.sh versions based on user instruction or change complexity."
+  short_description: "先规划后实现，构建后默认部署到240"
+  default_prompt: "Use $add-feature to plan first, implement after confirmation, sync docs/agent updates, decide whether to bump build_deb.sh/usb_updater_build.sh versions from explicit user instruction, then build and deploy to ubuntu@192.168.2.240 with password ubuntu."

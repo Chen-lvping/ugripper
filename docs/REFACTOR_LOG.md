@@ -34,6 +34,25 @@
 
 ## Entries
 
+### 2026-06-12 - ch9344-udev-helper-slimming
+
+- 阶段：`udev hot-path cleanup`
+- 范围：`config/99-fixed-usb-map.rules`、`scripts/ugripper_ch9344_symlink_name.sh`、`build_deb.sh`、`pack_script/postinst`
+- 类型：`helper 收口 / udev 规则瘦身 / 打包边界`
+- 主要改动：
+  - 将 CH9344 gripper/encoder 的组内排序逻辑从 udev rule 的内联 `for | sort | sed` shell 管道移到独立 helper
+  - `99-fixed-usb-map.rules` 中 CH9344 部分收敛为一条权限规则和一条 helper symlink 规则
+  - 打包时将 helper 安装为 `/usr/local/bin/ugripper_ch9344_symlink_name`，`postinst` 兜底补可执行权限
+- 风险与行为等价说明：
+  - 逻辑仍保持同一 CH9344 设备组内第 1 路生成 `*_gripper`、第 2 路生成 `*_encoder`
+  - 本次只降低 udev 热路径中的外部命令和规则重复度，不改变运行时使用的 `/dev/left_gripper`、`/dev/right_gripper`、`/dev/left_encoder`、`/dev/right_encoder` 契约
+- 已执行验证：
+  - `sh -n scripts/ugripper_ch9344_symlink_name.sh && sh -n build_deb.sh && sh -n pack_script/postinst`
+  - 使用假 sysfs 目录验证 `9-1.2` 左侧与 `1-1.2` 右侧 CH9344 的第 1/2 路输出符合既有映射
+- 后续待验证：
+  - 出包安装到 ARM 板后执行 `udevadm trigger --action=add /sys/class/tty/ttyCH9344USB*`，确认四个 symlink 自动回填
+  - 结合 240 当前左 Fays USB3 掉线问题继续区分 CH9344 规则压力与 Fays 物理链路异常
+
 ### 2026-04-28 - remove-standalone-log-stream-compat-layer
 
 - 阶段：`A3 / logger API cleanup`

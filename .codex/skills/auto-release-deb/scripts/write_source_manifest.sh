@@ -79,17 +79,34 @@ list_ugripper_inputs() {
     | sort -u
 }
 
+list_files_under() {
+  local root="$1"
+
+  [[ -d "$root" ]] || return 0
+  find "$root" -type f \
+    -not -path '*/.git/*' \
+    -not -path '*/__pycache__/*' \
+    -not -name '*.pyc' \
+    -not -name '.DS_Store' \
+    -print
+}
+
 list_updater_inputs() {
+  local das_updater_root="../DASUsbUpdater"
+
   {
     if [[ -f "usb_updater_build.sh" ]]; then
       echo "usb_updater_build.sh"
     fi
-    if [[ -d "auto_update" ]]; then
-      find auto_update -type f \
-        -not -path '*/__pycache__/*' \
-        -not -name '*.pyc' \
-        -printf '%P\n' \
-        | sed 's#^#auto_update/#'
+
+    if [[ -d "$das_updater_root" ]]; then
+      if [[ -f "$das_updater_root/usb_updater_build.sh" ]]; then
+        echo "$das_updater_root/usb_updater_build.sh"
+      fi
+      list_files_under "$das_updater_root/auto_update"
+      list_files_under "$das_updater_root/product"
+    elif [[ -d "auto_update" ]]; then
+      list_files_under "auto_update"
     fi
   } | sed '/^$/d' | sort -u
 }

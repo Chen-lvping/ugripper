@@ -1,6 +1,6 @@
 ---
 name: add-feature
-description: 为 ugripper 项目执行新增功能（add feature）类需求的标准工作流。用于用户提出“add feature / 加功能 / 新增功能”等请求时：先阅读 docs/agent/overview.md 理解当前实现，再先给实现计划并等待确认，然后以 heredoc 方式修改代码，并同步创建或维护 docs 文档；收尾阶段默认沿用 build 脚本里的现有版本打包，只有用户明确要求时才更新 build_deb.sh 与 usb_updater_build.sh 版本号，并默认联动 auto-release-deb 完成建议编译与自动安装。
+description: 为 ugripper 项目执行新增功能（add feature）类需求的标准工作流。用于用户提出“add feature / 加功能 / 新增功能”等请求时：先阅读 docs/agent/overview.md 理解当前实现，再先给实现计划并等待确认，然后以 heredoc 方式修改代码，并同步创建或维护 docs 文档；收尾阶段默认沿用 build 脚本里的现有版本打包，只有用户明确要求时才更新 build_deb.sh 与 usb_updater_build.sh 版本号，并默认完成建议编译后部署安装到 240 设备（ubuntu@192.168.2.240，密码 ubuntu）。
 ---
 
 # add-feature
@@ -12,8 +12,9 @@ description: 为 ugripper 项目执行新增功能（add feature）类需求的�
 3. 只有收到用户**明确的确认并开始指令**后，才开始改代码与文档。
 4. 代码改完后，先确认用户是否明确要求修改版本号；未明确要求时，默认沿用当前脚本版本。
 5. 若本次修改了代码文件，最终汇报前必须运行 `graphify update .`，用于 AST-only 增量更新项目知识图谱，不触发语义/API 抽取；若本地 graphify 版本不支持该别名，则运行等价的 `graphify . --update`。
-6. 功能修改确认后，默认调用 `auto-release-deb`（由该 skill 完成判定、编译与自动安装）。
-7. 编译/安装完成后，再给最终汇报。
+6. 功能修改确认后，默认调用 `auto-release-deb` 完成影响范围判定与建议编译；构建环境视为交叉编译环境，安装目标固定为 240 设备。
+7. 编译成功后，默认按 `ugripper-arm-deploy` 流程把生成的包安装到 240 设备：`ubuntu@192.168.2.240`，密码 `ubuntu`。
+8. 编译/240 安装完成后，再给最终汇报。
 
 ## 计划反馈阶段处理（强约束）
 
@@ -61,17 +62,21 @@ description: 为 ugripper 项目执行新增功能（add feature）类需求的�
    - 若有修改，必须给出每个脚本的旧版本 -> 新版本。
    - 若未修改，必须明确说明“沿用的脚本版本分别是什么”。
 8. 构建范围判定与编译执行统一由 `auto-release-deb` 负责；`add-feature` 不在内部重复判定或重复编译。
-9. 安装执行也统一由 `auto-release-deb` 负责；`add-feature` 不在内部重复执行安装命令。
+9. 安装执行默认按 `ugripper-arm-deploy` 安装到 240 设备。
 
 ## 发布与编译联动规则（新增）
 
 1. 在 feature 改动落地并确认后，默认执行：
    - `bash .codex/skills/auto-release-deb/scripts/auto_release_deb.sh`
-2. `add-feature` 只消费 `auto-release-deb` 的判定与执行结果，不再自行执行任何构建或安装命令。
+2. `add-feature` 只消费 `auto-release-deb` 的判定与编译结果；部署安装统一走 240 设备。
 3. 若判定 `scope=none`，则不执行编译/安装并在汇报中说明原因。
 4. 仅当用户明确要求“只判定不编译 / 跳过编译 / 跳过安装”时，允许不执行对应步骤。
 5. 任何编译失败都要汇报失败命令与关键错误，并停止后续步骤，等待用户指示。
-6. 构建成功后默认继续安装对应新包；若安装失败，同样要汇报失败命令与关键错误，并停止后续步骤，等待用户指示。
+6. 构建成功后默认安装到 240：
+   - 主包：使用 `scripts/install_deb_to_arm_target.sh --host 192.168.2.240 --user ubuntu --password ubuntu --deb <ugripper_arm64.deb>`。
+   - Updater 包：使用 `sshpass -p ubuntu scp ... ubuntu@192.168.2.240:/tmp/` 后，在 240 上执行 `sudo dpkg -i /tmp/<updater.deb>`。
+   - 若只命中其中一个 scope，则只部署对应包。
+7. 若 240 安装失败，要汇报失败命令与关键错误，并停止后续步骤，等待用户指示。
 
 ## 验收与检查默认策略
 
@@ -94,6 +99,6 @@ description: 为 ugripper 项目执行新增功能（add feature）类需求的�
 2. 文档改动摘要（按文件）。
 3. 版本号决策与结果（含旧版 -> 新版，或不修改原因）。
 4. graphify 增量更新结果（若本次未修改代码，说明未执行原因）。
-5. auto-release-deb 判定结果与实际执行的编译/安装命令（含成功/失败）。
+5. auto-release-deb 判定结果、实际执行的编译命令、240 部署安装命令（含成功/失败）。
 6. 已执行检查与未执行测试说明。
 7. 建议的手动验收步骤。

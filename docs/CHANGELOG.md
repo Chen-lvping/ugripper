@@ -6,6 +6,8 @@
 
 ## v2.0.8 - Unreleased
 
+- 触觉传感器持久化 baseline 存储目录由 `/tmp/umi_tactile_state` 改为 `/var/lib/ugripper/tactile_state`，避免重启后 persistent baseline 被清除导致无法检测关机期间动生的盖板损伤。
+- 升级/重装时在 `prerm` 阶段自动清除触觉传感器基线目录，避免旧版本基线持续污染新版本。
 - 录制起停的 stereo 控制改为 `record_runtime` 直接写左右 Fays recorder FIFO，停录时并发发送左右 `STOP`，并统一 C++ FIFO 完整行读写工具，避免顶层 shell FIFO 超时读半行导致 `STOP` 被截断。
 - 双目 stereo 的时长与 span gap 校验改用对应 Fays MCAP camera 帧首尾时间跨度，MKV 仅保留存在性与可读性检查，避免轻微丢帧造成容器时长偏短时误判数据失败。
 - 触觉实时参考帧与持久化 baseline 改为夹爪重连后只标记待更新，由后续首个可用 episode 的触觉视频截帧生成，避免服务初始化或插爪阶段直接打开触觉相机。
