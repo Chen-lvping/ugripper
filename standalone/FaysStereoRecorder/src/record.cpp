@@ -31,6 +31,7 @@
 #include <limits.h>
 #include <stdexcept>
 #include <opencv2/imgproc.hpp>
+#include "utils/fifo_utils.h"
 #include "fays_atrak/fays_atrak_types.h"
 #include "fays_atrak/fays_vikit.h"
 #include "common/print_helpers.h"
@@ -2377,21 +2378,9 @@ static std::string Trim(const std::string& input) {
 }
 
 static bool EnsureControlFifo(const std::string& fifoPath) {
-    struct stat st {};
-    if (stat(fifoPath.c_str(), &st) == 0) {
-        if (!S_ISFIFO(st.st_mode)) {
-            std::cerr << "[Control] Path exists but is not FIFO: " << fifoPath << std::endl;
-            return false;
-        }
-        return true;
-    }
-
-    if (mkfifo(fifoPath.c_str(), 0666) != 0) {
-        if (errno == EEXIST) {
-            return true;
-        }
-        std::cerr << "[Control] Failed to create FIFO " << fifoPath
-                  << ": " << std::strerror(errno) << std::endl;
+    std::string error;
+    if (!utils::EnsureFifo(fifoPath, 0666, &error)) {
+        std::cerr << "[Control] " << error << std::endl;
         return false;
     }
     return true;
@@ -2403,17 +2392,14 @@ static void RunControlLoop(FaysRecorder& recorder, const std::string& fifoPath) 
     std::cout << "[Control] Supported commands: START|<output_dir>, STOP, EXIT" << std::endl;
 
     while (recorder.IsRunning()) {
-        // Keep FIFO opened in RDWR mode so open() won't block waiting for an external writer.
-        // This makes the control endpoint visible immediately after daemon startup.
-        int fd = open(fifoPath.c_str(), O_RDWR | O_NONBLOCK);
-        if (fd < 0) {
-            std::cerr << "[Control] Failed to open FIFO: " << std::strerror(errno) << std::endl;
+        utils::BufferedFifoLineReader reader;
+        std::string error;
+        if (!reader.Open(fifoPath, 0666, &error)) {
+            std::cerr << "[Control] Failed to open FIFO: " << error << std::endl;
             std::this_thread::sleep_for(std::chrono::milliseconds(500));
             continue;
         }
 
-        char buffer[1024];
-        std::string pending;
         while (recorder.IsRunning()) {
             if (ConsumeStopRequested()) {
                 FaysEventLog("fays_recorder", "signal stop requested");
@@ -2422,26 +2408,18 @@ static void RunControlLoop(FaysRecorder& recorder, const std::string& fifoPath) 
                 break;
             }
 
-            const ssize_t bytesRead = read(fd, buffer, sizeof(buffer));
-            if (bytesRead < 0) {
-                if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                    continue;
-                }
-                std::cerr << "[Control] FIFO read failed: " << std::strerror(errno) << std::endl;
+            std::vector<std::string> commands;
+            if (!reader.ReadAvailable(&commands, &error)) {
+                std::cerr << "[Control] FIFO read failed: " << error << std::endl;
                 break;
             }
-            if (bytesRead == 0) {
+            if (commands.empty()) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(50));
                 continue;
             }
 
-            pending.append(buffer, buffer + bytesRead);
-            size_t newlinePos = std::string::npos;
-            while ((newlinePos = pending.find('\n')) != std::string::npos) {
-                std::string cmd = Trim(pending.substr(0, newlinePos));
-                pending.erase(0, newlinePos + 1);
-
+            for (const std::string& line : commands) {
+                std::string cmd = Trim(line);
                 if (cmd.empty()) {
                     continue;
                 }
@@ -2469,7 +2447,7 @@ static void RunControlLoop(FaysRecorder& recorder, const std::string& fifoPath) 
             }
         }
 
-        close(fd);
+        reader.Close();
         if (ConsumeStopRequested()) {
             FaysEventLog("fays_recorder", "signal stop requested");
             std::cout << "\n[Signal] Stop requested, stopping recorder..." << std::endl;

@@ -14,6 +14,8 @@ struct StereoSessionClientOptions
 {
     std::vector<std::string> daemon_arguments;
     std::string control_pipe;
+    std::string left_control_fifo;
+    std::string right_control_fifo;
     std::string status_file;
     int daemon_stop_timeout_ms = 2000;
     uint64_t restart_interval_ms = 2000;
@@ -42,6 +44,9 @@ public:
     bool WaitForFinalize(const std::string& episode_dir,
                          int timeout_ms,
                          std::string* error_message = nullptr) const;
+    bool LastSessionJson(const std::string& episode_dir,
+                         std::string* session_json,
+                         std::string* error_message = nullptr) const;
 
     bool daemon_started() const;
     uint64_t command_seq() const;
@@ -60,6 +65,10 @@ private:
     bool daemon_started_ = false;
     uint64_t last_start_attempt_ms_ = 0;
     mutable uint64_t command_seq_ = 0;
+    std::string active_episode_dir_;
+    int64_t active_start_system_time_us_ = 0;
+    int64_t active_stop_system_time_us_ = 0;
+    mutable std::string last_session_json_;
 };
 
 }  // namespace ugripper::runtime

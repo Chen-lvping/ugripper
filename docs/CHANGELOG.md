@@ -6,6 +6,7 @@
 
 ## v2.0.8 - Unreleased
 
+- 录制起停的 stereo 控制改为 `record_runtime` 直接写左右 Fays recorder FIFO，停录时并发发送左右 `STOP`，并统一 C++ FIFO 完整行读写工具，避免顶层 shell FIFO 超时读半行导致 `STOP` 被截断。
 - 双目 stereo 的时长与 span gap 校验改用对应 Fays MCAP camera 帧首尾时间跨度，MKV 仅保留存在性与可读性检查，避免轻微丢帧造成容器时长偏短时误判数据失败。
 - 触觉实时参考帧与持久化 baseline 改为夹爪重连后只标记待更新，由后续首个可用 episode 的触觉视频截帧生成，避免服务初始化或插爪阶段直接打开触觉相机。
 - 单侧 Fays stereo 控制链路失效改为 `stereo_control_failed` / `ERROR_4` 侧别提示，识别不到 Fays 相机仍保持 `ERROR_2`；FIFO 启动超时日志补充 side、pid、设备路径和 runtime status 证据。

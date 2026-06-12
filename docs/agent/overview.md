@@ -115,7 +115,7 @@
 8. 并行启动：
    - `camera_recorder --codec <codec> --output-dir <episode> --only left_cam_main,right_cam_main[,chest_cam_main],left_tcam_l,left_tcam_r,right_tcam_l,right_tcam_r`
    - `sensor_recorder <episode_dir>`
-9. 同时向 stereo warmup daemon 写入本次 session 控制文件；双目不重启采集管线，只把本次 session 窗口内的帧纳入当前 episode，由 session writer 抽帧并编码落盘。
+9. 同时由 `record_runtime` 直接向左右 Fays recorder FIFO 写入本次 session `START` 命令；双目不重启采集管线，只把本次 session 窗口内的帧纳入当前 episode，由 session writer 抽帧并编码落盘。
 10. 切换到 `RECORDING` 状态并播放开始提示音。
 
 ### 6.2 相机链路
@@ -175,13 +175,13 @@
 - encoder 连接会优先在 `1Mbps` 下做 3 次快速验证重试（总验证窗口约 `150ms`，目标控制在 `200ms` 内），仍无响应才回退 `115200`；若 `115200` 可响应，则切回 `1Mbps` 后再次验证。
 
 ### 6.4 停止录制
-1. `record_runtime` 会先向 stereo warmup daemon 发送 stop-session，尽早冻结本次双目 session 的收尾边界，避免 stop 命令在普通相机与传感器都停完之后才传到双目链路。
-2. 在 stereo daemon 收到 stop-session 后，`record_runtime` 并发停止普通录制模式下的 `camera_recorder` 与 `sensor_recorder`，降低两条独立链路顺序收尾带来的蓝灯等待。
-3. stereo daemon 收到 stop-session 后会先一次性冻结左右双目 session 的送帧边界，再逐路 finalize 文件，避免某一路在另一侧 finalize 期间继续长出额外尾巴；收尾完成后后台 warmup 继续运行。
+1. `record_runtime` 会先并发向左右 Fays recorder FIFO 发送 `STOP`，尽早冻结本次双目 session 的收尾边界，避免 stop 命令在普通相机与传感器都停完之后才传到双目链路；单侧 FIFO 写入失败不会阻塞另一侧 stop 命令发送。
+2. 在双侧 stop 命令发出后，`record_runtime` 并发停止普通录制模式下的 `camera_recorder` 与 `sensor_recorder`，降低两条独立链路顺序收尾带来的蓝灯等待。
+3. 左右 Fays recorder 收到 `STOP` 后分别 finalize 本侧 `stereo_*.mkv` 与 `fays_data_*.mcap`；后台 warmup daemon 继续负责 recorder 常驻、健康检查与热插拔恢复。
 4. 先发送 `recording_stop`，随后立即切到 `writing`；提示音采用“后触发抢占前触发”的语义，因此 `writing` 会直接打断仍在播放的上一条提示。
 5. 若本条 episode 已拉起 ego sidecar，停录进入 `writing` 后会停止后台增量同步进程，向 ego app 广播 `STOP_RECORDING`，等待 ego 侧目录从 `episode_*-temp` rename 为最终目录并补齐最后一轮文件；若起录阶段还未写出本次 `remote_episode`，stop 只会从 START 前不存在的新 `episode_*-temp` 中选择，避免把 ego 设备上的历史遗留 temp 目录同步进本条 episode。随后 worker 会重新拉取 MP4/M4A finalize 后的头部 `moov` 区域并覆盖本地差异段，再修复 ego MP4 中 stop 后才可确定的 extended-size `mdat` 大小，使本地同步文件可被播放器按 box 边界读到。ego 失败当前只更新 `ego/ego_sync.json` 与日志，不改变 UGripper `quality_check_status`。
 6. 进入 `writing` 阶段：切换 `INIT` 蓝灯并执行分阶段文件级 flush。所有 episode 产物都必须在所属阶段显式执行文件级 flush，再刷 episode 目录项；`pre_stereo_finalize` 只刷普通相机视频、左右 sensor MCAP、`calibration.json` 和可选音频；等待 ego/stereo finalize 并合并 session 信息后，`final` 刷 `stereo_*.mkv`、`fays_data_*.mcap` 与 `ego/` 下已同步文件，并额外刷 ego 子目录目录项；`final` flush 完成后才允许 worker 删除 ego 设备上的同名远端原始 episode，且只删除已 finalize、非 `-temp`、远端/本地文件大小一致的 `episode_*` 目录；删除结果写入 `ego/ego_sync.json.remote_cleanup` 后会再补刷 `ego/ego_sync.json` 和 `ego/` 目录项。`metadata_final` 只刷最终 `metadata.json`、失败时的 `validation_error.log` 和目录项，避免停录路径重复刷同一批媒体文件。停录收尾完成后会请求 `run_record.sh` 将当前运行日志刷写到 `/mnt/data_disk/logs/`。
-7. `record_runtime` 等待 daemon 在状态文件中写出本次 `last_session`，再将其并入 `/dev/shm` 内部 timing 缓存。
+7. `record_runtime` 在 writing 阶段等待左右 `stereo_*.mkv` 非空且 `fays_data_*.mcap` 完整后，本地生成本次 stereo session 摘要并并入 `/dev/shm` 内部 timing 缓存；该等待发生在原有 stereo finalize 阶段，不阻塞前面的 stop 命令并发发送。
 8. 先生成最终 `metadata.json`，其中 `video_details[].start_offset_us/duration_s` 来自 `/dev/shm` 内部 timing 缓存和视频轻量探测；随后执行稳定校验，校验只读取最终 `metadata.json` 与最终媒体/MCAP/`calibration.json`，不再直接依赖 shm 缓存。视频探测结果会尽量写入 `/dev/shm` 内部 timing 缓存的 `video_probes`，供同次 metadata 生成复用；若缓存写入失败，只记录告警，不作为 episode 硬校验失败原因。
 9. 停录硬校验完成后，触觉状态抽检改为后台慢校验，不阻塞当前 stop 返回，也不反改本条 episode 的 `quality_check_status`。后台任务会执行两轮轻量 tactile 处理：其一是“本次起录附近单帧 vs 同 `serial` 实时参考帧”的比较；其二是“本次起录附近单帧 vs 同 `serial` 持久化 baseline”的慢变量比较。若夹爪刚重连、参考帧缺失或持久化 baseline 缺失/过期，则优先用本次 episode 的起录附近单帧初始化对应参考帧，本轮不计入对应 damaged 窗口；若视频缺失、损坏或截帧失败，则保留待更新标记并顺延到下一条 episode。两者都不会扫描整段视频，也不会重新读取 MCAP 做 encoder 对齐。
 10. 实时触觉抽检当前属于软告警而不是完整性失败：单次异常只更新该 tactile `serial` 的近期历史；当同一 `serial` 最近 `3` 个 episode 都判为异常时，空闲态切到黄灯闪烁，并播放对应 `left/right_tcam_*_damaged` 提示音。后台 tactile 校验最多保留一个待处理 episode；若下一次录制开始，会请求当前后台校验停止并清空待处理任务，避免干扰下一次录制。
@@ -272,7 +272,8 @@
 - 运行日志：`/tmp/umi_sys_<device_sn_lower>_<YYYYMMDD>.log`
 - 数据盘日志镜像：`/mnt/data_disk/logs/umi_sys_<device_sn_lower>_<YYYYMMDD>.log`
 - stereo daemon 状态：`/tmp/umi_stereo_camera_status.json`
-- stereo daemon 控制 FIFO：`/tmp/umi_stereo_camera_control.pipe`
+- 左右 Fays recorder 控制 FIFO：`/tmp/umi_left_fays_cmd`、`/tmp/umi_right_fays_cmd`
+- stereo daemon 顶层控制 FIFO：`/tmp/umi_stereo_camera_control.pipe`（保留兼容入口，当前普通录制起停由 `record_runtime` 直接写左右 Fays recorder FIFO）
 - `/mnt/data_disk` 只作为固定挂载点使用：安装阶段会预创建为 `root:root 0555`，业务不会把本地空目录当成数据目录；只有真实数据盘挂载成功后才允许继续启动录制服务。
 - 运行日志维护当前参考 V1 口径：本地先写 `/tmp`，在视频停录、音频停录和运行时退出时增量同步到 `/mnt/data_disk/logs`，并只保留当天同 SN 日志。
 

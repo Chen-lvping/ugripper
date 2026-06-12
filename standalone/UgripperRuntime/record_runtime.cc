@@ -61,8 +61,6 @@ constexpr uint64_t kAudioPlayerReadyGraceMs = 3000;
 constexpr uint64_t kStereoDaemonRestartIntervalMs = 2000;
 constexpr uint64_t kStereoFinalizeWaitPollMs = 100;
 constexpr uint64_t kRecordControlDebounceMs = 300;
-constexpr size_t kRecordControlMaxCommandsPerPoll = 8;
-constexpr size_t kRecordControlMaxBufferBytes = 4096;
 constexpr uint64_t kEgoFinalizeWaitPollMs = 100;
 constexpr uint64_t kEgoStartAckWaitMs = 5000;
 constexpr uint64_t kEgoStartAckPollMs = 50;
@@ -3752,8 +3750,10 @@ bool RecordRuntime::initialize()
                     options_.leftFaysControlFifo,
                     "--right-fifo",
                     options_.rightFaysControlFifo,
-                },
+            },
             .control_pipe = options_.stereoControlPipe,
+            .left_control_fifo = options_.leftFaysControlFifo,
+            .right_control_fifo = options_.rightFaysControlFifo,
             .status_file = options_.stereoStatusFile,
             .daemon_stop_timeout_ms = 2000,
             .restart_interval_ms = kStereoDaemonRestartIntervalMs,
@@ -4190,7 +4190,7 @@ bool RecordRuntime::writeStereoControl(bool recording,
     }
     if (!ok)
     {
-        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write stereo control pipe: " << errorMessage << std::endl).str());
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write stereo control command: " << errorMessage << std::endl).str());
     }
     return ok;
 }
@@ -4445,40 +4445,35 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
         return false;
     }
 
-    std::ifstream statusInput(options_.stereoStatusFile);
-    if (!statusInput.is_open())
+    if (stereoSessionClient_ == nullptr)
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = "cannot open stereo status file";
+            *errorMessage = "stereo session client not initialized";
         }
         return false;
     }
 
-    json status;
+    std::string stereoSessionText;
+    if (!stereoSessionClient_->LastSessionJson(episodeDir, &stereoSessionText, errorMessage))
+    {
+        return false;
+    }
+
+    json stereoSession;
     try
     {
-        status = json::parse(statusInput);
+        stereoSession = json::parse(stereoSessionText);
     }
     catch (const std::exception &ex)
     {
         if (errorMessage != nullptr)
         {
-            *errorMessage = std::string("failed to parse stereo status: ") + ex.what();
+            *errorMessage = std::string("failed to parse stereo session metadata: ") + ex.what();
         }
         return false;
     }
 
-    if (!status.contains("last_session") || !status["last_session"].is_object())
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "stereo status missing last_session";
-        }
-        return false;
-    }
-
-    const json &stereoSession = status["last_session"];
     if (stereoSession.value("episode_dir", std::string()) != episodeDir)
     {
         if (errorMessage != nullptr)
@@ -5796,34 +5791,12 @@ bool RecordRuntime::initializeRecordControlPipe()
         return false;
     }
 
-    std::error_code statusError;
-    if (fs::exists(options_.recordControlPipe, statusError) &&
-        !fs::is_fifo(fs::status(options_.recordControlPipe, statusError)))
-    {
-        DM_LOG_WARN("{}", (::DA::utils::LogString()
-            << "record control path exists but is not a FIFO, software recording control disabled: "
-            << options_.recordControlPipe << std::endl).str());
-        return false;
-    }
-
-    if (!fs::exists(options_.recordControlPipe, statusError))
-    {
-        if (mkfifo(options_.recordControlPipe.c_str(), 0620) != 0 && errno != EEXIST)
-        {
-            DM_LOG_WARN("{}", (::DA::utils::LogString()
-                << "failed to create record control FIFO: " << options_.recordControlPipe
-                << " errno=" << errno << " (" << std::strerror(errno) << ")" << std::endl).str());
-            return false;
-        }
-    }
-
-    chmod(options_.recordControlPipe.c_str(), 0620);
-    recordControlFd_ = open(options_.recordControlPipe.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
-    if (recordControlFd_ < 0)
+    std::string errorMessage;
+    if (!recordControlReader_.Open(options_.recordControlPipe, 0620, &errorMessage))
     {
         DM_LOG_WARN("{}", (::DA::utils::LogString()
             << "failed to open record control FIFO: " << options_.recordControlPipe
-            << " errno=" << errno << " (" << std::strerror(errno) << ")" << std::endl).str());
+            << " error=" << errorMessage << std::endl).str());
         return false;
     }
 
@@ -5834,76 +5807,39 @@ bool RecordRuntime::initializeRecordControlPipe()
 
 void RecordRuntime::closeRecordControlPipe()
 {
-    if (recordControlFd_ >= 0)
-    {
-        close(recordControlFd_);
-        recordControlFd_ = -1;
-    }
+    recordControlReader_.Close();
 }
 
 bool RecordRuntime::pollRecordControlPipe()
 {
-    if (recordControlFd_ < 0)
+    if (!recordControlReader_.IsOpen())
     {
         return false;
     }
 
     bool accepted = false;
-    std::array<char, 512> buffer{};
-    while (true)
+    std::vector<std::string> commands;
+    std::string errorMessage;
+    if (!recordControlReader_.ReadAvailable(&commands, &errorMessage))
     {
-        const ssize_t count = read(recordControlFd_, buffer.data(), buffer.size());
-        if (count > 0)
+        if (errorMessage.find("buffer overflow") != std::string::npos)
         {
-            recordControlBuffer_.append(buffer.data(), static_cast<size_t>(count));
-            if (recordControlBuffer_.size() > kRecordControlMaxBufferBytes)
-            {
-                DM_LOG_WARN("{}", (::DA::utils::LogString()
-                    << "[CONTROL_DIAG] source=fifo result=ignored reason=buffer_overflow").str());
-                recordControlBuffer_.clear();
-                break;
-            }
-            continue;
-        }
-        if (count == 0 || errno == EAGAIN || errno == EWOULDBLOCK)
-        {
-            break;
-        }
-        if (errno == EINTR)
-        {
-            continue;
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                << "[CONTROL_DIAG] source=fifo result=ignored reason=buffer_overflow").str());
+            return false;
         }
         DM_LOG_WARN("{}", (::DA::utils::LogString()
-            << "record control FIFO read failed: errno=" << errno
-            << " (" << std::strerror(errno) << ")" << std::endl).str());
+            << "record control FIFO read failed: " << errorMessage << std::endl).str());
         closeRecordControlPipe();
-        return accepted;
+        return false;
     }
 
-    size_t processed = 0;
-    while (processed < kRecordControlMaxCommandsPerPoll)
+    for (const std::string& command : commands)
     {
-        const size_t newline = recordControlBuffer_.find('\n');
-        if (newline == std::string::npos)
-        {
-            break;
-        }
-        std::string command = recordControlBuffer_.substr(0, newline);
-        recordControlBuffer_.erase(0, newline + 1);
-        if (!command.empty() && command.back() == '\r')
-        {
-            command.pop_back();
-        }
         if (processRecordControlCommand(command))
         {
             accepted = true;
         }
-        ++processed;
-    }
-    if (processed == kRecordControlMaxCommandsPerPoll && recordControlBuffer_.find('\n') != std::string::npos)
-    {
-        DM_LOG_WARN("{}", (::DA::utils::LogString()
-            << "[CONTROL_DIAG] source=fifo result=deferred reason=command_limit").str());
     }
     return accepted;
 }

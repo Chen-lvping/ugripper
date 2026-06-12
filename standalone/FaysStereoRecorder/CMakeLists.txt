@@ -90,6 +90,7 @@ target_link_libraries(fays_record_example
         "${FAYS_OPENCV_IMGPROC_LIBRARY}"
         "${FAYS_OPENCV_CORE_LIBRARY}"
         fays_mcap
+        PP::utils
         Threads::Threads
 )
 target_compile_definitions(fays_record_example

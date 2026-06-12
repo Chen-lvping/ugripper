@@ -193,6 +193,82 @@ TEST(StereoSessionClientTest, ReportsFinalizeErrorFromStatusFile)
     EXPECT_EQ(error, "stereo finalize failed");
 }
 
+TEST(StereoSessionClientTest, DirectSideFifosStopAndFinalizeWithoutTopControlPipe)
+{
+    TempDir temp_dir;
+    const fs::path control_pipe = temp_dir.path() / "unused_top_control.pipe";
+    const fs::path left_fifo = temp_dir.path() / "left_fays_cmd";
+    const fs::path right_fifo = temp_dir.path() / "right_fays_cmd";
+    const fs::path status_file = temp_dir.path() / "stereo_status.json";
+    const fs::path episode_dir = temp_dir.path() / "episode_1";
+    fs::create_directories(episode_dir);
+
+    ASSERT_EQ(mkfifo(left_fifo.c_str(), 0600), 0);
+    ASSERT_EQ(mkfifo(right_fifo.c_str(), 0600), 0);
+    const int left_fd = open(left_fifo.c_str(), O_RDWR | O_NONBLOCK);
+    const int right_fd = open(right_fifo.c_str(), O_RDWR | O_NONBLOCK);
+    ASSERT_GE(left_fd, 0);
+    ASSERT_GE(right_fd, 0);
+
+    ugripper::runtime::ProcessSupervisor supervisor;
+    ugripper::runtime::StereoSessionClient client(
+        &supervisor,
+        {
+            .daemon_arguments = {"/bin/sh", "-c", "sleep 5"},
+            .control_pipe = control_pipe.string(),
+            .left_control_fifo = left_fifo.string(),
+            .right_control_fifo = right_fifo.string(),
+            .status_file = status_file.string(),
+            .daemon_stop_timeout_ms = 500,
+            .restart_interval_ms = 50,
+            .finalize_wait_poll_ms = 10,
+        },
+        &utils::CurrentSteadyMs);
+
+    std::string error;
+    ASSERT_TRUE(client.StartSession(episode_dir.string(), 1000, &error)) << error;
+
+    char buffer[256] = {};
+    ssize_t bytes = read(left_fd, buffer, sizeof(buffer) - 1);
+    ASSERT_GT(bytes, 0);
+    EXPECT_EQ(std::string(buffer, static_cast<size_t>(bytes)), "START|" + episode_dir.string() + "\n");
+    buffer[0] = '\0';
+    bytes = read(right_fd, buffer, sizeof(buffer) - 1);
+    ASSERT_GT(bytes, 0);
+    EXPECT_EQ(std::string(buffer, static_cast<size_t>(bytes)), "START|" + episode_dir.string() + "\n");
+
+    ASSERT_TRUE(client.StopSession(episode_dir.string(), 2000, &error)) << error;
+    buffer[0] = '\0';
+    bytes = read(left_fd, buffer, sizeof(buffer) - 1);
+    ASSERT_GT(bytes, 0);
+    EXPECT_EQ(std::string(buffer, static_cast<size_t>(bytes)), "STOP\n");
+    buffer[0] = '\0';
+    bytes = read(right_fd, buffer, sizeof(buffer) - 1);
+    ASSERT_GT(bytes, 0);
+    EXPECT_EQ(std::string(buffer, static_cast<size_t>(bytes)), "STOP\n");
+
+    {
+        std::ofstream(episode_dir / "stereo_left.mkv") << "video";
+        std::ofstream(episode_dir / "stereo_right.mkv") << "video";
+        const std::string magic = "\x89MCAP0\r\n";
+        std::ofstream left_mcap(episode_dir / "fays_data_left.mcap", std::ios::binary);
+        left_mcap << magic << "payload" << magic;
+        std::ofstream right_mcap(episode_dir / "fays_data_right.mcap", std::ios::binary);
+        right_mcap << magic << "payload" << magic;
+    }
+
+    EXPECT_TRUE(client.WaitForFinalize(episode_dir.string(), 200, &error)) << error;
+    std::string session_json;
+    ASSERT_TRUE(client.LastSessionJson(episode_dir.string(), &session_json, &error)) << error;
+    const json session = json::parse(session_json);
+    EXPECT_EQ(session.value("episode_dir", std::string()), episode_dir.string());
+    EXPECT_EQ(session["cameras"]["left_stereo"].value("record_time_offset_us", 0), 1000);
+    EXPECT_EQ(session["cameras"]["right_stereo"].value("record_time_offset_us", 0), 1000);
+
+    close(left_fd);
+    close(right_fd);
+}
+
 TEST(StereoSessionClientTest, ReportsFinalizeErrorWhileDaemonIsStillFinalizing)
 {
     auto fake_port = std::make_unique<FakeStereoSessionPort>();

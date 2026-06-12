@@ -7,14 +7,18 @@
 #include "record_runtime/subprocess_handle.h"
 
 #include "utils/logger.h"
+#include "utils/fifo_utils.h"
 #include "utils/time_utils.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <future>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <utility>
@@ -52,6 +56,70 @@ bool RetryIntervalElapsed(uint64_t now_ms, uint64_t last_attempt_ms, uint64_t re
     return (now_ms - last_attempt_ms) >= retry_interval_ms;
 }
 
+bool FileExistsAndNotEmpty(const fs::path& path)
+{
+    std::error_code error;
+    return fs::exists(path, error) && fs::is_regular_file(path, error) && fs::file_size(path, error) > 0;
+}
+
+bool McapFileComplete(const fs::path& path)
+{
+    static constexpr char kMcapMagic[] = "\x89MCAP0\r\n";
+    static constexpr size_t kMagicSize = sizeof(kMcapMagic) - 1;
+
+    if (!FileExistsAndNotEmpty(path))
+    {
+        return false;
+    }
+    std::error_code error;
+    const uintmax_t size = fs::file_size(path, error);
+    if (error || size < kMagicSize * 2)
+    {
+        return false;
+    }
+
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open())
+    {
+        return false;
+    }
+
+    std::string head(kMagicSize, '\0');
+    std::string tail(kMagicSize, '\0');
+    input.read(head.data(), static_cast<std::streamsize>(head.size()));
+    input.seekg(-static_cast<std::streamoff>(kMagicSize), std::ios::end);
+    input.read(tail.data(), static_cast<std::streamsize>(tail.size()));
+    return input.good() && head == std::string(kMcapMagic, kMagicSize) &&
+           tail == std::string(kMcapMagic, kMagicSize);
+}
+
+json BuildStereoSessionJson(const std::string& episode_dir,
+                            int64_t start_system_time_us,
+                            int64_t stop_system_time_us)
+{
+    const int64_t duration_us = std::max<int64_t>(0, stop_system_time_us - start_system_time_us);
+    auto camera_info = [&]() {
+        return json{
+            {"record_time_offset_us", start_system_time_us},
+            {"first_written_frame_pts_us", 0},
+            {"first_written_frame_system_time_us", start_system_time_us},
+            {"last_written_frame_pts_us", duration_us},
+            {"last_written_frame_system_time_us", stop_system_time_us},
+        };
+    };
+
+    return json{
+        {"episode_dir", episode_dir},
+        {"start_system_time_us", start_system_time_us},
+        {"stop_system_time_us", stop_system_time_us},
+        {"cameras",
+         json{
+             {"left_stereo", camera_info()},
+             {"right_stereo", camera_info()},
+         }},
+    };
+}
+
 bool WriteTextFileAtomically(const fs::path& path,
                              const std::string& content,
                              std::string* error_message);
@@ -83,28 +151,18 @@ public:
 
     bool SendCommand(const std::string& command, std::string* error_message) const override
     {
-        const int fd = open(command_path_.c_str(), O_WRONLY | O_NONBLOCK);
-        if (fd < 0)
+        std::string local_error;
+        if (!utils::WriteFifoLine(command_path_, command, true, &local_error))
         {
             if (error_message != nullptr)
             {
-                *error_message = std::strerror(errno);
+                *error_message = local_error;
             }
             return false;
         }
-
-        const std::string payload = command + "\n";
-        const ssize_t written = write(fd, payload.data(), payload.size());
-        const int saved_errno = errno;
-        close(fd);
-
-        if (written < 0)
+        if (error_message != nullptr)
         {
-            if (error_message != nullptr)
-            {
-                *error_message = std::strerror(saved_errno);
-            }
-            return false;
+            error_message->clear();
         }
         return true;
     }
@@ -117,8 +175,13 @@ private:
 class FifoStereoSessionPort : public ugripper::runtime::StereoSessionPort
 {
 public:
-    FifoStereoSessionPort(std::string control_path, std::string status_path)
+    FifoStereoSessionPort(std::string control_path,
+                          std::string left_control_fifo,
+                          std::string right_control_fifo,
+                          std::string status_path)
         : control_path_(std::move(control_path)),
+          left_control_fifo_(std::move(left_control_fifo)),
+          right_control_fifo_(std::move(right_control_fifo)),
           status_path_(std::move(status_path))
     {
     }
@@ -147,32 +210,22 @@ public:
                       uint64_t command_seq,
                       std::string* error_message) const override
     {
+        if (UseSideRecorderFifos())
+        {
+            return WriteSideRecorderControl(recording, episode_dir, error_message);
+        }
+
         const std::string payload = BuildCommandLine(recording,
                                                      episode_dir,
                                                      start_system_time_us,
                                                      stop_system_time_us,
                                                      command_seq);
-        const int fd = open(control_path_.c_str(), O_WRONLY | O_NONBLOCK);
-        if (fd < 0)
+        std::string local_error;
+        if (!utils::WriteFifoLine(control_path_.string(), payload, true, &local_error))
         {
             if (error_message != nullptr)
             {
-                *error_message = "open stereo control pipe failed: " + std::string(std::strerror(errno));
-            }
-            return false;
-        }
-
-        const ssize_t written = write(fd, payload.data(), payload.size());
-        const int saved_errno = errno;
-        close(fd);
-
-        if (written < 0 || static_cast<size_t>(written) != payload.size())
-        {
-            if (error_message != nullptr)
-            {
-                *error_message = written < 0
-                                     ? "write stereo control pipe failed: " + std::string(std::strerror(saved_errno))
-                                     : "short write to stereo control pipe";
+                *error_message = "write stereo control pipe failed: " + local_error;
             }
             return false;
         }
@@ -234,6 +287,92 @@ public:
     }
 
 private:
+    bool UseSideRecorderFifos() const
+    {
+        return !left_control_fifo_.empty() && !right_control_fifo_.empty();
+    }
+
+    bool WriteSideRecorderControl(bool recording,
+                                  const std::string& episode_dir,
+                                  std::string* error_message) const
+    {
+        const std::string command = recording ? ("START|" + episode_dir) : "STOP";
+        auto send_one = [&](const std::string& side, const std::string& fifo) {
+            std::string local_error;
+            const bool ok = utils::WriteFifoLine(fifo, command, true, &local_error);
+            if (ok)
+            {
+                return std::string();
+            }
+            return side + " Fays FIFO command failed: " + local_error;
+        };
+
+        if (recording)
+        {
+            const std::string left_error = send_one("left", left_control_fifo_.string());
+            const std::string right_error = send_one("right", right_control_fifo_.string());
+            if (!left_error.empty() || !right_error.empty())
+            {
+                if (left_error.empty())
+                {
+                    utils::WriteFifoLine(left_control_fifo_.string(), "STOP", true, nullptr);
+                }
+                if (right_error.empty())
+                {
+                    utils::WriteFifoLine(right_control_fifo_.string(), "STOP", true, nullptr);
+                }
+                SetCombinedError(left_error, right_error, error_message);
+                return false;
+            }
+            if (error_message != nullptr)
+            {
+                error_message->clear();
+            }
+            return true;
+        }
+
+        auto left_future = std::async(
+            std::launch::async,
+            send_one,
+            std::string("left"),
+            left_control_fifo_.string());
+        auto right_future = std::async(
+            std::launch::async,
+            send_one,
+            std::string("right"),
+            right_control_fifo_.string());
+        const std::string left_error = left_future.get();
+        const std::string right_error = right_future.get();
+        if (!left_error.empty() || !right_error.empty())
+        {
+            SetCombinedError(left_error, right_error, error_message);
+            return false;
+        }
+        if (error_message != nullptr)
+        {
+            error_message->clear();
+        }
+        return true;
+    }
+
+    static void SetCombinedError(const std::string& left_error,
+                                 const std::string& right_error,
+                                 std::string* error_message)
+    {
+        if (error_message == nullptr)
+        {
+            return;
+        }
+        if (!left_error.empty() && !right_error.empty())
+        {
+            *error_message = left_error + "; " + right_error;
+        }
+        else
+        {
+            *error_message = !left_error.empty() ? left_error : right_error;
+        }
+    }
+
     static std::string BuildCommandLine(bool recording,
                                         const std::string& episode_dir,
                                         int64_t start_system_time_us,
@@ -252,6 +391,8 @@ private:
     }
 
     fs::path control_path_;
+    fs::path left_control_fifo_;
+    fs::path right_control_fifo_;
     fs::path status_path_;
 };
 
@@ -415,9 +556,14 @@ std::unique_ptr<AudioCommandPort> CreateFileAudioCommandPort(std::string command
 }
 
 std::unique_ptr<StereoSessionPort> CreateFifoStereoSessionPort(std::string control_path,
+                                                               std::string left_control_fifo,
+                                                               std::string right_control_fifo,
                                                                std::string status_path)
 {
-    return std::make_unique<FifoStereoSessionPort>(std::move(control_path), std::move(status_path));
+    return std::make_unique<FifoStereoSessionPort>(std::move(control_path),
+                                                   std::move(left_control_fifo),
+                                                   std::move(right_control_fifo),
+                                                   std::move(status_path));
 }
 
 std::unique_ptr<ShutdownRequestPort> CreateFileShutdownRequestPort(std::string request_path,
@@ -1003,7 +1149,10 @@ StereoSessionClient::StereoSessionClient(ProcessSupervisor* supervisor,
     if (session_port_ == nullptr)
     {
         session_port_ =
-            CreateFifoStereoSessionPort(options_.control_pipe, options_.status_file);
+            CreateFifoStereoSessionPort(options_.control_pipe,
+                                        options_.left_control_fifo,
+                                        options_.right_control_fifo,
+                                        options_.status_file);
     }
 }
 
@@ -1066,13 +1215,22 @@ bool StereoSessionClient::StartSession(const std::string& episode_dir,
                                        int64_t start_system_time_us,
                                        std::string* error_message)
 {
-    return WriteControl(true, episode_dir, start_system_time_us, 0, error_message);
+    if (!WriteControl(true, episode_dir, start_system_time_us, 0, error_message))
+    {
+        return false;
+    }
+    active_episode_dir_ = episode_dir;
+    active_start_system_time_us_ = start_system_time_us;
+    active_stop_system_time_us_ = 0;
+    last_session_json_.clear();
+    return true;
 }
 
 bool StereoSessionClient::StopSession(const std::string& episode_dir,
                                       int64_t stop_system_time_us,
                                       std::string* error_message)
 {
+    active_stop_system_time_us_ = stop_system_time_us;
     return WriteControl(false, episode_dir, 0, stop_system_time_us, error_message);
 }
 
@@ -1080,6 +1238,67 @@ bool StereoSessionClient::WaitForFinalize(const std::string& episode_dir,
                                           int timeout_ms,
                                           std::string* error_message) const
 {
+    if (!options_.left_control_fifo.empty() && !options_.right_control_fifo.empty())
+    {
+        const fs::path episode_path(episode_dir);
+        const fs::path left_video = episode_path / "stereo_left.mkv";
+        const fs::path right_video = episode_path / "stereo_right.mkv";
+        const fs::path left_mcap = episode_path / "fays_data_left.mcap";
+        const fs::path right_mcap = episode_path / "fays_data_right.mcap";
+
+        const bool finalized = PollUntilReady(
+            static_cast<uint64_t>(timeout_ms), options_.finalize_wait_poll_ms, now_ms_fn_, [&]() {
+                return FileExistsAndNotEmpty(left_video) &&
+                       FileExistsAndNotEmpty(right_video) &&
+                       McapFileComplete(left_mcap) &&
+                       McapFileComplete(right_mcap);
+            });
+        if (!finalized)
+        {
+            std::vector<std::string> missing;
+            if (!FileExistsAndNotEmpty(left_video))
+            {
+                missing.emplace_back("stereo_left.mkv missing or empty");
+            }
+            if (!FileExistsAndNotEmpty(right_video))
+            {
+                missing.emplace_back("stereo_right.mkv missing or empty");
+            }
+            if (!McapFileComplete(left_mcap))
+            {
+                missing.emplace_back("fays_data_left.mcap missing or incomplete");
+            }
+            if (!McapFileComplete(right_mcap))
+            {
+                missing.emplace_back("fays_data_right.mcap missing or incomplete");
+            }
+            if (error_message != nullptr)
+            {
+                std::ostringstream joined;
+                for (size_t i = 0; i < missing.size(); ++i)
+                {
+                    if (i > 0)
+                    {
+                        joined << "; ";
+                    }
+                    joined << missing[i];
+                }
+                *error_message = joined.str().empty() ? "timed out waiting for stereo files" : joined.str();
+            }
+            return false;
+        }
+
+        last_session_json_ = BuildStereoSessionJson(episode_dir,
+                                                    active_start_system_time_us_,
+                                                    active_stop_system_time_us_)
+                                 .dump();
+        if (error_message != nullptr)
+        {
+            error_message->clear();
+        }
+        return true;
+    }
+
     const bool finalized = PollUntilReady(
         static_cast<uint64_t>(timeout_ms), options_.finalize_wait_poll_ms, now_ms_fn_, [&]() {
             StereoSessionStatusSnapshot status;
@@ -1138,6 +1357,85 @@ bool StereoSessionClient::WaitForFinalize(const std::string& episode_dir,
     return false;
 }
 
+bool StereoSessionClient::LastSessionJson(const std::string& episode_dir,
+                                          std::string* session_json,
+                                          std::string* error_message) const
+{
+    if (!last_session_json_.empty())
+    {
+        json parsed;
+        try
+        {
+            parsed = json::parse(last_session_json_);
+        }
+        catch (const std::exception& ex)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = std::string("failed to parse cached stereo session: ") + ex.what();
+            }
+            return false;
+        }
+        if (parsed.value("episode_dir", std::string()) == episode_dir)
+        {
+            if (session_json != nullptr)
+            {
+                *session_json = last_session_json_;
+            }
+            if (error_message != nullptr)
+            {
+                error_message->clear();
+            }
+            return true;
+        }
+    }
+
+    StereoSessionStatusSnapshot status;
+    std::string load_error;
+    if (session_port_->LoadStatus(&status, &load_error) &&
+        status.has_last_session &&
+        status.last_session_episode_dir == episode_dir)
+    {
+        std::ifstream input(options_.status_file);
+        if (!input.is_open())
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = "cannot open stereo status file";
+            }
+            return false;
+        }
+        json root;
+        try
+        {
+            root = json::parse(input);
+        }
+        catch (const std::exception& ex)
+        {
+            if (error_message != nullptr)
+            {
+                *error_message = std::string("failed to parse stereo status: ") + ex.what();
+            }
+            return false;
+        }
+        if (session_json != nullptr)
+        {
+            *session_json = root["last_session"].dump();
+        }
+        if (error_message != nullptr)
+        {
+            error_message->clear();
+        }
+        return true;
+    }
+
+    if (error_message != nullptr)
+    {
+        *error_message = load_error.empty() ? "stereo session metadata is not available" : load_error;
+    }
+    return false;
+}
+
 bool StereoSessionClient::daemon_started() const
 {
     return daemon_started_;
@@ -1162,7 +1460,7 @@ bool StereoSessionClient::WriteControl(bool recording,
                                      next_command_seq,
                                      error_message))
     {
-        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write stereo control pipe: "
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "failed to write stereo control command: "
                              << (error_message != nullptr ? *error_message : std::string())).str());
         return false;
     }

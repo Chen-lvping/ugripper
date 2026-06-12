@@ -10,6 +10,7 @@
 #include "record_runtime/recording_orchestrator.h"
 #include "record_runtime/shutdown_request_port.h"
 #include "record_runtime/stereo_session_client.h"
+#include "utils/fifo_utils.h"
 
 #include <array>
 #include <atomic>
@@ -379,8 +380,7 @@ private:
     uint64_t leftBothPressedSinceMs_ = 0;
     bool leftDualChordActive_ = false;
     bool leftDualLongHandled_ = false;
-    int recordControlFd_ = -1;
-    std::string recordControlBuffer_;
+    utils::BufferedFifoLineReader recordControlReader_{4096};
     uint64_t lastRecordControlActionMs_ = 0;
     bool tactileWarningActive_ = false;
     std::string tactileTriggeredAudioCommand_;

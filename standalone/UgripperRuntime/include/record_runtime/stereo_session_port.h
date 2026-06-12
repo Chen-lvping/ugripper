@@ -33,6 +33,8 @@ public:
 };
 
 std::unique_ptr<StereoSessionPort> CreateFifoStereoSessionPort(std::string control_path,
+                                                               std::string left_control_fifo,
+                                                               std::string right_control_fifo,
                                                                std::string status_path);
 
 }  // namespace ugripper::runtime

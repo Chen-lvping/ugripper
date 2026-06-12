@@ -10,6 +10,7 @@ pkg_check_modules(FMT REQUIRED IMPORTED_TARGET fmt)
 
 add_library(utils
     src/env_utils.cc
+    src/fifo_utils.cc
     src/file_logger.cc
     src/log_fmtter.cc
     src/spd_logger.cc
