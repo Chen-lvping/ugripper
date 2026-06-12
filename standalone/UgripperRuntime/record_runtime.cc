@@ -4445,6 +4445,47 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
         return false;
     }
 
+    auto timingErrorForCamera = [&baseInfo](const std::string &cameraName) {
+        if (!baseInfo.contains("timing_errors") || !baseInfo["timing_errors"].is_array())
+        {
+            return std::string();
+        }
+        for (const auto &entry : baseInfo["timing_errors"])
+        {
+            if (!entry.is_object() || entry.value("camera_name", std::string()) != cameraName)
+            {
+                continue;
+            }
+            return entry.value("error", std::string());
+        }
+        return std::string();
+    };
+    for (const auto &artifact : activeEpisodeVideoArtifacts(chestCameraEnabled_))
+    {
+        if (std::string(artifact.cameraName).find("stereo") != std::string::npos)
+        {
+            continue;
+        }
+        const std::string key = std::string(artifact.cameraName) + "_record_time_offset_us";
+        if (!baseInfo.contains(key) || !baseInfo[key].is_number_integer())
+        {
+            if (errorMessage != nullptr)
+            {
+                std::string detail = timingErrorForCamera(artifact.cameraName);
+                *errorMessage = "camera timing offset unavailable: " + std::string(artifact.cameraName);
+                if (!detail.empty())
+                {
+                    *errorMessage += " error=" + detail;
+                }
+                if (baseInfo.contains(key) && baseInfo[key].is_null())
+                {
+                    *errorMessage += " value=null";
+                }
+            }
+            return false;
+        }
+    }
+
     if (stereoSessionClient_ == nullptr)
     {
         if (errorMessage != nullptr)
@@ -4503,11 +4544,15 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
             return false;
         }
         const json &cameraInfo = stereoSession["cameras"][cameraName];
-        if (!cameraInfo.contains("record_time_offset_us"))
+        if (!cameraInfo.contains("record_time_offset_us") || !cameraInfo["record_time_offset_us"].is_number_integer())
         {
             if (errorMessage != nullptr)
             {
                 *errorMessage = std::string("stereo camera info missing record_time_offset_us: ") + cameraName;
+                if (cameraInfo.contains("record_time_offset_us") && cameraInfo["record_time_offset_us"].is_null())
+                {
+                    *errorMessage += " value=null";
+                }
             }
             return false;
         }

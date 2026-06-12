@@ -3425,6 +3425,7 @@ CameraRecorderManager::CameraRecorderManager(Options options)
 
 bool CameraRecorderManager::Prepare(const std::vector<CameraConfig>& configs, std::vector<std::string>* missing_devices) {
     recorders_.clear();
+    expected_configs_.clear();
     had_failure_ = false;
 
     auto selected = [&](const std::string& name) {
@@ -3435,6 +3436,7 @@ bool CameraRecorderManager::Prepare(const std::vector<CameraConfig>& configs, st
         if (!selected(config.name)) {
             continue;
         }
+        expected_configs_.push_back(config);
         if (!Exists(config.device)) {
             if (missing_devices != nullptr) {
                 missing_devices->push_back(config.device);
@@ -3541,23 +3543,65 @@ bool CameraRecorderManager::WriteInfoJson() const {
 
     bool missing_offset = false;
     std::vector<std::string> missing_cameras;
-    for (const auto& recorder : recorders_) {
-        auto offset_us = recorder->RecordTimeOffsetUs();
-        if (!offset_us.has_value() && options_.codec == "h265" && IsMainCamera(recorder->config())) {
+    std::vector<std::string> missing_devices;
+    for (const auto& config : expected_configs_) {
+        const CameraRecorder* matching_recorder = nullptr;
+        for (const auto& recorder : recorders_) {
+            if (recorder->config().name == config.name) {
+                matching_recorder = recorder.get();
+                break;
+            }
+        }
+
+        std::optional<int64_t> offset_us;
+        if (matching_recorder != nullptr) {
+            offset_us = matching_recorder->RecordTimeOffsetUs();
+        }
+        if (matching_recorder != nullptr &&
+            !offset_us.has_value() &&
+            options_.codec == "h265" &&
+            IsMainCamera(config)) {
             offset_us = boot_time_offset_us;
             DM_LOG_WARN("{}", (::DA::utils::LogString() << "[camera_recorder] fallback to boot_time_offset_us for main camera "
-                                 << recorder->config().name << " in h265 direct-stream mode").str());
-        }
-        if (!offset_us.has_value()) {
-            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] missing record time offset for "
-                                  << recorder->config().name).str());
-            missing_offset = true;
-            missing_cameras.push_back(recorder->config().name);
-            continue;
+                                 << config.name << " in h265 direct-stream mode").str());
         }
         output << ",\n"
-               << "  \"" << recorder->config().name << "_record_time_offset_us\": "
-               << *offset_us;
+               << "  \"" << config.name << "_record_time_offset_us\": ";
+        if (!offset_us.has_value()) {
+            missing_offset = true;
+            if (matching_recorder == nullptr) {
+                missing_devices.push_back(config.name);
+                DM_LOG_ERROR("{}", (::DA::utils::LogString()
+                                    << "[camera_recorder] missing camera device for timing: "
+                                    << config.name << " device=" << config.device).str());
+            } else {
+                missing_cameras.push_back(config.name);
+                DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] missing record time offset for "
+                                      << config.name).str());
+            }
+            output << "null";
+            continue;
+        }
+        output << *offset_us;
+    }
+    if (!missing_devices.empty() || !missing_cameras.empty()) {
+        output << ",\n  \"timing_errors\": [";
+        bool first_error = true;
+        auto write_error = [&](const std::string& camera_name, const std::string& error_type) {
+            if (!first_error) {
+                output << ",";
+            }
+            first_error = false;
+            output << "\n    {\"camera_name\": \"" << camera_name
+                   << "\", \"error\": \"" << error_type << "\"}";
+        };
+        for (const auto& camera_name : missing_devices) {
+            write_error(camera_name, "device_missing");
+        }
+        for (const auto& camera_name : missing_cameras) {
+            write_error(camera_name, "missing_record_time_offset_us");
+        }
+        output << "\n  ]";
     }
     output << "\n}\n";
     output.flush();
@@ -3576,10 +3620,19 @@ bool CameraRecorderManager::WriteInfoJson() const {
     }
     if (missing_offset) {
         std::ostringstream oss;
-        for (size_t i = 0; i < missing_cameras.size(); ++i) {
-            if (i != 0) {
+        bool wrote_any = false;
+        for (const auto& camera : missing_devices) {
+            if (wrote_any) {
                 oss << ",";
             }
+            wrote_any = true;
+            oss << camera << ":device_missing";
+        }
+        for (size_t i = 0; i < missing_cameras.size(); ++i) {
+            if (wrote_any || i != 0) {
+                oss << ",";
+            }
+            wrote_any = true;
             oss << missing_cameras[i];
         }
         DM_LOG_ERROR("{}", (::DA::utils::LogString()

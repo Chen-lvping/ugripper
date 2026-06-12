@@ -70,6 +70,7 @@ public:
 
 private:
     Options options_;
+    std::vector<CameraConfig> expected_configs_;
     std::vector<std::unique_ptr<CameraRecorder>> recorders_;
     bool had_failure_ = false;
 };

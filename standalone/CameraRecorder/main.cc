@@ -85,12 +85,14 @@ int main(int argc, char** argv) {
                 DM_LOG_ERROR("  - {}", device);
             }
             if (!options.allow_missing) {
+                manager.WriteInfoJson();
                 return 2;
             }
         }
 
         if (manager.empty()) {
             DM_LOG_ERROR("[camera_recorder] no camera process to start");
+            manager.WriteInfoJson();
             return 2;
         }
 
@@ -105,6 +107,7 @@ int main(int argc, char** argv) {
 
         if (!manager.StartAll()) {
             manager.StopAll();
+            manager.WriteInfoJson();
             return 1;
         }
 
