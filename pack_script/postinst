@@ -12,8 +12,10 @@ SHUTDOWN_TRIGGER_PATH="umi-shutdown-trigger.path"
 NTP_SYNC_SERVICE="ugripper-ntp-sync.service"
 CONTINUOUS_NTP_SERVICES=(ntp.service chrony.service systemd-timesyncd.service)
 NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
+CH9344_SYMLINK_HELPER="/usr/local/bin/ugripper_ch9344_symlink_name"
 CALIB_PERSIST_DIR="/etc/ugripper/config/calibration"
 CALIB_PERSIST_FILE="${CALIB_PERSIST_DIR}/calibration.json"
+TACTILE_STATE_DIR="/var/lib/ugripper/tactile_state"
 DATA_MOUNT_POINT="/mnt/data_disk"
 EXFAT_SOURCE_MODULE="/home/user/lib/exfat.ko"
 EXFAT_MODULE_NAME="exfat"
@@ -310,6 +312,7 @@ force_cleanup_recording_processes
 chmod +x "$APP_DIR/run_record.sh"
 chmod +x "$APP_DIR/time_sync/safe_ntp_sync.sh" 2>/dev/null || true
 chmod +x "$SHUTDOWN_TRIGGER_SCRIPT"
+chmod +x "$CH9344_SYMLINK_HELPER" 2>/dev/null || true
 chmod -R 777 "$APP_DIR"
 
 SERVICE_RUN_USER="$(resolve_service_user)"
@@ -328,6 +331,13 @@ if id ubuntu >/dev/null 2>&1; then
         chown ubuntu:ubuntu "$CALIB_PERSIST_FILE" >/dev/null 2>&1 || true
         chmod 0664 "$CALIB_PERSIST_FILE" >/dev/null 2>&1 || true
     fi
+fi
+
+# 初始化触觉传感器持久化状态目录（persistent baseline 跨关机有效，不能存 /tmp）
+mkdir -p "${TACTILE_STATE_DIR}/reference" "${TACTILE_STATE_DIR}/persistent"
+if id ubuntu >/dev/null 2>&1; then
+    chown -R ubuntu:ubuntu "$TACTILE_STATE_DIR" >/dev/null 2>&1 || true
+    chmod -R 0775 "$TACTILE_STATE_DIR" >/dev/null 2>&1 || true
 fi
 
 # 安装时自动配置 exfat 提前加载，兼容已生产设备通过 deb 升级修复开机挂载竞态

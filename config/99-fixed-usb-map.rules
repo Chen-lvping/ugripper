@@ -1,299 +1,68 @@
-# ========================
-# RK3588 USB sensor groups
-# ========================
-# 命名约定：
-# - 右侧 hub 可插右上 / 右下物理口：USB2=5-1|1-1，USB3=6-1|8-1
-# - 左侧 hub 可插左上 / 左下物理口：USB2=9-1|11-1，USB3=10-1|12-1
-# - 右侧 hub 内部端口约定：
-#   * .4.1 -> tcam_r
-#   * .4.2 -> tcam_l
-#   * .4.4 -> cam_main (YuZhuo, 27c2:0530)
-# - 新 hub (`1a86:80a0`/`1a86:80a1`) 内部端口约定：
-#   * USB2 .1 -> cam_main (YuZhuo, 27c2:0530)
-#   * 右侧 USB2 .3 -> tcam_l (0bda:5846)
-#   * 右侧 USB2 .4 -> tcam_r (0bda:5846)
-#   * 左侧 USB2 .3 -> tcam_l (0bda:5846)
-#   * 左侧 USB2 .4 -> tcam_r (0bda:5846)
-#   * USB3 .3/.4 -> Fays stereo (0403:602e)
-# - 当前不再保留旧特殊 hub 判定；udev 热路径不再通过 PROGRAM 读取 hub sysfs VID/PID。
-# - 左侧更换新 hub 后，主摄 / tactile 的内部端口与右侧保持同构；仅主摄仍保留设备类型优先兜底：
-#   * tactile `l/r` 仍按左右侧固定节点命名，不做跨侧互换
-#   * 左侧主摄 / tactile `l` 优先按设备类型识别（27c2:0530 = main, 0bda:5846 = tactile），
-#     USB2 口位只用于限定“属于左侧链路”，不再假设固定落在 .4.2 / .4.4
-#   * 左侧 tactile `r` 使用新 hub `.4`
-#   * Fays stereo 使用 USB3 路径，允许同侧 `.1/.2/.3/.4`
-# 摄像头通常会生成两个节点 (videoN, videoN+1)，这里只取 index=0 的主节点。
+# Minimal fixed USB names for the current UGripper topology.
+#
+# Storage is handled by 99-usb-auto-update.rules. This file only maps:
+# main cameras, chest camera, tactile cameras, Fays stereo/IMU, and CH9344.
+#
+# Board ports:
+# - right USB2 hub: 1-1 or 5-1
+# - right USB3 hub: 6-1 or 8-1
+# - left USB2 hub: 9-1 or 11-1
+# - left USB3 hub: 10-1 or 12-1
+# - chest camera: 5-1 or 11-1 direct USB2 only
 
-# ========================
-# 1. USB cameras
-# ========================
-# ---- Right tactile cameras ----
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.2", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_right_l"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.2", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_right_l"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.3", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_right_l"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.3", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_right_l"
+ACTION!="add|change", GOTO="ugripper_fixed_end"
 
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.1", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_right_r"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.1", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_right_r"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4:1.0", \
-  ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_right_r"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4:1.0", \
-  ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_right_r"
+SUBSYSTEM=="usb", GOTO="ugripper_fixed_usb"
+SUBSYSTEM=="video4linux", GOTO="ugripper_fixed_video"
+SUBSYSTEM=="tty", GOTO="ugripper_fixed_tty"
+GOTO="ugripper_fixed_end"
 
-# ---- Left tactile cameras ----
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.2", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_left_l"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.4", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_left_l"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_left_l"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_left_l"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.3", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_left_l"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.3", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_left_l"
+LABEL="ugripper_fixed_usb"
+# Fays SDK needs access to the USB device/control node. Match only SuperSpeed
+# ports in the current UGripper side topology.
+ENV{DEVTYPE}=="usb_device", KERNEL=="[68]-1.[1-4]", ATTR{idVendor}=="0403", ATTR{idProduct}=="602e", ATTR{speed}=="5000", MODE:="0777", GROUP:="plugdev"
+ENV{DEVTYPE}=="usb_device", KERNEL=="1[02]-1.[1-4]", ATTR{idVendor}=="0403", ATTR{idProduct}=="602e", ATTR{speed}=="5000", MODE:="0777", GROUP:="plugdev"
+GOTO="ugripper_fixed_end"
 
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.1", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_left_r"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.1", \
-  ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_left_r"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4:1.0", \
-  ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_left_r"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4:1.0", \
-  ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", \
-  SYMLINK+="tcam_left_r"
+LABEL="ugripper_fixed_video"
+# Fays video + IMU streams on USB3. Interface 00 is stereo; interface 02 is IMU.
+KERNEL=="video*", KERNELS=="[68]-1.[1-4]", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
+KERNEL=="video*", KERNELS=="[68]-1.[1-4]", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="right_fays_imu"
+KERNEL=="video*", KERNELS=="1[02]-1.[1-4]", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
+KERNEL=="video*", KERNELS=="1[02]-1.[1-4]", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="left_fays_imu"
 
-# ---- Right main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
-# 右主摄 packet size helper 仍在包内保留，但自动触发尚未调通，暂不由 udev 执行。
-# 这里仅保留固定节点映射和权限。
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="1-1.4.4", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="5-1.4.4", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="1-1.1", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="5-1.1", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.4.4", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_right"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.4.4", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_right"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1.1", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_right"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1.1", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_right"
+# Left/right main cameras on the hand USB2 hubs.
+KERNEL=="video*", KERNELS=="[15]-1.4.4", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_right"
+KERNEL=="video*", KERNELS=="[15]-1.1", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_right"
+KERNEL=="video*", KERNELS=="9-1.4.[24]", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
+KERNEL=="video*", KERNELS=="11-1.4.[24]", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
+KERNEL=="video*", KERNELS=="9-1.1", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
+KERNEL=="video*", KERNELS=="11-1.1", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
 
-# ---- Left main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="9-1.4.2", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="9-1.4.4", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="11-1.4.2", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="11-1.4.4", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="9-1.1", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNELS=="11-1.1", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.2", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_left"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.4.4", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_left"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.2", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_left"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.4.4", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_left"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1.1", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_left"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1.1", \
-  ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_left"
-# ---- Chest main camera (YuZhuo USB FHD Camera, 27c2:0530) ----
-# 胸部主摄插在板载 4 个 USB 口任意一个都允许，但必须是直连，不允许落在 hub 下。
-# 因此这里按直连 usb interface 路径 `X-1:1.0` 匹配 video 节点；
-# VID/PID 直接复用 usb_id 已导入的 ENV，避免 `KERNELS=="X-1:1.0"` 与
-# `ATTRS{idVendor}`/`ATTRS{idProduct}` 落在不同父节点上导致规则无法命中。
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNEL=="1-1", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNEL=="5-1", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNEL=="9-1", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-ACTION=="add|change", SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", KERNEL=="11-1", \
-  ATTR{idVendor}=="27c2", ATTR{idProduct}=="0530", MODE:="0666", GROUP:="plugdev", TAG+="uaccess"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="1-1:1.0", \
-  ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_chest"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="5-1:1.0", \
-  ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_chest"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="9-1:1.0", \
-  ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_chest"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="11-1:1.0", \
-  ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", MODE:="0660", GROUP:="video", TAG+="uaccess", \
-  SYMLINK+="cam_chest"
+# Chest camera can only be directly plugged into right-upper or left-lower USB2.
+KERNEL=="video*", KERNELS=="5-1:1.0", ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", SYMLINK+="cam_chest"
+KERNEL=="video*", KERNELS=="11-1:1.0", ENV{ID_VENDOR_ID}=="27c2", ENV{ID_MODEL_ID}=="0530", ATTR{index}=="0", SYMLINK+="cam_chest"
 
-# ---- Fays stereo cameras (FTDI Superspeed Video Bridge, 0403:602e) ----
-# Interface 00 is the stereo image stream and interface 02 is the IMU stream.
-# Keep logical stereo_left/stereo_right names for runtime health and episode
-# schema, and expose *_fays_stereo aliases for the vendor SDK configs.
-SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="602e", \
-  MODE:="0777", GROUP:="plugdev", TAG+="uaccess"
-SUBSYSTEM=="video4linux", KERNEL=="video*", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", \
-  MODE:="0777", GROUP:="video", TAG+="uaccess"
+# Tactile cameras on the hand USB2 hubs.
+KERNEL=="video*", KERNELS=="[15]-1.4.2", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_l"
+KERNEL=="video*", KERNELS=="[15]-1.3", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_l"
+KERNEL=="video*", KERNELS=="[15]-1.4.1", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_r"
+KERNEL=="video*", KERNELS=="[15]-1.4:1.0", ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", SYMLINK+="tcam_right_r"
+KERNEL=="video*", KERNELS=="9-1.4.[24]", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
+KERNEL=="video*", KERNELS=="11-1.4.[24]", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
+KERNEL=="video*", KERNELS=="9-1.3", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
+KERNEL=="video*", KERNELS=="11-1.3", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
+KERNEL=="video*", KERNELS=="9-1.4.1", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_r"
+KERNEL=="video*", KERNELS=="11-1.4.1", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_r"
+KERNEL=="video*", KERNELS=="9-1.4:1.0", ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", SYMLINK+="tcam_left_r"
+KERNEL=="video*", KERNELS=="11-1.4:1.0", ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", SYMLINK+="tcam_left_r"
+GOTO="ugripper_fixed_end"
 
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="right_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="right_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="right_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="right_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="right_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="right_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="6-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="right_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="8-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="right_fays_imu"
+LABEL="ugripper_fixed_tty"
+# CH9344 exposes multiple tty nodes without a stable per-port sysfs attribute.
+# Keep udev rules thin: one permission rule, then a small helper returns the
+# symlink name for group rank 1/2 only (gripper/encoder).
+KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", MODE:="0666"
+KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", PROGRAM=="/usr/local/bin/ugripper_ch9344_symlink_name %p %k", SYMLINK+="%c"
 
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", \
-  SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="left_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="left_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.1", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="left_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.2", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="left_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="left_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.3", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="left_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="10-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="left_fays_imu"
-SUBSYSTEM=="video4linux", KERNEL=="video*", KERNELS=="12-1.4", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ENV{ID_VENDOR_ID}=="0403", ENV{ID_MODEL_ID}=="602e", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", \
-  SYMLINK+="left_fays_imu"
-
-
-# ========================
-# 2. USB multi-serial bridges
-# ========================
-# v2 编码器现通过 QinHeng CH9344 多串口桥暴露为 /dev/ttyCH9344USB*。
-# 这里统一放开 tty 节点权限，便于现场脚本直接探测；不绑定固定端口号。
-SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9",   MODE:="0666", TAG+="uaccess"
-
-# CH9344 gripper HMI 固定口映射：只依赖左右 USB2 hub 路径 + 同组 tty 的内核顺序，
-# 不依赖全局 ttyCH9344USB<num> 号。允许同侧 USB2 hub 的内部端口 .1/.2 互换。
-# 在同一个 CH9344 设备组下，组内排序第 1 路 = gripper HMI，第 2 路 = encoder。
-# 新版不再接板载 IM648，因此不生成 left_imu / right_imu。
-# 通过 PROGRAM 的退出码判断“当前 tty 是否为组内第 N 路”，不依赖额外 role probe。
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="right_gripper"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="left_gripper"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="left_gripper"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="left_gripper"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 1p); [ %k = $$pick ]'", SYMLINK+="left_gripper"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="1-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="5-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="right_encoder"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="9-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.1",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
-ACTION=="add", SUBSYSTEM=="tty", KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", KERNELS=="11-1.2",   PROGRAM=="/bin/sh -c 'pick=$$(for node in /sys%p/../ttyCH9344USB*; do basename $$node; done | sort -V | sed -n 2p); [ %k = $$pick ]'", SYMLINK+="left_encoder"
-# ========================
-# 3. USB audio headset
-# ========================
-# v2 音频优先使用受支持的外接 USB 耳机；当前兼容两款 liyuany 设备：
-# - USB Audio             (0020:0b21)
-# - USB PnP Sound Device  (0023:0b23)
-# 这里按设备指纹匹配，不绑定具体物理口；插在板载 4 个 USB 口任意一个都能识别。
-SUBSYSTEM=="usb", ATTR{idVendor}=="0020", ATTR{idProduct}=="0b21",   MODE:="0666", TAG+="uaccess"
-SUBSYSTEM=="sound", KERNEL=="card*", ATTRS{idVendor}=="0020", ATTRS{idProduct}=="0b21",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_card"
-SUBSYSTEM=="sound", KERNEL=="controlC*", ATTRS{idVendor}=="0020", ATTRS{idProduct}=="0b21",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_control"
-SUBSYSTEM=="sound", KERNEL=="pcmC*D*p", ATTRS{idVendor}=="0020", ATTRS{idProduct}=="0b21",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_playback"
-SUBSYSTEM=="sound", KERNEL=="pcmC*D*c", ATTRS{idVendor}=="0020", ATTRS{idProduct}=="0b21",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_capture"
-SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="0020", ATTRS{idProduct}=="0b21", MODE:="0666", SYMLINK+="input/ugripper_usb_audio_keys"
-SUBSYSTEM=="usb", ATTR{idVendor}=="0023", ATTR{idProduct}=="0b23",   MODE:="0666", TAG+="uaccess"
-SUBSYSTEM=="sound", KERNEL=="card*", ATTRS{idVendor}=="0023", ATTRS{idProduct}=="0b23",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_card"
-SUBSYSTEM=="sound", KERNEL=="controlC*", ATTRS{idVendor}=="0023", ATTRS{idProduct}=="0b23",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_control"
-SUBSYSTEM=="sound", KERNEL=="pcmC*D*p", ATTRS{idVendor}=="0023", ATTRS{idProduct}=="0b23",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_playback"
-SUBSYSTEM=="sound", KERNEL=="pcmC*D*c", ATTRS{idVendor}=="0023", ATTRS{idProduct}=="0b23",   MODE:="0666", GROUP:="audio", SYMLINK+="snd/ugripper_usb_audio_capture"
-SUBSYSTEM=="input", KERNEL=="event*", ATTRS{idVendor}=="0023", ATTRS{idProduct}=="0b23", MODE:="0666", SYMLINK+="input/ugripper_usb_audio_keys"
-
-# ========================
-# 4. Storage devices
-# ========================
-# 数据盘挂载/卸载和 USB 升级触发由独立 das-usb-updater 包的
-# 99-usb-auto-update.rules 承载；主包只保留传感器、串口和音频映射。
+LABEL="ugripper_fixed_end"
