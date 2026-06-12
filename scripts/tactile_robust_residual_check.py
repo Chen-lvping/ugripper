@@ -23,13 +23,11 @@ from PIL import Image
 FRAME_WIDTH = 160
 FRAME_HEIGHT = 120
 FRAME_BYTES = FRAME_WIDTH * FRAME_HEIGHT
-RESIDUAL_FLOOR = 24.0
+RESIDUAL_FLOOR = 10.0
 MAD_TO_SIGMA = 1.4826
 MAD_MULTIPLIER = 6.0
 MIN_NEIGHBOR_COUNT = 3
 MIN_COMPONENT_PIXELS = 8
-SMALL_DAMAGE_AREA_THRESHOLD = 0.0004
-SMALL_DAMAGE_COMPONENT_PIXELS = 8
 
 
 def _resampling_filter() -> int:
@@ -49,7 +47,7 @@ def load_tactile_frame(path: Path) -> np.ndarray:
 
     image = image.convert("RGB")
     width, height = image.size
-    left = int(width * 0.08)
+    left = int(width * 0.12)
     image = image.crop((left, 0, width, height))
     image = image.resize((FRAME_WIDTH, FRAME_HEIGHT), _resampling_filter()).convert("L")
     return np.asarray(image, dtype=np.float32)
@@ -121,8 +119,6 @@ def robust_residual_area(baseline: np.ndarray, current: np.ndarray) -> Tuple[flo
         "mad_multiplier": MAD_MULTIPLIER,
         "min_neighbor_count": MIN_NEIGHBOR_COUNT,
         "min_component_pixels": MIN_COMPONENT_PIXELS,
-        "small_damage_area_threshold": SMALL_DAMAGE_AREA_THRESHOLD,
-        "small_damage_component_pixels": SMALL_DAMAGE_COMPONENT_PIXELS,
         "max_component_pixels": max_component_pixels,
     }
     return area, detail
@@ -144,7 +140,6 @@ def save_overlay(path: Path, current: np.ndarray, baseline: np.ndarray, detail: 
 
 def main() -> int:
     global RESIDUAL_FLOOR, MAD_MULTIPLIER, MIN_NEIGHBOR_COUNT, MIN_COMPONENT_PIXELS
-    global SMALL_DAMAGE_AREA_THRESHOLD, SMALL_DAMAGE_COMPONENT_PIXELS
 
     parser = argparse.ArgumentParser(description="Run tactile robust residual damage check.")
     parser.add_argument("--baseline", required=True, type=Path, help="Baseline image or 160x120 .gray file.")
@@ -154,8 +149,6 @@ def main() -> int:
     parser.add_argument("--mad-multiplier", type=float, default=MAD_MULTIPLIER, help="MAD multiplier for adaptive residual threshold.")
     parser.add_argument("--min-neighbor-count", type=int, default=MIN_NEIGHBOR_COUNT, help="Minimum active pixels in a 3x3 neighborhood.")
     parser.add_argument("--min-component-pixels", type=int, default=MIN_COMPONENT_PIXELS, help="Minimum connected component size to keep in the residual mask.")
-    parser.add_argument("--small-damage-area-threshold", type=float, default=SMALL_DAMAGE_AREA_THRESHOLD, help="Raw residual area threshold for small connected damage.")
-    parser.add_argument("--small-damage-component-pixels", type=int, default=SMALL_DAMAGE_COMPONENT_PIXELS, help="Connected component size threshold for small damage.")
     parser.add_argument("--json", action="store_true", help="Print JSON only.")
     parser.add_argument("--overlay", type=Path, help="Optional output path for a green residual mask overlay PNG.")
     args = parser.parse_args()
@@ -164,20 +157,13 @@ def main() -> int:
     MAD_MULTIPLIER = args.mad_multiplier
     MIN_NEIGHBOR_COUNT = args.min_neighbor_count
     MIN_COMPONENT_PIXELS = args.min_component_pixels
-    SMALL_DAMAGE_AREA_THRESHOLD = args.small_damage_area_threshold
-    SMALL_DAMAGE_COMPONENT_PIXELS = args.small_damage_component_pixels
 
     baseline = load_tactile_frame(args.baseline)
     current = load_tactile_frame(args.current)
     score, detail = robust_residual_area(baseline, current)
-    small_damage = (
-        detail["raw_residual_area"] >= SMALL_DAMAGE_AREA_THRESHOLD
-        and detail["max_component_pixels"] >= SMALL_DAMAGE_COMPONENT_PIXELS
-    )
-    damaged = score >= args.threshold or small_damage
+    damaged = score >= args.threshold
     result = {
         "damaged": damaged,
-        "small_damage": small_damage,
         "threshold": args.threshold,
         **detail,
     }
@@ -201,9 +187,6 @@ def main() -> int:
         print(f"residual_p99={detail['residual_p99']:.3f}")
         print(f"max_component_pixels={detail['max_component_pixels']}")
         print(f"min_component_pixels={detail['min_component_pixels']}")
-        print(f"small_damage={str(small_damage).lower()}")
-        print(f"small_damage_area_threshold={detail['small_damage_area_threshold']:.6f}")
-        print(f"small_damage_component_pixels={detail['small_damage_component_pixels']}")
         print(f"gain={detail['gain']:.6f}")
         print(f"offset={detail['offset']:.3f}")
         if args.overlay is not None:

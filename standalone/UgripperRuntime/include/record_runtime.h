@@ -51,7 +51,7 @@ struct RecordRuntimeOptions
     std::string persistCalibrationFile = "/etc/ugripper/config/calibration/calibration.json";
     std::string exampleCalibrationFile = "./calibration.json";
     std::string fallbackCalibrationFile = "./bin/UgripperRuntime/config/fakeCamCalib.json";
-    std::string tactileStateDir = "/tmp/umi_tactile_state";
+    std::string tactileStateDir = "/var/lib/ugripper/tactile_state";
     std::string cameraCodec = "h264";
     std::string stereoControlPipe = "/tmp/umi_stereo_camera_control.pipe";
     std::string stereoStatusFile = "/tmp/umi_stereo_camera_status.json";

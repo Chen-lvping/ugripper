@@ -2,6 +2,7 @@
 set -e
 
 SERVICE_NAME="{{APP_NAME}}.service"
+TACTILE_STATE_DIR="/var/lib/ugripper/tactile_state"
 
 # 定义所有涉及的服务名称
 NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
@@ -68,6 +69,11 @@ systemctl disable "$SHUTDOWN_TRIGGER_SERVICE" || true
 # 3) 清理生成的文件
 # --------------------------------------------------
 echo "Cleaning up systemd units and configs..."
+
+# 升级/重装时清除触觉传感器基线文件，避免旧基线影响新版本延续使用
+if [ "$1" = "upgrade" ]; then
+    rm -rf "$TACTILE_STATE_DIR" || true
+fi
 
 
 systemctl daemon-reload

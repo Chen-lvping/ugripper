@@ -96,16 +96,13 @@ constexpr int kTactileFrameHeight = 120;
 constexpr size_t kTactileFrameBytes = static_cast<size_t>(kTactileFrameWidth * kTactileFrameHeight);
 constexpr double kTactileEpisodeProbeSec = 0.12;
 constexpr double kTactileRobustResidualAreaThreshold = 0.003;
-constexpr double kTactileResidualFloorThreshold = 24.0;
+constexpr double kTactileResidualFloorThreshold = 10.0;
 constexpr double kTactileResidualMadMultiplier = 6.0;
 constexpr double kTactileMadToSigma = 1.4826;
 constexpr int kTactileResidualMinNeighborCount = 3;
 constexpr size_t kTactileResidualMinComponentPixels = 8;
-constexpr double kTactileSmallResidualAreaThreshold = 0.0004;
-constexpr size_t kTactileSmallResidualComponentPixels = 8;
 constexpr size_t kTactileHistoryWindow = 3;
 constexpr int kTactileSnapshotTimeoutMs = 2500;
-constexpr uint64_t kTactilePersistentBaselineRefreshMs = 12ULL * 60ULL * 60ULL * 1000ULL;
 constexpr const char *kEpisodeTimingFileName = ".recording_timing.json";
 constexpr const char *kEpisodeTimingShmPrefix = "ugripper_recording_timing_";
 constexpr const char *kEgoSyncStatusFileName = "ego_sync.json";
@@ -465,6 +462,17 @@ fs::path tactilePersistentRawPath(const fs::path &root, const std::string &seria
     return tactilePersistentDir(root) / (sanitizeFileComponent(serial) + ".gray");
 }
 
+std::string currentBootId()
+{
+    std::ifstream input("/proc/sys/kernel/random/boot_id");
+    std::string bootId;
+    if (input.is_open())
+    {
+        std::getline(input, bootId);
+    }
+    return bootId;
+}
+
 bool writeTactileReferenceMeta(const fs::path &root,
                                const std::string &serial,
                                const TactileCalibrationTarget &target,
@@ -760,8 +768,6 @@ std::string formatTactileMetrics(const TactileFrameMetrics &metrics)
            " residual_p99=" + formatFixed(metrics.residualP99, 2) +
            " max_component_px=" + std::to_string(metrics.maxResidualComponentPixels) +
            " min_component_px=" + std::to_string(kTactileResidualMinComponentPixels) +
-           " small_area_threshold=" + formatFixed(kTactileSmallResidualAreaThreshold, 4) +
-           " small_component_px=" + std::to_string(kTactileSmallResidualComponentPixels) +
            " gain=" + formatFixed(metrics.gain, 4) +
            " offset=" + formatFixed(metrics.offset, 2);
 }
@@ -943,11 +949,7 @@ TactileFrameMetrics computeTactileFrameMetrics(const std::vector<uint8_t> &basel
         kTactileResidualMinComponentPixels,
         &metrics.maxResidualComponentPixels);
     metrics.robustResidualArea = static_cast<double>(filteredResidualMaskCount) / static_cast<double>(baseline.size());
-    const bool areaDamaged = metrics.robustResidualArea >= kTactileRobustResidualAreaThreshold;
-    const bool smallComponentDamaged =
-        metrics.rawResidualArea >= kTactileSmallResidualAreaThreshold &&
-        metrics.maxResidualComponentPixels >= kTactileSmallResidualComponentPixels;
-    metrics.damaged = areaDamaged || smallComponentDamaged;
+    metrics.damaged = metrics.robustResidualArea >= kTactileRobustResidualAreaThreshold;
     return metrics;
 }
 
@@ -2299,7 +2301,7 @@ std::optional<std::vector<uint8_t>> captureTactileGrayFrame(const std::vector<st
     arguments.push_back("-frames:v");
     arguments.push_back("1");
     arguments.push_back("-vf");
-    arguments.push_back("crop=iw*0.92:ih:iw*0.08:0,scale=160:120,format=gray");
+    arguments.push_back("crop=iw*0.88:ih:iw*0.12:0,scale=160:120,format=gray");
     arguments.push_back("-f");
     arguments.push_back("rawvideo");
     arguments.push_back("-");
@@ -7031,13 +7033,7 @@ void RecordRuntime::EpisodeManager::markTactileReferencePendingForSide(
         cameraHistory["reference_pending"] = true;
         cameraHistory["reference_pending_reason"] = reason;
         cameraHistory["reference_pending_at_ms"] = nowMs;
-        cameraHistory["persistent_baseline_pending"] = true;
-        cameraHistory["persistent_baseline_pending_reason"] = reason;
-        cameraHistory["persistent_baseline_pending_at_ms"] = nowMs;
         cameraHistory["recent"] = json::array();
-        cameraHistory["persistent_recent"] = json::array();
-        cameraHistory["persistent_fault_active"] = false;
-        cameraHistory["persistent_fault_detail"] = "";
         historyDirty = true;
         DM_LOG_INFO("{}", (::DA::utils::LogString()
             << "tactile reference pending: camera=" << target.cameraName
@@ -7411,6 +7407,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
     std::vector<TactileValidationFinding> *tactileFindings) const
 {
     const int64_t tactileValidationStartMs = steadyNowMs();
+    const std::string bootId = currentBootId();
     json tactileHistory = json::object();
     {
         std::ifstream historyInput(tactileHistoryPath(tactileStateDir_));
@@ -7467,7 +7464,8 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
             const json &cameraHistory = tactileHistory["cameras"][*serial];
             if (cameraHistory.is_object() &&
                 (cameraHistory.value("reference_pending", false) ||
-                 cameraHistory.value("persistent_baseline_pending", false)))
+                 cameraHistory.value("persistent_baseline_pending", false) ||
+                 cameraHistory.value("persistent_baseline_refresh_on_next_boot", false)))
             {
                 DM_LOG_WARN("{}", (::DA::utils::LogString()
                     << "tactile reference deferred: camera=" << target.cameraName
@@ -7493,7 +7491,8 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
             cameraHistory["persistent_recent"] = json::array();
         }
         cameraHistory["camera_name"] = target.cameraName;
-        cameraHistory["updated_at_ms"] = RecordRuntime::currentEpochMs();
+        const uint64_t nowMs = RecordRuntime::currentEpochMs();
+        cameraHistory["updated_at_ms"] = nowMs;
 
         std::vector<uint8_t> baselineFrame;
         std::string baselineError;
@@ -7562,15 +7561,30 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
                                 &persistentBaselineError);
         const uint64_t persistentBaselineUpdatedAtMs =
             cameraHistory.value("persistent_baseline_updated_at_ms", static_cast<uint64_t>(0));
-        const bool persistentPending = cameraHistory.value("persistent_baseline_pending", false);
-        const bool persistentExpired =
-            hasPersistentBaseline &&
-            persistentBaselineUpdatedAtMs != 0 &&
-            (RecordRuntime::currentEpochMs() - persistentBaselineUpdatedAtMs) >=
-                kTactilePersistentBaselineRefreshMs;
+        const bool legacyPersistentPending = cameraHistory.value("persistent_baseline_pending", false);
+        const bool persistentRefreshOnNextBoot =
+            cameraHistory.value("persistent_baseline_refresh_on_next_boot", false);
+        const std::string persistentRefreshRequestBootId =
+            cameraHistory.value("persistent_baseline_refresh_request_boot_id", std::string());
+        const bool persistentRefreshAfterReboot =
+            persistentRefreshOnNextBoot &&
+            !persistentRefreshRequestBootId.empty() &&
+            !bootId.empty() &&
+            persistentRefreshRequestBootId != bootId;
         const bool persistentNeedsUpdate =
             !hasPersistentBaseline || persistentBaselineUpdatedAtMs == 0 ||
-            persistentPending || persistentExpired;
+            persistentRefreshAfterReboot;
+        const std::string persistentUpdateReason =
+            (!hasPersistentBaseline || persistentBaselineUpdatedAtMs == 0)
+                ? "missing"
+                : (persistentRefreshAfterReboot ? "alarm_reboot" : "");
+        if (legacyPersistentPending && !persistentNeedsUpdate)
+        {
+            cameraHistory["persistent_baseline_pending"] = false;
+            cameraHistory["persistent_baseline_pending_reason"] = "";
+            cameraHistory["persistent_baseline_pending_at_ms"] = 0;
+            historyDirty = true;
+        }
         bool initializedPersistentFromEpisode = false;
         if (persistentNeedsUpdate)
         {
@@ -7582,7 +7596,10 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
                 cameraHistory["persistent_baseline_pending"] = false;
                 cameraHistory["persistent_baseline_pending_reason"] = "";
                 cameraHistory["persistent_baseline_pending_at_ms"] = 0;
-                cameraHistory["persistent_baseline_updated_at_ms"] = RecordRuntime::currentEpochMs();
+                cameraHistory["persistent_baseline_updated_at_ms"] = nowMs;
+                cameraHistory["persistent_baseline_refresh_on_next_boot"] = false;
+                cameraHistory["persistent_baseline_refresh_request_boot_id"] = "";
+                cameraHistory["persistent_baseline_refresh_request_at_ms"] = 0;
                 cameraHistory["persistent_fault_active"] = false;
                 cameraHistory["persistent_fault_detail"] = "";
                 cameraHistory["persistent_recent"] = json::array();
@@ -7594,17 +7611,14 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
                     << "tactile persistent baseline initialized from episode: camera=" << target.cameraName
                     << " serial=" << *serial
                     << " episode=" << episodeDir
-                    << " reason="
-                    << (persistentPending ? "pending" :
-                        (!hasPersistentBaseline || persistentBaselineUpdatedAtMs == 0 ? "missing" : "expired"))
+                    << " reason=" << persistentUpdateReason
                     << std::endl).str());
             }
             else
             {
                 cameraHistory["persistent_baseline_pending"] = true;
-                cameraHistory["persistent_baseline_pending_reason"] =
-                    persistentPending ? cameraHistory.value("persistent_baseline_pending_reason", std::string("write_failed"))
-                                      : std::string("persistent_write_failed");
+                cameraHistory["persistent_baseline_pending_reason"] = persistentUpdateReason + "_write_failed";
+                cameraHistory["persistent_baseline_pending_at_ms"] = nowMs;
                 historyDirty = true;
                 DM_LOG_WARN("{}", (::DA::utils::LogString()
                     << "tactile persistent baseline deferred: camera=" << target.cameraName
@@ -7681,6 +7695,9 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
                     persistentWarningTriggered = true;
                 }
                 persistentWarningActiveAfter = true;
+                cameraHistory["persistent_baseline_refresh_on_next_boot"] = !bootId.empty();
+                cameraHistory["persistent_baseline_refresh_request_boot_id"] = bootId;
+                cameraHistory["persistent_baseline_refresh_request_at_ms"] = nowMs;
             }
             else if (persistentWindowClean)
             {
