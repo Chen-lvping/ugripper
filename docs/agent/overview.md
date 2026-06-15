@@ -147,6 +147,7 @@
   - recorder 会低频刷新 `/dev/shm/umi_left_fays_runtime_status.json` / `/dev/shm/umi_right_fays_runtime_status.json`，只记录最近 warmup frame 时间、最近编码 frame 时间和当前录制 session id 等事实调试变量；daemon 用最近 frame freshness 判断 warmup 拉流是否真的存活，不额外引入“session writer 确认”状态。
   - 录制中若某侧 recorder 工作状态异常，daemon 会立即记录当前 session 的单侧 stereo 控制错误，停录阶段快速返回失败；finalize 等待视频/MCAP 文件期间也会被已知错误打断，不再等缺失文件触发完整超时。若该侧 Fays 相机/IMU symlink 本身识别不到，仍按关键设备缺失进入 `ERROR_2`；若设备已在线但 recorder/FIFO/control 链路失效，则进入 `ERROR_4` 并提示拔插对应侧夹爪，软件复位不作为有效恢复手段。
   - 每次拉起单侧 Fays recorder 前会先等待该侧 stereo/IMU symlink 解析目标稳定，随后默认再延迟 `1.5s`，可通过 `FAYS_STEREO_START_DELAY_SEC` 覆盖，避免设备刚枚举完成或 videoN 仍在漂移时被 SDK 过快打开。
+  - 左右 Fays recorder 不并行拉起：daemon 会按左右 stereo symlink 当前解析到的 `/dev/videoN` 顺序启动，较小 videoN 视为更早插入/枚举的一侧；单侧启动后会等待 SDK handle 完成启动（FIFO 在线、calibration serial 可读且 warmup frame fresh）或默认 `10s` 超时，再拉起另一侧，可通过 `FAYS_STEREO_START_COMPLETE_TIMEOUT_SEC` 覆盖该等待窗口。
   - 单侧 recorder 清理优先走 FIFO `EXIT` 触发进程内 `Stop()`，该路径会唤醒视频、IMU、MCAP 和编码队列；若 SDK 线程仍未退出，再依次用 `SIGTERM` 和 `SIGKILL` 兜底，避免外层 daemon 因无界 `wait` 卡住。
   - Fays recorder 重启不会主动执行 USB `unbind/bind`、USB reset 或 udev 规则重载；它会关闭旧进程持有的 SDK/video/IMU handle，再重新拉起 recorder 并由 SDK 打开当前 symlink 指向的设备节点。外层 daemon 在启动/重启前会用 `fuser` 检查该侧 stereo/IMU 实际节点是否仍被占用，必要时会终止占用这些节点的进程；因此日志中可能看到 video port 占用清理，但这不是内核 USB 设备 reset。
   - Fays 相关关键事件日志统一带 `[FAYS_TS <HH:MM:SS.usec>]` 前缀，便于和 `dmesg -T` 的内核日志对齐。当前覆盖 stereo daemon 的 recorder start/stop/restart、video port busy/forced cleanup、session start/stop/finalize error，以及 `fays_record_example` 的进程启动、SDK handle 创建失败、控制 FIFO `START/STOP/EXIT` 和进程退出。

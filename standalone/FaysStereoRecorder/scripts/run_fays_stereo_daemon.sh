@@ -19,6 +19,7 @@ POLL_INTERVAL_SEC="${FAYS_STEREO_POLL_INTERVAL_SEC:-0.2}"
 HEALTH_POLL_INTERVAL_SEC="${FAYS_STEREO_HEALTH_POLL_INTERVAL_SEC:-1}"
 FINALIZE_TIMEOUT_SEC="${FAYS_STEREO_FINALIZE_TIMEOUT_SEC:-10}"
 START_DELAY_SEC="${FAYS_STEREO_START_DELAY_SEC:-1.5}"
+START_COMPLETE_TIMEOUT_SEC="${FAYS_STEREO_START_COMPLETE_TIMEOUT_SEC:-10}"
 HEALTH_GRACE_SEC="${FAYS_STEREO_HEALTH_GRACE_SEC:-3}"
 FRAME_STALE_SEC="${FAYS_STEREO_FRAME_STALE_SEC:-3}"
 SYMLINK_STABLE_SEC="${FAYS_STEREO_SYMLINK_STABLE_SEC:-1}"
@@ -789,6 +790,95 @@ check_side_working_state() {
     return 1
 }
 
+side_pid() {
+    local side="$1"
+    if [ "$side" = "left" ]; then
+        echo "$LEFT_PID"
+    else
+        echo "$RIGHT_PID"
+    fi
+}
+
+side_stereo_video_index() {
+    local config="$1"
+    local stereo_path resolved node
+
+    stereo_path="$(config_value "$config" stereo_dev_port)"
+    [ -n "$stereo_path" ] && [ "$stereo_path" != "NULL" ] || return 1
+    [ -e "$stereo_path" ] || return 1
+    resolved="$(readlink -f "$stereo_path" 2>/dev/null || true)"
+    [ -n "$resolved" ] || return 1
+    node="$(basename "$resolved")"
+    case "$node" in
+        video*[!0-9]*|"")
+            return 1
+            ;;
+        video*)
+            printf '%s\n' "${node#video}"
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+stereo_start_order() {
+    local left_index right_index
+
+    left_index="$(side_stereo_video_index "$LEFT_CONFIG" 2>/dev/null || true)"
+    right_index="$(side_stereo_video_index "$RIGHT_CONFIG" 2>/dev/null || true)"
+
+    if [ -n "$left_index" ] && [ -n "$right_index" ]; then
+        if [ "$right_index" -lt "$left_index" ]; then
+            fays_log "stereo recorder start order: right,left (right video$right_index before left video$left_index)"
+            printf '%s\n%s\n' right left
+            return 0
+        fi
+        fays_log "stereo recorder start order: left,right (left video$left_index before right video$right_index)"
+        printf '%s\n%s\n' left right
+        return 0
+    fi
+
+    fays_log "stereo recorder start order fallback: left,right (left_video=${left_index:-unknown} right_video=${right_index:-unknown})"
+    printf '%s\n%s\n' left right
+}
+
+wait_for_side_start_complete() {
+    local side="$1"
+    local config="$2"
+    local fifo="$3"
+    local calib_json="$4"
+    local deadline_ms current_ms pid
+
+    pid="$(side_pid "$side")"
+    if [ -z "$pid" ] && [ ! -p "$fifo" ]; then
+        fays_log "$side recorder SDK startup wait skipped: recorder not running"
+        return 1
+    fi
+
+    deadline_ms=$(($(now_ms) + START_COMPLETE_TIMEOUT_SEC * 1000))
+    fays_log "$side recorder waiting for SDK startup completion: timeout_s=$START_COMPLETE_TIMEOUT_SEC"
+    while true; do
+        pid="$(side_pid "$side")"
+        if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null &&
+           check_side_device_paths "$side" "$config" "$fifo" true true &&
+           calibration_serial "$calib_json" >/dev/null 2>&1 &&
+           runtime_frame_fresh "$side"; then
+            fays_log "$side recorder SDK startup complete: pid=$pid fifo=$fifo"
+            return 0
+        fi
+
+        current_ms="$(now_ms)"
+        [ "$current_ms" -lt "$deadline_ms" ] || break
+        sleep 0.1
+    done
+
+    pid="$(side_pid "$side")"
+    fays_log "$side recorder SDK startup wait timed out: timeout_s=$START_COMPLETE_TIMEOUT_SEC pid=${pid:-none} fifo_ready=$([ -p "$fifo" ] && echo true || echo false) calib_ready=$(calibration_serial "$calib_json" >/dev/null 2>&1 && echo true || echo false) frame_fresh=$(runtime_frame_fresh "$side" && echo true || echo false)"
+    return 1
+}
+
 dump_side_calibration() {
     local side="$1"
     local config="$2"
@@ -931,6 +1021,38 @@ maintain_side_daemon() {
     return 0
 }
 
+maintain_side_daemon_by_name() {
+    local side="$1"
+    local already_working=false
+
+    if [ "$side" = "left" ]; then
+        if [ -n "$LEFT_PID" ] && kill -0 "$LEFT_PID" 2>/dev/null && [ -p "$LEFT_FIFO" ] &&
+           check_side_working_state left "$LEFT_CONFIG" "$LEFT_FIFO" "$LEFT_CALIB_JSON" "$LEFT_PID" true; then
+            already_working=true
+        fi
+        maintain_side_daemon left "$LEFT_CONFIG" "$LEFT_FIFO" stereo_left.mkv fays_data_left.mcap "$LEFT_CALIB_JSON" "$LEFT_PID"
+        [ "$already_working" = "true" ] || wait_for_side_start_complete left "$LEFT_CONFIG" "$LEFT_FIFO" "$LEFT_CALIB_JSON" || true
+    else
+        if [ -n "$RIGHT_PID" ] && kill -0 "$RIGHT_PID" 2>/dev/null && [ -p "$RIGHT_FIFO" ] &&
+           check_side_working_state right "$RIGHT_CONFIG" "$RIGHT_FIFO" "$RIGHT_CALIB_JSON" "$RIGHT_PID" true; then
+            already_working=true
+        fi
+        maintain_side_daemon right "$RIGHT_CONFIG" "$RIGHT_FIFO" stereo_right.mkv fays_data_right.mcap "$RIGHT_CALIB_JSON" "$RIGHT_PID"
+        [ "$already_working" = "true" ] || wait_for_side_start_complete right "$RIGHT_CONFIG" "$RIGHT_FIFO" "$RIGHT_CALIB_JSON" || true
+    fi
+}
+
+maintain_stereo_daemons_in_insert_order() {
+    local side
+
+    while IFS= read -r side; do
+        [ -n "$side" ] || continue
+        maintain_side_daemon_by_name "$side"
+    done <<EOF
+$(stereo_start_order)
+EOF
+}
+
 handle_multi_device_health() {
     local left_serial right_serial
 
@@ -976,8 +1098,7 @@ start_daemons() {
     # probes are opened immediately before the long-lived recorder handles.
     # Each recorder daemon writes its own calibration JSON after its stable
     # handle is created.
-    maintain_side_daemon left "$LEFT_CONFIG" "$LEFT_FIFO" stereo_left.mkv fays_data_left.mcap "$LEFT_CALIB_JSON" "$LEFT_PID"
-    maintain_side_daemon right "$RIGHT_CONFIG" "$RIGHT_FIFO" stereo_right.mkv fays_data_right.mcap "$RIGHT_CALIB_JSON" "$RIGHT_PID"
+    maintain_stereo_daemons_in_insert_order
 }
 
 send_side_command() {
@@ -1294,8 +1415,7 @@ while true; do
     if [ "$LAST_HEALTH_CHECK_MS" -eq 0 ] ||
        [ $((current_ms - LAST_HEALTH_CHECK_MS)) -ge $((HEALTH_POLL_INTERVAL_SEC * 1000)) ]; then
         LAST_HEALTH_CHECK_MS="$current_ms"
-        maintain_side_daemon left "$LEFT_CONFIG" "$LEFT_FIFO" stereo_left.mkv fays_data_left.mcap "$LEFT_CALIB_JSON" "$LEFT_PID"
-        maintain_side_daemon right "$RIGHT_CONFIG" "$RIGHT_FIFO" stereo_right.mkv fays_data_right.mcap "$RIGHT_CALIB_JSON" "$RIGHT_PID"
+        maintain_stereo_daemons_in_insert_order
         handle_multi_device_health
         clear_recovery_error_if_ready
 

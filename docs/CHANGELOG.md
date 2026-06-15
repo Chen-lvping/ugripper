@@ -14,6 +14,7 @@
 - 单侧 Fays stereo 控制链路失效改为 `stereo_control_failed` / `ERROR_4` 侧别提示，识别不到 Fays 相机仍保持 `ERROR_2`；FIFO 启动超时日志补充 side、pid、设备路径和 runtime status 证据。
 - 主包 postinst 安装窗口改为先停止并等待 `ugripper.service` 完全停稳，再重放 udev trigger，最后手动 start 并确认 active，降低 Fays warmup daemon 持有设备时触发 udev 导致 stereo USB 掉线的风险。
 - Fays stereo daemon、wrapper 与 recorder 补充 `[FAYS_TS <HH:MM:SS.usec>]` 事件日志，覆盖 recorder 启停、健康重启、video port 占用清理、session start/stop/finalize 错误和 recorder 进程异常退出，便于和 `dmesg -T` USB 断连时间线直接对齐。
+- Fays stereo daemon 改为按 stereo `/dev/videoN` 枚举顺序串行启动左右 SDK recorder，单侧等待启动完成或 `10s` 超时后再拉起另一侧，避免双侧 SDK 并行初始化互相干扰。
 - 新增 `py_script/read_ugripper_mcap.txt` 通用 MCAP 读取示例及配套 README，供数据使用者直接解析当前 UGripper episode 中的 sensor、Fays 与可选 ego MCAP；使用 `.txt` 后缀便于发送。
 - `[PERF]` 日志改为由编译包决定，默认发布包关闭；运行时不再读取 `UGRIPPER_PERF_LOG`，需要开启时由构建定义 `UGRIPPER_ENABLE_PERF_LOG=1`；Fays 错误、重启和必要状态日志不受该开关影响。
 - 构建脚本默认主包版本调整到 `2.0.8`。

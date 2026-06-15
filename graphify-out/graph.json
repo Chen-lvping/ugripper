@@ -17224,7 +17224,7 @@
       "label": "v2.0.4 - Unreleased",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L20",
+      "source_location": "L22",
       "id": "docs_changelog_v2_0_4_unreleased",
       "community": 174,
       "norm_label": "v2.0.4 - unreleased"
@@ -17233,7 +17233,7 @@
       "label": "v2.0.1 - 2026-05-21",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L34",
+      "source_location": "L36",
       "id": "docs_changelog_v2_0_1_2026_05_21",
       "community": 174,
       "norm_label": "v2.0.1 - 2026-05-21"
@@ -17242,7 +17242,7 @@
       "label": "v2.0.0 - 2026-04-29",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L47",
+      "source_location": "L49",
       "id": "docs_changelog_v2_0_0_2026_04_29",
       "community": 174,
       "norm_label": "v2.0.0 - 2026-04-29"
@@ -17638,7 +17638,7 @@
       "label": "6.3 \u4f20\u611f\u5668\u94fe\u8def",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L162",
+      "source_location": "L163",
       "id": "agent_overview_6_3_\u4f20\u611f\u5668\u94fe\u8def",
       "community": 239,
       "norm_label": "6.3 \u4f20\u611f\u5668\u94fe\u8def"
@@ -17647,7 +17647,7 @@
       "label": "6.4 \u505c\u6b62\u5f55\u5236",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L177",
+      "source_location": "L178",
       "id": "agent_overview_6_4_\u505c\u6b62\u5f55\u5236",
       "community": 239,
       "norm_label": "6.4 \u505c\u6b62\u5f55\u5236"
@@ -17656,7 +17656,7 @@
       "label": "7. Episode \u4ea7\u7269\u4e0e\u68c0\u67e5",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L191",
+      "source_location": "L192",
       "id": "agent_overview_7_episode_\u4ea7\u7269\u4e0e\u68c0\u67e5",
       "community": 240,
       "norm_label": "7. episode \u4ea7\u7269\u4e0e\u68c0\u67e5"
@@ -17665,7 +17665,7 @@
       "label": "7.1 \u9ed8\u8ba4\u4ea7\u7269",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L192",
+      "source_location": "L193",
       "id": "agent_overview_7_1_\u9ed8\u8ba4\u4ea7\u7269",
       "community": 240,
       "norm_label": "7.1 \u9ed8\u8ba4\u4ea7\u7269"
@@ -17674,7 +17674,7 @@
       "label": "7.2 metadata.json",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L217",
+      "source_location": "L218",
       "id": "agent_overview_7_2_metadata_json",
       "community": 240,
       "norm_label": "7.2 metadata.json"
@@ -17683,7 +17683,7 @@
       "label": "7.3 \u505c\u5f55\u5f3a\u6821\u9a8c",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L231",
+      "source_location": "L232",
       "id": "agent_overview_7_3_\u505c\u5f55\u5f3a\u6821\u9a8c",
       "community": 240,
       "norm_label": "7.3 \u505c\u5f55\u5f3a\u6821\u9a8c"
@@ -17692,7 +17692,7 @@
       "label": "8. \u706f\u6548\u3001\u97f3\u9891\u4e0e\u5173\u952e\u8def\u5f84",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L252",
+      "source_location": "L253",
       "id": "agent_overview_8_\u706f\u6548_\u97f3\u9891\u4e0e\u5173\u952e\u8def\u5f84",
       "community": 203,
       "norm_label": "8. \u706f\u6548\u3001\u97f3\u9891\u4e0e\u5173\u952e\u8def\u5f84"
@@ -17701,7 +17701,7 @@
       "label": "8.1 \u5f53\u524d\u72b6\u6001\u706f\u8bed\u4e49",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L253",
+      "source_location": "L254",
       "id": "agent_overview_8_1_\u5f53\u524d\u72b6\u6001\u706f\u8bed\u4e49",
       "community": 203,
       "norm_label": "8.1 \u5f53\u524d\u72b6\u6001\u706f\u8bed\u4e49"
@@ -17710,7 +17710,7 @@
       "label": "8.2 \u5173\u952e\u6301\u4e45\u5316\u4e0e\u4e34\u65f6\u8def\u5f84",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L262",
+      "source_location": "L263",
       "id": "agent_overview_8_2_\u5173\u952e\u6301\u4e45\u5316\u4e0e\u4e34\u65f6\u8def\u5f84",
       "community": 203,
       "norm_label": "8.2 \u5173\u952e\u6301\u4e45\u5316\u4e0e\u4e34\u65f6\u8def\u5f84"
@@ -17719,7 +17719,7 @@
       "label": "8.3 \u8f6f\u4ef6\u5f55\u5236\u63a7\u5236",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L280",
+      "source_location": "L281",
       "id": "agent_overview_8_3_\u8f6f\u4ef6\u5f55\u5236\u63a7\u5236",
       "community": 203,
       "norm_label": "8.3 \u8f6f\u4ef6\u5f55\u5236\u63a7\u5236"
@@ -17728,7 +17728,7 @@
       "label": "8.4 PERF \u65e5\u5fd7",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L295",
+      "source_location": "L296",
       "id": "agent_overview_8_4_perf_\u65e5\u5fd7",
       "community": 203,
       "norm_label": "8.4 perf \u65e5\u5fd7"
@@ -17737,7 +17737,7 @@
       "label": "8.5 \u97f3\u9891\u94fe\u8def\u5173\u952e\u884c\u4e3a",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L300",
+      "source_location": "L301",
       "id": "agent_overview_8_5_\u97f3\u9891\u94fe\u8def\u5173\u952e\u884c\u4e3a",
       "community": 203,
       "norm_label": "8.5 \u97f3\u9891\u94fe\u8def\u5173\u952e\u884c\u4e3a"
@@ -17746,7 +17746,7 @@
       "label": "8.6 \u76f8\u5173\u8f85\u52a9\u5355\u5143",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L313",
+      "source_location": "L314",
       "id": "agent_overview_8_6_\u76f8\u5173\u8f85\u52a9\u5355\u5143",
       "community": 203,
       "norm_label": "8.6 \u76f8\u5173\u8f85\u52a9\u5355\u5143"
@@ -17755,7 +17755,7 @@
       "label": "8.7 \u786c\u4ef6\u5065\u5eb7\u76d1\u63a7",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L319",
+      "source_location": "L320",
       "id": "agent_overview_8_7_\u786c\u4ef6\u5065\u5eb7\u76d1\u63a7",
       "community": 203,
       "norm_label": "8.7 \u786c\u4ef6\u5065\u5eb7\u76d1\u63a7"
@@ -17764,7 +17764,7 @@
       "label": "9. \u914d\u7f6e\u3001\u5b89\u88c5\u4e0e U \u76d8\u6d41\u7a0b",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L327",
+      "source_location": "L328",
       "id": "agent_overview_9_\u914d\u7f6e_\u5b89\u88c5\u4e0e_u_\u76d8\u6d41\u7a0b",
       "community": 237,
       "norm_label": "9. \u914d\u7f6e\u3001\u5b89\u88c5\u4e0e u \u76d8\u6d41\u7a0b"
@@ -17773,7 +17773,7 @@
       "label": "9.1 \u5f53\u524d\u4e3b\u8981\u914d\u7f6e\u5165\u53e3",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L328",
+      "source_location": "L329",
       "id": "agent_overview_9_1_\u5f53\u524d\u4e3b\u8981\u914d\u7f6e\u5165\u53e3",
       "community": 237,
       "norm_label": "9.1 \u5f53\u524d\u4e3b\u8981\u914d\u7f6e\u5165\u53e3"
@@ -17782,7 +17782,7 @@
       "label": "9.2 \u5f53\u524d\u9ed8\u8ba4\u9879",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L343",
+      "source_location": "L344",
       "id": "agent_overview_9_2_\u5f53\u524d\u9ed8\u8ba4\u9879",
       "community": 237,
       "norm_label": "9.2 \u5f53\u524d\u9ed8\u8ba4\u9879"
@@ -17791,7 +17791,7 @@
       "label": "9.3 U \u76d8\u652f\u6301\u5185\u5bb9",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L351",
+      "source_location": "L352",
       "id": "agent_overview_9_3_u_\u76d8\u652f\u6301\u5185\u5bb9",
       "community": 237,
       "norm_label": "9.3 u \u76d8\u652f\u6301\u5185\u5bb9"
@@ -17800,7 +17800,7 @@
       "label": "9.4 U \u76d8\u540c\u6b21\u63d2\u5165\u987a\u5e8f",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L366",
+      "source_location": "L367",
       "id": "agent_overview_9_4_u_\u76d8\u540c\u6b21\u63d2\u5165\u987a\u5e8f",
       "community": 237,
       "norm_label": "9.4 u \u76d8\u540c\u6b21\u63d2\u5165\u987a\u5e8f"
@@ -17809,7 +17809,7 @@
       "label": "9.5 \u5b89\u88c5\u811a\u672c\u4e0e\u7f51\u7edc\u884c\u4e3a",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L379",
+      "source_location": "L380",
       "id": "agent_overview_9_5_\u5b89\u88c5\u811a\u672c\u4e0e\u7f51\u7edc\u884c\u4e3a",
       "community": 237,
       "norm_label": "9.5 \u5b89\u88c5\u811a\u672c\u4e0e\u7f51\u7edc\u884c\u4e3a"
@@ -17818,7 +17818,7 @@
       "label": "9.6 \u7f51\u7ebf\u76d1\u6d4b\u884c\u4e3a",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L401",
+      "source_location": "L402",
       "id": "agent_overview_9_6_\u7f51\u7ebf\u76d1\u6d4b\u884c\u4e3a",
       "community": 237,
       "norm_label": "9.6 \u7f51\u7ebf\u76d1\u6d4b\u884c\u4e3a"
@@ -17827,7 +17827,7 @@
       "label": "9.7 \u4e3b\u5305\u6253\u5305\u7ea6\u675f",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L407",
+      "source_location": "L408",
       "id": "agent_overview_9_7_\u4e3b\u5305\u6253\u5305\u7ea6\u675f",
       "community": 237,
       "norm_label": "9.7 \u4e3b\u5305\u6253\u5305\u7ea6\u675f"
@@ -17836,7 +17836,7 @@
       "label": "10. \u5e38\u7528\u68c0\u67e5\u4e0e\u6392\u969c\u5165\u53e3",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L414",
+      "source_location": "L415",
       "id": "agent_overview_10_\u5e38\u7528\u68c0\u67e5\u4e0e\u6392\u969c\u5165\u53e3",
       "community": 13,
       "norm_label": "10. \u5e38\u7528\u68c0\u67e5\u4e0e\u6392\u969c\u5165\u53e3"
@@ -17845,7 +17845,7 @@
       "label": "10.1 \u670d\u52a1\u7ba1\u7406",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L415",
+      "source_location": "L416",
       "id": "agent_overview_10_1_\u670d\u52a1\u7ba1\u7406",
       "community": 13,
       "norm_label": "10.1 \u670d\u52a1\u7ba1\u7406"
@@ -17854,7 +17854,7 @@
       "label": "code:bash (sudo systemctl status ugripper.service)",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L416",
+      "source_location": "L417",
       "id": "agent_overview_codeblock_1",
       "community": 13,
       "norm_label": "code:bash (sudo systemctl status ugripper.service)"
@@ -17863,7 +17863,7 @@
       "label": "10.2 \u5f55\u5236\u76f8\u5173\u8fdb\u7a0b",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L422",
+      "source_location": "L423",
       "id": "agent_overview_10_2_\u5f55\u5236\u76f8\u5173\u8fdb\u7a0b",
       "community": 13,
       "norm_label": "10.2 \u5f55\u5236\u76f8\u5173\u8fdb\u7a0b"
@@ -17872,7 +17872,7 @@
       "label": "10.3 U \u76d8\u6d41\u7a0b\u65e5\u5fd7",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L428",
+      "source_location": "L429",
       "id": "agent_overview_10_3_u_\u76d8\u6d41\u7a0b\u65e5\u5fd7",
       "community": 13,
       "norm_label": "10.3 u \u76d8\u6d41\u7a0b\u65e5\u5fd7"
@@ -17881,7 +17881,7 @@
       "label": "code:bash (sudo tail -n 200 /var/log/ugripper/usb_auto_update.log)",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L429",
+      "source_location": "L430",
       "id": "agent_overview_codeblock_2",
       "community": 13,
       "norm_label": "code:bash (sudo tail -n 200 /var/log/ugripper/usb_auto_update.log)"
@@ -17890,7 +17890,7 @@
       "label": "10.4 \u8fd0\u884c\u65e5\u5fd7",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L434",
+      "source_location": "L435",
       "id": "agent_overview_10_4_\u8fd0\u884c\u65e5\u5fd7",
       "community": 13,
       "norm_label": "10.4 \u8fd0\u884c\u65e5\u5fd7"
@@ -17899,7 +17899,7 @@
       "label": "code:bash (tail -n 200 /tmp/umi_sys_<device_sn_lower>_$(date +%Y%m%d).l)",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L435",
+      "source_location": "L436",
       "id": "agent_overview_codeblock_3",
       "community": 13,
       "norm_label": "code:bash (tail -n 200 /tmp/umi_sys_<device_sn_lower>_$(date +%y%m%d).l)"
@@ -17908,7 +17908,7 @@
       "label": "10.5 \u8bbe\u5907\u6620\u5c04\u4f18\u5148\u68c0\u67e5",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L440",
+      "source_location": "L441",
       "id": "agent_overview_10_5_\u8bbe\u5907\u6620\u5c04\u4f18\u5148\u68c0\u67e5",
       "community": 13,
       "norm_label": "10.5 \u8bbe\u5907\u6620\u5c04\u4f18\u5148\u68c0\u67e5"
@@ -17917,7 +17917,7 @@
       "label": "10.6 \u5feb\u901f\u5b9a\u4f4d\u5efa\u8bae",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L454",
+      "source_location": "L455",
       "id": "agent_overview_10_6_\u5feb\u901f\u5b9a\u4f4d\u5efa\u8bae",
       "community": 13,
       "norm_label": "10.6 \u5feb\u901f\u5b9a\u4f4d\u5efa\u8bae"
@@ -17926,7 +17926,7 @@
       "label": "10.7 tactile serial \u5b9a\u5411\u6838\u5bf9",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L465",
+      "source_location": "L466",
       "id": "agent_overview_10_7_tactile_serial_\u5b9a\u5411\u6838\u5bf9",
       "community": 13,
       "norm_label": "10.7 tactile serial \u5b9a\u5411\u6838\u5bf9"
@@ -17935,7 +17935,7 @@
       "label": "code:bash (udevadm info --attribute-walk --name=/dev/tcam_left_l | sed )",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L466",
+      "source_location": "L467",
       "id": "agent_overview_codeblock_4",
       "community": 13,
       "norm_label": "code:bash (udevadm info --attribute-walk --name=/dev/tcam_left_l | sed )"
@@ -17944,7 +17944,7 @@
       "label": "10.8 \u4ed3\u5e93\u5185\u6d4b\u8bd5\u811a\u672c",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L486",
+      "source_location": "L487",
       "id": "agent_overview_10_8_\u4ed3\u5e93\u5185\u6d4b\u8bd5\u811a\u672c",
       "community": 13,
       "norm_label": "10.8 \u4ed3\u5e93\u5185\u6d4b\u8bd5\u811a\u672c"
@@ -17953,7 +17953,7 @@
       "label": "11. \u5f53\u524d\u4f7f\u7528\u6ce8\u610f\u70b9",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L500",
+      "source_location": "L501",
       "id": "agent_overview_11_\u5f53\u524d\u4f7f\u7528\u6ce8\u610f\u70b9",
       "community": 199,
       "norm_label": "11. \u5f53\u524d\u4f7f\u7528\u6ce8\u610f\u70b9"
@@ -103755,5 +103755,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "8d8a0707720e9ec99486693f6c793bec11aa5f07"
+  "built_at_commit": "e8f411bd0097a018b2d11769868dd29cbed5db9b"
 }
