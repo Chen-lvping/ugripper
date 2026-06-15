@@ -92,14 +92,14 @@
 1. 在 `/mnt/data_disk/<device_sn_lower>/data` 下创建新的 `episode_YYYYMMDD_NNNN-temp`；目录名带 `-temp` 表示采集中或停录收尾中。
 2. `metadata.json` 不在起录阶段预写；停录完成媒体 finalize、强校验和轻量探测后，才一次性写入最终结构，确保 `collection_duration_s`、`video_details[].duration_s/fps/start_offset_us` 与质量检查结果来自本次最终数据。
 3. 一进入起录流程就写入 `/tmp/umi_recording.lock`，内容包含 `record_runtime` 的 `pid`、episode 目录（创建前可为空）与起录时间；episode 目录创建后会更新锁内容。该锁会覆盖 episode 准备、recorder 启动、录制、停录写盘和校验阶段，供 NTP 同步等系统级辅助动作避让录制窗口。若准备或启动失败会立即清锁；停录收尾完成后清锁。
-4. 写入 `calibration.json`：当前不再从旧持久化 `calibration.json` 迁移或清洗后输出，而是按运行时设备缓存、Fays daemon 标定状态和 tactile 当前 USB serial 从零组装，避免旧标定字段、旧命名或旧表述混入 episode。`calibration.json` 的输出格式当前已锁定：
+4. 写入 `calibration.json`：当前不再从旧持久化 `calibration.json` 迁移或清洗后输出，而是按运行时设备缓存、Fays daemon 标定状态和 tactile USB serial 运行时缓存从零组装，避免旧标定字段、旧命名或旧表述混入 episode。`calibration.json` 的输出格式当前已锁定：
    - 这是锁定格式，顶层字段集合不得增加，已有字段的职责不得漂移；若必须调整，必须先更新本节文档，再同步修改生成代码、持久化刷新逻辑与 episode 校验口径。
    - 顶层只保留 `calibration_info/observation`。
    - `calibration_info` 只保留 `calibration_status/format_version`，其中 `format_version=3.0`。
    - `observation.images` 使用新范本 key：`cam_left_main/cam_right_main/cam_chest_main/stereo_left/stereo_right/tcam_left_l/tcam_left_r/tcam_right_l/tcam_right_r`。
    - `observation.imu` 使用 `imu_left/imu_right`。
    - 主摄字段只保留 `camera_model/distortion_coeffs/distortion_model/fps/intrinsics/names/shape`；缺缓存时写默认占位，停录强校验再判失败。
-   - tactile 字段只保留 `names/serial/shape`，serial 来自当前 USB 设备。
+   - tactile 字段只保留 `names/serial/shape`，serial 来自运行时在 `/dev/tcam_*` 插入或 symlink 目标变化时维护的 USB sysfs serial 缓存；episode 生成只消费缓存，不再停录阶段额外执行 `udevadm` 探测。
    - stereo 字段按范本保留 `cam0/cam1/camera_model/distortion_model/extrinsics/fps/names/shape`；IMU 字段按范本保留 `accelerometer/gyroscope/update_rate_hz`。
    - 左右主摄、胸部主摄 SN 与主摄标定参数由运行时在相机 symlink 插入/目标变化时通过 Yuzhou UVC XU 异步刷新缓存，拔出时清空；episode 生成只消费缓存，不再停录后同步读 XU。若在线主摄缺少合法 `FE...` SN 或 `MCAL` 标定 payload，本条 episode 会在停录校验阶段失败。
    - 左右 stereo 与 IMU 标定由 Fays daemon 状态填充；不再把 gripper payload 或旧持久化 calibration 作为 episode `calibration.json` 的来源。
@@ -223,7 +223,7 @@
 - `metadata.json` 使用范本顺序写出顶层字段、`hardware_list` 字段和 `video_details[]` 字段；校验脚本会把 key 顺序漂移作为格式错误。
 - `data_uuid` 使用系统随机 UUID；若 `/proc/sys/kernel/random/uuid` 不可用则回退 `libuuid` 的 `uuid_generate/uuid_unparse`。无音频文件时 `audio_uuid` 允许为空字符串。
 - `hardware_version` 默认 `v2.5`，可通过 `UGRIPPER_HARDWARE_VERSION` 覆盖；`software_version` 来自 ugripper 主包版本并带 `v` 前缀；`das_usb_updater_version` 优先读取 `das-usb-updater` 包版本。
-- `hardware_list` 只存各硬件 SN：左右 gripper、左右主摄、可选胸部主摄、四路 tactile、左右 stereo。左右 gripper SN 在 gripper 插入并完成运行时 refresh 后缓存，拔出后清理；写 metadata 时只使用该缓存，不再额外同步读串口。gripper HMI 不再参与 calibration 读取，后续标定完全从相机侧读取。主摄/胸部相机 SN 同样只使用插入/目标变化时通过 Yuzhou UVC XU 维护的运行时缓存，读取失败写空字符串，不回退 USB serial；tactile 使用 USB serial；stereo 使用 Fays daemon 状态中的 SDK serial。`video_details` 不再重复写 `serial`。
+- `hardware_list` 只存各硬件 SN：左右 gripper、左右主摄、可选胸部主摄、四路 tactile、左右 stereo。左右 gripper SN 在 gripper 插入并完成运行时 refresh 后缓存，拔出后清理；写 metadata 时只使用该缓存，不再额外同步读串口。gripper HMI 不再参与 calibration 读取，后续标定完全从相机侧读取。主摄/胸部相机 SN 同样只使用插入/目标变化时通过 Yuzhou UVC XU 维护的运行时缓存，读取失败写空字符串，不回退 USB serial；tactile SN 由运行时在 `/dev/tcam_*` 插入或 symlink 目标变化时读取 USB sysfs `serial` 并缓存，metadata/calibration/后台 tactile 校验只消费缓存，不再每条 episode 执行 `udevadm`；stereo 使用 Fays daemon 状态中的 SDK serial。`video_details` 不再重复写 `serial`。
 - `quality_check_status` 取值为 `success` / `fail` / 空字符串；`quality_check_err_type` 保持单字段兼容，只写本次失败的主 `error_type`。常见取值包括 `missing_file`、`collection_duration_too_short`、`frame_loss`、`finalize_error`、`stereo_control_failed`、`calibration_error`、`runtime_error`、`device_disconnected`，以及健康监控直接上报的 `disk_mount_lost`、`disk_not_writable`、`disk_full`、`critical_devices_missing`、`stereo_not_ready`、`hmi_*` 等 fault key；无法归类时写 `unknown`。
 - `collection_duration_s` 取最终视频有效时长最大值，保留 1 位小数；`video_details[].fps` 与 `duration_s` 也保留 1 位小数；普通相机与触觉相机的时长优先复用停录校验阶段的 `video_probes` 缓存，缺失时兜底重新探测视频；左右 stereo 的 `duration_s` 使用对应 `fays_data_*.mcap` 中 camera 帧首尾 logTime 跨度，避免轻微双目丢帧导致 MKV 容器时长偏短时误判轨迹数据不可用。
 - `video_details[].start_offset_us` 由内部 timing 字段折算而来，单位为微秒，字段名带 `_us` 后缀；计算时以本 episode 最早一路视频 offset 为 0。
@@ -457,7 +457,7 @@ tail -n 200 /mnt/data_disk/logs/umi_sys_<device_sn_lower>_$(date +%Y%m%d).log
 - 能录不能停：优先检查 HMI 按键事件、状态机和 `sensor_recorder` / `camera_recorder` 退出路径。
 - 少文件或校验失败：先核对默认八路视频、胸部主摄启用时的第九路视频、双 MCAP、`metadata.json`、`calibration.json` 是否完整；若已进入 `ERROR_1`，优先查看 episode 下的 `validation_error.log`；若进入 `ERROR_3`，优先检查 `journalctl -u ugripper.service` 中的 `disk_mount_lost / disk_not_writable / disk_full` 日志。
 - warmup 一起双目就掉线：先查是否同时存在多份 `camera_recorder --stereo-daemon`。重复 warmup daemon 抢占同一批双目视频设备时，可能把双目打进 `recovering`，严重时会伴随 USB 侧重枚举；先清掉多余 daemon，再观察 `/tmp/umi_stereo_camera_status.json` 与 `journalctl -u ugripper.service -n 200`。
-- tactile serial 不对：先分别用 `udevadm info --attribute-walk --name=/dev/tcam_left_l`、`/dev/tcam_left_r`、`/dev/tcam_right_l`、`/dev/tcam_right_r` 向上核对 USB `ATTRS{serial}`，再对比 episode `calibration.json` 中 `observation.images.tcam_left_l.serial`、`tcam_left_r.serial`、`tcam_right_l.serial`、`tcam_right_r.serial`；当前口径只修正 episode，不回写 `/etc/ugripper/config/calibration/calibration.json`，且不再输出旧 tactile 键。
+- tactile serial 不对：先看 `journalctl -u ugripper.service` 中 `tactile camera runtime serial cache` 相关日志，确认 `/dev/tcam_*` 插入、symlink target 变化和 sysfs serial 缓存刷新结果；再只读核对 `/sys/class/video4linux/<videoN>/device` 向上 USB 父节点的 `serial`，并对比 episode `calibration.json` 中 `observation.images.tcam_left_l.serial`、`tcam_left_r.serial`、`tcam_right_l.serial`、`tcam_right_r.serial`；当前口径只修正 episode，不回写 `/etc/ugripper/config/calibration/calibration.json`，且不再输出旧 tactile 键。
 - 进入错误灯效但录制进程还活着：优先检查 `/mnt/data_disk` 是否仍可写、关键 `/dev/*` 设备节点是否还在，以及 HMI 是否持续响应。
 - 音频异常：优先看 USB 耳机枚举、PulseAudio sink/source、`module-suspend-on-idle` 是否已在初始化阶段被卸载。
 - 运行日志缺失：先看 `/tmp/umi_sys_<sn>_<date>.log` 是否生成，再看 `/mnt/data_disk/logs/` 是否存在当天镜像，最后核对 `/mnt/data_disk` 是否仍是真实可写挂载点。
@@ -465,10 +465,20 @@ tail -n 200 /mnt/data_disk/logs/umi_sys_<device_sn_lower>_$(date +%Y%m%d).log
 
 ### 10.7 tactile serial 定向核对
 ```bash
-udevadm info --attribute-walk --name=/dev/tcam_left_l | sed -n '/SUBSYSTEMS==\"usb\"/,/ATTRS{serial}/p'
-udevadm info --attribute-walk --name=/dev/tcam_left_r | sed -n '/SUBSYSTEMS==\"usb\"/,/ATTRS{serial}/p'
-udevadm info --attribute-walk --name=/dev/tcam_right_l | sed -n '/SUBSYSTEMS==\"usb\"/,/ATTRS{serial}/p'
-udevadm info --attribute-walk --name=/dev/tcam_right_r | sed -n '/SUBSYSTEMS==\"usb\"/,/ATTRS{serial}/p'
+journalctl -u ugripper.service --since "2 hours ago" | grep 'tactile camera runtime serial cache'
+
+for dev in /dev/tcam_left_l /dev/tcam_left_r /dev/tcam_right_l /dev/tcam_right_r; do
+  node="$(basename "$(readlink -f "$dev")")"
+  echo "===== $dev -> $node ====="
+  p="$(readlink -f "/sys/class/video4linux/$node/device")"
+  while [ "$p" != "/" ] && [ -n "$p" ]; do
+    if [ -f "$p/serial" ]; then
+      echo "$p/serial: $(cat "$p/serial")"
+      break
+    fi
+    p="$(dirname "$p")"
+  done
+done
 
 python3 - <<'PY'
 import json, pathlib

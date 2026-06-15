@@ -80,7 +80,6 @@ constexpr mcap::ChannelId kFaysCameraChannelId = 2;
 constexpr uint64_t kFaysImuPayloadBytes = sizeof(double) * 6;
 constexpr uint64_t kFaysCameraPayloadBytes = sizeof(uint32_t);
 constexpr int kVideoProbeTimeoutMs = 1500;
-constexpr int kUdevadmProbeTimeoutMs = 2000;
 constexpr uint8_t kYuzhouXuUnitId = 0x03;
 constexpr uint8_t kYuzhouXuSelector = 0x17;
 constexpr size_t kYuzhouXuPacketSize = 9;
@@ -91,6 +90,7 @@ constexpr size_t kYuzhouSnOffset = 0x010;
 constexpr size_t kYuzhouSnLength = 16;
 constexpr uint64_t kMainCameraRefreshDelayMs = 1500;
 constexpr uint64_t kMainCameraRefreshRetryMs = 3000;
+constexpr uint64_t kTactileSerialRefreshRetryMs = 3000;
 constexpr int kTactileFrameWidth = 160;
 constexpr int kTactileFrameHeight = 120;
 constexpr size_t kTactileFrameBytes = static_cast<size_t>(kTactileFrameWidth * kTactileFrameHeight);
@@ -366,6 +366,7 @@ struct TactileFrameMetrics
 
 bool writeTextFileAtomically(const fs::path &path, const std::string &content, std::string *errorMessage);
 bool loadJsonFile(const std::string &path, json *output, std::string *errorMessage);
+std::string resolveDeviceNodeTarget(const std::string &devicePath);
 
 struct TactileCalibrationTarget
 {
@@ -2343,67 +2344,35 @@ std::optional<std::vector<uint8_t>> captureTactileGrayFrame(const std::vector<st
     return bytes;
 }
 
-std::optional<std::string> extractUsbSerialFromUdevadmOutput(const std::string &output)
+std::optional<std::string> readTextFileTrimmed(const fs::path &path, std::string *detail)
 {
-    const std::regex serialPattern(R"SER(ATTRS\{serial\}=="([^"]+)")SER");
-    std::vector<std::string> blockLines;
-
-    const auto inspectBlock = [&blockLines, &serialPattern]() -> std::optional<std::string>
+    std::ifstream input(path);
+    if (!input.is_open())
     {
-        bool hasUsbSubsystem = false;
-        bool hasUsbDriver = false;
-        std::string serial;
-
-        for (const std::string &line : blockLines)
+        if (detail != nullptr)
         {
-            const std::string trimmedLine = trim(line);
-            if (trimmedLine.find(R"(SUBSYSTEMS=="usb")") != std::string::npos)
-            {
-                hasUsbSubsystem = true;
-            }
-            if (trimmedLine.find(R"(DRIVERS=="usb")") != std::string::npos)
-            {
-                hasUsbDriver = true;
-            }
-
-            std::smatch match;
-            if (serial.empty() && std::regex_search(trimmedLine, match, serialPattern) && match.size() >= 2)
-            {
-                const std::string candidate = match[1].str();
-                if (candidate.rfind("xhci-", 0) != 0)
-                {
-                    serial = candidate;
-                }
-            }
-        }
-
-        if (hasUsbSubsystem && hasUsbDriver && !serial.empty())
-        {
-            return serial;
+            *detail = "cannot open " + path.string();
         }
         return std::nullopt;
-    };
-
-    std::stringstream stream(output);
-    std::string line;
-    while (std::getline(stream, line))
-    {
-        if (trim(line).empty())
-        {
-            if (const auto serial = inspectBlock())
-            {
-                return serial;
-            }
-            blockLines.clear();
-            continue;
-        }
-        blockLines.push_back(line);
     }
 
-    return inspectBlock();
+    std::ostringstream stream;
+    stream << input.rdbuf();
+    std::string value = trim(stream.str());
+    if (value.empty())
+    {
+        if (detail != nullptr)
+        {
+            *detail = "empty " + path.string();
+        }
+        return std::nullopt;
+    }
+    return value;
 }
 
-std::optional<std::string> probeUsbSerialForDeviceNode(const std::string &devicePath, std::string *detail)
+std::optional<std::string> readTactileUsbSerialFromSysfs(const std::string &devicePath,
+                                                        const std::string &resolvedTarget,
+                                                        std::string *detail)
 {
     if (!fs::exists(devicePath))
     {
@@ -2414,38 +2383,56 @@ std::optional<std::string> probeUsbSerialForDeviceNode(const std::string &device
         return std::nullopt;
     }
 
-    const CommandCaptureResult probe = runCommandCapture(
-        {"udevadm", "info", "--attribute-walk", "--name=" + devicePath},
-        kUdevadmProbeTimeoutMs);
-
-    if (probe.timedOut)
+    fs::path videoNode = resolvedTarget.empty() ? fs::path(resolveDeviceNodeTarget(devicePath))
+                                                : fs::path(resolvedTarget);
+    const std::string videoName = videoNode.filename().string();
+    if (videoName.rfind("video", 0) != 0)
     {
         if (detail != nullptr)
         {
-            *detail = "udevadm timed out after " + std::to_string(kUdevadmProbeTimeoutMs) + "ms";
-        }
-        return std::nullopt;
-    }
-    if (!probe.success)
-    {
-        if (detail != nullptr)
-        {
-            std::string commandError = trim(probe.output);
-            if (commandError.empty())
-            {
-                commandError = "udevadm exited with code " + std::to_string(probe.exitCode);
-            }
-            *detail = commandError;
+            *detail = "resolved target is not a video node: " + videoNode.string();
         }
         return std::nullopt;
     }
 
-    const auto serial = extractUsbSerialFromUdevadmOutput(probe.output);
-    if (!serial.has_value() && detail != nullptr)
+    std::error_code error;
+    fs::path deviceSysfs = fs::canonical(fs::path("/sys/class/video4linux") / videoName / "device", error);
+    if (error)
     {
-        *detail = "no parent usb ATTRS{serial} found";
+        if (detail != nullptr)
+        {
+            *detail = "cannot resolve video sysfs device for " + videoName + ": " + error.message();
+        }
+        return std::nullopt;
     }
-    return serial;
+
+    for (fs::path current = deviceSysfs; !current.empty(); current = current.parent_path())
+    {
+        if (current == current.parent_path())
+        {
+            break;
+        }
+
+        const fs::path serialPath = current / "serial";
+        if (!fs::exists(serialPath, error) || error)
+        {
+            error.clear();
+            continue;
+        }
+
+        std::string readDetail;
+        const auto serial = readTextFileTrimmed(serialPath, &readDetail);
+        if (serial.has_value() && serial->rfind("xhci-", 0) != 0)
+        {
+            return serial;
+        }
+    }
+
+    if (detail != nullptr)
+    {
+        *detail = "no USB serial found under sysfs for " + videoName;
+    }
+    return std::nullopt;
 }
 
 bool isYuzhouMainCameraSn(const std::string &sn)
@@ -3699,6 +3686,8 @@ bool RecordRuntime::initialize()
         return false;
     }
     initializeMainCameraRuntimeStates();
+    initializeTactileCameraRuntimeStates();
+    maintainTactileCameraRuntimeStates();
 
     if (!panelManager_.connect(options_.gripperPorts))
     {
@@ -4054,6 +4043,7 @@ int RecordRuntime::run()
     {
         const uint64_t loopStartMs = currentSteadyMs();
         maintainMainCameraRuntimeStates();
+        maintainTactileCameraRuntimeStates();
         maintainAudioPlayer();
         maintainStereoDaemon();
         maintainBackgroundTactileValidation();
@@ -5186,6 +5176,129 @@ void RecordRuntime::syncMainCameraRuntimeStatesToEpisodeManager()
         target.lastError = source.lastError;
     }
     episodeManager_->setMainCameraRuntimeStates(states);
+}
+
+void RecordRuntime::initializeTactileCameraRuntimeStates()
+{
+    tactileCameraRuntimeStates_.clear();
+    const uint64_t nowMs = currentSteadyMs();
+    for (const auto &target : kTactileCalibrationTargets)
+    {
+        TactileCameraRuntimeCache state;
+        state.cameraName = target.cameraName;
+        state.side = target.side;
+        state.devicePath = target.devicePath;
+        state.nextRefreshAllowedMs = nowMs;
+        tactileCameraRuntimeStates_.push_back(std::move(state));
+    }
+    syncTactileCameraRuntimeStatesToEpisodeManager();
+}
+
+void RecordRuntime::maintainTactileCameraRuntimeStates()
+{
+    bool updatedAny = false;
+    const uint64_t nowMs = currentSteadyMs();
+
+    for (auto &state : tactileCameraRuntimeStates_)
+    {
+        const bool exists = fs::exists(state.devicePath);
+        if (!exists)
+        {
+            if (state.present || !state.serialNumber.empty())
+            {
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                    << "tactile camera device removed, clear runtime serial cache: camera=" << state.cameraName
+                    << " device=" << state.devicePath << std::endl).str());
+                state.present = false;
+                state.resolvedTarget.clear();
+                state.serialNumber.clear();
+                state.lastError = "device node missing";
+                updatedAny = true;
+            }
+            continue;
+        }
+
+        const std::string resolvedTarget = resolveDeviceNodeTarget(state.devicePath);
+        if (!state.present || state.resolvedTarget != resolvedTarget)
+        {
+            state.present = true;
+            state.resolvedTarget = resolvedTarget;
+            state.serialNumber.clear();
+            state.lastError = "waiting for tactile serial cache refresh";
+            state.nextRefreshAllowedMs = nowMs;
+            updatedAny = true;
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "tactile camera device detected, schedule runtime serial cache refresh: camera=" << state.cameraName
+                << " device=" << state.devicePath
+                << " target=" << state.resolvedTarget << std::endl).str());
+        }
+
+        if (nowMs < state.nextRefreshAllowedMs)
+        {
+            continue;
+        }
+
+        std::string detail;
+        const auto serial = readTactileUsbSerialFromSysfs(state.devicePath, state.resolvedTarget, &detail);
+        if (serial.has_value() && !serial->empty())
+        {
+            state.serialNumber = *serial;
+            state.lastError.clear();
+            state.nextRefreshAllowedMs = std::numeric_limits<uint64_t>::max();
+            updatedAny = true;
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "tactile camera runtime serial cache refreshed: camera=" << state.cameraName
+                << " device=" << state.devicePath
+                << " target=" << state.resolvedTarget
+                << " serial=" << state.serialNumber << std::endl).str());
+            continue;
+        }
+
+        const std::string newError = detail.empty() ? "failed to read tactile USB serial from sysfs" : detail;
+        const bool shouldLogFailure =
+            state.lastError.empty() ||
+            state.lastError == "waiting for tactile serial cache refresh" ||
+            state.lastError != newError;
+        state.serialNumber.clear();
+        state.lastError = newError;
+        state.nextRefreshAllowedMs = nowMs + kTactileSerialRefreshRetryMs;
+        updatedAny = true;
+        if (shouldLogFailure)
+        {
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                << "tactile camera runtime serial cache refresh failed: camera=" << state.cameraName
+                << " device=" << state.devicePath
+                << " target=" << state.resolvedTarget
+                << " detail=" << state.lastError << std::endl).str());
+        }
+    }
+
+    if (updatedAny)
+    {
+        syncTactileCameraRuntimeStatesToEpisodeManager();
+    }
+}
+
+void RecordRuntime::syncTactileCameraRuntimeStatesToEpisodeManager()
+{
+    if (episodeManager_ == nullptr)
+    {
+        return;
+    }
+
+    std::array<EpisodeManager::TactileCameraRuntimeState, 4> states{};
+    for (size_t index = 0; index < states.size() && index < tactileCameraRuntimeStates_.size(); ++index)
+    {
+        const auto &source = tactileCameraRuntimeStates_[index];
+        auto &target = states[index];
+        target.cameraName = source.cameraName;
+        target.side = source.side;
+        target.devicePath = source.devicePath;
+        target.present = source.present;
+        target.serialNumber = source.serialNumber;
+        target.lastError = source.lastError;
+    }
+    episodeManager_->setTactileCameraRuntimeStates(states);
 }
 
 void RecordRuntime::waitForMainCameraRefreshes()
@@ -6925,6 +7038,30 @@ void RecordRuntime::EpisodeManager::setMainCameraRuntimeStates(
     mainCameraRuntimeStates_ = states;
 }
 
+void RecordRuntime::EpisodeManager::setTactileCameraRuntimeStates(
+    const std::array<TactileCameraRuntimeState, 4> &states)
+{
+    tactileCameraRuntimeStates_ = states;
+}
+
+const RecordRuntime::EpisodeManager::TactileCameraRuntimeState *
+RecordRuntime::EpisodeManager::tactileCameraStateForName(const std::string &cameraName) const
+{
+    const auto it = std::find_if(
+        tactileCameraRuntimeStates_.begin(),
+        tactileCameraRuntimeStates_.end(),
+        [&cameraName](const TactileCameraRuntimeState &state) {
+            return state.cameraName == cameraName;
+        });
+    return it != tactileCameraRuntimeStates_.end() ? &(*it) : nullptr;
+}
+
+std::string RecordRuntime::EpisodeManager::cachedTactileSerialForName(const std::string &cameraName) const
+{
+    const auto *state = tactileCameraStateForName(cameraName);
+    return state != nullptr ? state->serialNumber : std::string();
+}
+
 std::string RecordRuntime::EpisodeManager::createNextEpisodeDir()
 {
     const auto now = std::chrono::system_clock::now();
@@ -7013,18 +7150,20 @@ void RecordRuntime::EpisodeManager::markTactileReferencePendingForSide(
             continue;
         }
 
-        std::string serialDetail;
-        const auto serial = probeUsbSerialForDeviceNode(target.devicePath, &serialDetail);
-        if (!serial.has_value() || serial->empty())
+        const auto *state = tactileCameraStateForName(target.cameraName);
+        const std::string serial = state != nullptr ? state->serialNumber : std::string();
+        if (serial.empty())
         {
             DM_LOG_WARN("{}", (::DA::utils::LogString() << "tactile reference pending skipped: camera=" << target.cameraName
                                  << " reason="
-                                 << (serialDetail.empty() ? "missing tactile serial" : serialDetail)
+                                 << (state == nullptr
+                                         ? "missing tactile serial cache state"
+                                         : (state->lastError.empty() ? "missing tactile serial cache" : state->lastError))
                                  << std::endl).str());
             continue;
         }
 
-        json &cameraHistory = tactileHistory["cameras"][*serial];
+        json &cameraHistory = tactileHistory["cameras"][serial];
         if (!cameraHistory.is_object())
         {
             cameraHistory = json::object();
@@ -7038,7 +7177,7 @@ void RecordRuntime::EpisodeManager::markTactileReferencePendingForSide(
         DM_LOG_INFO("{}", (::DA::utils::LogString()
             << "tactile reference pending: camera=" << target.cameraName
             << " side=" << side
-            << " serial=" << *serial
+            << " serial=" << serial
             << " reason=" << reason
             << std::endl).str());
     }
@@ -7441,9 +7580,8 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
     }
     for (const auto &target : kTactileCalibrationTargets)
     {
-        std::string serialDetail;
-        const auto serial = probeUsbSerialForDeviceNode(target.devicePath, &serialDetail);
-        if (!serial.has_value() || serial->empty())
+        const std::string serial = cachedTactileSerialForName(target.cameraName);
+        if (serial.empty())
         {
             continue;
         }
@@ -7461,7 +7599,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
             &frameError);
         if (!currentFrame.has_value())
         {
-            const json &cameraHistory = tactileHistory["cameras"][*serial];
+            const json &cameraHistory = tactileHistory["cameras"][serial];
             if (cameraHistory.is_object() &&
                 (cameraHistory.value("reference_pending", false) ||
                  cameraHistory.value("persistent_baseline_pending", false) ||
@@ -7469,7 +7607,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
             {
                 DM_LOG_WARN("{}", (::DA::utils::LogString()
                     << "tactile reference deferred: camera=" << target.cameraName
-                    << " serial=" << *serial
+                    << " serial=" << serial
                     << " episode=" << episodeDir
                     << " reason=" << frameError
                     << std::endl).str());
@@ -7477,7 +7615,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
             continue;
         }
 
-        json &cameraHistory = tactileHistory["cameras"][*serial];
+        json &cameraHistory = tactileHistory["cameras"][serial];
         if (!cameraHistory.is_object())
         {
             cameraHistory = json::object();
@@ -7497,7 +7635,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
         std::vector<uint8_t> baselineFrame;
         std::string baselineError;
         const bool hasReferenceBaseline =
-            readBinaryFileExact(tactileReferenceRawPath(tactileStateDir_, *serial),
+            readBinaryFileExact(tactileReferenceRawPath(tactileStateDir_, serial),
                                 kTactileFrameBytes,
                                 &baselineFrame,
                                 &baselineError);
@@ -7506,11 +7644,11 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
         if (!hasReferenceBaseline || referencePending)
         {
             std::string writeError;
-            if (writeBinaryFile(tactileReferenceRawPath(tactileStateDir_, *serial),
+            if (writeBinaryFile(tactileReferenceRawPath(tactileStateDir_, serial),
                                 *currentFrame,
                                 &writeError) &&
                 writeTactileReferenceMeta(tactileStateDir_,
-                                          *serial,
+                                          serial,
                                           target,
                                           RecordRuntime::currentEpochMs(),
                                           &writeError))
@@ -7524,7 +7662,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
                 initializedReferenceFromEpisode = true;
                 DM_LOG_INFO("{}", (::DA::utils::LogString()
                     << "tactile reference initialized from episode: camera=" << target.cameraName
-                    << " serial=" << *serial
+                    << " serial=" << serial
                     << " episode=" << episodeDir
                     << (referencePending ? " reason=pending" : " reason=missing")
                     << std::endl).str());
@@ -7538,7 +7676,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
                 historyDirty = true;
                 DM_LOG_WARN("{}", (::DA::utils::LogString()
                     << "tactile reference deferred: camera=" << target.cameraName
-                    << " serial=" << *serial
+                    << " serial=" << serial
                     << " episode=" << episodeDir
                     << " reason=" << writeError
                     << std::endl).str());
@@ -7555,7 +7693,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
         std::vector<uint8_t> persistentBaseline;
         std::string persistentBaselineError;
         const bool hasPersistentBaseline =
-            readBinaryFileExact(tactilePersistentRawPath(tactileStateDir_, *serial),
+            readBinaryFileExact(tactilePersistentRawPath(tactileStateDir_, serial),
                                 kTactileFrameBytes,
                                 &persistentBaseline,
                                 &persistentBaselineError);
@@ -7589,7 +7727,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
         if (persistentNeedsUpdate)
         {
             std::string writeError;
-            if (writeBinaryFile(tactilePersistentRawPath(tactileStateDir_, *serial),
+            if (writeBinaryFile(tactilePersistentRawPath(tactileStateDir_, serial),
                                 *currentFrame,
                                 &writeError))
             {
@@ -7609,7 +7747,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
                 initializedPersistentFromEpisode = true;
                 DM_LOG_INFO("{}", (::DA::utils::LogString()
                     << "tactile persistent baseline initialized from episode: camera=" << target.cameraName
-                    << " serial=" << *serial
+                    << " serial=" << serial
                     << " episode=" << episodeDir
                     << " reason=" << persistentUpdateReason
                     << std::endl).str());
@@ -7622,7 +7760,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
                 historyDirty = true;
                 DM_LOG_WARN("{}", (::DA::utils::LogString()
                     << "tactile persistent baseline deferred: camera=" << target.cameraName
-                    << " serial=" << *serial
+                    << " serial=" << serial
                     << " episode=" << episodeDir
                     << " reason=" << writeError
                     << std::endl).str());
@@ -7712,7 +7850,7 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
 
         TactileValidationFinding finding;
         finding.cameraName = target.cameraName;
-        finding.serialNumber = *serial;
+        finding.serialNumber = serial;
         finding.damaged = metrics.damaged;
         finding.warningActive = warningActive || persistentWarningActiveAfter;
         finding.warningTriggered =
@@ -7858,11 +7996,6 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
     hardwareList["gripper_right_sn"] = gripperRuntimeStates_[gripperStateIndexForSide("right")].serialNumber;
     hardwareList["gripper_left_sn"] = gripperRuntimeStates_[gripperStateIndexForSide("left")].serialNumber;
 
-    const auto probeSerial = [](const std::string &devicePath) {
-        std::string detail;
-        const auto serial = probeUsbSerialForDeviceNode(devicePath, &detail);
-        return serial.value_or(std::string());
-    };
     const auto cachedMainCameraSn = [this](const std::string &cameraName) {
         const auto it = std::find_if(
             mainCameraRuntimeStates_.begin(),
@@ -7875,10 +8008,10 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
     hardwareList["cam_right_sn"] = cachedMainCameraSn("right_cam_main");
     hardwareList["cam_left_sn"] = cachedMainCameraSn("left_cam_main");
     hardwareList["cam_chest_sn"] = chestCameraEnabled_ ? cachedMainCameraSn("chest_cam_main") : "";
-    hardwareList["tactile_right_l_sn"] = probeSerial("/dev/tcam_right_l");
-    hardwareList["tactile_right_r_sn"] = probeSerial("/dev/tcam_right_r");
-    hardwareList["tactile_left_l_sn"] = probeSerial("/dev/tcam_left_l");
-    hardwareList["tactile_left_r_sn"] = probeSerial("/dev/tcam_left_r");
+    hardwareList["tactile_right_l_sn"] = cachedTactileSerialForName("right_tcam_l");
+    hardwareList["tactile_right_r_sn"] = cachedTactileSerialForName("right_tcam_r");
+    hardwareList["tactile_left_l_sn"] = cachedTactileSerialForName("left_tcam_l");
+    hardwareList["tactile_left_r_sn"] = cachedTactileSerialForName("left_tcam_r");
 
     json stereoStatus = json::object();
     loadJsonFile(stereoStatusFile_, &stereoStatus, &ignoredError);
@@ -8162,19 +8295,16 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
 
     for (const auto &target : kTactileCalibrationTargets)
     {
-        std::string serial;
-        std::string detail;
-        const auto runtimeSerial = probeUsbSerialForDeviceNode(target.devicePath, &detail);
-        if (runtimeSerial.has_value())
-        {
-            serial = *runtimeSerial;
-        }
-        else
+        const auto *state = tactileCameraStateForName(target.cameraName);
+        const std::string serial = state != nullptr ? state->serialNumber : std::string();
+        if (serial.empty())
         {
             DM_LOG_WARN("{}", (::DA::utils::LogString()
-                << "failed to resolve runtime tactile serial for camera=" << target.cameraName
+                << "tactile serial cache unavailable for episode calibration: camera=" << target.cameraName
                 << " device=" << target.devicePath
-                << " detail=" << detail
+                << " detail=" << (state == nullptr
+                                      ? "missing tactile serial cache state"
+                                      : (state->lastError.empty() ? "empty tactile serial cache" : state->lastError))
                 << "; write empty serial" << std::endl).str());
         }
         std::string imageKey = target.cameraName;

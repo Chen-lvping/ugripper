@@ -206,6 +206,16 @@ private:
             std::string lastError;
         };
 
+        struct TactileCameraRuntimeState
+        {
+            std::string cameraName;
+            std::string side;
+            std::string devicePath;
+            bool present = false;
+            std::string serialNumber;
+            std::string lastError;
+        };
+
         struct TactileValidationFinding
         {
             std::string cameraName;
@@ -235,6 +245,7 @@ private:
         std::string createNextEpisodeDir();
         void setGripperRuntimeStates(const std::array<GripperRuntimeState, 2> &states);
         void setMainCameraRuntimeStates(const std::array<MainCameraRuntimeState, 3> &states);
+        void setTactileCameraRuntimeStates(const std::array<TactileCameraRuntimeState, 4> &states);
         void markTactileReferencePendingForSide(const std::string &side,
                                                 const std::string &reason);
         bool prepareEpisode(const std::string &episodeDir,
@@ -258,6 +269,8 @@ private:
     private:
         bool writeFilteredCalibration(const std::string &episodeDir, std::string *errorMessage) const;
         bool prepareEpisodeOutputs(const std::string &episodeDir, std::string *errorMessage) const;
+        const TactileCameraRuntimeState *tactileCameraStateForName(const std::string &cameraName) const;
+        std::string cachedTactileSerialForName(const std::string &cameraName) const;
 
         std::string diskRoot_;
         std::string deviceSn_;
@@ -277,6 +290,7 @@ private:
         std::string episodeRoot_;
         std::array<GripperRuntimeState, 2> gripperRuntimeStates_{};
         std::array<MainCameraRuntimeState, 3> mainCameraRuntimeStates_{};
+        std::array<TactileCameraRuntimeState, 4> tactileCameraRuntimeStates_{};
     };
 
     static GripperLedEffect makeLedEffect(LedState state, double progress = 0.0);
@@ -306,6 +320,9 @@ private:
     void maintainMainCameraRuntimeStates();
     void syncMainCameraRuntimeStatesToEpisodeManager();
     void waitForMainCameraRefreshes();
+    void initializeTactileCameraRuntimeStates();
+    void maintainTactileCameraRuntimeStates();
+    void syncTactileCameraRuntimeStatesToEpisodeManager();
     bool startRecording(bool resetRecording);
     bool stopRecording(bool dueToError, const std::string &reason, const std::string &errorType = "");
     void handleButtons(const ButtonSnapshot &buttons);
@@ -426,6 +443,18 @@ private:
         std::future<MainCameraRefreshResult> refreshFuture;
     };
     std::vector<MainCameraRuntimeCache> mainCameraRuntimeStates_;
+    struct TactileCameraRuntimeCache
+    {
+        std::string cameraName;
+        std::string side;
+        std::string devicePath;
+        bool present = false;
+        std::string resolvedTarget;
+        std::string serialNumber;
+        std::string lastError;
+        uint64_t nextRefreshAllowedMs = 0;
+    };
+    std::vector<TactileCameraRuntimeCache> tactileCameraRuntimeStates_;
     GripperPanelManager panelManager_;
     std::unique_ptr<HmiLedController> ledController_;
     mutable ugripper::runtime::ProcessSupervisor processSupervisor_{};
