@@ -372,16 +372,17 @@ struct TactileCalibrationTarget
 {
     const char *cameraName;
     const char *side;
+    const char *sensorSlot;
     const char *devicePath;
     const char *jsonPath;
     const char *serialPlaceholder;
 };
 
 constexpr std::array<TactileCalibrationTarget, 4> kTactileCalibrationTargets = {{
-    {"left_tcam_l", "left", "/dev/tcam_left_l", "observation.images.tcam_left_l", "{{LEFT_TCAM_L_SERIAL}}"},
-    {"left_tcam_r", "left", "/dev/tcam_left_r", "observation.images.tcam_left_r", "{{LEFT_TCAM_R_SERIAL}}"},
-    {"right_tcam_l", "right", "/dev/tcam_right_l", "observation.images.tcam_right_l", "{{RIGHT_TCAM_L_SERIAL}}"},
-    {"right_tcam_r", "right", "/dev/tcam_right_r", "observation.images.tcam_right_r", "{{RIGHT_TCAM_R_SERIAL}}"},
+    {"left_tcam_l", "left", "l", "/dev/tcam_left_l", "observation.images.tcam_left_l", "{{LEFT_TCAM_L_SERIAL}}"},
+    {"left_tcam_r", "left", "r", "/dev/tcam_left_r", "observation.images.tcam_left_r", "{{LEFT_TCAM_R_SERIAL}}"},
+    {"right_tcam_l", "right", "l", "/dev/tcam_right_l", "observation.images.tcam_right_l", "{{RIGHT_TCAM_L_SERIAL}}"},
+    {"right_tcam_r", "right", "r", "/dev/tcam_right_r", "observation.images.tcam_right_r", "{{RIGHT_TCAM_R_SERIAL}}"},
 }};
 
 const char *boolText(bool value)
@@ -5326,6 +5327,7 @@ void RecordRuntime::applyTactileValidationFindings(
     const std::vector<EpisodeManager::TactileValidationFinding> &findings)
 {
     bool warningActive = false;
+    tactileWarningSides_ = {};
     for (const auto &finding : findings)
     {
         if (tactileTriggeredAudioCommand_.empty() && finding.warningTriggered)
@@ -5335,6 +5337,26 @@ void RecordRuntime::applyTactileValidationFindings(
         if (finding.warningActive)
         {
             warningActive = true;
+            TactileWarningSideState *sideState = nullptr;
+            if (finding.side == "left")
+            {
+                sideState = &tactileWarningSides_[0];
+            }
+            else if (finding.side == "right")
+            {
+                sideState = &tactileWarningSides_[1];
+            }
+            if (sideState != nullptr)
+            {
+                if (finding.sensorSlot == "l")
+                {
+                    sideState->leftSensor = true;
+                }
+                else if (finding.sensorSlot == "r")
+                {
+                    sideState->rightSensor = true;
+                }
+            }
         }
     }
     tactileWarningActive_ = warningActive;
@@ -5459,7 +5481,12 @@ void RecordRuntime::cancelBackgroundTactileValidation()
 
 void RecordRuntime::applyIdleState()
 {
-    setLedState(tactileWarningActive_ ? LedState::Warning : LedState::Ready);
+    if (tactileWarningActive_)
+    {
+        setTactileWarningLedState();
+        return;
+    }
+    setLedState(LedState::Ready);
 }
 
 bool RecordRuntime::areSideCriticalDevicesReady(const std::string &side) const
@@ -6218,6 +6245,41 @@ void RecordRuntime::setLedState(LedState state, double progress)
     {
         ledController_->setState(state, progress);
     }
+}
+
+void RecordRuntime::setTactileWarningLedState()
+{
+    if (!ledController_)
+    {
+        return;
+    }
+
+    const auto effectForSide = [](const TactileWarningSideState &state) -> GripperLedEffect {
+        if (state.leftSensor && state.rightSensor)
+        {
+            return GripperLedEffect{GripperLedEffectState::TactileWarningBothSensors, 0.0};
+        }
+        if (state.leftSensor)
+        {
+            return GripperLedEffect{GripperLedEffectState::TactileWarningLeftSensor, 0.0};
+        }
+        if (state.rightSensor)
+        {
+            return GripperLedEffect{GripperLedEffectState::TactileWarningRightSensor, 0.0};
+        }
+        return GripperLedEffect{GripperLedEffectState::Ready, 0.0};
+    };
+
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+        << "[HMI_DIAG] category=led_target"
+        << " state=TactileWarning"
+        << " left_l=" << boolText(tactileWarningSides_[0].leftSensor)
+        << " left_r=" << boolText(tactileWarningSides_[0].rightSensor)
+        << " right_l=" << boolText(tactileWarningSides_[1].leftSensor)
+        << " right_r=" << boolText(tactileWarningSides_[1].rightSensor)).str());
+
+    panelManager_.setLedEffectForSide("left", effectForSide(tactileWarningSides_[0]));
+    panelManager_.setLedEffectForSide("right", effectForSide(tactileWarningSides_[1]));
 }
 
 void RecordRuntime::setHardwareFaultLedState(const ugripper::runtime::HealthFault &fault)
@@ -7851,6 +7913,8 @@ void RecordRuntime::EpisodeManager::validateTactileEpisode(
         TactileValidationFinding finding;
         finding.cameraName = target.cameraName;
         finding.serialNumber = serial;
+        finding.side = target.side;
+        finding.sensorSlot = target.sensorSlot;
         finding.damaged = metrics.damaged;
         finding.warningActive = warningActive || persistentWarningActiveAfter;
         finding.warningTriggered =

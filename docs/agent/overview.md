@@ -254,7 +254,7 @@
 ### 8.1 当前状态灯语义
 - `INIT`：初始化或落盘阶段，蓝灯。
 - `READY`：可录制，绿色呼吸灯；当前基于单调时钟渲染，避免系统校时导致相位突变。
-- `WARNING`：触觉软告警，黄灯闪烁；当前用于同一 tactile serial 的实时 reference 窗口或 persistent baseline 窗口连续 `3` 个 episode 异常。若后续连续 `3` 次 clean，相关窗口会清除告警并回到 READY。
+- `WARNING`：触觉软告警，黄灯按侧别与传感器位置编码闪烁；当前用于同一 tactile serial 的实时 reference 窗口或 persistent baseline 窗口连续 `3` 个 episode 异常。故障侧夹爪显示黄灯：`*_tcam_l` 为一长一短，`*_tcam_r` 为一长两短，同侧两路都异常为两长；左右侧都异常时两侧分别显示各自编码，未异常侧保持 READY 绿呼吸。若后续连续 `3` 次 clean，相关窗口会清除告警并回到 READY。
 - `RECORDING`：录制中，绿色闪烁；当前只在亮灭边沿和低频补发时下发 RGB，避免高频重复写串口造成丢闪。
 - `CALIB_PRE` / `CALIB_RUN` / `CALIB_DONE`：供 USB 导入、deb 安装与校准脚本复用；deb 安装窗口使用 `CALIB_RUN` 表示安装中、`CALIB_DONE` 表示全部包处理完成。
 - `ERROR_1` ~ `ERROR_5`：红灯长短码。当前口径下，`ERROR_1` 用于完整性/校验失败，`ERROR_2` 用于关键设备/HMI/stereo 缺失或不活跃，`ERROR_3` 用于数据盘挂载丢失 / 不可写 / 写满，`ERROR_4` 用于 Fays 相机已识别但单侧 stereo/Fays recorder、FIFO 或控制链路失效，`ERROR_5` 用于其他运行时异常。同一条 episode 可同时存在多个内部 `error_type`，最终灯效只按优先级播报一个：磁盘类优先 `ERROR_3`，关键设备缺失优先 `ERROR_2`，stereo 控制失效为 `ERROR_4`，运行时异常为 `ERROR_5`，普通校验失败为 `ERROR_1`。硬件缺失类 `ERROR_2` 和控制链路类 `ERROR_4` 都会按侧别提示：故障侧夹爪闪烁对应错误码，另一侧红灯常亮；左右都故障则两侧一起闪烁；`ERROR_2` 无法归属左右侧时，两侧同步先闪一次完整序列，再红灯常亮相同时间并循环。

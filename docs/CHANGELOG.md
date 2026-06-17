@@ -2,12 +2,13 @@
 
 > 说明：本文件只保留 v2.0.0 以来的高信号发布变更；当前系统行为以 `docs/agent/overview.md` 为准。
 >
-> 仓库没有 `v2.0.x` git tag。下面的发布边界按 `build_deb.sh` / `scripts/build_arm_deb_in_pp_arm_dev.sh` 中 `BASE_VERSION` 的提交记录推定：`2caf6e0` 为 v2.0.0，`d81c3c1` 为 v2.0.1；v2.0.8 为当前发布收口版本。
+> 仓库没有 `v2.0.x` git tag。下面的发布边界按 `build_deb.sh` / `scripts/build_arm_deb_in_pp_arm_dev.sh` 中 `BASE_VERSION` 的提交记录推定：`2caf6e0` 为 v2.0.0，`d81c3c1` 为 v2.0.1；v2.0.12 为当前发布收口版本。
 
-## v2.0.8 - Unreleased
+## v2.0.12 - Unreleased
 
 - 触觉相机 SN 改为运行时缓存：在 `/dev/tcam_*` 插入或 symlink 目标变化时通过 USB sysfs serial 刷新，metadata、calibration 与后台 tactile 校验只消费缓存，减少停录阶段外部探测操作。
-- 触觉传感器持久化 baseline 存储目录由 `/tmp/umi_tactile_state` 改为 `/var/lib/ugripper/tactile_state`，避免重启后 persistent baseline 被清除导致无法检测关机期间动生的盖板损伤。
+- 触觉传感器持久化 baseline 存储目录由 `/tmp/umi_tactile_state` 改为 `/var/lib/ugripper/tactile_state`，避免重启后 persistent baseline 被清除导致无法检测关机期间发生的盖板损伤。
+- 触觉软告警黄灯改为按侧别与传感器位置编码：左侧分别使用一长一短/一长两短，双路异常时使用两长，左右两侧可同时显示各自编码。
 - 升级/重装时在 `prerm` 阶段自动清除触觉传感器基线目录，避免旧版本基线持续污染新版本。
 - 录制起停的 stereo 控制改为 `record_runtime` 直接写左右 Fays recorder FIFO，停录时并发发送左右 `STOP`，并统一 C++ FIFO 完整行读写工具，避免顶层 shell FIFO 超时读半行导致 `STOP` 被截断。
 - 双目 stereo 的时长与 span gap 校验改用对应 Fays MCAP camera 帧首尾时间跨度，MKV 仅保留存在性与可读性检查，避免轻微丢帧造成容器时长偏短时误判数据失败。
@@ -18,7 +19,7 @@
 - Fays stereo daemon 改为按 stereo `/dev/videoN` 枚举顺序串行启动左右 SDK recorder，单侧等待启动完成或 `10s` 超时后再拉起另一侧，避免双侧 SDK 并行初始化互相干扰。
 - 新增 `py_script/read_ugripper_mcap.txt` 通用 MCAP 读取示例及配套 README，供数据使用者直接解析当前 UGripper episode 中的 sensor、Fays 与可选 ego MCAP；使用 `.txt` 后缀便于发送。
 - `[PERF]` 日志改为由编译包决定，默认发布包关闭；运行时不再读取 `UGRIPPER_PERF_LOG`，需要开启时由构建定义 `UGRIPPER_ENABLE_PERF_LOG=1`；Fays 错误、重启和必要状态日志不受该开关影响。
-- 构建脚本默认主包版本调整到 `2.0.8`。
+- 构建脚本默认主包版本调整到 `2.0.12`。
 
 ## v2.0.4 - Unreleased
 

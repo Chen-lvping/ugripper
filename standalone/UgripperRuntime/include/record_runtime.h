@@ -220,6 +220,8 @@ private:
         {
             std::string cameraName;
             std::string serialNumber;
+            std::string side;
+            std::string sensorSlot;
             bool damaged = false;
             bool warningActive = false;
             bool warningTriggered = false;
@@ -371,6 +373,7 @@ private:
     void setAudioRecoveryCommand(std::string command);
     void sendAudioCommand(const std::string &command) const;
     void setLedState(LedState state, double progress = 0.0);
+    void setTactileWarningLedState();
     void setHardwareFaultLedState(const ugripper::runtime::HealthFault &fault);
     bool isRecordingActive() const;
     const std::string &currentEpisodeDir() const;
@@ -399,6 +402,12 @@ private:
     bool leftDualLongHandled_ = false;
     utils::BufferedFifoLineReader recordControlReader_{4096};
     uint64_t lastRecordControlActionMs_ = 0;
+    struct TactileWarningSideState
+    {
+        bool leftSensor = false;
+        bool rightSensor = false;
+    };
+    std::array<TactileWarningSideState, 2> tactileWarningSides_{};
     bool tactileWarningActive_ = false;
     std::string tactileTriggeredAudioCommand_;
     struct BackgroundTactileValidationResult

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace
 {
@@ -14,6 +15,13 @@ constexpr uint64_t kErrorPulseGapMs = 300;
 constexpr uint64_t kErrorSequenceGapMs = 1200;
 constexpr double kPi = 3.14159265358979323846;
 
+enum class TactileWarningPattern
+{
+    OneLongOneShort,
+    OneLongTwoShort,
+    TwoLong,
+};
+
 double clampProgress(double progress)
 {
     if (progress < 0.0)
@@ -25,6 +33,58 @@ double clampProgress(double progress)
         return 1.0;
     }
     return progress;
+}
+
+GripperLedColor renderPulseSequence(uint64_t steadyMs,
+                                    const std::vector<uint64_t> &onDurationsMs,
+                                    const GripperLedColor &onColor)
+{
+    uint64_t cycleMs = 0;
+    for (size_t index = 0; index < onDurationsMs.size(); ++index)
+    {
+        cycleMs += onDurationsMs[index];
+        cycleMs += (index + 1 == onDurationsMs.size()) ? kErrorSequenceGapMs : kErrorPulseGapMs;
+    }
+
+    if (cycleMs == 0)
+    {
+        return GripperLedColor{0, 0, 0};
+    }
+
+    uint64_t phaseMs = steadyMs % cycleMs;
+    for (size_t index = 0; index < onDurationsMs.size(); ++index)
+    {
+        const uint64_t onMs = onDurationsMs[index];
+        if (phaseMs < onMs)
+        {
+            return onColor;
+        }
+        phaseMs -= onMs;
+
+        const uint64_t offMs = (index + 1 == onDurationsMs.size()) ? kErrorSequenceGapMs : kErrorPulseGapMs;
+        if (phaseMs < offMs)
+        {
+            return GripperLedColor{0, 0, 0};
+        }
+        phaseMs -= offMs;
+    }
+
+    return GripperLedColor{0, 0, 0};
+}
+
+GripperLedColor renderTactileWarningPattern(uint64_t steadyMs, TactileWarningPattern pattern)
+{
+    constexpr GripperLedColor kWarningYellow{255, 110, 0};
+    switch (pattern)
+    {
+    case TactileWarningPattern::OneLongOneShort:
+        return renderPulseSequence(steadyMs, {kErrorLongOnMs, kErrorShortOnMs}, kWarningYellow);
+    case TactileWarningPattern::OneLongTwoShort:
+        return renderPulseSequence(steadyMs, {kErrorLongOnMs, kErrorShortOnMs, kErrorShortOnMs}, kWarningYellow);
+    case TactileWarningPattern::TwoLong:
+        return renderPulseSequence(steadyMs, {kErrorLongOnMs, kErrorLongOnMs}, kWarningYellow);
+    }
+    return GripperLedColor{0, 0, 0};
 }
 }
 
@@ -51,6 +111,18 @@ bool GripperLedEffectRenderer::parseStateText(const std::string &text, GripperLe
     else if (stateText == "WARNING")
     {
         parsed.state = GripperLedEffectState::Warning;
+    }
+    else if (stateText == "TACTILE_WARNING_L")
+    {
+        parsed.state = GripperLedEffectState::TactileWarningLeftSensor;
+    }
+    else if (stateText == "TACTILE_WARNING_R")
+    {
+        parsed.state = GripperLedEffectState::TactileWarningRightSensor;
+    }
+    else if (stateText == "TACTILE_WARNING_BOTH")
+    {
+        parsed.state = GripperLedEffectState::TactileWarningBothSensors;
     }
     else if (stateText == "RECORDING")
     {
@@ -127,6 +199,12 @@ std::string GripperLedEffectRenderer::stateText(const GripperLedEffect &effect)
         return "READY";
     case GripperLedEffectState::Warning:
         return "WARNING";
+    case GripperLedEffectState::TactileWarningLeftSensor:
+        return "TACTILE_WARNING_L";
+    case GripperLedEffectState::TactileWarningRightSensor:
+        return "TACTILE_WARNING_R";
+    case GripperLedEffectState::TactileWarningBothSensors:
+        return "TACTILE_WARNING_BOTH";
     case GripperLedEffectState::Recording:
         return "RECORDING";
     case GripperLedEffectState::Error1:
@@ -173,6 +251,12 @@ GripperLedColor GripperLedEffectRenderer::render(const GripperLedEffect &effect,
         const bool on = (steadyMs % kRecordingBlinkPeriodMs) < (kRecordingBlinkPeriodMs / 2);
         return on ? GripperLedColor{255, 110, 0} : GripperLedColor{30, 10, 0};
     }
+    case GripperLedEffectState::TactileWarningLeftSensor:
+        return renderTactileWarningPattern(steadyMs, TactileWarningPattern::OneLongOneShort);
+    case GripperLedEffectState::TactileWarningRightSensor:
+        return renderTactileWarningPattern(steadyMs, TactileWarningPattern::OneLongTwoShort);
+    case GripperLedEffectState::TactileWarningBothSensors:
+        return renderTactileWarningPattern(steadyMs, TactileWarningPattern::TwoLong);
     case GripperLedEffectState::Recording:
     {
         const bool on = (steadyMs % kRecordingBlinkPeriodMs) < (kRecordingBlinkPeriodMs / 2);
