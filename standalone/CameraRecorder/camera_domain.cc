@@ -291,6 +291,10 @@ void ValidateNonNegativeFields(const CameraConfig& config, const std::string& co
         throw std::runtime_error(
             "fields 'capture_width', 'capture_height', and 'input_thread_queue_size' must be >= 0 in " + context);
     }
+    if (config.v4l2_buffer_count < 2)
+    {
+        throw std::runtime_error("field 'v4l2_buffer_count' must be >= 2 in " + context);
+    }
     if (config.qp_init < 0 || config.qp_max < 0 || config.qp_min < 0 || config.qp_max_i < 0 ||
         config.qp_min_i < 0)
     {
@@ -317,6 +321,7 @@ CameraConfig ParseLegacyCameraConfig(const YAML::Node& camera_node, size_t index
     config.video_filter = OptionalString(camera_node, "video_filter", "", context);
     config.output_files = RequireOutputFiles(camera_node, context);
     config.input_thread_queue_size = OptionalInt(camera_node, "input_thread_queue_size", 0, context);
+    config.v4l2_buffer_count = OptionalInt(camera_node, "v4l2_buffer_count", config.v4l2_buffer_count, context);
     config.qp_init = OptionalInt(camera_node, "qp_init", config.qp_init, context);
     config.qp_max = OptionalInt(camera_node, "qp_max", config.qp_max, context);
     config.qp_min = OptionalInt(camera_node, "qp_min", config.qp_min, context);
@@ -377,6 +382,8 @@ CameraConfig ParseSchemaV1CameraConfig(const YAML::Node& camera_node, size_t ind
     config.output_fps = OptionalInt(record_node, "output_fps", 0, context + ".record");
     config.input_thread_queue_size =
         OptionalInt(record_node, "input_thread_queue_size", 0, context + ".record");
+    config.v4l2_buffer_count =
+        OptionalInt(record_node, "v4l2_buffer_count", config.v4l2_buffer_count, context + ".record");
     config.video_filter = OptionalString(record_node, "video_filter", "", context + ".record");
     if (const YAML::Node qp_node = record_node["qp"])
     {

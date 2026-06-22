@@ -1231,9 +1231,9 @@ private:
         RetryIoctl(fd_, VIDIOC_S_PARM, &streamparm);
 
         v4l2_requestbuffers request{};
-        // Keep enough compressed V4L2 buffers to absorb short stalls while
-        // reducing contiguous DMA pressure during multi-camera startup.
-        request.count = 24;
+        // Keep this modest: each MMAP buffer can consume contiguous DMA/CMA
+        // memory on RK3588, and repeated multi-camera start/stop can fragment it.
+        request.count = static_cast<uint32_t>(std::max(2, config_.v4l2_buffer_count));
         request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         request.memory = V4L2_MEMORY_MMAP;
         if (!RetryIoctl(fd_, VIDIOC_REQBUFS, &request) || request.count < 2) {

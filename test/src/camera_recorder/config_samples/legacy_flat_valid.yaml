@@ -6,3 +6,4 @@ cameras:
     height: 1080
     fps: 30
     output_files: [step4_demo_camera.mkv]
+    v4l2_buffer_count: 6

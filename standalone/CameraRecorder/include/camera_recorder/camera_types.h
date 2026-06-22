@@ -49,6 +49,7 @@ struct CameraConfig {
     std::string video_filter;
     std::vector<std::string> output_files;
     int input_thread_queue_size = 0;
+    int v4l2_buffer_count = 16;
     int qp_init = 30;
     int qp_max = 38;
     int qp_min = 24;

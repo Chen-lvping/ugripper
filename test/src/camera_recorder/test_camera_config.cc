@@ -21,6 +21,7 @@ TEST(CameraConfigTest, LoadsLegacyFlatSample)
     EXPECT_EQ(configs[0].name, "step4_demo_camera");
     EXPECT_EQ(configs[0].device, "/dev/null");
     EXPECT_EQ(configs[0].mode, ugripper::camera::CameraRecordMode::DirectCopyH265);
+    EXPECT_EQ(configs[0].v4l2_buffer_count, 6);
     EXPECT_EQ(ugripper::camera::PrimaryOutputFileName(configs[0]), "step4_demo_camera.mkv");
 }
 
@@ -38,6 +39,7 @@ TEST(CameraConfigTest, LoadsSchemaV1Sample)
     EXPECT_TRUE(ugripper::camera::HasGroup(configs[0], "critical"));
     EXPECT_EQ(configs[0].device, "/dev/null");
     EXPECT_EQ(configs[0].fps, 30);
+    EXPECT_EQ(configs[0].v4l2_buffer_count, 10);
     EXPECT_EQ(ugripper::camera::PrimaryOutputFileName(configs[0]), "step4_demo_camera.mkv");
 }
 

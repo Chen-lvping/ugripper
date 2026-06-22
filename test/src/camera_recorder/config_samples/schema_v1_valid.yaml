@@ -16,6 +16,7 @@ CameraRecorder:
 
       record:
         pipeline: direct_copy_h265
+        v4l2_buffer_count: 10
 
       output:
         file_name: step4_demo_camera.mkv

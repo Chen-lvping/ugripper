@@ -6,6 +6,8 @@
 
 ## v2.0.12 - Unreleased
 
+- 主摄 V4L2 MMAP 缓冲池改为 `v4l2_buffer_count` 可配置，并将默认主摄缓冲数从 24 收敛为 16，降低 RK3588 现场 `alloc_contig_range ... PFNs busy` / CMA 压力导致主摄 UVC 起流失败的概率，同时避免回退到历史 8-buffer 口径带来的短时背压/坏流风险。
+- Fays stereo raw frame 队列收敛：`VideoFrameQueue` 默认容量从 128 降为 32，ffmpeg rawvideo `thread_queue_size` 从 512 降为 64，降低双路 stereo 常驻/录制切换期间的大帧内存占用。
 - 触觉相机 SN 改为运行时缓存：在 `/dev/tcam_*` 插入或 symlink 目标变化时通过 USB sysfs serial 刷新，metadata、calibration 与后台 tactile 校验只消费缓存，减少停录阶段外部探测操作。
 - 触觉传感器持久化 baseline 存储目录由 `/tmp/umi_tactile_state` 改为 `/var/lib/ugripper/tactile_state`，避免重启后 persistent baseline 被清除导致无法检测关机期间发生的盖板损伤。
 - 触觉软告警黄灯改为按侧别与传感器位置编码：左侧分别使用一长一短/一长两短，双路异常时使用两长，左右两侧可同时显示各自编码。

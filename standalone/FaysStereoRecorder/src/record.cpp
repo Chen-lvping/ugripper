@@ -1243,7 +1243,7 @@ struct VideoFrame {
 
 class VideoFrameQueue {
 public:
-    static constexpr size_t kDefaultCapacity = 128;
+    static constexpr size_t kDefaultCapacity = 32;
 
     explicit VideoFrameQueue(size_t capacity = kDefaultCapacity)
         : capacity_(capacity), stopped_(false), dropCount_(0) {}
@@ -1307,7 +1307,7 @@ public:
 
         std::stringstream cmd;
         cmd << "ffmpeg -hide_banner -loglevel error -nostats -y "
-            << "-thread_queue_size 512 "
+            << "-thread_queue_size 64 "
             << "-f rawvideo -vcodec rawvideo "
             << "-pix_fmt bgr24 "
             << "-s " << width << "x" << height << " "

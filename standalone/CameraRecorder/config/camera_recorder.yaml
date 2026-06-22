@@ -6,6 +6,7 @@ cameras:
     height: 1080
     fps: 60
     output_files: [cam_left.mkv]
+    v4l2_buffer_count: 16
 
   - name: right_cam_main
     device: /dev/cam_right
@@ -14,6 +15,7 @@ cameras:
     height: 1080
     fps: 60
     output_files: [cam_right.mkv]
+    v4l2_buffer_count: 16
 
   - name: chest_cam_main
     device: /dev/cam_chest
@@ -22,6 +24,7 @@ cameras:
     height: 1080
     fps: 60
     output_files: [cam_chest.mkv]
+    v4l2_buffer_count: 16
 
   - name: left_tcam_l
     device: /dev/tcam_left_l
