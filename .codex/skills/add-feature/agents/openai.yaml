@@ -1,4 +1,4 @@
 interface:
   display_name: "Add Feature"
   short_description: "先规划后实现，构建后默认部署到240"
-  default_prompt: "Use $add-feature to plan first, implement after confirmation, sync docs/agent updates, decide whether to bump build_deb.sh/usb_updater_build.sh versions from explicit user instruction, then build and deploy to ubuntu@192.168.2.240 with password ubuntu."
+  default_prompt: "Use $add-feature to plan first, implement after confirmation, sync docs/agent updates, decide whether to bump build_deb.sh plus scripts/build_arm_deb_in_pp_arm_dev.sh for ugripper and ../DASUsbUpdater/usb_updater_build.sh for updater from explicit user instruction, then build and deploy to ubuntu@192.168.2.240 with password ubuntu."

@@ -172,6 +172,44 @@ def read_status(path: Path) -> dict:
     return payload if isinstance(payload, dict) else {}
 
 
+def ego_codec_for_camera_codec(camera_codec: str) -> str:
+    codec = (camera_codec or "").strip().lower()
+    if codec in ("h265", "hevc"):
+        return "hevc"
+    return "avc"
+
+
+def set_ego_video_codec(adb: Adb, camera_codec: str) -> dict:
+    ego_codec = ego_codec_for_camera_codec(camera_codec)
+    detail = {
+        "camera_codec": camera_codec,
+        "ego_codec": ego_codec,
+    }
+    try:
+        result = adb.run(
+            "shell",
+            "am",
+            "broadcast",
+            "-a",
+            f"{PACKAGE}.SET_VIDEO_CODEC",
+            "--es",
+            "codec",
+            ego_codec,
+            timeout=10,
+        )
+    except Exception as exc:
+        detail.update({"returncode": -1, "error": str(exc)})
+        return detail
+    detail.update(
+        {
+            "returncode": result.returncode,
+            "stdout": result.stdout.strip().replace("\r", ""),
+            "stderr": result.stderr.strip().replace("\r", ""),
+        }
+    )
+    return detail
+
+
 def list_devices(adb: Adb) -> list[str]:
     result = adb.run("devices", "-l", timeout=5)
     if result.returncode != 0:
@@ -812,6 +850,10 @@ def run_start(args: argparse.Namespace) -> int:
         write_status(args.status_file, status)
 
         existing_temp_episodes = list_temp_episodes(adb)
+        status["video_codec"] = set_ego_video_codec(adb, args.codec)
+        status["updated_at_ms"] = now_ms()
+        write_status(args.status_file, status)
+
         result = adb.run("shell", "am", "broadcast", "-a", f"{PACKAGE}.START_RECORDING", timeout=10)
         status["start_broadcast_returncode"] = result.returncode
         status["updated_at_ms"] = now_ms()
@@ -945,6 +987,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interval", type=float, default=float(os.environ.get("UGRIPPER_EGO_SYNC_INTERVAL_SEC", "1")))
     parser.add_argument("--detect-timeout", type=float, default=15.0)
     parser.add_argument("--finalize-timeout", type=float, default=60.0)
+    parser.add_argument("--codec", choices=("h264", "h265"), default="h264")
     return parser.parse_args()
 
 

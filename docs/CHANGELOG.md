@@ -2,9 +2,9 @@
 
 > 说明：本文件只保留 v2.0.0 以来的高信号发布变更；当前系统行为以 `docs/agent/overview.md` 为准。
 >
-> 仓库没有 `v2.0.x` git tag。下面的发布边界按 `build_deb.sh` / `scripts/build_arm_deb_in_pp_arm_dev.sh` 中 `BASE_VERSION` 的提交记录推定：`2caf6e0` 为 v2.0.0，`d81c3c1` 为 v2.0.1；v2.0.12 为当前发布收口版本。
+> 仓库没有 `v2.0.x` git tag。下面的发布边界按 `build_deb.sh` / `scripts/build_arm_deb_in_pp_arm_dev.sh` 中 `BASE_VERSION` 的提交记录推定：`2caf6e0` 为 v2.0.0，`d81c3c1` 为 v2.0.1；v2.0.13 为当前发布收口版本。
 
-## v2.0.12 - Unreleased
+## v2.0.13 - Unreleased
 
 - 主摄 V4L2 MMAP 缓冲池改为 `v4l2_buffer_count` 可配置，并将默认主摄缓冲数从 24 收敛为 16，降低 RK3588 现场 `alloc_contig_range ... PFNs busy` / CMA 压力导致主摄 UVC 起流失败的概率，同时避免回退到历史 8-buffer 口径带来的短时背压/坏流风险。
 - Fays stereo raw frame 队列收敛：`VideoFrameQueue` 默认容量从 128 降为 32，ffmpeg rawvideo `thread_queue_size` 从 512 降为 64，降低双路 stereo 常驻/录制切换期间的大帧内存占用。
@@ -21,7 +21,8 @@
 - Fays stereo daemon 改为按 stereo `/dev/videoN` 枚举顺序串行启动左右 SDK recorder，单侧等待启动完成或 `10s` 超时后再拉起另一侧，避免双侧 SDK 并行初始化互相干扰。
 - 新增 `py_script/read_ugripper_mcap.txt` 通用 MCAP 读取示例及配套 README，供数据使用者直接解析当前 UGripper episode 中的 sensor、Fays 与可选 ego MCAP；使用 `.txt` 后缀便于发送。
 - `[PERF]` 日志改为由编译包决定，默认发布包关闭；运行时不再读取 `UGRIPPER_PERF_LOG`，需要开启时由构建定义 `UGRIPPER_ENABLE_PERF_LOG=1`；Fays 错误、重启和必要状态日志不受该开关影响。
-- 构建脚本默认主包版本调整到 `2.0.12`。
+- ego 起录前按 `CAMERA_CODEC` 同步视频编码：`h264` 广播为 `avc`，`h265` 广播为 `hevc`，保持 ego 与背包编码格式一致。
+- 构建脚本默认主包版本调整到 `2.0.13`。
 
 ## v2.0.4 - Unreleased
 

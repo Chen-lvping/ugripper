@@ -4203,7 +4203,8 @@ bool RecordRuntime::waitForStereoFinalize(const std::string &episodeDir, int tim
 
 std::vector<std::string> egoWorkerArgs(const std::string &script,
                                        const std::string &command,
-                                       const std::string &episodeDir)
+                                       const std::string &episodeDir,
+                                       const std::string &cameraCodec = "")
 {
     std::vector<std::string> args = resolvePythonCommand();
     args.push_back(script);
@@ -4212,6 +4213,11 @@ std::vector<std::string> egoWorkerArgs(const std::string &script,
     args.push_back(episodeDir);
     args.push_back("--status-file");
     args.push_back((fs::path(episodeDir) / "ego" / kEgoSyncStatusFileName).string());
+    if (command == "start" && !cameraCodec.empty())
+    {
+        args.push_back("--codec");
+        args.push_back(cameraCodec);
+    }
     return args;
 }
 
@@ -4249,7 +4255,10 @@ bool RecordRuntime::startEgoRecording(const std::string &episodeDir,
 
     egoRecordingWorker_.emplace("ego_recording_worker");
     egoRecordingAttempted_ = true;
-    if (!egoRecordingWorker_->Start(egoWorkerArgs(options_.egoRecordingScript, "start", episodeDir),
+    if (!egoRecordingWorker_->Start(egoWorkerArgs(options_.egoRecordingScript,
+                                                 "start",
+                                                 episodeDir,
+                                                 options_.cameraCodec),
                                    {},
                                    errorMessage))
     {

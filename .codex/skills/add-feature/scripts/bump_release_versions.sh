@@ -9,8 +9,8 @@ Usage:
 
 Options:
   --target   Which package version(s) to update. Default: both.
-             ugripper -> build_deb.sh VERSION
-             updater  -> usb_updater_build.sh PKG_VERSION
+             ugripper -> build_deb.sh BASE_VERSION and scripts/build_arm_deb_in_pp_arm_dev.sh BASE_VERSION
+             updater  -> ../DASUsbUpdater/usb_updater_build.sh PKG_VERSION_BASE
              both     -> update both files
   --bump     Version bump level. Default: .z
              Accepted values: .z/.y/.x, z/y/x, patch/minor/major.
@@ -57,10 +57,9 @@ bump_semver() {
   echo "${major}.${minor}.${patch}"
 }
 
-update_version_file() {
+parse_version_file() {
   local file="$1"
   local key="$2"
-  local bump="$3"
 
   if [[ ! -f "$file" ]]; then
     echo "Required file not found: $file" >&2
@@ -68,20 +67,97 @@ update_version_file() {
   fi
 
   local line
-  line="$(grep -E "^${key}=\"[0-9]+\.[0-9]+\.[0-9]+\"" "$file" | head -n 1 || true)"
+  line="$(grep -E "^${key}=\"\\$\\{${key}:-[0-9]+\\.[0-9]+\\.[0-9]+\\}\"" "$file" | head -n 1 || true)"
+  if [[ -z "$line" ]]; then
+    line="$(grep -E "^${key}=\"[0-9]+\\.[0-9]+\\.[0-9]+\"" "$file" | head -n 1 || true)"
+  fi
   if [[ -z "$line" ]]; then
     echo "Failed to parse ${key} from ${file}" >&2
     exit 1
   fi
 
+  sed -n -E "s/^${key}=\"\\$\\{${key}:-([0-9]+\\.[0-9]+\\.[0-9]+)\\}\".*/\\1/p; s/^${key}=\"([0-9]+\\.[0-9]+\\.[0-9]+)\".*/\\1/p" "$file" | head -n 1
+}
+
+update_version_file_to() {
+  local file="$1"
+  local key="$2"
+  local new_version="$3"
+
+  if [[ ! -f "$file" ]]; then
+    echo "Required file not found: $file" >&2
+    exit 1
+  fi
+
   local current_version
-  current_version="$(echo "$line" | sed -E "s/^${key}=\"([0-9]+\.[0-9]+\.[0-9]+)\".*/\1/")"
+  current_version="$(parse_version_file "$file" "$key")"
+
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="$key" -v new_version="$new_version" '
+    BEGIN {
+      fallback_pattern = "^" key "=\"\\$\\{" key ":-[0-9]+\\.[0-9]+\\.[0-9]+\\}\""
+      literal_pattern = "^" key "=\"[0-9]+\\.[0-9]+\\.[0-9]+\""
+      replacement_done = 0
+    }
+    replacement_done == 0 && $0 ~ fallback_pattern {
+      print key "=\"${" key ":-" new_version "}\""
+      replacement_done = 1
+      next
+    }
+    replacement_done == 0 && $0 ~ literal_pattern {
+      print key "=\"" new_version "\""
+      replacement_done = 1
+      next
+    }
+    { print }
+    END {
+      if (replacement_done == 0) {
+        exit 1
+      }
+    }
+  ' "$file" > "$tmp" || {
+    rm -f "$tmp"
+    echo "Failed to update ${key} in ${file}" >&2
+    exit 1
+  }
+  mv "$tmp" "$file"
+
+  echo "${file}:${key}:${current_version}:${new_version}"
+}
+
+update_version_file() {
+  local file="$1"
+  local key="$2"
+  local bump="$3"
+
+  local current_version
+  current_version="$(parse_version_file "$file" "$key")"
   local new_version
   new_version="$(bump_semver "$current_version" "$bump")"
 
-  sed -i -E "0,/^${key}=\"[0-9]+\.[0-9]+\.[0-9]+\"/s//${key}=\"${new_version}\"/" "$file"
+  update_version_file_to "$file" "$key" "$new_version"
+}
 
-  echo "${file}:${key}:${current_version}:${new_version}"
+update_ugripper_versions() {
+  local bump="$1"
+  local primary_file="build_deb.sh"
+  local helper_file="scripts/build_arm_deb_in_pp_arm_dev.sh"
+  local primary_current
+  primary_current="$(parse_version_file "$primary_file" "BASE_VERSION")"
+  local helper_current
+  helper_current="$(parse_version_file "$helper_file" "BASE_VERSION")"
+  if [[ "$primary_current" != "$helper_current" ]]; then
+    echo "Ugripper version mismatch before bump: ${primary_file}=${primary_current}, ${helper_file}=${helper_current}" >&2
+    echo "Refusing to bump from an ambiguous base; align the two files first." >&2
+    exit 1
+  fi
+
+  local new_version
+  new_version="$(bump_semver "$primary_current" "$bump")"
+
+  update_version_file_to "$primary_file" "BASE_VERSION" "$new_version"
+  update_version_file_to "$helper_file" "BASE_VERSION" "$new_version"
 }
 
 TARGET="both"
@@ -157,11 +233,16 @@ fi
 results=()
 
 if [[ "$TARGET" == "ugripper" || "$TARGET" == "both" ]]; then
-  results+=("$(update_version_file "build_deb.sh" "VERSION" "$BUMP")")
+  ugripper_output="$(update_ugripper_versions "$BUMP")"
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    results+=("$line")
+  done <<< "$ugripper_output"
 fi
 
 if [[ "$TARGET" == "updater" || "$TARGET" == "both" ]]; then
-  results+=("$(update_version_file "usb_updater_build.sh" "PKG_VERSION" "$BUMP")")
+  updater_output="$(update_version_file "../DASUsbUpdater/usb_updater_build.sh" "PKG_VERSION_BASE" "$BUMP")"
+  results+=("$updater_output")
 fi
 
 case "$BUMP" in
