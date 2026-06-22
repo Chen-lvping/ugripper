@@ -101,6 +101,9 @@ constexpr double kTactileResidualMadMultiplier = 6.0;
 constexpr double kTactileMadToSigma = 1.4826;
 constexpr int kTactileResidualMinNeighborCount = 3;
 constexpr size_t kTactileResidualMinComponentPixels = 8;
+constexpr int kTactileResidualLowFrequencyBlurRadius = 2;
+constexpr size_t kTactileResidualArtifactMaxComponentPixels = 25;
+constexpr double kTactileResidualArtifactLowFrequencyMeanThreshold = 5.0;
 constexpr size_t kTactileHistoryWindow = 3;
 constexpr int kTactileSnapshotTimeoutMs = 2500;
 constexpr const char *kEpisodeTimingFileName = ".recording_timing.json";
@@ -361,6 +364,8 @@ struct TactileFrameMetrics
     double gain = 1.0;
     double offset = 0.0;
     size_t maxResidualComponentPixels = 0;
+    size_t droppedArtifactComponentPixels = 0;
+    size_t droppedArtifactComponentCount = 0;
     bool damaged = false;
 };
 
@@ -759,6 +764,46 @@ std::vector<double> sortedFrameValues(const std::vector<uint8_t> &frame)
     return values;
 }
 
+std::vector<double> boxBlurFrame(const std::vector<double> &frame,
+                                 size_t width,
+                                 size_t height,
+                                 int radius)
+{
+    std::vector<double> blurred(frame.size(), 0.0);
+    if (frame.size() != width * height || frame.empty() || radius <= 0)
+    {
+        return frame;
+    }
+
+    const int radiusValue = std::max(0, radius);
+    for (size_t y = 0; y < height; ++y)
+    {
+        for (size_t x = 0; x < width; ++x)
+        {
+            double sum = 0.0;
+            size_t count = 0;
+            const size_t yBegin = static_cast<size_t>(
+                std::max<int64_t>(0, static_cast<int64_t>(y) - radiusValue));
+            const size_t yEnd = static_cast<size_t>(
+                std::min<int64_t>(static_cast<int64_t>(height) - 1, static_cast<int64_t>(y) + radiusValue));
+            const size_t xBegin = static_cast<size_t>(
+                std::max<int64_t>(0, static_cast<int64_t>(x) - radiusValue));
+            const size_t xEnd = static_cast<size_t>(
+                std::min<int64_t>(static_cast<int64_t>(width) - 1, static_cast<int64_t>(x) + radiusValue));
+            for (size_t yy = yBegin; yy <= yEnd; ++yy)
+            {
+                for (size_t xx = xBegin; xx <= xEnd; ++xx)
+                {
+                    sum += frame[yy * width + xx];
+                    ++count;
+                }
+            }
+            blurred[y * width + x] = count > 0 ? sum / static_cast<double>(count) : frame[y * width + x];
+        }
+    }
+    return blurred;
+}
+
 std::string formatTactileMetrics(const TactileFrameMetrics &metrics)
 {
     return "robust_residual_area=" + formatFixed(metrics.robustResidualArea, 4) +
@@ -770,6 +815,10 @@ std::string formatTactileMetrics(const TactileFrameMetrics &metrics)
            " residual_p99=" + formatFixed(metrics.residualP99, 2) +
            " max_component_px=" + std::to_string(metrics.maxResidualComponentPixels) +
            " min_component_px=" + std::to_string(kTactileResidualMinComponentPixels) +
+           " artifact_drop_px=" + std::to_string(metrics.droppedArtifactComponentPixels) +
+           " artifact_drop_components=" + std::to_string(metrics.droppedArtifactComponentCount) +
+           " artifact_max_component_px=" + std::to_string(kTactileResidualArtifactMaxComponentPixels) +
+           " artifact_lowfreq_mean_thr=" + formatFixed(kTactileResidualArtifactLowFrequencyMeanThreshold, 2) +
            " gain=" + formatFixed(metrics.gain, 4) +
            " offset=" + formatFixed(metrics.offset, 2);
 }
@@ -778,13 +827,24 @@ size_t countFilteredResidualMask(const std::vector<uint8_t> &rawMask,
                                  size_t width,
                                  size_t height,
                                  size_t minComponentPixels,
-                                 size_t *maxComponentPixels)
+                                 const std::vector<double> *lowFrequencyDiff,
+                                 size_t *maxComponentPixels,
+                                 size_t *droppedArtifactPixelsOut,
+                                 size_t *droppedArtifactComponentsOut)
 {
     if (rawMask.size() != width * height || rawMask.empty())
     {
         if (maxComponentPixels != nullptr)
         {
             *maxComponentPixels = 0;
+        }
+        if (droppedArtifactPixelsOut != nullptr)
+        {
+            *droppedArtifactPixelsOut = 0;
+        }
+        if (droppedArtifactComponentsOut != nullptr)
+        {
+            *droppedArtifactComponentsOut = 0;
         }
         return 0;
     }
@@ -825,6 +885,8 @@ size_t countFilteredResidualMask(const std::vector<uint8_t> &rawMask,
     std::vector<size_t> stack;
     size_t retainedPixels = 0;
     size_t maxComponent = 0;
+    size_t droppedArtifactPixelCount = 0;
+    size_t droppedArtifactComponents = 0;
     for (size_t start = 0; start < neighborMask.size(); ++start)
     {
         if (neighborMask[start] == 0 || visited[start] != 0)
@@ -836,10 +898,15 @@ size_t countFilteredResidualMask(const std::vector<uint8_t> &rawMask,
         stack.push_back(start);
         visited[start] = 1;
         size_t componentPixels = 0;
+        double lowFrequencySum = 0.0;
         for (size_t cursor = 0; cursor < stack.size(); ++cursor)
         {
             const size_t index = stack[cursor];
             ++componentPixels;
+            if (lowFrequencyDiff != nullptr && lowFrequencyDiff->size() == rawMask.size())
+            {
+                lowFrequencySum += (*lowFrequencyDiff)[index];
+            }
             const size_t y = index / width;
             const size_t x = index % width;
             const size_t yBegin = (y == 0) ? 0 : y - 1;
@@ -863,13 +930,34 @@ size_t countFilteredResidualMask(const std::vector<uint8_t> &rawMask,
         maxComponent = std::max(maxComponent, componentPixels);
         if (componentPixels >= minComponentPixels)
         {
-            retainedPixels += componentPixels;
+            const double lowFrequencyMean =
+                (lowFrequencyDiff != nullptr && lowFrequencyDiff->size() == rawMask.size() && componentPixels > 0)
+                    ? lowFrequencySum / static_cast<double>(componentPixels)
+                    : std::numeric_limits<double>::infinity();
+            if (componentPixels <= kTactileResidualArtifactMaxComponentPixels &&
+                lowFrequencyMean < kTactileResidualArtifactLowFrequencyMeanThreshold)
+            {
+                droppedArtifactPixelCount += componentPixels;
+                ++droppedArtifactComponents;
+            }
+            else
+            {
+                retainedPixels += componentPixels;
+            }
         }
     }
 
     if (maxComponentPixels != nullptr)
     {
         *maxComponentPixels = maxComponent;
+    }
+    if (droppedArtifactPixelsOut != nullptr)
+    {
+        *droppedArtifactPixelsOut = droppedArtifactPixelCount;
+    }
+    if (droppedArtifactComponentsOut != nullptr)
+    {
+        *droppedArtifactComponentsOut = droppedArtifactComponents;
     }
     return retainedPixels;
 }
@@ -899,6 +987,10 @@ TactileFrameMetrics computeTactileFrameMetrics(const std::vector<uint8_t> &basel
 
     std::vector<double> residuals;
     residuals.reserve(baseline.size());
+    std::vector<double> baselineValues;
+    baselineValues.reserve(baseline.size());
+    std::vector<double> correctedCurrentValues;
+    correctedCurrentValues.reserve(current.size());
     double residualSum = 0.0;
     for (size_t index = 0; index < baseline.size(); ++index)
     {
@@ -906,6 +998,8 @@ TactileFrameMetrics computeTactileFrameMetrics(const std::vector<uint8_t> &basel
         const double currentValue = static_cast<double>(current[index]);
         const double correctedCurrent = std::clamp(currentValue * metrics.gain + metrics.offset, 0.0, 255.0);
         const double residual = std::fabs(correctedCurrent - baseValue);
+        baselineValues.push_back(baseValue);
+        correctedCurrentValues.push_back(correctedCurrent);
         residuals.push_back(residual);
         residualSum += residual;
     }
@@ -944,12 +1038,31 @@ TactileFrameMetrics computeTactileFrameMetrics(const std::vector<uint8_t> &basel
         }
     }
     metrics.rawResidualArea = static_cast<double>(rawResidualMaskCount) / static_cast<double>(baseline.size());
+    const std::vector<double> baselineLowFrequency = boxBlurFrame(
+        baselineValues,
+        static_cast<size_t>(kTactileFrameWidth),
+        static_cast<size_t>(kTactileFrameHeight),
+        kTactileResidualLowFrequencyBlurRadius);
+    const std::vector<double> currentLowFrequency = boxBlurFrame(
+        correctedCurrentValues,
+        static_cast<size_t>(kTactileFrameWidth),
+        static_cast<size_t>(kTactileFrameHeight),
+        kTactileResidualLowFrequencyBlurRadius);
+    std::vector<double> lowFrequencyDiff;
+    lowFrequencyDiff.reserve(baseline.size());
+    for (size_t index = 0; index < baseline.size(); ++index)
+    {
+        lowFrequencyDiff.push_back(std::fabs(currentLowFrequency[index] - baselineLowFrequency[index]));
+    }
     const size_t filteredResidualMaskCount = countFilteredResidualMask(
         rawResidualMask,
         static_cast<size_t>(kTactileFrameWidth),
         static_cast<size_t>(kTactileFrameHeight),
         kTactileResidualMinComponentPixels,
-        &metrics.maxResidualComponentPixels);
+        &lowFrequencyDiff,
+        &metrics.maxResidualComponentPixels,
+        &metrics.droppedArtifactComponentPixels,
+        &metrics.droppedArtifactComponentCount);
     metrics.robustResidualArea = static_cast<double>(filteredResidualMaskCount) / static_cast<double>(baseline.size());
     metrics.damaged = metrics.robustResidualArea >= kTactileRobustResidualAreaThreshold;
     return metrics;
