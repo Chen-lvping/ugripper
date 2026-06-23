@@ -430,6 +430,10 @@ copy_first_existing "$TARGET_INSTALL_ROOT/bin/FaysStereoRecorder/fays_record_exa
 copy_if_exists "scripts/hws" "$BUILD_ROOT/usr/local/bin/hws"
 copy_if_exists "scripts/ugripper_ch9344_symlink_name.sh" \
     "$BUILD_ROOT/usr/local/bin/ugripper_ch9344_symlink_name"
+copy_if_exists "scripts/restore_usb/ugripper_restore_usb" \
+    "$BUILD_ROOT/usr/local/sbin/ugripper_restore_usb"
+copy_if_exists "scripts/restore_usb/auto_restore_usb.py" \
+    "$BUILD_ROOT/usr/local/lib/ugripper/restore_usb/auto_restore_usb.py"
 
 copy_if_exists "standalone/CameraRecorder/config" "$TARGET_INSTALL_ROOT/bin/CameraRecorder/config"
 copy_if_exists "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/config" \
@@ -475,6 +479,8 @@ copy_if_exists "$PACK_SCRIPT_DIR/control"  "$BUILD_ROOT/DEBIAN/control"
 copy_if_exists "$PACK_SCRIPT_DIR/postinst" "$BUILD_ROOT/DEBIAN/postinst"
 copy_if_exists "$PACK_SCRIPT_DIR/prerm"    "$BUILD_ROOT/DEBIAN/prerm"
 copy_if_exists "$PACK_SCRIPT_DIR/postrm"   "$BUILD_ROOT/DEBIAN/postrm"
+copy_if_exists "$PACK_SCRIPT_DIR/ugripper-restore-usb.sudoers" \
+    "$BUILD_ROOT/etc/sudoers.d/ugripper-restore-usb"
 
 # 3. 赋予脚本执行权限
 chmod 755 "$BUILD_ROOT/DEBIAN/postinst"
@@ -482,6 +488,9 @@ chmod 755 "$BUILD_ROOT/DEBIAN/prerm"
 chmod 755 "$BUILD_ROOT/DEBIAN/postrm"
 chmod 755 "$BUILD_ROOT/usr/local/bin/hws"
 chmod 755 "$BUILD_ROOT/usr/local/bin/ugripper_ch9344_symlink_name"
+chmod 755 "$BUILD_ROOT/usr/local/sbin/ugripper_restore_usb"
+chmod 755 "$BUILD_ROOT/usr/local/lib/ugripper/restore_usb/auto_restore_usb.py"
+chmod 0440 "$BUILD_ROOT/etc/sudoers.d/ugripper-restore-usb"
 chmod 755 "$TARGET_INSTALL_ROOT/time_sync/safe_ntp_sync.sh"
 
 # 4. 执行变量替换

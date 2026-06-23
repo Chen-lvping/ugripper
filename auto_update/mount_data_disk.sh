@@ -16,6 +16,12 @@ current_source() {
     findmnt -rn -o SOURCE --mountpoint "$MOUNT_POINT" 2>/dev/null || true
 }
 
+mountpoints_for_source() {
+    local source="${1:-}"
+    [ -n "$source" ] || return 0
+    findmnt -rn -S "$source" -o TARGET 2>/dev/null || true
+}
+
 mount_active() {
     findmnt -rn --mountpoint "$MOUNT_POINT" >/dev/null 2>&1
 }
@@ -41,6 +47,21 @@ ensure_mountpoint_dir() {
 }
 
 cleanup_mountpoint() {
+    local source="${1:-}"
+    if [ -n "$source" ]; then
+        while IFS= read -r target; do
+            [ -n "$target" ] || continue
+            [ "$target" != "$MOUNT_POINT" ] || continue
+            run_unmount_with_timeout /usr/bin/systemd-umount "$target"
+            if findmnt -rn --mountpoint "$target" >/dev/null 2>&1; then
+                run_unmount_with_timeout umount "$target"
+            fi
+            if findmnt -rn --mountpoint "$target" >/dev/null 2>&1; then
+                run_unmount_with_timeout umount -l "$target"
+            fi
+        done < <(mountpoints_for_source "$source")
+    fi
+
     if mount_active; then
         run_unmount_with_timeout /usr/bin/systemd-umount "$MOUNT_POINT"
     fi
@@ -81,7 +102,7 @@ case "$ACTION" in
             ensure_mountpoint_dir
             exit 0
         fi
-        cleanup_mountpoint
+        cleanup_mountpoint "$CURRENT_SOURCE"
         exit 0
         ;;
     add)
@@ -103,7 +124,7 @@ if [ "$CURRENT_SOURCE" = "$DEVNODE" ] && source_exists "$CURRENT_SOURCE"; then
 fi
 
 if [ -n "$CURRENT_SOURCE" ]; then
-    cleanup_mountpoint || exit 1
+    cleanup_mountpoint "$CURRENT_SOURCE" || exit 1
 fi
 
 ensure_mountpoint_dir

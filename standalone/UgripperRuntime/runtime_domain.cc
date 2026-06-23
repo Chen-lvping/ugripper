@@ -1442,6 +1442,10 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
 
     if (due_to_error)
     {
+        if (dependencies_.handle_failure_state != nullptr)
+        {
+            dependencies_.handle_failure_state(failure_led_state, error_types, final_error_message);
+        }
         if (dependencies_.set_led_state != nullptr)
         {
             ApplyFailureLedState(dependencies_, failure_led_state, stereo_control_failure_side);
@@ -1471,6 +1475,10 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     const bool final_valid = valid && episode_dir_finalized;
     if (!final_valid)
     {
+        if (dependencies_.handle_failure_state != nullptr)
+        {
+            dependencies_.handle_failure_state(failure_led_state, error_types, final_error_message);
+        }
         if (dependencies_.set_led_state != nullptr)
         {
             ApplyFailureLedState(dependencies_, failure_led_state, stereo_control_failure_side);

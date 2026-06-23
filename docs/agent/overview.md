@@ -320,9 +320,10 @@
 ### 8.7 硬件健康监控
 - `record_runtime` 当前参考 v1 口径保留低频硬件健康监控，约每 `1s` 检查一次关键硬件状态，而不是在主循环里做高频主动轮询。
 - 当前监控项包括：`/mnt/data_disk` 是否仍可写、8 路相机设备节点、左右 IMU/encoder 设备节点、stereo daemon `ready/not-ready` 状态，以及左右 HMI 串口是否仍连接、输入侧 HMI 是否持续有响应。
-- 发现磁盘异常时进入 `ERROR_3`；当前会区分 `disk_mount_lost`、`disk_not_writable`、`disk_full` 等 fault key，并按“同类 fault 首次出现打错误日志、持续期间不重复刷屏、恢复时补一条 recovered”收敛日志。发现关键设备节点缺失、HMI 断连或 HMI 长时间无响应时进入 `ERROR_2`，并通过音频守护进程播报 `error`。`ERROR_2` 会根据缺失路径、stereo 状态或 HMI port 归属到左手、右手、双手或 unknown，用对应侧别灯效提示现场先看哪侧硬件。若 Fays stereo/IMU symlink 在线但单侧 recorder、控制 FIFO 或 START/STOP 控制链路失效，则进入 `ERROR_4`，提示拔插对应侧夹爪；此类问题不建议用软件复位作为恢复动作。
+- 发现磁盘异常时进入 `ERROR_3`；当前会区分 `disk_mount_lost`、`disk_not_writable`、`disk_full` 等 fault key，并按“同类 fault 首次出现打错误日志、持续期间不重复刷屏、恢复时补一条 recovered”收敛日志。发现关键设备节点缺失、HMI 断连或 HMI 长时间无响应时进入 `ERROR_2`，并通过音频守护进程播报 `error`。`ERROR_2` 会根据缺失路径、stereo 状态或 HMI port 归属到左手、右手、双手或 unknown，用对应侧别灯效提示现场先看哪侧硬件。若 Fays stereo/IMU symlink 在线但单侧 recorder、控制 FIFO 或 START/STOP 控制链路失效，则进入 `ERROR_4`，提示对应侧夹爪控制链路异常，并纳入错误态自动复位策略。
 - 若录制中发现任意关键设备、HMI、数据盘或 stereo daemon 健康故障，当前 episode 会立即按错误停录收尾，写失败 `metadata.json` 和 `validation_error.log`，并把健康监控 fault key 作为显式 `error_type` 进入本条 episode；若停录后又发现文件缺失、finalize 失败等问题，会同时记录内部错误类型，但 `quality_check_err_type` 只保留最高优先级主类型。设备后续恢复只影响下一次录制，不会把本条数据恢复成成功。
 - 若异常恢复发生在空闲态：回到 `READY` 并补播 `ready`。
+- 自动复位策略当前只覆盖可能由夹爪侧 USB/供电重枚举恢复的错误：`ERROR_2`（关键硬件/HMI/stereo 缺失或不活跃）、`ERROR_4`（stereo/Fays 控制链路失效）和主摄相关 `ERROR_1`（错误文本指向 `main camera`、`cam_left/right/chest` 或 `/dev/cam_*`）。`ERROR_3` 是数据盘挂载/可写/空间问题，不触发复位；`ERROR_5` 是 `runtime_error` 或其他运行时异常兜底，也不默认复位。若某侧夹爪完全未枚举（该侧 HMI 和关键传感器 symlink 都不存在），运行时只保留错误提示，不触发软件复位且不消耗复位次数；检测到该侧任一关键节点或 HMI 重新出现时，会重置当前复位次数，并给该侧约 `20s` 插入稳定窗口，窗口内健康监控错误、Fays ready 未完成或主摄缓存未读完都不会触发软件复位。触发命令为 `sudo -n /usr/local/sbin/ugripper_restore_usb`；真正执行断电复位前，若仍在录制会先按错误停录完成 episode 收尾，再同步运行日志并通过 `/tmp/umi_system_action_request=umount` 请求 root helper 卸载 `/mnt/data_disk`，数据盘未挂载时直接继续，卸载失败时跳过本次复位且不消耗复位次数，避免 U 盘读写中被 USB 供电复位硬断；随后运行时会先暂停 Fays stereo daemon/recorder，并在等待窗口内阻止 supervisor 自动重启 Fays，避免 SDK 在 USB 断电重枚举期间占用 stereo/IMU 节点。每次复位完成后会按约 `1s` 周期检查全部当前启用的关键传感器 symlink；节点齐全后立即恢复 Fays daemon，并从该时间点最多继续等待约 `20s`，要求健康监控恢复且主摄相关触发时主摄 SN/标定缓存恢复；若复位完成后约 `20s` 仍缺 symlink，或 symlink 齐后约 `20s` 仍未健康恢复，则进入下一次复位。同一错误窗口最多连续复位 `3` 次，第三次仍在 symlink 或 ready 阶段超时后，会沿用 HMI 蜂鸣器链路对故障侧夹爪报警，未知侧或双侧故障时两侧同时报警，单次蜂鸣最长 `5s` 后自动关闭；等待窗口内如果健康监控提前恢复并回到空闲态，会立即认定本轮复位成功并清除等待窗口，后续再异常按新的故障窗口处理；重新开始录制也会清除本轮复位窗口并关闭蜂鸣。等待窗口内的重复硬件健康报错不会抢跑触发下一次复位。该 root wrapper 会在存在 `bluetooth_gatt.service` 时先停止服务以释放通信接口，不存在或 stop/start 失败只记录告警，不阻断 GPIO/电源板复位主流程。供电板寄存器 `0x10` 当前按位掩码一次性写入并回读校验，失败时有限重试，避免逐 bit 快速读改写时旧读数覆盖前一位上电结果或偶发读回失败直接终止复位。
 - `camera_recorder` 仍保持“单路 recorder 失败不立即主动终止整次录制”的容错语义；本次实现只加强停录阶段的子进程组回收与 stop 日志，不把启动期短暂抖动直接升级为全量停录。
 
 ## 9. 配置、安装与 U 盘流程
@@ -397,7 +398,7 @@
 - `config/99-fixed-usb-map.rules` 会在允许的物理 USB 口上调用 `mount_data_disk.sh`，固定挂载点仍然是 `/mnt/data_disk`。
 - 主包规则现在只负责挂载/卸载；若额外安装了可选包 `das-usb-updater`，则由 updater 包自己的 `99-usb-auto-update.rules` 通过 `SYSTEMD_WANTS` 拉起 `usb-auto-update@<dev>.service`。
 - 允许的 USB 分区在 `remove` 事件里会显式对 `/mnt/data_disk` 执行卸载清理；此外还保留了 USB block `remove` 的兜底触发，尽量覆盖 hub 断链或热插拔时分区级事件不完整的场景，避免拔盘后残留 stale mount。
-- `mount_data_disk.sh` 当前除了匹配挂载源设备节点，还会把“挂载点只读”“挂载源设备节点已不存在”或“挂载点已不可访问”视为脏状态并优先清理；它不再主动启动 updater service；`run_record.sh` 也会把这类状态视为未就绪。
+- `mount_data_disk.sh` 当前除了匹配挂载源设备节点，还会把“挂载点只读”“挂载源设备节点已不存在”或“挂载点已不可访问”视为脏状态并优先清理；清理同一数据盘时会同步卸载同源的其他挂载点（例如桌面 automount 到 `/media/ubuntu/...` 后又挂到 `/mnt/data_disk` 的双挂载场景），避免复位前只卸载业务挂载点却仍有同一 USB 盘保持 mounted；它不再主动启动 updater service；`run_record.sh` 也会把这类状态视为未就绪。
 
 ### 9.6 网线监测行为
 `auto_calibration/monitor_network.sh` 当前行为：
@@ -409,7 +410,7 @@
 - 主包当前仍直接携带项目内 `.venv` 与 `.venv/.python-runtime`，部署后继续以 `/opt/ugripper/.venv/bin/python3` 作为首选解释器入口。
 - `build_deb.sh` 的 staging 目录默认按增量方式复用：项目主体与 `.venv` 分开同步，避免每次打包都先删除再完整重拷 `.venv`。
 - `build_deb.sh` 默认 `dpkg-deb` 压缩口径为 `xz -1`，兼顾构建速度与包体积；`build_deb.sh -q` 仍跳过 C++ 编译，并沿用同一默认压缩口径。如需在速度与包体积之间切换，可通过 `DPKG_DEB_COMPRESSOR`、`DPKG_DEB_LEVEL`、`DPKG_DEB_STRATEGY`、`DPKG_DEB_UNIFORM_COMPRESSION` 覆盖默认参数。
-- 主包打包当前默认优先从 Nexus raw 仓库下载并解压归档好的 `.venv` `tar.gz`，再沿用同一套 `.venv` 架构校验与 staging 同步逻辑；当前这条入口只针对 raw 制品下载，不走 Conan recipe。
+- 主包打包当前默认优先从 Nexus raw 仓库下载并解压归档好的 `.venv` `tar.gz`，再沿用同一套 `.venv` 架构校验与 staging 同步逻辑；当前默认归档为 `ugripper-v2-uv-venv/py311_v2.1.0/ugripper_venv_20260623_102954_arm64.tar.gz`，这条入口只针对 raw 制品下载，不走 Conan recipe。
 - 若需要临时切回本地或外部目录中的 `.venv` / `build`，可显式设置 `PACKAGED_VENV_URL=''` 后再配合 `PACKAGED_VENV_SOURCE`、`PACKAGED_BUILD_DIR` 覆盖来源；若最终 `.venv` 来源不存在，脚本会同步移除 staging 中旧的 `.venv`，此时包仍可生成，但不再满足部署后直接运行的交付约束。
 
 ## 10. 常用检查与排障入口

@@ -46,6 +46,7 @@ struct RecordRuntimeOptions
     std::string noiseProfile = "./bin/UgripperRuntime/audio/noise.prof";
     std::string systemActionRequestFile = "/tmp/umi_system_action_request";
     std::string systemActionResultFile = "/tmp/umi_system_action_result";
+    std::string restoreUsbCommand = "/usr/local/sbin/ugripper_restore_usb";
     std::string diskRoot = "/mnt/data_disk";
     std::string envFile = "/etc/environment";
     std::string persistCalibrationFile = "/etc/ugripper/config/calibration/calibration.json";
@@ -351,6 +352,14 @@ private:
     bool startStereoDaemon();
     void stopStereoDaemon();
     void maintainStereoDaemon();
+    void maintainRestoreUsbRetry();
+    void maintainRestoreUsbFailureAlarm();
+    void maintainRestoreUsbDevicePresence();
+    void suspendStereoDaemonForRestoreUsb(const std::string &reason);
+    void resumeStereoDaemonAfterRestoreUsb(const std::string &reason);
+    bool isDataDiskMounted() const;
+    bool requestDataDiskUmountForRestoreUsb(const std::string &reason);
+    bool prepareDataDiskForRestoreUsb(const std::string &reason);
     bool writeStereoControl(bool recording,
                             const std::string &episodeDir,
                             int64_t startSystemTimeUs,
@@ -375,6 +384,24 @@ private:
     void setLedState(LedState state, double progress = 0.0);
     void setTactileWarningLedState();
     void setHardwareFaultLedState(const ugripper::runtime::HealthFault &fault);
+    void maybeTriggerRestoreUsbForHardwareFault(const ugripper::runtime::HealthFault &fault);
+    void handleFailureState(ugripper::runtime::RuntimeLedState state,
+                            const std::vector<std::string> &errorTypes,
+                            const std::string &detail);
+    void triggerRestoreUsbOnError(const std::string &reason, bool checkMainCameraRecovery = false);
+    bool shouldRestoreUsbForFailure(ugripper::runtime::RuntimeLedState state,
+                                    const std::vector<std::string> &errorTypes,
+                                    const std::string &detail,
+                                    bool *checkMainCameraRecovery) const;
+    bool shouldDeferRestoreUsbForSide(ugripper::runtime::HardwareFaultSide side,
+                                      const std::string &reason) const;
+    bool sideHasAnyRestoreUsbDevice(const std::string &side) const;
+    bool restoreUsbCriticalSymlinksPresent(std::string *detail) const;
+    bool restoreUsbTargetRecovered() const;
+    bool mainCameraRestoreTargetsHealthy() const;
+    void triggerRestoreUsbFailureAlarm(const std::string &reason);
+    void noteRestoreUsbManualInsert(const std::string &side, const std::string &reason);
+    void resetRestoreUsbErrorWindow();
     bool isRecordingActive() const;
     const std::string &currentEpisodeDir() const;
     const std::string &lastEpisodeDir() const;
@@ -420,6 +447,21 @@ private:
     std::future<BackgroundTactileValidationResult> backgroundTactileFuture_;
     std::atomic<bool> stopBackgroundTactileValidation_{false};
     std::optional<ugripper::runtime::HealthFault> activeHardwareFault_;
+    std::shared_ptr<std::atomic<bool>> restoreUsbInProgress_ = std::make_shared<std::atomic<bool>>(false);
+    std::shared_ptr<std::atomic<uint64_t>> restoreUsbLastFinishMs_ = std::make_shared<std::atomic<uint64_t>>(0);
+    int restoreUsbAttemptsInCurrentError_ = 0;
+    bool restoreUsbPendingRetryCheck_ = false;
+    bool restoreUsbSymlinkCheckPassed_ = false;
+    uint64_t restoreUsbSymlinkPassedMs_ = 0;
+    uint64_t restoreUsbLastSymlinkProbeMs_ = 0;
+    bool restoreUsbCheckMainCameraRecovery_ = false;
+    bool restoreUsbFailureAlarmActive_ = false;
+    uint64_t restoreUsbFailureAlarmStartMs_ = 0;
+    uint64_t restoreUsbPreflightFailureUntilMs_ = 0;
+    bool restoreUsbStereoDaemonStopped_ = false;
+    std::array<bool, 2> restoreUsbSidePresent_{};
+    std::array<uint64_t, 2> restoreUsbInsertGraceUntilMs_{};
+    std::string restoreUsbLastReason_;
     LedState lastLoggedLedState_ = LedState::Init;
     double lastLoggedLedProgress_ = 0.0;
     bool hasLastLoggedLedState_ = false;

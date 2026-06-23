@@ -17,7 +17,7 @@ struct HealthMonitorOptions
     std::string stereo_status_file;
     std::vector<std::string> critical_device_paths;
     uint64_t poll_interval_ms = 1000;
-    uint64_t hmi_active_timeout_ms = 2500;
+    uint64_t hmi_active_timeout_ms = 5500;
     uint64_t stereo_startup_grace_ms = 12000;
 };
 

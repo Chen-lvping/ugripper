@@ -1,0 +1,75 @@
+#!/bin/bash
+set -u
+
+BLUETOOTH_GATT_SERVICE="bluetooth_gatt.service"
+BLUETOOTH_GATT_STOPPED=0
+GPIO_NUM=496
+GPIO_PATH="/sys/class/gpio/gpio${GPIO_NUM}"
+RESTORE_SCRIPT="/usr/local/lib/ugripper/restore_usb/auto_restore_usb.py"
+PYTHON_BIN="/opt/ugripper/.venv/bin/python3"
+
+try_stop_bluetooth_gatt() {
+    if ! systemctl cat "$BLUETOOTH_GATT_SERVICE" >/dev/null 2>&1; then
+        echo "skip ${BLUETOOTH_GATT_SERVICE}: unit not found"
+        return 0
+    fi
+
+    if systemctl stop "$BLUETOOTH_GATT_SERVICE"; then
+        BLUETOOTH_GATT_STOPPED=1
+        echo "stopped ${BLUETOOTH_GATT_SERVICE}"
+    else
+        echo "warning: failed to stop ${BLUETOOTH_GATT_SERVICE}; continue restore" >&2
+    fi
+}
+
+try_start_bluetooth_gatt() {
+    if [ "$BLUETOOTH_GATT_STOPPED" -ne 1 ]; then
+        return 0
+    fi
+
+    if systemctl start "$BLUETOOTH_GATT_SERVICE"; then
+        echo "started ${BLUETOOTH_GATT_SERVICE}"
+    else
+        echo "warning: failed to start ${BLUETOOTH_GATT_SERVICE} after restore" >&2
+    fi
+}
+
+prepare_gpio() {
+    if [ ! -d "$GPIO_PATH" ]; then
+        if ! echo "$GPIO_NUM" > /sys/class/gpio/export; then
+            echo "warning: failed to export gpio ${GPIO_NUM}" >&2
+            return 0
+        fi
+        sleep 0.1
+    fi
+
+    if [ -e "${GPIO_PATH}/direction" ]; then
+        echo out > "${GPIO_PATH}/direction" || \
+            echo "warning: failed to set gpio ${GPIO_NUM} direction" >&2
+    fi
+}
+
+restore_rc=0
+
+try_stop_bluetooth_gatt
+prepare_gpio
+
+if [ -e /dev/ttyS0 ]; then
+    chmod 666 /dev/ttyS0 || echo "warning: failed to chmod /dev/ttyS0" >&2
+else
+    echo "warning: /dev/ttyS0 not found; restore script may fail" >&2
+fi
+
+if [ ! -x "$PYTHON_BIN" ]; then
+    PYTHON_BIN="$(command -v python3 || true)"
+fi
+
+if [ -z "$PYTHON_BIN" ] || [ ! -f "$RESTORE_SCRIPT" ]; then
+    echo "error: restore python runtime or script not found" >&2
+    restore_rc=1
+else
+    "$PYTHON_BIN" "$RESTORE_SCRIPT" || restore_rc=$?
+fi
+
+try_start_bluetooth_gatt
+exit "$restore_rc"

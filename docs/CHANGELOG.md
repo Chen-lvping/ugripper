@@ -2,7 +2,16 @@
 
 > 说明：本文件只保留 v2.0.0 以来的高信号发布变更；当前系统行为以 `docs/agent/overview.md` 为准。
 >
-> 仓库没有 `v2.0.x` git tag。下面的发布边界按 `build_deb.sh` / `scripts/build_arm_deb_in_pp_arm_dev.sh` 中 `BASE_VERSION` 的提交记录推定：`2caf6e0` 为 v2.0.0，`d81c3c1` 为 v2.0.1；v2.0.13 为当前发布收口版本。
+> 仓库没有 `v2.0.x` git tag。下面的发布边界按 `build_deb.sh` / `scripts/build_arm_deb_in_pp_arm_dev.sh` 中 `BASE_VERSION` 的提交记录推定：`2caf6e0` 为 v2.0.0，`d81c3c1` 为 v2.0.1。
+
+## v2.1.0 - Unreleased
+
+- 新增错误态夹爪传感器复位入口：`record_runtime` 会在 `ERROR_2`、`ERROR_4` 以及主摄相关 `ERROR_1` 时异步触发 `/usr/local/sbin/ugripper_restore_usb`，`ERROR_3` 磁盘类错误和 `ERROR_5` 运行时兜底错误不触发；触发复位前会先暂停 Fays stereo daemon/recorder，避免 SDK 在 USB 断电重枚举窗口占用双目节点；每次复位完成后会按约 `1s` 周期检查全部关键传感器 symlink，symlink 齐后立即重启 Fays daemon 并开始健康恢复计时，最多等约 `20s` 仍缺 symlink 才重试；symlink 齐后最多继续等约 `20s` 检查健康状态与主摄缓存，仍未恢复则重试；等待窗口内如果健康状态提前恢复，会立即认定本轮复位成功并清除等待窗口，后续再异常按新的故障窗口处理；同一错误窗口连续 `3` 次失败后通过夹爪 HMI 蜂鸣器报警，单次蜂鸣最长 `5s` 后自动关闭。sudoers 允许 `ubuntu` 用户免密执行固定 root wrapper；wrapper 会在存在 `bluetooth_gatt.service` 时先停止以释放通信接口，不存在或停止失败不阻断复位主流程。
+- 自动复位断电前新增数据盘保护：录制中先按错误停录完成 episode 收尾，随后同步运行日志并通过 root system action 卸载 `/mnt/data_disk`；数据盘卸载失败时跳过本次复位且不消耗复位次数，避免 U 盘读写中被 USB 供电复位硬断。
+- 自动复位新增人工插拔保护：某侧夹爪完全未枚举时只保留错误提示，不触发软件复位且不消耗复位次数；检测到该侧任一关键节点或 HMI 重新出现时会重置复位次数，并给该侧 `20s` 插入稳定窗口，窗口内健康检查错误不触发软件复位。
+- 修正夹爪供电复位写寄存器方式：电源板 `0x10` 寄存器改为按掩码一次性写入并回读校验，失败时有限重试，避免逐 bit 快速读改写时旧读数覆盖刚写入的供电位或偶发读回失败直接终止复位。
+- Python 运行环境新增 `pymodbus`，并将默认打包 `.venv` 切到 `py311_v2.1.0/ugripper_venv_20260623_102954_arm64.tar.gz`；`pyserial` 继续锁定在现有依赖中。
+- 构建脚本默认主包版本调整到 `2.1.0`。
 
 ## v2.0.13 - Unreleased
 

@@ -4,7 +4,11 @@ set -e
 REQUEST_FILE="/tmp/umi_system_action_request"
 RESULT_FILE="/tmp/umi_system_action_result"
 UPDATER_MOUNT_HELPER="/usr/local/bin/ugripper_mount_data_disk.sh"
-LEGACY_MOUNT_HELPER="/opt/ugripper/auto_update/mount_data_disk.sh"
+DAS_MOUNT_HELPER="/usr/local/bin/das_mount_data_disk.sh"
+LEGACY_MOUNT_HELPERS=(
+    "/opt/ugripper/auto_update/mount_data_disk.sh"
+    "/opt/uglove/auto_update/mount_data_disk.sh"
+)
 
 write_result() {
     local result="${1:-error}"
@@ -32,8 +36,16 @@ case "$ACTION" in
         echo "System action consumed: umount /mnt/data_disk"
         if [ -x "$UPDATER_MOUNT_HELPER" ]; then
             MOUNT_HELPER="$UPDATER_MOUNT_HELPER"
+        elif [ -x "$DAS_MOUNT_HELPER" ]; then
+            MOUNT_HELPER="$DAS_MOUNT_HELPER"
         else
-            MOUNT_HELPER="$LEGACY_MOUNT_HELPER"
+            MOUNT_HELPER=""
+            for candidate in "${LEGACY_MOUNT_HELPERS[@]}"; do
+                if [ -x "$candidate" ]; then
+                    MOUNT_HELPER="$candidate"
+                    break
+                fi
+            done
         fi
         if [ -x "$MOUNT_HELPER" ] && "$MOUNT_HELPER" remove; then
             write_result ok
