@@ -10,6 +10,7 @@ dependencies = [
     "mypy>=1.19.0",
     "pydub>=0.25.1",
     "pygame>=2.6.1",
+    "pymodbus>=3.13.1",
     "pyserial>=3.5",
     "pytest>=9.0.1",
 ]

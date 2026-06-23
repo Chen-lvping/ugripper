@@ -336,14 +336,14 @@
 
 #### 7.3.1 当前 Nexus `.venv` 归档口径
 - raw 仓库基名：`ugripper-v2-uv-venv`
-- 当前版本目录：`py311-v1`
-- 当前默认归档文件：`ugripper_venv_20260423_143813.tar.gz`
+- 当前版本目录：`py311_v2.1.0`
+- 当前默认归档文件：`ugripper_venv_20260623_102954_arm64.tar.gz`
 - 当前脚本内置完整 URL：
-  - `http://nexus.dmrobot.com:8081/repository/dmrobot_raw_hosted/ugripper-v2-uv-venv/py311-v1/ugripper_venv_20260423_143813.tar.gz`
+  - `http://nexus.dmrobot.com:8081/repository/dmrobot_raw_hosted/ugripper-v2-uv-venv/py311_v2.1.0/ugripper_venv_20260623_102954_arm64.tar.gz`
 - 这三层的语义分别是：
   - `ugripper-v2-uv-venv`：当前 `.venv` 包名 / 归档名
-  - `py311-v1`：当前 `.venv` 版本号目录
-  - `ugripper_venv_20260423_143813.tar.gz`：这次实际上传的归档文件名
+  - `py311_v2.1.0`：当前 `.venv` 版本号目录
+  - `ugripper_venv_20260623_102954_arm64.tar.gz`：这次实际上传的归档文件名
 
 #### 7.3.2 当前 `.venv` 的使用顺序
 - 若 `PACKAGED_VENV_URL` 保持默认值：
@@ -363,8 +363,8 @@
 - 当前 agent 在汇报 `.venv` 版本时，应优先同时说明：
   - Python 版本：`3.11.15`
   - raw 包名：`ugripper-v2-uv-venv`
-  - 当前版本目录：`py311-v1`
-  - 当前默认归档文件：`ugripper_venv_20260423_143813.tar.gz`
+  - 当前版本目录：`py311_v2.1.0`
+  - 当前默认归档文件：`ugripper_venv_20260623_102954_arm64.tar.gz`
 
 ### 7.4 可选 updater 包
 - updater 可单独通过 `usb_updater_build.sh` 打包

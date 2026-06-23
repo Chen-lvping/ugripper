@@ -150,7 +150,7 @@ PACKAGED_BUILD_DIR=build/arm_container_release ./build_deb.sh -q
 
 ## 已验证前提
 - `build_deb.sh` 默认优先从 Nexus raw 下载归档好的 `.venv`，再完成打包。
-- 当前默认 `.venv` 归档 URL 已内置在 `build_deb.sh`，用于 `ugripper-v2-uv-venv/py311-v1`。
+- 当前默认 `.venv` 归档 URL 已内置在 `build_deb.sh`，用于 `ugripper-v2-uv-venv/py311_v2.1.0`。
 - 标准模式只编主包必需目标：`CameraRecorder`、`SensorRecorder`、`zeroing`、`GripperHmiTool`、`UgripperRuntime`。
 - 打包前会校验 `.venv/bin/python3` 和以上 5 个核心二进制的 ELF 架构，避免把 `x86_64` 产物误打进 `arm64` 包。
 - 顶层默认不再强制构建 `src/third_party/mcap_builder`，普通主包出包不会再被这个可选目标阻塞。
