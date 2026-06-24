@@ -62,10 +62,11 @@ constexpr uint64_t kStereoDaemonRestartIntervalMs = 2000;
 constexpr uint64_t kStereoFinalizeWaitPollMs = 100;
 constexpr uint64_t kRecordControlDebounceMs = 300;
 constexpr uint64_t kRestoreUsbSymlinkPollIntervalMs = 1000;
-constexpr uint64_t kRestoreUsbSymlinkMaxWaitMs = 20000;
-constexpr uint64_t kRestoreUsbReadyCheckDelayMs = 20000;
+constexpr uint64_t kRestoreUsbSymlinkMaxWaitMs = 25000;
+constexpr uint64_t kRestoreUsbReadyCheckDelayMs = 25000;
 constexpr uint64_t kRestoreUsbFailureAlarmDurationMs = 5000;
 constexpr uint64_t kRestoreUsbManualInsertGraceMs = 20000;
+constexpr uint64_t kRestoreUsbTriggerStableMs = 6000;
 constexpr uint64_t kRestoreUsbPreflightFailureCooldownMs = 30000;
 constexpr int kRestoreUsbMaxAttemptsPerError = 3;
 constexpr uint64_t kEgoFinalizeWaitPollMs = 100;
@@ -328,6 +329,61 @@ ugripper::runtime::HardwareFaultSide restoreUsbSideForText(const std::string &te
         return ugripper::runtime::HardwareFaultSide::Right;
     }
     return ugripper::runtime::HardwareFaultSide::Unknown;
+}
+
+const char *restoreUsbSideName(ugripper::runtime::HardwareFaultSide side)
+{
+    switch (side)
+    {
+    case ugripper::runtime::HardwareFaultSide::Left:
+        return "left";
+    case ugripper::runtime::HardwareFaultSide::Right:
+        return "right";
+    case ugripper::runtime::HardwareFaultSide::Both:
+        return "both";
+    case ugripper::runtime::HardwareFaultSide::Unknown:
+    default:
+        return "unknown";
+    }
+}
+
+std::string compactRestoreUsbEvidence(std::string detail)
+{
+    const std::string prefix = "Critical device nodes missing:";
+    const size_t prefixPos = detail.find(prefix);
+    if (prefixPos != std::string::npos)
+    {
+        detail = detail.substr(prefixPos + prefix.size());
+    }
+    detail.erase(detail.begin(), std::find_if(detail.begin(), detail.end(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }));
+    detail.erase(std::find_if(detail.rbegin(), detail.rend(), [](unsigned char ch) {
+        return !std::isspace(ch);
+    }).base(), detail.end());
+    std::string compact;
+    compact.reserve(detail.size());
+    bool previousWasSpace = false;
+    for (const char ch : detail)
+    {
+        if (std::isspace(static_cast<unsigned char>(ch)))
+        {
+            if (!previousWasSpace)
+            {
+                compact.push_back(' ');
+                previousWasSpace = true;
+            }
+            continue;
+        }
+        compact.push_back(ch);
+        previousWasSpace = false;
+    }
+    return compact.empty() ? "none" : compact;
+}
+
+bool isCriticalDeviceMissingEvidence(const std::string &detail)
+{
+    return detail.find("Critical device nodes missing:") != std::string::npos;
 }
 
 struct VideoProbeResult
@@ -5753,6 +5809,21 @@ void RecordRuntime::handleFailureState(ugripper::runtime::RuntimeLedState state,
     {
         return;
     }
+    RestoreUsbTriggerContext context;
+    context.cause = std::string("failure_") + ledStateName(toLedState(state));
+    context.evidence = compactRestoreUsbEvidence(detail);
+    context.side = restoreUsbSideName(side);
+    if (isCriticalDeviceMissingEvidence(detail))
+    {
+        if (!confirmRestoreUsbTrigger(context))
+        {
+            return;
+        }
+    }
+    else
+    {
+        logRestoreUsbRequested(context);
+    }
     triggerRestoreUsbOnError(reason, checkMainCameraRecovery);
 }
 
@@ -5914,22 +5985,11 @@ bool RecordRuntime::shouldDeferRestoreUsbForSide(ugripper::runtime::HardwareFaul
         const size_t index = gripperStateIndexForSide(sideName);
         if (!sideHasAnyRestoreUsbDevice(sideName))
         {
-            DM_LOG_INFO("{}", (::DA::utils::LogString()
-                << "skip restore usb on error: side appears unplugged"
-                << " side=" << sideName
-                << " reason=" << reason
-                << std::endl).str());
             return true;
         }
         const uint64_t graceUntilMs = restoreUsbInsertGraceUntilMs_[index];
         if (graceUntilMs != 0 && nowMs < graceUntilMs)
         {
-            DM_LOG_INFO("{}", (::DA::utils::LogString()
-                << "skip restore usb on error: waiting for manual insert settle"
-                << " side=" << sideName
-                << " remaining_ms=" << (graceUntilMs - nowMs)
-                << " reason=" << reason
-                << std::endl).str());
             return true;
         }
         return false;
@@ -6100,9 +6160,19 @@ void RecordRuntime::resetRestoreUsbErrorWindow()
     restoreUsbSymlinkCheckPassed_ = false;
     restoreUsbSymlinkPassedMs_ = 0;
     restoreUsbLastSymlinkProbeMs_ = 0;
+    restoreUsbLastMissingLogMs_ = 0;
+    restoreUsbLastMissingDetail_.clear();
     restoreUsbCheckMainCameraRecovery_ = false;
     restoreUsbLastReason_.clear();
     restoreUsbLastFinishMs_->store(0);
+    restoreUsbPendingTriggerKey_.clear();
+    restoreUsbPendingTriggerCause_.clear();
+    restoreUsbPendingTriggerEvidence_.clear();
+    restoreUsbPendingTriggerSide_.clear();
+    restoreUsbPendingTriggerFirstSeenMs_ = 0;
+    restoreUsbPendingTriggerLastSeenMs_ = 0;
+    restoreUsbPendingTriggerLogged_ = false;
+    restoreUsbLastSkipLogKey_.clear();
     if (restoreUsbFailureAlarmActive_)
     {
         panelManager_.silenceBeep();
@@ -6251,6 +6321,69 @@ bool RecordRuntime::prepareDataDiskForRestoreUsb(const std::string &reason)
     return requestDataDiskUmountForRestoreUsb(reason);
 }
 
+void RecordRuntime::logRestoreUsbRequested(const RestoreUsbTriggerContext &context)
+{
+    DM_LOG_WARN("{}", (::DA::utils::LogString()
+        << "restore usb requested"
+        << " cause=" << context.cause
+        << " evidence=" << context.evidence
+        << " side=" << context.side
+        << std::endl).str());
+}
+
+bool RecordRuntime::confirmRestoreUsbTrigger(const RestoreUsbTriggerContext &context)
+{
+    const uint64_t nowMs = currentSteadyMs();
+    const std::string key = context.cause + "|" + context.side + "|" + context.evidence;
+    if (restoreUsbPendingTriggerKey_ != key)
+    {
+        if (!restoreUsbPendingTriggerKey_.empty())
+        {
+            const uint64_t ageMs = restoreUsbPendingTriggerFirstSeenMs_ == 0
+                                       ? 0
+                                       : nowMs - restoreUsbPendingTriggerFirstSeenMs_;
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "restore usb pending cleared"
+                << " cause=" << restoreUsbPendingTriggerCause_
+                << " evidence=" << restoreUsbPendingTriggerEvidence_
+                << " side=" << restoreUsbPendingTriggerSide_
+                << " age_ms=" << ageMs
+                << std::endl).str());
+        }
+        restoreUsbPendingTriggerKey_ = key;
+        restoreUsbPendingTriggerCause_ = context.cause;
+        restoreUsbPendingTriggerEvidence_ = context.evidence;
+        restoreUsbPendingTriggerSide_ = context.side;
+        restoreUsbPendingTriggerFirstSeenMs_ = nowMs;
+        restoreUsbPendingTriggerLastSeenMs_ = nowMs;
+        restoreUsbPendingTriggerLogged_ = false;
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+            << "restore usb pending wait"
+            << " cause=" << context.cause
+            << " evidence=" << context.evidence
+            << " side=" << context.side
+            << " stable_ms=" << kRestoreUsbTriggerStableMs
+            << std::endl).str());
+        return false;
+    }
+
+    restoreUsbPendingTriggerLastSeenMs_ = nowMs;
+    const uint64_t ageMs = restoreUsbPendingTriggerFirstSeenMs_ == 0
+                               ? 0
+                               : nowMs - restoreUsbPendingTriggerFirstSeenMs_;
+    if (ageMs < kRestoreUsbTriggerStableMs)
+    {
+        return false;
+    }
+
+    if (!restoreUsbPendingTriggerLogged_)
+    {
+        logRestoreUsbRequested(context);
+        restoreUsbPendingTriggerLogged_ = true;
+    }
+    return true;
+}
+
 void RecordRuntime::maintainRestoreUsbRetry()
 {
     if (!restoreUsbPendingRetryCheck_ || restoreUsbInProgress_->load())
@@ -6274,10 +6407,10 @@ void RecordRuntime::maintainRestoreUsbRetry()
     if (restoreUsbTargetRecovered())
     {
         DM_LOG_INFO("{}", (::DA::utils::LogString()
-            << "restore usb target recovered early after attempt="
+            << "restore usb recovered"
+            << " attempt="
             << restoreUsbAttemptsInCurrentError_
             << " elapsed_ms=" << elapsedMs
-            << " reason=" << restoreUsbLastReason_
             << std::endl).str());
         resetRestoreUsbErrorWindow();
         return;
@@ -6298,21 +6431,26 @@ void RecordRuntime::maintainRestoreUsbRetry()
         {
             if (elapsedMs < kRestoreUsbSymlinkMaxWaitMs)
             {
-                DM_LOG_INFO("{}", (::DA::utils::LogString()
-                    << "restore usb critical symlinks still missing"
-                    << " elapsed_ms=" << elapsedMs
-                    << " attempts=" << restoreUsbAttemptsInCurrentError_
-                    << " missing=" << missingDetail
-                    << " reason=" << restoreUsbLastReason_
-                    << std::endl).str());
+                if (restoreUsbLastMissingDetail_ != missingDetail ||
+                    restoreUsbLastMissingLogMs_ == 0 ||
+                    nowMs - restoreUsbLastMissingLogMs_ >= 5000)
+                {
+                    restoreUsbLastMissingDetail_ = missingDetail;
+                    restoreUsbLastMissingLogMs_ = nowMs;
+                    DM_LOG_INFO("{}", (::DA::utils::LogString()
+                        << "restore usb symlinks waiting"
+                        << " attempt=" << restoreUsbAttemptsInCurrentError_
+                        << " elapsed_ms=" << elapsedMs
+                        << " evidence=" << missingDetail
+                        << std::endl).str());
+                }
                 return;
             }
             DM_LOG_ERROR("{}", (::DA::utils::LogString()
-                << "restore usb critical symlinks missing after settle"
+                << "restore usb symlinks timeout"
+                << " attempt=" << restoreUsbAttemptsInCurrentError_
                 << " elapsed_ms=" << elapsedMs
-                << " attempts=" << restoreUsbAttemptsInCurrentError_
-                << " missing=" << missingDetail
-                << " reason=" << restoreUsbLastReason_
+                << " evidence=" << missingDetail
                 << std::endl).str());
             restoreUsbPendingRetryCheck_ = false;
             if (restoreUsbAttemptsInCurrentError_ >= kRestoreUsbMaxAttemptsPerError)
@@ -6331,10 +6469,10 @@ void RecordRuntime::maintainRestoreUsbRetry()
         resumeStereoDaemonAfterRestoreUsb(restoreUsbLastReason_ + ":critical_symlinks_present");
         restoreUsbSymlinkPassedMs_ = currentSteadyMs();
         DM_LOG_INFO("{}", (::DA::utils::LogString()
-            << "restore usb critical symlinks present after attempt="
+            << "restore usb symlinks ready"
+            << " attempt="
             << restoreUsbAttemptsInCurrentError_
             << " elapsed_ms=" << elapsedMs
-            << " reason=" << restoreUsbLastReason_
             << std::endl).str());
     }
 
@@ -6348,22 +6486,23 @@ void RecordRuntime::maintainRestoreUsbRetry()
     restoreUsbPendingRetryCheck_ = false;
     if (restoreUsbTargetRecovered())
     {
+        const int attempt = restoreUsbAttemptsInCurrentError_;
         DM_LOG_INFO("{}", (::DA::utils::LogString()
-            << "restore usb target recovered after attempt="
-            << restoreUsbAttemptsInCurrentError_
+            << "restore usb recovered"
+            << " attempt="
+            << attempt
             << " elapsed_ms=" << elapsedMs
             << " ready_elapsed_ms=" << readyElapsedMs
-            << " reason=" << restoreUsbLastReason_
             << std::endl).str());
+        resetRestoreUsbErrorWindow();
         return;
     }
 
     DM_LOG_ERROR("{}", (::DA::utils::LogString()
-        << "restore usb target still unhealthy after ready wait"
-        << " attempts=" << restoreUsbAttemptsInCurrentError_
+        << "restore usb ready timeout"
+        << " attempt=" << restoreUsbAttemptsInCurrentError_
         << " elapsed_ms=" << elapsedMs
         << " ready_elapsed_ms=" << readyElapsedMs
-        << " reason=" << restoreUsbLastReason_
         << std::endl).str());
     if (restoreUsbAttemptsInCurrentError_ >= kRestoreUsbMaxAttemptsPerError)
     {
@@ -6374,43 +6513,43 @@ void RecordRuntime::maintainRestoreUsbRetry()
     triggerRestoreUsbOnError(restoreUsbLastReason_ + ":ready_retry", restoreUsbCheckMainCameraRecovery_);
 }
 
+void RecordRuntime::logRestoreUsbSkipOnce(const std::string &key, const std::string &message)
+{
+    if (key.empty() || restoreUsbLastSkipLogKey_ == key)
+    {
+        return;
+    }
+    restoreUsbLastSkipLogKey_ = key;
+    DM_LOG_WARN("{}", (::DA::utils::LogString() << message << std::endl).str());
+}
+
 void RecordRuntime::triggerRestoreUsbOnError(const std::string &reason, bool checkMainCameraRecovery)
 {
     if (restoreUsbPendingRetryCheck_)
     {
-        DM_LOG_INFO("{}", (::DA::utils::LogString()
-            << "skip restore usb on error: waiting for settle window"
-            << " attempts=" << restoreUsbAttemptsInCurrentError_
-            << " reason=" << reason
-            << std::endl).str());
         return;
     }
 
     if (restoreUsbAttemptsInCurrentError_ >= kRestoreUsbMaxAttemptsPerError)
     {
-        DM_LOG_INFO("{}", (::DA::utils::LogString()
-            << "skip restore usb on error: max attempts reached"
-            << " attempts=" << restoreUsbAttemptsInCurrentError_
-            << " reason=" << reason
-            << std::endl).str());
         return;
     }
 
     if (options_.restoreUsbCommand.empty())
     {
-        DM_LOG_WARN("{}", (::DA::utils::LogString()
-            << "skip restore usb on error: restore command is empty"
-            << std::endl).str());
+        logRestoreUsbSkipOnce("restore_command_empty",
+                              "skip restore usb on error: restore command is empty");
         return;
     }
 
     std::error_code error;
     if (!fs::exists(options_.restoreUsbCommand, error))
     {
-        DM_LOG_WARN("{}", (::DA::utils::LogString()
-            << "skip restore usb on error: command not found: "
-            << options_.restoreUsbCommand
-            << std::endl).str());
+        logRestoreUsbSkipOnce(
+            "restore_command_not_found:" + options_.restoreUsbCommand,
+            (::DA::utils::LogString()
+                << "skip restore usb on error: command not found: "
+                << options_.restoreUsbCommand).str());
         return;
     }
 
@@ -6420,12 +6559,6 @@ void RecordRuntime::triggerRestoreUsbOnError(const std::string &reason, bool che
     const uint64_t nowMs = currentSteadyMs();
     if (restoreUsbPreflightFailureUntilMs_ != 0 && nowMs < restoreUsbPreflightFailureUntilMs_)
     {
-        DM_LOG_INFO("{}", (::DA::utils::LogString()
-            << "skip restore usb on error: data disk preflight cooldown"
-            << " remaining_ms=" << (restoreUsbPreflightFailureUntilMs_ - nowMs)
-            << " attempts=" << restoreUsbAttemptsInCurrentError_
-            << " reason=" << reason
-            << std::endl).str());
         return;
     }
 
@@ -6445,13 +6578,10 @@ void RecordRuntime::triggerRestoreUsbOnError(const std::string &reason, bool che
     bool expected = false;
     if (!restoreUsbInProgress_->compare_exchange_strong(expected, true))
     {
-        DM_LOG_INFO("{}", (::DA::utils::LogString()
-            << "skip restore usb on error: restore already running"
-            << " reason=" << reason
-            << std::endl).str());
         return;
     }
 
+    restoreUsbLastSkipLogKey_.clear();
     suspendStereoDaemonForRestoreUsb(reason);
 
     ++restoreUsbAttemptsInCurrentError_;
@@ -6459,18 +6589,18 @@ void RecordRuntime::triggerRestoreUsbOnError(const std::string &reason, bool che
     restoreUsbSymlinkCheckPassed_ = false;
     restoreUsbSymlinkPassedMs_ = 0;
     restoreUsbLastSymlinkProbeMs_ = 0;
+    restoreUsbLastMissingLogMs_ = 0;
+    restoreUsbLastMissingDetail_.clear();
     restoreUsbLastFinishMs_->store(0);
 
     const std::string command = "sudo -n " + shellQuote(options_.restoreUsbCommand);
     const auto inProgress = restoreUsbInProgress_;
     const auto lastFinishMs = restoreUsbLastFinishMs_;
     const int attempt = restoreUsbAttemptsInCurrentError_;
-    std::thread([command, reason, inProgress, lastFinishMs, attempt]() {
+    std::thread([command, inProgress, lastFinishMs, attempt]() {
         DM_LOG_WARN("{}", (::DA::utils::LogString()
-            << "trigger restore usb on error"
-            << " reason=" << reason
+            << "restore usb start"
             << " attempt=" << attempt
-            << " command=" << command
             << std::endl).str());
 
         const int rc = std::system(command.c_str());
@@ -6485,7 +6615,6 @@ void RecordRuntime::triggerRestoreUsbOnError(const std::string &reason, bool che
         {
             DM_LOG_INFO("{}", (::DA::utils::LogString()
                 << "restore usb command completed"
-                << " command=" << command
                 << std::endl).str());
         }
         else
@@ -7147,14 +7276,22 @@ void RecordRuntime::monitorHardwareHealth()
                     << " action=stop_recording").str());
             }
             const bool stopOk = stopRecording(true, stopReason, result.fault->key);
-            if (stopOk)
+            const bool recordingStopped = !isRecordingActive();
+            if (stopOk || recordingStopped)
             {
+                if (!stopOk)
+                {
+                    DM_LOG_WARN("{}", (::DA::utils::LogString()
+                        << "recording stopped with failed episode; keep restore usb pending"
+                        << " key=" << result.fault->key
+                        << std::endl).str());
+                }
                 maybeTriggerRestoreUsbForHardwareFault(*result.fault);
             }
             else
             {
                 DM_LOG_ERROR("{}", (::DA::utils::LogString()
-                    << "skip restore usb on recording hardware fault: stop recording failed"
+                    << "skip restore usb on recording hardware fault: recording still active after stop"
                     << " key=" << result.fault->key
                     << std::endl).str());
             }
@@ -7177,6 +7314,27 @@ void RecordRuntime::monitorHardwareHealth()
 
     if (result.recovered)
     {
+        if (!restoreUsbPendingTriggerKey_.empty())
+        {
+            const uint64_t nowMs = currentSteadyMs();
+            const uint64_t ageMs = restoreUsbPendingTriggerFirstSeenMs_ == 0
+                                       ? 0
+                                       : nowMs - restoreUsbPendingTriggerFirstSeenMs_;
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "restore usb pending cleared"
+                << " cause=" << restoreUsbPendingTriggerCause_
+                << " evidence=" << restoreUsbPendingTriggerEvidence_
+                << " side=" << restoreUsbPendingTriggerSide_
+                << " age_ms=" << ageMs
+                << std::endl).str());
+            restoreUsbPendingTriggerKey_.clear();
+            restoreUsbPendingTriggerCause_.clear();
+            restoreUsbPendingTriggerEvidence_.clear();
+            restoreUsbPendingTriggerSide_.clear();
+            restoreUsbPendingTriggerFirstSeenMs_ = 0;
+            restoreUsbPendingTriggerLastSeenMs_ = 0;
+            restoreUsbPendingTriggerLogged_ = false;
+        }
         activeHardwareFault_.reset();
         DM_LOG_INFO("{}", (::DA::utils::LogString()
                            << "hardware health recovered"
@@ -7328,6 +7486,14 @@ void RecordRuntime::maybeTriggerRestoreUsbForHardwareFault(const ugripper::runti
 
     const std::string reason = std::string("hardware_fault:") + fault.key;
     if (shouldDeferRestoreUsbForSide(fault.side, reason))
+    {
+        return;
+    }
+    RestoreUsbTriggerContext context;
+    context.cause = fault.key;
+    context.evidence = compactRestoreUsbEvidence(fault.detail);
+    context.side = restoreUsbSideName(fault.side);
+    if (!confirmRestoreUsbTrigger(context))
     {
         return;
     }

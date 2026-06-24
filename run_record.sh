@@ -29,6 +29,11 @@ LOG_DIR_LOCAL="/tmp"
 LOG_DIR_DISK="$DISK_ROOT/logs"
 WAIT_INTERVAL_SEC=2
 
+# Keep Rockchip MPP encoder chatter out of journald during normal recording.
+export mpp_debug="${mpp_debug:-0}"
+export mpp_log_level="${mpp_log_level:-2}"
+export mpp_syslog_perror="${mpp_syslog_perror:-0}"
+
 DEVICE_SN="$(ugripper_read_env_value "$ENV_FILE" "DEVICE_SN" || true)"
 DEVICE_SN_LOWER="${DEVICE_SN,,}"
 DEVICE_SN_LOWER="${DEVICE_SN_LOWER:-unknown_device}"

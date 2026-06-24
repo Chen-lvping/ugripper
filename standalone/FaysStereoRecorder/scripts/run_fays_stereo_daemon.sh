@@ -831,16 +831,13 @@ stereo_start_order() {
 
     if [ -n "$left_index" ] && [ -n "$right_index" ]; then
         if [ "$right_index" -lt "$left_index" ]; then
-            fays_log "stereo recorder start order: right,left (right video$right_index before left video$left_index)"
             printf '%s\n%s\n' right left
             return 0
         fi
-        fays_log "stereo recorder start order: left,right (left video$left_index before right video$right_index)"
         printf '%s\n%s\n' left right
         return 0
     fi
 
-    fays_log "stereo recorder start order fallback: left,right (left_video=${left_index:-unknown} right_video=${right_index:-unknown})"
     printf '%s\n%s\n' left right
 }
 
@@ -858,7 +855,6 @@ wait_for_side_start_complete() {
     fi
 
     deadline_ms=$(($(now_ms) + START_COMPLETE_TIMEOUT_SEC * 1000))
-    fays_log "$side recorder waiting for SDK startup completion: timeout_s=$START_COMPLETE_TIMEOUT_SEC"
     while true; do
         pid="$(side_pid "$side")"
         if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null &&

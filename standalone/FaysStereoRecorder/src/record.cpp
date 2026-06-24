@@ -2388,8 +2388,6 @@ static bool EnsureControlFifo(const std::string& fifoPath) {
 
 static void RunControlLoop(FaysRecorder& recorder, const std::string& fifoPath) {
     FaysEventLog("fays_recorder", "control loop enter fifo=" + fifoPath);
-    std::cout << "[Control] Entering command loop. FIFO: " << fifoPath << std::endl;
-    std::cout << "[Control] Supported commands: START|<output_dir>, STOP, EXIT" << std::endl;
 
     while (recorder.IsRunning()) {
         utils::BufferedFifoLineReader reader;

@@ -151,7 +151,6 @@ private:
     uint64_t firstConnectFailureAtMs_ = 0;
     uint32_t suppressedConnectFailureCount_ = 0;
     uint64_t nextCommandId_ = 1;
-    uint64_t lastIoSummaryLogAtMs_ = 0;
 
     std::atomic<uint64_t> txLedCount_{0};
     std::atomic<uint64_t> txBeepCount_{0};

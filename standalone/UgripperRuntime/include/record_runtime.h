@@ -44,8 +44,8 @@ struct RecordRuntimeOptions
     std::string recordControlPipe = "/tmp/umi_record_control.pipe";
     std::string recordingLockFile = "/tmp/umi_recording.lock";
     std::string noiseProfile = "./bin/UgripperRuntime/audio/noise.prof";
-    std::string systemActionRequestFile = "/tmp/umi_system_action_request";
-    std::string systemActionResultFile = "/tmp/umi_system_action_result";
+    std::string systemActionRequestFile = "/run/ugripper/system_action_request";
+    std::string systemActionResultFile = "/run/ugripper/system_action_result";
     std::string restoreUsbCommand = "/usr/local/sbin/ugripper_restore_usb";
     std::string diskRoot = "/mnt/data_disk";
     std::string envFile = "/etc/environment";
@@ -360,6 +360,14 @@ private:
     bool isDataDiskMounted() const;
     bool requestDataDiskUmountForRestoreUsb(const std::string &reason);
     bool prepareDataDiskForRestoreUsb(const std::string &reason);
+    struct RestoreUsbTriggerContext
+    {
+        std::string cause;
+        std::string evidence;
+        std::string side;
+    };
+    void logRestoreUsbRequested(const RestoreUsbTriggerContext &context);
+    bool confirmRestoreUsbTrigger(const RestoreUsbTriggerContext &context);
     bool writeStereoControl(bool recording,
                             const std::string &episodeDir,
                             int64_t startSystemTimeUs,
@@ -388,6 +396,7 @@ private:
     void handleFailureState(ugripper::runtime::RuntimeLedState state,
                             const std::vector<std::string> &errorTypes,
                             const std::string &detail);
+    void logRestoreUsbSkipOnce(const std::string &key, const std::string &message);
     void triggerRestoreUsbOnError(const std::string &reason, bool checkMainCameraRecovery = false);
     bool shouldRestoreUsbForFailure(ugripper::runtime::RuntimeLedState state,
                                     const std::vector<std::string> &errorTypes,
@@ -454,6 +463,8 @@ private:
     bool restoreUsbSymlinkCheckPassed_ = false;
     uint64_t restoreUsbSymlinkPassedMs_ = 0;
     uint64_t restoreUsbLastSymlinkProbeMs_ = 0;
+    uint64_t restoreUsbLastMissingLogMs_ = 0;
+    std::string restoreUsbLastMissingDetail_;
     bool restoreUsbCheckMainCameraRecovery_ = false;
     bool restoreUsbFailureAlarmActive_ = false;
     uint64_t restoreUsbFailureAlarmStartMs_ = 0;
@@ -461,6 +472,14 @@ private:
     bool restoreUsbStereoDaemonStopped_ = false;
     std::array<bool, 2> restoreUsbSidePresent_{};
     std::array<uint64_t, 2> restoreUsbInsertGraceUntilMs_{};
+    std::string restoreUsbPendingTriggerKey_;
+    std::string restoreUsbPendingTriggerCause_;
+    std::string restoreUsbPendingTriggerEvidence_;
+    std::string restoreUsbPendingTriggerSide_;
+    uint64_t restoreUsbPendingTriggerFirstSeenMs_ = 0;
+    uint64_t restoreUsbPendingTriggerLastSeenMs_ = 0;
+    bool restoreUsbPendingTriggerLogged_ = false;
+    std::string restoreUsbLastSkipLogKey_;
     std::string restoreUsbLastReason_;
     LedState lastLoggedLedState_ = LedState::Init;
     double lastLoggedLedProgress_ = 0.0;

@@ -37,7 +37,6 @@ constexpr int kCalibrationAbortRetryLimit = 2;
 constexpr int kSerialNumberCommandRetryLimit = 3;
 constexpr int kExclusiveCommandDrainIdleMs = 40;
 constexpr int kExclusiveCommandDrainMaxMs = 120;
-constexpr uint64_t kIoSummaryIntervalMs = 30000;
 struct CommandDiagStats
 {
     uint64_t sends = 0;
@@ -241,7 +240,6 @@ uint64_t GripperHmiDriver::allocateCommandIdLocked()
 
 void GripperHmiDriver::logIoSummaryLocked(const char *reason, uint64_t nowMs)
 {
-    lastIoSummaryLogAtMs_ = nowMs;
     DM_LOG_INFO("{}", (::DA::utils::LogString()
         << "[GRIPPER_DIAG] category=io_summary"
         << " port=" << sanitizeDiagValue(port_)
@@ -1996,10 +1994,6 @@ void GripperHmiDriver::ioLoop()
             std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch())
                 .count());
-        if (lastIoSummaryLogAtMs_ == 0 || (nowMs - lastIoSummaryLogAtMs_) >= kIoSummaryIntervalMs)
-        {
-            logIoSummaryLocked("periodic", nowMs);
-        }
         const bool stateDue = pendingStateRequest_ ||
                               (nowMs - lastStateRequestAtMs_) >= kStateRequestIntervalMs;
         const bool renderDue = !ledEffectEnabled_ ||
