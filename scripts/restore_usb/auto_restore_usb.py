@@ -12,10 +12,13 @@ POWER_BOARD_PORT = "/dev/ttyS0"
 POWER_BOARD_BAUDRATE = 9600
 POWER_BOARD_SLAVE_ID = 1
 POWER_REGISTER = 0x10
-POWER_BITS = range(5)
-POWER_BIT_MASK = sum(1 << bit_index for bit_index in POWER_BITS)
-POWER_WRITE_ATTEMPTS = 3
-POWER_WRITE_RETRY_DELAY_SEC = 0.2
+POWER_BITS = tuple(range(4))
+POWER_VERIFY_MASK = sum(1 << bit_index for bit_index in POWER_BITS)
+POWER_GROUP_ATTEMPTS = 3
+POWER_BIT_ATTEMPTS = 3
+POWER_VERIFY_DELAY_SEC = 0.1
+POWER_RETRY_DELAY_SEC = 0.2
+POWER_STAGGER_DELAY_SEC = 0.01
 
 
 def set_gpio_value(value: int) -> bool:
@@ -41,18 +44,27 @@ def open_modbus_client() -> ModbusSerialClient:
 
 
 def read_power_register(client: ModbusSerialClient) -> int | None:
-    read_result = client.read_holding_registers(
-        POWER_REGISTER,
-        count=1,
-        device_id=POWER_BOARD_SLAVE_ID,
-    )
-    if read_result.isError():
+    try:
+        read_result = client.read_holding_registers(
+            POWER_REGISTER,
+            count=1,
+            device_id=POWER_BOARD_SLAVE_ID,
+        )
+    except Exception as exc:
+        print(f"warning: failed to read power register: {exc}")
+        return None
+
+    if read_result is None or read_result.isError():
         print(f"warning: failed to read power register: {read_result}")
         return None
     return int(read_result.registers[0])
 
 
-def write_power_bits(value: int) -> bool:
+def write_power_bit(bit_index: int, bit_value: int) -> bool:
+    if bit_index < 0 or bit_index > 15:
+        print(f"warning: invalid power bit index: {bit_index}")
+        return False
+
     client = open_modbus_client()
     try:
         if not client.connect():
@@ -63,56 +75,111 @@ def write_power_bits(value: int) -> bool:
         if current is None:
             return False
 
-        if value:
-            new_value = current | POWER_BIT_MASK
+        bit_mask = 1 << bit_index
+        if bit_value:
+            new_value = current | bit_mask
         else:
-            new_value = current & ~POWER_BIT_MASK
+            new_value = current & ~bit_mask
 
-        write_result = client.write_register(
-            POWER_REGISTER,
-            new_value,
-            device_id=POWER_BOARD_SLAVE_ID,
-        )
-        if write_result.isError():
-            print(f"warning: failed to write power register: {write_result}")
-            return False
+        if new_value != current:
+            try:
+                write_result = client.write_register(
+                    POWER_REGISTER,
+                    new_value,
+                    device_id=POWER_BOARD_SLAVE_ID,
+                )
+            except Exception as exc:
+                print(f"warning: failed to write power bit{bit_index}: {exc}")
+                return False
+            if write_result is None or write_result.isError():
+                print(f"warning: failed to write power bit{bit_index}: {write_result}")
+                return False
 
-        time.sleep(0.1)
+        time.sleep(POWER_VERIFY_DELAY_SEC)
         verify = read_power_register(client)
         if verify is None:
             return False
-        if (verify & POWER_BIT_MASK) != (new_value & POWER_BIT_MASK):
+        if bool(verify & bit_mask) != bool(bit_value):
             print(
-                "warning: power register verify mismatch: "
-                f"expected bits 0x{new_value & POWER_BIT_MASK:04X}, "
-                f"got 0x{verify & POWER_BIT_MASK:04X}, "
+                f"warning: power bit{bit_index} verify mismatch: "
+                f"expected={bit_value}, "
+                f"got={1 if verify & bit_mask else 0}, "
                 f"register=0x{verify:04X}"
             )
             return False
 
         print(
-            f"power bits mask=0x{POWER_BIT_MASK:04X} -> {value}, "
+            f"power bit{bit_index} -> {bit_value}, "
             f"register 0x{current:04X} -> 0x{new_value:04X}, "
             f"verify=0x{verify:04X}"
         )
         return True
     except Exception as exc:
-        print(f"warning: power bits restore failed: {exc}")
+        print(f"warning: power bit{bit_index} restore failed: {exc}")
         return False
     finally:
         client.close()
 
 
-def set_power_bits(value: int) -> bool:
-    for attempt in range(1, POWER_WRITE_ATTEMPTS + 1):
-        if write_power_bits(value):
+def set_power_bit(bit_index: int, bit_value: int) -> bool:
+    for attempt in range(1, POWER_BIT_ATTEMPTS + 1):
+        if write_power_bit(bit_index, bit_value):
             return True
-        if attempt < POWER_WRITE_ATTEMPTS:
+        if attempt < POWER_BIT_ATTEMPTS:
             print(
-                f"warning: retry power bits value={value} "
-                f"attempt={attempt + 1}/{POWER_WRITE_ATTEMPTS}"
+                f"warning: retry power bit{bit_index} value={bit_value} "
+                f"attempt={attempt + 1}/{POWER_BIT_ATTEMPTS}"
             )
-            time.sleep(POWER_WRITE_RETRY_DELAY_SEC)
+            time.sleep(POWER_RETRY_DELAY_SEC)
+    return False
+
+
+def verify_power_bits(bit_value: int) -> bool:
+    client = open_modbus_client()
+    try:
+        if not client.connect():
+            print(f"warning: failed to open {POWER_BOARD_PORT}")
+            return False
+        register_value = read_power_register(client)
+    finally:
+        client.close()
+
+    if register_value is None:
+        return False
+    expected = POWER_VERIFY_MASK if bit_value else 0
+    actual = register_value & POWER_VERIFY_MASK
+    if actual != expected:
+        print(
+            "warning: power bits group verify mismatch: "
+            f"expected=0x{expected:04X}, got=0x{actual:04X}, "
+            f"register=0x{register_value:04X}"
+        )
+        return False
+
+    print(
+        f"power bits group verify ok: mask=0x{POWER_VERIFY_MASK:04X}, "
+        f"value={bit_value}, register=0x{register_value:04X}"
+    )
+    return True
+
+
+def set_power_bits(bit_value: int, stagger: bool = False) -> bool:
+    for attempt in range(1, POWER_GROUP_ATTEMPTS + 1):
+        bits_ok = True
+        for bit_index in POWER_BITS:
+            bits_ok = set_power_bit(bit_index, bit_value) and bits_ok
+            if stagger and bit_index != POWER_BITS[-1]:
+                time.sleep(POWER_STAGGER_DELAY_SEC)
+
+        if bits_ok and verify_power_bits(bit_value):
+            return True
+
+        if attempt < POWER_GROUP_ATTEMPTS:
+            print(
+                f"warning: retry power bits group value={bit_value} "
+                f"attempt={attempt + 1}/{POWER_GROUP_ATTEMPTS}"
+            )
+            time.sleep(POWER_RETRY_DELAY_SEC)
     return False
 
 
@@ -128,7 +195,7 @@ def main() -> int:
 
     ok = set_gpio_value(0) and ok
     time.sleep(1)
-    ok = set_power_bits(1) and ok
+    ok = set_power_bits(1, stagger=True) and ok
 
     return 0 if ok else 1
 
