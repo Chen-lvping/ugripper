@@ -34,6 +34,30 @@
 
 ## Entries
 
+### 2026-06-24 - restore-and-fays-log-noise-cleanup
+
+- 阶段：`Post-A3 Step 9 / Scripts And Field-Test Boundary Cleanup`
+- 范围：`standalone/UgripperRuntime`、`standalone/GripperHmiTool`、`standalone/FaysStereoRecorder/scripts`、`build_deb.sh`
+- 类型：`日志统一 / 脚本日志收敛 / 打包边界`
+- 主要改动：
+  - 删除 Fays stereo daemon 健康维护循环中的 `stereo recorder start order` 调试日志，避免每轮健康检查刷屏并误导为 recorder 反复启动。
+  - 删除 restore USB defer 分支中按轮询周期重复输出的 `skip restore usb ... side appears unplugged` 与 `waiting for manual insert settle` 日志，保留人工插入/拔出、grace 结束、复位请求、symlink 缺失、恢复和失败日志。
+  - 删除 restore USB 等待 settle、最大尝试次数、preflight cooldown、命令运行中等早返回分支的轮询日志；restore command 配置错误改为按 skip key 仅输出一次。
+  - 删除 Fays recorder SDK startup 的起始等待日志，保留 startup complete 与 wait timed out。
+  - 删除 HMI 串口驱动 30s 周期性 `io_summary reason=periodic` 摘要日志，保留断连与 IO 失败摘要。
+  - `build_deb.sh` 打包 Fays scripts 时改为读取当前源码目录，避免快速组包复用 stale build dir 脚本。
+- 风险与行为等价说明：
+  - 本轮只收敛日志和脚本打包来源，不改变 restore USB 触发、等待、重试、蜂鸣或 Fays recorder 启停时序。
+- 已执行验证：
+  - `rg -n "kIoSummaryIntervalMs|lastIoSummaryLogAtMs_|logIoSummaryLocked\\(\"periodic\"" standalone/GripperHmiTool/include/gripper_hmi_driver.h standalone/GripperHmiTool/gripper_hmi_driver.cc || true`
+  - `cmake --build build/arm_container_release --target GripperHmiTool UgripperRuntime --parallel 8`
+  - `cmake --build build/arm_container_release --target UgripperRuntime --parallel 8`
+  - `PACKAGED_BUILD_DIR=build/arm_container_release bash ./build_deb.sh -q`
+  - `bash -n standalone/FaysStereoRecorder/scripts/run_fays_stereo_daemon.sh && bash -n build_deb.sh && git diff --check`
+  - 抽取 `ugripper_2.1.1_arm64.deb` 后确认包内不再包含旧刷屏日志字符串和 `reason=periodic`，且 `UgripperRuntime` / `GripperHmiTool` 为 ARM aarch64 产物。
+- 后续待验证：
+  - ARM 板安装后观察 `journalctl -u ugripper.service`，确认 restore/Fays/HMI 日志只保留触发原因、缺失证据、恢复结果和通信异常等高信号事件。
+
 ### 2026-06-12 - ch9344-udev-helper-slimming
 
 - 阶段：`udev hot-path cleanup`

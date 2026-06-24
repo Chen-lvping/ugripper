@@ -81,10 +81,10 @@
 - `BTN_DOWN` 长按：空闲时录制 post audio；录制中忽略。
 - 右手双键长按：
   - 2 秒时播放 `shutdown` 提示音。
-  - 4 秒时进入 `EXIT`，必要时先停录，然后写 `/tmp/umi_system_action_request=shutdown`。
+  - 4 秒时进入 `EXIT`，必要时先停录，然后写 `/run/ugripper/system_action_request=shutdown`。
 - 左手双键长按：
   - 仅在停止录制状态下生效；录制中忽略并播报 `error`。
-  - 4 秒时先触发 `writing` 并刷写运行日志，然后写 `/tmp/umi_system_action_request=umount`。
+  - 4 秒时先触发 `writing` 并刷写运行日志，然后写 `/run/ugripper/system_action_request=umount`。
   - root helper 卸载 `/mnt/data_disk` 成功后播放 `umount`；失败播放 `error`。
 
 ## 6. 录制生命周期
@@ -266,8 +266,8 @@
 - 运行时音频 FIFO：`/tmp/umi_audio_pipe`
 - 运行时软件录制控制 FIFO：`/tmp/umi_record_control.pipe`
 - 音频临时目录：`/tmp/umi_audio`
-- 系统动作请求文件：`/tmp/umi_system_action_request`
-- 系统动作结果文件：`/tmp/umi_system_action_result`
+- 系统动作请求文件：`/run/ugripper/system_action_request`
+- 系统动作结果文件：`/run/ugripper/system_action_result`
 - 数据目录：`/mnt/data_disk/<device_sn_lower>/data`
 - 运行日志：`/tmp/umi_sys_<device_sn_lower>_<YYYYMMDD>.log`
 - 数据盘日志镜像：`/mnt/data_disk/logs/umi_sys_<device_sn_lower>_<YYYYMMDD>.log`
@@ -295,7 +295,7 @@
 
 ### 8.4 PERF 日志
 - 停录收尾、文件 flush、视频探测和 episode validation 会输出 `[PERF]` 耗时日志，用于现场拆分蓝灯延迟。
-- `[PERF]` 日志由编译包决定，默认发布包关闭；需要开启时在构建时定义 `UGRIPPER_ENABLE_PERF_LOG=1`。运行时不再读取 `/etc/environment` 开关；错误日志、校验失败记录和必要状态日志不受影响，关闭时会同步压低 ffmpeg/gst/MPP 等编码链路噪声，`[FAYS_TS ...]` 事件日志仍会输出。
+- `[PERF]` 日志由编译包决定，默认发布包关闭；需要开启时在构建时定义 `UGRIPPER_ENABLE_PERF_LOG=1`。运行时不再读取 `/etc/environment` 开关；错误日志、校验失败记录和必要状态日志不受影响，关闭时会同步压低 ffmpeg/gst/MPP 等编码链路噪声，`[FAYS_TS ...]` 事件日志仍会输出。`run_record.sh` 还会默认导出 `mpp_debug=0`、`mpp_log_level=2`、`mpp_syslog_perror=0`，让 CameraRecorder/Fays/ffmpeg 子进程继承 MPP error-only 日志口径，避免 `mpp_info`、`mpp_enc` 初始化配置行刷屏。
 - validation 耗时当前按粗粒度输出：setup、并行视频 probe、并行 tail checks 与总耗时。其中 encoder/Fays tail checks 会作为 4 个只读任务并行执行，并统一打一条总耗时与详情日志；后台 tactile 慢校验另行输出 queued/start/end/applied/cancel 相关 PERF。
 
 ### 8.5 音频链路关键行为
@@ -312,8 +312,8 @@
 - 现场 5 步回归 SOP：1）确认耳机已识别且服务正常，观察 `journalctl -u ugripper.service -n 100` 是否出现 USB 音频初始化日志；2）空闲 3~5 分钟后执行 `python3 py_script/usb_audio_play_test.py`，确认首个测试音不吞头；3）再次空闲 3~5 分钟后执行 `python3 py_script/usb_audio_mic_test.py --playback`，确认录音回放起始段不被截断；4）若需覆盖热恢复，再做一次耳机热插拔后重复步骤 2/3；5）若结果异常，记录 `pactl list short modules`、`pactl list short sinks`、`pactl list short sources` 与 `journalctl -u ugripper.service -n 200` 作为现场。
 
 ### 8.6 相关辅助单元
-- `auto_update/umi-shutdown-trigger.path`：监控 `/tmp/umi_system_action_request`。
-- `auto_update/umi-shutdown-trigger.service`：检测到触发文件后执行统一 helper；当前支持 `shutdown` 与 `umount` 两类动作，并把执行结果写回 `/tmp/umi_system_action_result`。
+- `auto_update/umi-shutdown-trigger.path`：由 `ugripper` 主包交付并启用，监控 `/run/ugripper/system_action_request`；`/run/ugripper` 由随包 tmpfiles.d 配置在开机阶段创建，避免系统镜像中 `/tmp` tmpfs 与 swapfile 链路的 systemd boot transaction ordering cycle 造成 path unit 激活遗漏。
+- `auto_update/umi-shutdown-trigger.service`：由 `ugripper` 主包交付，只作为 path 触发的 oneshot helper，不单独 enable；检测到触发文件后执行统一 helper，当前支持 `shutdown` 与 `umount` 两类动作，并把执行结果写回 `/run/ugripper/system_action_result`。
 - `auto_calibration/ugripper-network-monitor.service`：监听网线插拔，当前仅在拔线时重启 `ugripper.service`。
 - `auto_update/boot_check_install.sh`：开机时检查 `/opt/backup` 中的 `deb` 是否需要恢复或升级。
 
@@ -323,7 +323,7 @@
 - 发现磁盘异常时进入 `ERROR_3`；当前会区分 `disk_mount_lost`、`disk_not_writable`、`disk_full` 等 fault key，并按“同类 fault 首次出现打错误日志、持续期间不重复刷屏、恢复时补一条 recovered”收敛日志。发现关键设备节点缺失、HMI 断连或 HMI 长时间无响应时进入 `ERROR_2`，并通过音频守护进程播报 `error`。`ERROR_2` 会根据缺失路径、stereo 状态或 HMI port 归属到左手、右手、双手或 unknown，用对应侧别灯效提示现场先看哪侧硬件。若 Fays stereo/IMU symlink 在线但单侧 recorder、控制 FIFO 或 START/STOP 控制链路失效，则进入 `ERROR_4`，提示对应侧夹爪控制链路异常，并纳入错误态自动复位策略。
 - 若录制中发现任意关键设备、HMI、数据盘或 stereo daemon 健康故障，当前 episode 会立即按错误停录收尾，写失败 `metadata.json` 和 `validation_error.log`，并把健康监控 fault key 作为显式 `error_type` 进入本条 episode；若停录后又发现文件缺失、finalize 失败等问题，会同时记录内部错误类型，但 `quality_check_err_type` 只保留最高优先级主类型。设备后续恢复只影响下一次录制，不会把本条数据恢复成成功。
 - 若异常恢复发生在空闲态：回到 `READY` 并补播 `ready`。
-- 自动复位策略当前只覆盖可能由夹爪侧 USB/供电重枚举恢复的错误：`ERROR_2`（关键硬件/HMI/stereo 缺失或不活跃）、`ERROR_4`（stereo/Fays 控制链路失效）和主摄相关 `ERROR_1`（错误文本指向 `main camera`、`cam_left/right/chest` 或 `/dev/cam_*`）。`ERROR_3` 是数据盘挂载/可写/空间问题，不触发复位；`ERROR_5` 是 `runtime_error` 或其他运行时异常兜底，也不默认复位。若某侧夹爪完全未枚举（该侧 HMI 和关键传感器 symlink 都不存在），运行时只保留错误提示，不触发软件复位且不消耗复位次数；检测到该侧任一关键节点或 HMI 重新出现时，会重置当前复位次数，并给该侧约 `20s` 插入稳定窗口，窗口内健康监控错误、Fays ready 未完成或主摄缓存未读完都不会触发软件复位。触发命令为 `sudo -n /usr/local/sbin/ugripper_restore_usb`；真正执行断电复位前，若仍在录制会先按错误停录完成 episode 收尾，再同步运行日志并通过 `/tmp/umi_system_action_request=umount` 请求 root helper 卸载 `/mnt/data_disk`，数据盘未挂载时直接继续，卸载失败时跳过本次复位且不消耗复位次数，避免 U 盘读写中被 USB 供电复位硬断；随后运行时会先暂停 Fays stereo daemon/recorder，并在等待窗口内阻止 supervisor 自动重启 Fays，避免 SDK 在 USB 断电重枚举期间占用 stereo/IMU 节点。每次复位完成后会按约 `1s` 周期检查全部当前启用的关键传感器 symlink；节点齐全后立即恢复 Fays daemon，并从该时间点最多继续等待约 `20s`，要求健康监控恢复且主摄相关触发时主摄 SN/标定缓存恢复；若复位完成后约 `20s` 仍缺 symlink，或 symlink 齐后约 `20s` 仍未健康恢复，则进入下一次复位。同一错误窗口最多连续复位 `3` 次，第三次仍在 symlink 或 ready 阶段超时后，会沿用 HMI 蜂鸣器链路对故障侧夹爪报警，未知侧或双侧故障时两侧同时报警，单次蜂鸣最长 `5s` 后自动关闭；等待窗口内如果健康监控提前恢复并回到空闲态，会立即认定本轮复位成功并清除等待窗口，后续再异常按新的故障窗口处理；重新开始录制也会清除本轮复位窗口并关闭蜂鸣。等待窗口内的重复硬件健康报错不会抢跑触发下一次复位。该 root wrapper 会在存在 `bluetooth_gatt.service` 时先停止服务以释放通信接口，不存在或 stop/start 失败只记录告警，不阻断 GPIO/电源板复位主流程。供电板寄存器 `0x10` 当前按位掩码一次性写入并回读校验，失败时有限重试，避免逐 bit 快速读改写时旧读数覆盖前一位上电结果或偶发读回失败直接终止复位。
+- 自动复位策略当前只覆盖可能由夹爪侧 USB/供电重枚举恢复的错误：`ERROR_2`（关键硬件/HMI/stereo 缺失或不活跃）、`ERROR_4`（stereo/Fays 控制链路失效）和主摄相关 `ERROR_1`（错误文本指向 `main camera`、`cam_left/right/chest` 或 `/dev/cam_*`）。`ERROR_3` 是数据盘挂载/可写/空间问题，不触发复位；`ERROR_5` 是 `runtime_error` 或其他运行时异常兜底，也不默认复位。若某侧夹爪完全未枚举（该侧 HMI 和关键传感器 symlink 都不存在），运行时只保留错误提示，不触发软件复位且不消耗复位次数；检测到该侧任一关键节点或 HMI 重新出现时，会重置当前复位次数，并给该侧约 `20s` 插入稳定窗口，窗口内健康监控错误、Fays ready 未完成或主摄缓存未读完都不会触发软件复位。symlink/硬件健康缺失类触发进入自动复位前会先进入约 `6s` 自恢复缓冲窗口，要求同一 `cause/evidence/side` 证据持续存在才执行复位，避免 symlink/udev 瞬时抖动或可自恢复重枚举直接触发 USB 断电；窗口开始时日志输出 `restore usb pending wait cause=... evidence=... side=... stable_ms=6000`，窗口内恢复会输出 `restore usb pending cleared ...` 并取消复位。主摄校验类一次性证据仍会直接触发。确认触发时日志固定输出 `restore usb requested cause=... evidence=... side=...`，其中 `evidence` 直接给出缺失节点或关键错误证据。触发命令为 `sudo -n /usr/local/sbin/ugripper_restore_usb`；真正执行断电复位前，若仍在录制会先按错误停录完成 episode 收尾，停录返回失败但录制状态已经结束时仍进入自恢复缓冲窗口，只有录制仍未停住才跳过本次复位；随后同步运行日志并通过 `/run/ugripper/system_action_request=umount` 请求 root helper 卸载 `/mnt/data_disk`，数据盘未挂载时直接继续，卸载失败时跳过本次复位且不消耗复位次数，避免 U 盘读写中被 USB 供电复位硬断；随后运行时会先暂停 Fays stereo daemon/recorder，并在等待窗口内阻止 supervisor 自动重启 Fays，避免 SDK 在 USB 断电重枚举期间占用 stereo/IMU 节点。每次复位完成后会按约 `1s` 周期检查全部当前启用的关键传感器 symlink；节点齐全后立即恢复 Fays daemon，并从该时间点最多继续等待约 `25s`，要求健康监控恢复且主摄相关触发时主摄 SN/标定缓存恢复；等待 symlink 阶段只在缺失列表变化或约 `5s` 间隔输出 `restore usb symlinks waiting attempt=... evidence=...`，若复位完成后约 `25s` 仍缺 symlink，或 symlink 齐后约 `25s` 仍未健康恢复，则进入下一次复位。同一错误窗口最多连续复位 `3` 次，第三次仍在 symlink 或 ready 阶段超时后，会沿用 HMI 蜂鸣器链路对故障侧夹爪报警，未知侧或双侧故障时两侧同时报警，单次蜂鸣最长 `5s` 后自动关闭；等待窗口内如果健康监控提前恢复并回到空闲态，会立即认定本轮复位成功并清除等待窗口，后续再异常按新的故障窗口处理；重新开始录制也会清除本轮复位窗口并关闭蜂鸣。等待窗口内的重复硬件健康报错不会抢跑触发下一次复位。该 root wrapper 会在存在 `bluetooth_gatt.service` 时先停止服务以释放通信接口，不存在或 stop/start 失败只记录告警，不阻断 GPIO/电源板复位主流程。供电板寄存器 `0x10` 当前按低 4 bit 逐位写入：下电逐位清零，上电逐位置位并保留短间隔错峰上电；每个 bit 写入后读回校验，整组完成后再次校验，失败时有限重试。
 - `camera_recorder` 仍保持“单路 recorder 失败不立即主动终止整次录制”的容错语义；本次实现只加强停录阶段的子进程组回收与 stop 日志，不把启动期短暂抖动直接升级为全量停录。
 
 ## 9. 配置、安装与 U 盘流程
@@ -385,7 +385,7 @@
 - 自动配置 exfat 提前加载：若现场仍使用 `/home/user/lib/exfat.ko` 外部模块，安装时会把它复制进 `/lib/modules/<kernel>/extra/`、写入 `/etc/modules-load.d/ugripper-exfat.conf`，并在本次安装窗口内尝试立即加载。
 - 在重放相机/音频/串口 udev 规则前再次停止 `ugripper.service` 并等待停稳，避免 Fays warmup daemon 持有 stereo/IMU video 节点时被 trigger 扰动。
 - 重新加载 udev 规则，并只重放 Fays USB、video4linux、sound、input 与已枚举 CH9344 tty 事件；不主动触发 block add，避免升级期间重复拉起 USB updater。
-- 启用 `umi-shutdown-trigger.path`。
+- 创建 `/run/ugripper` 运行时目录，清理旧 `/tmp/umi_system_action_*` 与当前 `/run/ugripper/system_action_*` 残留请求，随后启用并启动 `umi-shutdown-trigger.path`；该 path/service 归 `ugripper` 主包唯一交付，`das-usb-updater` 不再打包同名单元，避免 `/lib/systemd/system` 与 `/etc/systemd/system` 的同名覆盖造成系统动作请求无人消费。
 - udev trigger 完成后手动 `start ugripper.service`，并等待服务进入 active；若启动失败，主包 postinst 直接失败，由 U 盘升级流程按安装失败处理。
 - 启用并重启 `ugripper-network-monitor.service`。
 

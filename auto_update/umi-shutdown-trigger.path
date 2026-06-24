@@ -2,7 +2,7 @@
 Description=Watch system action trigger file from run_record
 
 [Path]
-PathExists=/tmp/umi_system_action_request
+PathExists=/run/ugripper/system_action_request
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=paths.target multi-user.target

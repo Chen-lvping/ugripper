@@ -4,7 +4,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ================= 变量定义区域 =================
 APP_NAME="ugripper"
-BASE_VERSION="${BASE_VERSION:-2.1.0}"
+BASE_VERSION="${BASE_VERSION:-2.1.1}"
 VERSION_SUFFIX="${VERSION_SUFFIX:-}"
 VERSION="${VERSION:-${BASE_VERSION}${VERSION_SUFFIX}}"
 ARCH="arm64"
@@ -438,7 +438,7 @@ copy_if_exists "scripts/restore_usb/auto_restore_usb.py" \
 copy_if_exists "standalone/CameraRecorder/config" "$TARGET_INSTALL_ROOT/bin/CameraRecorder/config"
 copy_if_exists "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/config" \
     "$TARGET_INSTALL_ROOT/bin/FaysStereoRecorder/config"
-copy_if_exists "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/scripts" \
+copy_if_exists "standalone/FaysStereoRecorder/scripts" \
     "$TARGET_INSTALL_ROOT/bin/FaysStereoRecorder/scripts"
 copy_if_exists "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/lib" \
     "$TARGET_INSTALL_ROOT/bin/FaysStereoRecorder/lib"
@@ -460,6 +460,7 @@ copy_if_exists "py_script/fays_tail_imu_check.py" "$TARGET_INSTALL_ROOT/py_scrip
 
 # 4. 部署 Udev 规则
 copy_if_exists "config/99-fixed-usb-map.rules" "$BUILD_ROOT/etc/udev/rules.d/99-fixed-usb-map.rules"
+copy_if_exists "config/ugripper-tmpfiles.conf" "$BUILD_ROOT/etc/tmpfiles.d/ugripper.conf"
 copy_first_existing "$BUILD_ROOT/etc/udev/rules.d/99-serial.rules" \
     "standalone/SensorRecorder/99-serial.rules"
 echo "--> .venv sync: ${VENV_DURATION}s"

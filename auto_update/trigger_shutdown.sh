@@ -1,8 +1,9 @@
 #!/bin/bash
 set -e
 
-REQUEST_FILE="/tmp/umi_system_action_request"
-RESULT_FILE="/tmp/umi_system_action_result"
+RUNTIME_DIR="/run/ugripper"
+REQUEST_FILE="${RUNTIME_DIR}/system_action_request"
+RESULT_FILE="${RUNTIME_DIR}/system_action_result"
 UPDATER_MOUNT_HELPER="/usr/local/bin/ugripper_mount_data_disk.sh"
 DAS_MOUNT_HELPER="/usr/local/bin/das_mount_data_disk.sh"
 LEGACY_MOUNT_HELPERS=(
@@ -12,6 +13,7 @@ LEGACY_MOUNT_HELPERS=(
 
 write_result() {
     local result="${1:-error}"
+    mkdir -p "$RUNTIME_DIR" >/dev/null 2>&1 || true
     printf '%s\n' "$result" > "$RESULT_FILE"
     chmod 0666 "$RESULT_FILE" >/dev/null 2>&1 || true
 }

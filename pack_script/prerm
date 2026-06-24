@@ -8,6 +8,7 @@ TACTILE_STATE_DIR="/var/lib/ugripper/tactile_state"
 NETWORK_MONITOR_SERVICE="ugripper-network-monitor.service"
 SHUTDOWN_TRIGGER_SERVICE="umi-shutdown-trigger.service"
 SHUTDOWN_TRIGGER_PATH="umi-shutdown-trigger.path"
+SYSTEM_ACTION_RUNTIME_DIR="/run/ugripper"
 NTP_SYNC_SERVICE="ugripper-ntp-sync.service"
 
 stop_service_fast() {
@@ -44,7 +45,9 @@ force_cleanup_recording_processes() {
     fi
 
     rm -f /tmp/umi_audio_pipe /tmp/umi_stereo_camera_control.pipe /tmp/umi_stereo_camera_control.json \
-        /tmp/umi_recording.lock /tmp/umi_system_action_request /tmp/umi_system_action_result || true
+        /tmp/umi_recording.lock /tmp/umi_system_action_request /tmp/umi_system_action_result \
+        "${SYSTEM_ACTION_RUNTIME_DIR}/system_action_request" \
+        "${SYSTEM_ACTION_RUNTIME_DIR}/system_action_result" || true
 }
 
 echo "Removing {{APP_NAME}} configuration..."
@@ -63,8 +66,8 @@ force_cleanup_recording_processes
 systemctl disable "$SERVICE_NAME" || true
 systemctl disable "$NETWORK_MONITOR_SERVICE" || true
 systemctl disable "$NTP_SYNC_SERVICE" || true
-systemctl disable "$SHUTDOWN_TRIGGER_PATH" || true
-systemctl disable "$SHUTDOWN_TRIGGER_SERVICE" || true
+systemctl disable --now "$SHUTDOWN_TRIGGER_PATH" || true
+systemctl stop "$SHUTDOWN_TRIGGER_SERVICE" || true
 # --------------------------------------------------
 # 3) 清理生成的文件
 # --------------------------------------------------

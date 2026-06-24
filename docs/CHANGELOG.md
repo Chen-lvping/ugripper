@@ -4,14 +4,23 @@
 >
 > 仓库没有 `v2.0.x` git tag。下面的发布边界按 `build_deb.sh` / `scripts/build_arm_deb_in_pp_arm_dev.sh` 中 `BASE_VERSION` 的提交记录推定：`2caf6e0` 为 v2.0.0，`d81c3c1` 为 v2.0.1。
 
-## v2.1.0 - Unreleased
+## v2.1.1 - Unreleased
 
-- 新增错误态夹爪传感器复位入口：`record_runtime` 会在 `ERROR_2`、`ERROR_4` 以及主摄相关 `ERROR_1` 时异步触发 `/usr/local/sbin/ugripper_restore_usb`，`ERROR_3` 磁盘类错误和 `ERROR_5` 运行时兜底错误不触发；触发复位前会先暂停 Fays stereo daemon/recorder，避免 SDK 在 USB 断电重枚举窗口占用双目节点；每次复位完成后会按约 `1s` 周期检查全部关键传感器 symlink，symlink 齐后立即重启 Fays daemon 并开始健康恢复计时，最多等约 `20s` 仍缺 symlink 才重试；symlink 齐后最多继续等约 `20s` 检查健康状态与主摄缓存，仍未恢复则重试；等待窗口内如果健康状态提前恢复，会立即认定本轮复位成功并清除等待窗口，后续再异常按新的故障窗口处理；同一错误窗口连续 `3` 次失败后通过夹爪 HMI 蜂鸣器报警，单次蜂鸣最长 `5s` 后自动关闭。sudoers 允许 `ubuntu` 用户免密执行固定 root wrapper；wrapper 会在存在 `bluetooth_gatt.service` 时先停止以释放通信接口，不存在或停止失败不阻断复位主流程。
+- 新增错误态夹爪传感器复位入口：`record_runtime` 会在 `ERROR_2`、`ERROR_4` 以及主摄相关 `ERROR_1` 时异步触发 `/usr/local/sbin/ugripper_restore_usb`，`ERROR_3` 磁盘类错误和 `ERROR_5` 运行时兜底错误不触发；触发复位前会先暂停 Fays stereo daemon/recorder，避免 SDK 在 USB 断电重枚举窗口占用双目节点；每次复位完成后会按约 `1s` 周期检查全部关键传感器 symlink，symlink 齐后立即重启 Fays daemon 并开始健康恢复计时，最多等约 `25s` 仍缺 symlink 才重试；symlink 齐后最多继续等约 `25s` 检查健康状态与主摄缓存，仍未恢复则重试；等待窗口内如果健康状态提前恢复，会立即认定本轮复位成功并清除等待窗口，后续再异常按新的故障窗口处理；同一错误窗口连续 `3` 次失败后通过夹爪 HMI 蜂鸣器报警，单次蜂鸣最长 `5s` 后自动关闭。sudoers 允许 `ubuntu` 用户免密执行固定 root wrapper；wrapper 会在存在 `bluetooth_gatt.service` 时先停止以释放通信接口，不存在或停止失败不阻断复位主流程。
 - 自动复位断电前新增数据盘保护：录制中先按错误停录完成 episode 收尾，随后同步运行日志并通过 root system action 卸载 `/mnt/data_disk`；数据盘卸载失败时跳过本次复位且不消耗复位次数，避免 U 盘读写中被 USB 供电复位硬断。
 - 自动复位新增人工插拔保护：某侧夹爪完全未枚举时只保留错误提示，不触发软件复位且不消耗复位次数；检测到该侧任一关键节点或 HMI 重新出现时会重置复位次数，并给该侧 `20s` 插入稳定窗口，窗口内健康检查错误不触发软件复位。
-- 修正夹爪供电复位写寄存器方式：电源板 `0x10` 寄存器改为按掩码一次性写入并回读校验，失败时有限重试，避免逐 bit 快速读改写时旧读数覆盖刚写入的供电位或偶发读回失败直接终止复位。
+- 自动复位触发日志收敛为 `restore usb requested cause=... evidence=... side=...`；symlink/硬件健康缺失类触发会先进入约 `6s` 自恢复缓冲窗口，窗口内同一证据持续存在才执行复位，避免 symlink/udev 短暂抖动或可自恢复重枚举直接触发 USB 断电；主摄校验类一次性证据仍会直接触发。录制中硬件故障停录后，即使本条 episode 质量校验失败，只要录制已经停住，也会进入该缓冲窗口等待确认。恢复等待阶段只在缺失列表变化或约 `5s` 间隔输出 symlink 缺失证据。
+- `run_record.sh` 默认导出 `mpp_debug=0`、`mpp_log_level=2`、`mpp_syslog_perror=0`，压低 Rockchip MPP 编码库的 `mpp_info`/`mpp_enc` 正常配置噪声，避免录制时 journal 被编码器初始化信息刷屏。
+- 删除 Fays recorder 控制 FIFO 启动时的 `[Control] Entering command loop` 与 `Supported commands` 提示日志；保留 START/STOP、FIFO 读写失败和未知命令等有效事件。
+- 自动复位跳过人工插拔稳定窗口或整侧未枚举时不再按轮询周期重复输出 `skip restore usb ...`；保留人工插入、拔出、稳定窗口结束、复位请求、symlink 缺失/超时与最终恢复/失败日志，便于直接看到复位原因及证据。
+- 自动复位在等待本轮复位 settle、已达到最大尝试次数、preflight cooldown 或复位命令仍在运行时不再按轮询周期重复输出 `skip restore usb ...`；`restore command` 缺失或不存在仅在原因变化时输出一次。
+- 夹爪 HMI 串口驱动不再按 `30s` 周期输出 `[GRIPPER_DIAG] category=io_summary reason=periodic`；保留断连、IO 失败和独占命令失败摘要，降低正常待机日志噪声。
+- 删除 Fays stereo daemon 健康维护循环中的 `stereo recorder start order` 调试日志；保留 recorder 启停、SDK startup、unhealthy/restarting 等有效事件日志。
+- 修正夹爪供电复位写寄存器方式：电源板 `0x10` 寄存器恢复按低 4 bit 逐位写入，上电阶段保留短间隔错峰上电；每个 bit 写入后读回校验，整组完成后再次校验，失败时有限重试，避免偶发读写失败直接终止复位。
+- 收口系统动作触发单元归属：`umi-shutdown-trigger.path/service` 改为由 `ugripper` 主包唯一交付并在安装后显式启用/启动，`ugripper.service` 启动时也会补拉 path listener；`das-usb-updater` 不再打包同名 unit，避免 `/lib` 与 `/etc` 下的同名单元互相覆盖导致旧版系统动作请求文件无人消费。
+- 系统动作文件触发通道从 `/tmp/umi_system_action_*` 迁移到 `/run/ugripper/system_action_*`，并通过 tmpfiles.d 在开机阶段创建 `/run/ugripper`，规避系统镜像中 `/tmp` tmpfs 与 swapfile 链路的 systemd boot transaction ordering cycle 导致 path unit 激活遗漏。
 - Python 运行环境新增 `pymodbus`，并将默认打包 `.venv` 切到 `py311_v2.1.0/ugripper_venv_20260623_102954_arm64.tar.gz`；`pyserial` 继续锁定在现有依赖中。
-- 构建脚本默认主包版本调整到 `2.1.0`。
+- 构建脚本默认主包版本调整到 `2.1.1`。
 
 ## v2.0.13 - Unreleased
 
