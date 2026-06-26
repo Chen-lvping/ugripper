@@ -21,6 +21,7 @@
 
 - `./scripts/prepare_240_repro.sh`
 - `./scripts/pull_240_repro_logs.sh`
+- `./scripts/run_240_soak_safe.sh`
 
 板端：
 
@@ -55,6 +56,7 @@ BOARD_SSH_PASSWORD=ubuntu BOARD_SUDO_PASSWORD=ubuntu ./scripts/prepare_240_repro
 ```bash
 ./scripts/prepare_240_repro.sh --record-count 20
 ./scripts/prepare_240_repro.sh --record-sec 30 --idle-sec 10
+./scripts/prepare_240_repro.sh --continue-on-error
 ```
 
 默认目标是 `ubuntu@192.168.2.240`。如果目标不同，把目标写在命令后面：
@@ -70,7 +72,45 @@ BOARD_SSH_PASSWORD=ubuntu BOARD_SUDO_PASSWORD=ubuntu ./scripts/prepare_240_repro
 - 下一轮测试前，需要重新执行一次 `prepare_240_repro.sh`。
 - 自动脚本只负责连续录制、`hws` 状态刷新和报错时 `capture-now` 快照；系统日志和软件日志的实时观察仍建议测试同学另开终端手动执行，避免自动脚本代管造成误判。
 
-## 4. 手动实时看日志
+## 4. 推荐：长时间安全测试
+
+10 小时长测使用下面入口：
+
+```bash
+./scripts/run_240_soak_safe.sh
+```
+
+默认行为：
+
+- 运行约 10 小时，按 `60s` 录制、`5s` 间隔换算轮数。
+- 板端自动测试使用 `--continue-on-error`，单轮失败会抓日志，等待自动 USB 复位、服务、硬件和数据盘恢复后继续下一轮。
+- 不把测试脚本日志镜像到 `/mnt/data_disk`，避免测试外壳在数据盘抖动时退出。
+- 每小时只拉取 `/tmp/gripper_disconnect_repro_sop/logs/<RUN_ID>/` 下的测试日志。
+- 默认不拉取、不清理 `/mnt/data_disk` 里的 episode 数据，避免数据拉取或删除刚好撞上自动复位。
+
+如果必须边测边拉 episode：
+
+```bash
+./scripts/run_240_soak_safe.sh --pull-data
+```
+
+如果必须拉完后清理板端 episode：
+
+```bash
+./scripts/run_240_soak_safe.sh --pull-data --clean-board-data
+```
+
+脚本在操作 `/mnt/data_disk` 前会创建板端 `maintenance_hold`，让下一轮录制暂缓开始；随后确认：
+
+- `/tmp/umi_recording.lock` 不存在。
+- `ugripper.service` active。
+- `/mnt/data_disk` 已挂载、可写、`rw`。
+- 没有 `ugripper_restore_usb` / `auto_restore_usb` 进程。
+- 没有 system action request。
+
+确认稳定后才拉取或清理数据；如果 15 分钟内没有进入安全窗口，本次维护窗口会跳过，测试继续。
+
+## 5. 手动实时看日志
 
 需要实时观察系统日志时，另开终端执行：
 
@@ -84,7 +124,7 @@ ssh ubuntu@192.168.2.240 'journalctl -k -f'
 ssh ubuntu@192.168.2.240 'journalctl -fu ugripper.service'
 ```
 
-## 5. 手动模式：先准备
+## 6. 手动模式：先准备
 
 如果不使用一键自动测试，也可以先只准备和下发脚本：
 
@@ -98,7 +138,7 @@ ssh ubuntu@192.168.2.240 'journalctl -fu ugripper.service'
 ssh ubuntu@192.168.2.240
 ```
 
-## 6. 手动模式：开始采集
+## 7. 手动模式：开始采集
 
 在板子上执行：
 
@@ -120,7 +160,7 @@ bash /tmp/gripper_disconnect_repro_sop/scripts/board_repro_log.sh start
 
 - `/mnt/data_disk/gripper_disconnect_repro_sop/logs/<RUN_ID>/`
 
-## 7. 怎么测
+## 8. 怎么测
 
 只保留最简单的执行原则：
 
@@ -134,7 +174,7 @@ bash /tmp/gripper_disconnect_repro_sop/scripts/board_repro_log.sh start
 - 一侧设备掉线
 - 录制失败
 
-## 8. 报错后立刻抓日志
+## 9. 报错后立刻抓日志
 
 报错后不要重启服务，不要继续插拔，直接在板子上执行：
 
@@ -160,7 +200,7 @@ bash /tmp/gripper_disconnect_repro_sop/scripts/board_repro_log.sh capture-now
 
 其中最优先保住的是所有 `dmesg` 相关日志。
 
-## 9. 结束采集
+## 10. 结束采集
 
 测试结束后，在板子上执行：
 
@@ -174,7 +214,7 @@ bash /tmp/gripper_disconnect_repro_sop/scripts/board_repro_log.sh stop
 - 清理当前轮次标记
 - 自动删除 `/tmp/gripper_disconnect_repro_sop/scripts/board_repro_log.sh`
 
-## 10. 拉回主机
+## 11. 拉回主机
 
 回到主机后执行：
 
@@ -188,7 +228,7 @@ bash /tmp/gripper_disconnect_repro_sop/scripts/board_repro_log.sh stop
 ./logs/<RUN_ID>/
 ```
 
-## 11. 最少只记什么
+## 12. 最少只记什么
 
 只记报错相关信息，不记正常步骤。
 

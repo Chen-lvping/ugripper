@@ -8,6 +8,7 @@ BASE_TMP="${ROOT_DIR}/logs"
 BASE_DISK="/mnt/data_disk/${ROOT_NAME}/logs"
 CURRENT_RUN_FILE="${BASE_TMP}/.current_run_id"
 SCRIPT_PATH="$0"
+MAINTENANCE_HOLD_FILE="${ROOT_DIR}/maintenance_hold"
 
 usage() {
   cat <<'EOF'
@@ -26,6 +27,9 @@ usage() {
   --stop-timeout-sec N       等待停录收尾完成的秒数，默认 180。
   --hws-interval-sec N       前台刷新 hws 的间隔秒数，默认 3。
   --control-command NAME     SHORT_UP 或 START_STOP，默认 SHORT_UP。
+  --continue-on-error        报错抓日志后等待恢复并继续下一轮，不暂停人工确认。
+  --error-cooldown-sec N     报错后继续前的基础等待秒数，默认 60。
+  --no-disk-mirror           不把测试脚本日志镜像写入 /mnt/data_disk。
 EOF
 }
 
@@ -54,8 +58,9 @@ latest_run_id() {
 disk_out_for_run() {
   local run_id="$1"
   if findmnt -rn --mountpoint /mnt/data_disk >/dev/null 2>&1 && [ -w /mnt/data_disk ]; then
-    mkdir -p "${BASE_DISK}/${run_id}"
-    printf '%s\n' "${BASE_DISK}/${run_id}"
+    if mkdir -p "${BASE_DISK}/${run_id}" 2>/dev/null; then
+      printf '%s\n' "${BASE_DISK}/${run_id}"
+    fi
   fi
 }
 
@@ -284,7 +289,10 @@ copy_if_needed() {
   local src="$1"
   local dst="$2"
   if [ -n "${dst}" ]; then
-    cp "${src}" "${dst}"
+    mkdir -p "$(dirname "${dst}")" 2>/dev/null || true
+    if ! cp "${src}" "${dst}" 2>/dev/null; then
+      echo "WARN: failed to mirror ${src} to ${dst}" >&2
+    fi
   fi
 }
 
@@ -315,13 +323,18 @@ require_option_value() {
 
 start_capture() {
   local live_logs="${1:-1}"
+  local disk_mirror="${2:-1}"
   ensure_sudo
 
   local run_id tmp_out disk_out sudo_cmd
   run_id="$(date '+%Y%m%d_%H%M%S')"
   tmp_out="${BASE_TMP}/${run_id}"
   mkdir -p "${tmp_out}"
-  disk_out="$(disk_out_for_run "${run_id}" || true)"
+  if [ "${disk_mirror}" -eq 1 ]; then
+    disk_out="$(disk_out_for_run "${run_id}" || true)"
+  else
+    disk_out=""
+  fi
   sudo_cmd="$(sudo_prefix)"
 
   printf '%s\n' "${run_id}" > "${CURRENT_RUN_FILE}"
@@ -342,8 +355,92 @@ start_capture() {
   if [ -n "${disk_out}" ]; then
     echo "DISK_OUT=${disk_out}"
   else
-    echo "DISK_OUT=<未挂载>"
+    echo "DISK_OUT=<disabled-or-unavailable>"
   fi
+}
+
+data_disk_ready() {
+  findmnt -rn --mountpoint /mnt/data_disk >/dev/null 2>&1 || return 1
+  findmnt -rn --mountpoint /mnt/data_disk -o OPTIONS 2>/dev/null | grep -qw rw || return 1
+  [ -w /mnt/data_disk ] || return 1
+}
+
+restore_or_system_action_active() {
+  pgrep -f 'ugripper_restore_usb|auto_restore_usb' >/dev/null 2>&1 && return 0
+  [ -e /run/ugripper/system_action_request ] && return 0
+  [ -e /tmp/umi_system_action_request ] && return 0
+  return 1
+}
+
+hws_all_ready() {
+  local out
+  out="$(/usr/local/bin/hws 2>&1 || true)"
+  printf '%s\n' "${out}" | grep -Eiq 'FAIL|ERROR|missing|not-ready|offline' && return 1
+  return 0
+}
+
+runtime_ready_for_next_cycle() {
+  [ ! -f "${recording_lock}" ] || return 1
+  [ -p "${record_control_pipe}" ] || return 1
+  [ "$(systemctl is-active ugripper.service 2>/dev/null || true)" = "active" ] || return 1
+  data_disk_ready || return 1
+  restore_or_system_action_active && return 1
+  hws_all_ready || return 1
+  return 0
+}
+
+wait_for_recovery_ready() {
+  local timeout_sec="$1"
+  local stable_sec="$2"
+  local loop_log="$3"
+  local deadline stable_start now
+  deadline=$((SECONDS + timeout_sec))
+  stable_start=0
+
+  echo "等待运行时/数据盘/硬件从错误或自动复位后恢复，timeout=${timeout_sec}s stable=${stable_sec}s" | tee -a "${loop_log}"
+  while [ "${SECONDS}" -lt "${deadline}" ]; do
+    now="${SECONDS}"
+    if runtime_ready_for_next_cycle; then
+      if [ "${stable_start}" -eq 0 ]; then
+        stable_start="${now}"
+        echo "恢复检查首次通过: $(date '+%F %T %Z')" | tee -a "${loop_log}"
+      fi
+      if [ $((now - stable_start)) -ge "${stable_sec}" ]; then
+        echo "恢复检查稳定通过: $(date '+%F %T %Z')" | tee -a "${loop_log}"
+        return 0
+      fi
+    else
+      stable_start=0
+    fi
+    sleep 5
+  done
+
+  echo "WARN: 恢复等待超时，下一轮仍会尝试继续: $(date '+%F %T %Z')" | tee -a "${loop_log}"
+  run_hws_once | tee -a "${loop_log}" | colorize_hws
+  return 1
+}
+
+wait_if_maintenance_requested() {
+  local loop_log="$1"
+  local max_hold_sec="${2:-1800}"
+  local hold_start now
+
+  while [ -f "${MAINTENANCE_HOLD_FILE}" ]; do
+    now="$(date +%s)"
+    hold_start="$(sed -n '1p' "${MAINTENANCE_HOLD_FILE}" 2>/dev/null || true)"
+    case "${hold_start}" in
+      ''|*[!0-9]*)
+        hold_start="${now}"
+        ;;
+    esac
+    if [ $((now - hold_start)) -gt "${max_hold_sec}" ]; then
+      echo "WARN: maintenance hold stale, removing ${MAINTENANCE_HOLD_FILE}" | tee -a "${loop_log}"
+      rm -f "${MAINTENANCE_HOLD_FILE}"
+      break
+    fi
+    echo "maintenance hold active, wait before next cycle: $(date '+%F %T %Z')" | tee -a "${loop_log}"
+    sleep 5
+  done
 }
 
 auto_record_loop() {
@@ -355,6 +452,8 @@ auto_record_loop() {
   local stop_timeout_sec="$6"
   local hws_interval_sec="$7"
   local control_command="$8"
+  local continue_on_error="${9:-0}"
+  local error_cooldown_sec="${10:-60}"
 
   local tmp_out disk_out loop_log disk_loop_log cycle start_command stop_command
   tmp_out="${BASE_TMP}/${run_id}"
@@ -391,6 +490,7 @@ auto_record_loop() {
   cycle=1
   while [ "${record_count}" -eq 0 ] || [ "${cycle}" -le "${record_count}" ]; do
     local before_episode after_episode status err_type elapsed error_reason
+    wait_if_maintenance_requested "${loop_log}"
     before_episode="$(latest_episode_dir || true)"
     error_reason=""
 
@@ -450,14 +550,20 @@ auto_record_loop() {
       echo "ERROR_REASON=${error_reason}" | tee -a "${loop_log}"
       capture_now "${run_id}" || true
       copy_if_needed "${loop_log}" "${disk_loop_log}"
-      echo
-      echo "自动测试已因错误暂停。"
-      echo "请先记录现场现象，确认或恢复硬件连接后，按 Enter 继续。"
-      if [ -t 0 ]; then
-        read -r _
+      if [ "${continue_on_error}" -eq 1 ]; then
+        echo "continue_on_error=1; cooldown ${error_cooldown_sec}s 后等待恢复并继续。" | tee -a "${loop_log}"
+        sleep "${error_cooldown_sec}"
+        wait_for_recovery_ready 420 20 "${loop_log}" || true
       else
-        echo "未检测到交互输入，等待 60s 后继续。"
-        sleep 60
+        echo
+        echo "自动测试已因错误暂停。"
+        echo "请先记录现场现象，确认或恢复硬件连接后，按 Enter 继续。"
+        if [ -t 0 ]; then
+          read -r _
+        else
+          echo "未检测到交互输入，等待 60s 后继续。"
+          sleep 60
+        fi
       fi
       echo "用户确认继续: $(date '+%F %T %Z')" | tee -a "${loop_log}"
       run_hws_once | tee -a "${loop_log}" | colorize_hws
@@ -557,7 +663,7 @@ main() {
   case "${1:-}" in
     start)
       shift
-      local auto_record=0 live_logs=1 record_count=0 record_sec=20 idle_sec=10 start_timeout_sec=20 stop_timeout_sec=180 hws_interval_sec=3 control_command=SHORT_UP
+      local auto_record=0 live_logs=1 disk_mirror=1 record_count=0 record_sec=20 idle_sec=10 start_timeout_sec=20 stop_timeout_sec=180 hws_interval_sec=3 control_command=SHORT_UP continue_on_error=0 error_cooldown_sec=60
       while [ "$#" -gt 0 ]; do
         case "$1" in
           --auto-record)
@@ -566,6 +672,10 @@ main() {
             ;;
           --no-live-logs)
             live_logs=0
+            shift
+            ;;
+          --no-disk-mirror)
+            disk_mirror=0
             shift
             ;;
           --record-count)
@@ -603,6 +713,15 @@ main() {
             control_command="$2"
             shift 2
             ;;
+          --continue-on-error)
+            continue_on_error=1
+            shift
+            ;;
+          --error-cooldown-sec)
+            require_option_value "$1" "${2:-}"
+            error_cooldown_sec="$2"
+            shift 2
+            ;;
           *)
             echo "未知 start 参数: $1" >&2
             usage >&2
@@ -610,10 +729,11 @@ main() {
             ;;
         esac
       done
-      start_capture "${live_logs}"
+      start_capture "${live_logs}" "${disk_mirror}"
       if [ "${auto_record}" -eq 1 ]; then
         auto_record_loop "$(latest_run_id)" "${record_count}" "${record_sec}" "${idle_sec}" \
-          "${start_timeout_sec}" "${stop_timeout_sec}" "${hws_interval_sec}" "${control_command}"
+          "${start_timeout_sec}" "${stop_timeout_sec}" "${hws_interval_sec}" "${control_command}" \
+          "${continue_on_error}" "${error_cooldown_sec}"
       fi
       ;;
     capture-now)

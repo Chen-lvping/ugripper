@@ -32,6 +32,9 @@ usage() {
   --stop-timeout-sec N       等待停录收尾超时秒数。
   --hws-interval-sec N       hws 刷新间隔秒数。
   --control-command SHORT_UP|START_STOP
+  --continue-on-error        报错抓日志后等待恢复并继续下一轮。
+  --error-cooldown-sec N     报错后继续前的基础等待秒数。
+  --no-disk-mirror           不把测试脚本日志镜像写入 /mnt/data_disk。
 EOF
 }
 
@@ -96,10 +99,14 @@ while [ "$#" -gt 0 ]; do
       AUTO_RECORD=0
       shift
       ;;
-    --record-count|--record-sec|--idle-sec|--start-timeout-sec|--stop-timeout-sec|--hws-interval-sec|--control-command)
+    --record-count|--record-sec|--idle-sec|--start-timeout-sec|--stop-timeout-sec|--hws-interval-sec|--control-command|--error-cooldown-sec)
       require_option_value "$1" "${2:-}"
       REMOTE_AUTO_ARGS+=("$1" "$2")
       shift 2
+      ;;
+    --continue-on-error|--no-disk-mirror)
+      REMOTE_AUTO_ARGS+=("$1")
+      shift
       ;;
     -h|--help)
       usage
