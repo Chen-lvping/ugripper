@@ -396,6 +396,8 @@ private:
     void setTactileWarningLedState();
     void setHardwareFaultLedState(const ugripper::runtime::HealthFault &fault);
     void maybeTriggerRestoreUsbForHardwareFault(const ugripper::runtime::HealthFault &fault);
+    std::optional<ugripper::runtime::HealthFault> detectCameraRecorderKernelHang();
+    void resetCameraRecorderDStateTracking();
     void handleFailureState(ugripper::runtime::RuntimeLedState state,
                             const std::vector<std::string> &errorTypes,
                             const std::string &detail);
@@ -475,6 +477,10 @@ private:
     bool restoreUsbStereoDaemonStopped_ = false;
     bool episodeManagerInitialized_ = false;
     bool dataStorageWaitLogged_ = false;
+    int cameraRecorderDStatePid_ = -1;
+    std::string cameraRecorderDStateTaskId_;
+    uint64_t cameraRecorderDStateFirstSeenMs_ = 0;
+    uint64_t cameraRecorderDStateLastLogMs_ = 0;
     std::array<bool, 2> restoreUsbSidePresent_{};
     std::array<uint64_t, 2> restoreUsbInsertGraceUntilMs_{};
     std::string restoreUsbPendingTriggerKey_;

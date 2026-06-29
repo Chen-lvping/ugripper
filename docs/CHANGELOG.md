@@ -4,6 +4,11 @@
 >
 > 仓库没有 `v2.0.x` git tag。下面的发布边界按 `build_deb.sh` / `scripts/build_arm_deb_in_pp_arm_dev.sh` 中 `BASE_VERSION` 的提交记录推定：`2caf6e0` 为 v2.0.0，`d81c3c1` 为 v2.0.1。
 
+## v2.1.2 - Unreleased
+
+- 录制中新增 CameraRecorder 内核 D 状态监控：`record_runtime` 会只读检查 `/proc/<camera_recorder_pid>/task/*/stat`，当 CameraRecorder 线程连续处于 `TASK_UNINTERRUPTIBLE` 超过阈值时，将其归类为主摄 V4L2/USB 内核等待故障 `ERROR_2`，并触发现有 USB 复位流程；该路径允许在 camera recorder 因内核等待无法正常停录时继续复位，以释放卡死的 V4L2/USB ioctl。
+- 构建脚本默认主包版本调整到 `2.1.2`。
+
 ## v2.1.1 - Unreleased
 
 - 新增错误态夹爪传感器复位入口：`record_runtime` 会在 `ERROR_2`、`ERROR_4` 以及主摄相关 `ERROR_1` 时异步触发 `/usr/local/sbin/ugripper_restore_usb`，`ERROR_3` 磁盘类错误和 `ERROR_5` 运行时兜底错误不触发；触发复位前会先暂停 Fays stereo daemon/recorder，避免 SDK 在 USB 断电重枚举窗口占用双目节点；每次复位完成后会按约 `1s` 周期检查全部关键传感器 symlink，symlink 齐后立即重启 Fays daemon 并开始健康恢复计时，最多等约 `25s` 仍缺 symlink 才重试；symlink 齐后最多继续等约 `25s` 检查健康状态与主摄缓存，仍未恢复则重试；等待窗口内如果健康状态提前恢复，会立即认定本轮复位成功并清除等待窗口，后续再异常按新的故障窗口处理；同一错误窗口连续 `3` 次失败后通过夹爪 HMI 蜂鸣器报警，单次蜂鸣最长 `5s` 后自动关闭。sudoers 允许 `ubuntu` 用户免密执行固定 root wrapper；wrapper 会在存在 `bluetooth_gatt.service` 时先停止以释放通信接口，不存在或停止失败不阻断复位主流程。

@@ -69,6 +69,8 @@ constexpr uint64_t kRestoreUsbManualInsertGraceMs = 20000;
 constexpr uint64_t kRestoreUsbTriggerStableMs = 6000;
 constexpr uint64_t kRestoreUsbPreflightFailureCooldownMs = 30000;
 constexpr int kRestoreUsbMaxAttemptsPerError = 3;
+constexpr uint64_t kCameraRecorderDStateFaultMs = 8000;
+constexpr uint64_t kCameraRecorderDStateLogIntervalMs = 3000;
 constexpr uint64_t kEgoFinalizeWaitPollMs = 100;
 constexpr uint64_t kEgoStartAckWaitMs = 5000;
 constexpr uint64_t kEgoStartAckPollMs = 50;
@@ -117,6 +119,7 @@ constexpr int kTactileSnapshotTimeoutMs = 2500;
 constexpr const char *kEpisodeTimingFileName = ".recording_timing.json";
 constexpr const char *kEpisodeTimingShmPrefix = "ugripper_recording_timing_";
 constexpr const char *kEgoSyncStatusFileName = "ego_sync.json";
+constexpr const char *kMainCameraV4l2KernelHangKey = "main_camera_v4l2_kernel_hang";
 
 #ifndef UGRIPPER_ENABLE_PERF_LOG
 #define UGRIPPER_ENABLE_PERF_LOG 0
@@ -184,6 +187,108 @@ std::optional<ugripper::runtime::HealthFault> MakeDiskHealthFault(const std::str
         .key = key,
         .detail = detail,
     };
+}
+
+struct ProcTaskDState
+{
+    std::string taskId;
+    std::string comm;
+    std::string wchan;
+};
+
+bool ReadProcTaskState(const fs::path &statPath, char *state, std::string *comm)
+{
+    std::ifstream input(statPath);
+    std::string line;
+    if (!input.is_open() || !std::getline(input, line))
+    {
+        return false;
+    }
+    const size_t leftParen = line.find('(');
+    const size_t rightParen = line.rfind(')');
+    if (leftParen == std::string::npos ||
+        rightParen == std::string::npos ||
+        rightParen + 2 >= line.size())
+    {
+        return false;
+    }
+    if (state != nullptr)
+    {
+        *state = line[rightParen + 2];
+    }
+    if (comm != nullptr)
+    {
+        *comm = line.substr(leftParen + 1, rightParen - leftParen - 1);
+    }
+    return true;
+}
+
+std::string ReadSmallTextFileTrimmed(const fs::path &path)
+{
+    std::ifstream input(path);
+    std::string text;
+    if (!input.is_open() || !std::getline(input, text))
+    {
+        return std::string();
+    }
+    while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back())))
+    {
+        text.pop_back();
+    }
+    return text;
+}
+
+std::optional<ProcTaskDState> FindFirstDStateTask(int pid)
+{
+    if (pid <= 0)
+    {
+        return std::nullopt;
+    }
+    const fs::path taskRoot = fs::path("/proc") / std::to_string(pid) / "task";
+    std::error_code error;
+    if (!fs::exists(taskRoot, error) || !fs::is_directory(taskRoot, error))
+    {
+        return std::nullopt;
+    }
+
+    for (const auto &entry : fs::directory_iterator(taskRoot, error))
+    {
+        if (error)
+        {
+            break;
+        }
+        if (!entry.is_directory(error))
+        {
+            continue;
+        }
+        const std::string taskId = entry.path().filename().string();
+        char state = '\0';
+        std::string comm;
+        if (!ReadProcTaskState(entry.path() / "stat", &state, &comm))
+        {
+            continue;
+        }
+        if (state != 'D')
+        {
+            continue;
+        }
+        return ProcTaskDState{
+            taskId,
+            comm,
+            ReadSmallTextFileTrimmed(entry.path() / "wchan"),
+        };
+    }
+    return std::nullopt;
+}
+
+bool IsCameraRecorderKernelHangReason(const std::string &reason)
+{
+    return reason.find(kMainCameraV4l2KernelHangKey) != std::string::npos;
+}
+
+bool IsCameraRecorderKernelHangFault(const ugripper::runtime::HealthFault &fault)
+{
+    return fault.key == kMainCameraV4l2KernelHangKey;
 }
 
 bool isMountedDiskRoot(const fs::path &diskRoot)
@@ -5967,6 +6072,96 @@ bool RecordRuntime::shouldRestoreUsbForFailure(ugripper::runtime::RuntimeLedStat
     return true;
 }
 
+void RecordRuntime::resetCameraRecorderDStateTracking()
+{
+    cameraRecorderDStatePid_ = -1;
+    cameraRecorderDStateTaskId_.clear();
+    cameraRecorderDStateFirstSeenMs_ = 0;
+    cameraRecorderDStateLastLogMs_ = 0;
+}
+
+std::optional<ugripper::runtime::HealthFault> RecordRuntime::detectCameraRecorderKernelHang()
+{
+    if (!isRecordingActive())
+    {
+        resetCameraRecorderDStateTracking();
+        return std::nullopt;
+    }
+
+    const auto status = processSupervisor_.GetStatus(ugripper::runtime::WorkerName::CameraRecorder);
+    if (!status.running || status.pid <= 0)
+    {
+        resetCameraRecorderDStateTracking();
+        return std::nullopt;
+    }
+
+    const auto dStateTask = FindFirstDStateTask(status.pid);
+    if (!dStateTask.has_value())
+    {
+        if (cameraRecorderDStateFirstSeenMs_ != 0)
+        {
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "camera recorder D-state cleared"
+                << " pid=" << cameraRecorderDStatePid_
+                << " tid=" << cameraRecorderDStateTaskId_
+                << std::endl).str());
+        }
+        resetCameraRecorderDStateTracking();
+        return std::nullopt;
+    }
+
+    const uint64_t nowMs = currentSteadyMs();
+    const bool newTask =
+        cameraRecorderDStatePid_ != status.pid ||
+        cameraRecorderDStateTaskId_ != dStateTask->taskId ||
+        cameraRecorderDStateFirstSeenMs_ == 0;
+    if (newTask)
+    {
+        cameraRecorderDStatePid_ = status.pid;
+        cameraRecorderDStateTaskId_ = dStateTask->taskId;
+        cameraRecorderDStateFirstSeenMs_ = nowMs;
+        cameraRecorderDStateLastLogMs_ = 0;
+    }
+
+    const uint64_t stuckMs = nowMs >= cameraRecorderDStateFirstSeenMs_
+                                 ? nowMs - cameraRecorderDStateFirstSeenMs_
+                                 : 0;
+    std::ostringstream detail;
+    detail << "CameraRecorder task stuck in D state"
+           << " pid=" << status.pid
+           << " tid=" << dStateTask->taskId
+           << " comm=" << dStateTask->comm
+           << " wchan=" << (dStateTask->wchan.empty() ? "unknown" : dStateTask->wchan)
+           << " stuck_ms=" << stuckMs;
+
+    if (cameraRecorderDStateLastLogMs_ == 0 ||
+        nowMs - cameraRecorderDStateLastLogMs_ >= kCameraRecorderDStateLogIntervalMs)
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "camera recorder D-state observed"
+            << " pid=" << status.pid
+            << " tid=" << dStateTask->taskId
+            << " comm=" << dStateTask->comm
+            << " wchan=" << (dStateTask->wchan.empty() ? "unknown" : dStateTask->wchan)
+            << " stuck_ms=" << stuckMs
+            << " threshold_ms=" << kCameraRecorderDStateFaultMs
+            << std::endl).str());
+        cameraRecorderDStateLastLogMs_ = nowMs;
+    }
+
+    if (stuckMs < kCameraRecorderDStateFaultMs)
+    {
+        return std::nullopt;
+    }
+
+    return ugripper::runtime::HealthFault{
+        ugripper::runtime::RuntimeLedState::Error2,
+        ugripper::runtime::HardwareFaultSide::Unknown,
+        kMainCameraV4l2KernelHangKey,
+        detail.str(),
+    };
+}
+
 bool RecordRuntime::mainCameraRestoreTargetsHealthy() const
 {
     for (const auto &state : mainCameraRuntimeStates_)
@@ -6363,6 +6558,7 @@ bool RecordRuntime::requestDataDiskUmountForRestoreUsb(const std::string &reason
 
 bool RecordRuntime::prepareDataDiskForRestoreUsb(const std::string &reason)
 {
+    const bool allowKernelHangRestore = IsCameraRecorderKernelHangReason(reason);
     if (isRecordingActive())
     {
         DM_LOG_WARN("{}", (::DA::utils::LogString()
@@ -6372,11 +6568,18 @@ bool RecordRuntime::prepareDataDiskForRestoreUsb(const std::string &reason)
         const std::string stopReason = "restore usb preflight before power reset: " + reason;
         if (!stopRecording(true, stopReason, ugripper::runtime::kErrorTypeRuntimeError))
         {
-            DM_LOG_ERROR("{}", (::DA::utils::LogString()
-                << "skip restore usb: failed to stop recording before power reset"
+            if (!allowKernelHangRestore)
+            {
+                DM_LOG_ERROR("{}", (::DA::utils::LogString()
+                    << "skip restore usb: failed to stop recording before power reset"
+                    << " reason=" << reason
+                    << std::endl).str());
+                return false;
+            }
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                << "continue restore usb despite stop failure for camera recorder kernel hang"
                 << " reason=" << reason
                 << std::endl).str());
-            return false;
         }
     }
 
@@ -6402,7 +6605,19 @@ bool RecordRuntime::prepareDataDiskForRestoreUsb(const std::string &reason)
             << std::endl).str());
     }
 
-    return requestDataDiskUmountForRestoreUsb(reason);
+    if (!requestDataDiskUmountForRestoreUsb(reason))
+    {
+        if (!allowKernelHangRestore)
+        {
+            return false;
+        }
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "continue restore usb despite data disk umount failure for camera recorder kernel hang"
+            << " disk_root=" << options_.diskRoot
+            << " reason=" << reason
+            << std::endl).str());
+    }
+    return true;
 }
 
 void RecordRuntime::logRestoreUsbRequested(const RestoreUsbTriggerContext &context)
@@ -7357,56 +7572,81 @@ void RecordRuntime::monitorHardwareHealth()
         return;
     }
 
-    if (result.fault.has_value())
-    {
-        activeHardwareFault_ = *result.fault;
-        if (isRecordingActive())
-        {
-            const std::string stopReason =
-                "recording hardware fault (" + result.fault->key + "): " + result.fault->detail;
-            if (result.should_notify_fault)
+    auto handleHardwareFault =
+        [this](const ugripper::runtime::HealthFault &fault, bool shouldNotifyFault) {
+            activeHardwareFault_ = fault;
+            if (isRecordingActive())
             {
-                DM_LOG_ERROR("{}", (::DA::utils::LogString() << stopReason << std::endl).str());
-                DM_LOG_INFO("{}", (::DA::utils::LogString()
-                    << "[HMI_DIAG] category=health_fault"
-                    << " key=" << result.fault->key
-                    << " led_state=" << ledStateName(toLedState(result.fault->led_state))
-                    << " action=stop_recording").str());
-            }
-            const bool stopOk = stopRecording(true, stopReason, result.fault->key);
-            const bool recordingStopped = !isRecordingActive();
-            if (stopOk || recordingStopped)
-            {
-                if (!stopOk)
+                const std::string stopReason =
+                    "recording hardware fault (" + fault.key + "): " + fault.detail;
+                if (shouldNotifyFault)
                 {
-                    DM_LOG_WARN("{}", (::DA::utils::LogString()
-                        << "recording stopped with failed episode; keep restore usb pending"
-                        << " key=" << result.fault->key
+                    DM_LOG_ERROR("{}", (::DA::utils::LogString() << stopReason << std::endl).str());
+                    DM_LOG_INFO("{}", (::DA::utils::LogString()
+                        << "[HMI_DIAG] category=health_fault"
+                        << " key=" << fault.key
+                        << " led_state=" << ledStateName(toLedState(fault.led_state))
+                        << " action=stop_recording").str());
+                }
+                const bool stopOk = stopRecording(true, stopReason, fault.key);
+                const bool recordingStopped = !isRecordingActive();
+                if (stopOk || recordingStopped || IsCameraRecorderKernelHangFault(fault))
+                {
+                    if (!stopOk && !recordingStopped)
+                    {
+                        DM_LOG_WARN("{}", (::DA::utils::LogString()
+                            << "recording did not stop; continue restore usb for camera recorder kernel hang"
+                            << " key=" << fault.key
+                            << std::endl).str());
+                    }
+                    else if (!stopOk)
+                    {
+                        DM_LOG_WARN("{}", (::DA::utils::LogString()
+                            << "recording stopped with failed episode; keep restore usb pending"
+                            << " key=" << fault.key
+                            << std::endl).str());
+                    }
+                    maybeTriggerRestoreUsbForHardwareFault(fault);
+                }
+                else
+                {
+                    DM_LOG_ERROR("{}", (::DA::utils::LogString()
+                        << "skip restore usb on recording hardware fault: recording still active after stop"
+                        << " key=" << fault.key
                         << std::endl).str());
                 }
-                maybeTriggerRestoreUsbForHardwareFault(*result.fault);
+                return;
             }
-            else
+            maybeTriggerRestoreUsbForHardwareFault(fault);
+            if (shouldNotifyFault)
             {
-                DM_LOG_ERROR("{}", (::DA::utils::LogString()
-                    << "skip restore usb on recording hardware fault: recording still active after stop"
-                    << " key=" << result.fault->key
-                    << std::endl).str());
+                DM_LOG_ERROR("{}", (::DA::utils::LogString() << "hardware health fault (" << fault.key << "): "
+                                      << fault.detail << std::endl).str());
+                DM_LOG_INFO("{}", (::DA::utils::LogString()
+                    << "[HMI_DIAG] category=health_fault"
+                    << " key=" << fault.key
+                    << " led_state=" << ledStateName(toLedState(fault.led_state))).str());
+                setHardwareFaultLedState(fault);
+                sendAudioCommand("error");
             }
-            return;
-        }
-        maybeTriggerRestoreUsbForHardwareFault(*result.fault);
-        if (result.should_notify_fault)
-        {
-            DM_LOG_ERROR("{}", (::DA::utils::LogString() << "hardware health fault (" << result.fault->key << "): "
-                                  << result.fault->detail << std::endl).str());
-            DM_LOG_INFO("{}", (::DA::utils::LogString()
-                << "[HMI_DIAG] category=health_fault"
-                << " key=" << result.fault->key
-                << " led_state=" << ledStateName(toLedState(result.fault->led_state))).str());
-            setHardwareFaultLedState(*result.fault);
-            sendAudioCommand("error");
-        }
+        };
+
+    if (result.fault.has_value())
+    {
+        handleHardwareFault(*result.fault, result.should_notify_fault);
+        return;
+    }
+
+    if (const auto cameraHangFault = detectCameraRecorderKernelHang())
+    {
+        const std::string errorKey = cameraHangFault->key + "|" + cameraHangFault->detail;
+        const bool shouldNotifyFault =
+            healthState_.status != ugripper::runtime::HealthStatus::Error ||
+            healthState_.last_error_key != errorKey;
+        healthState_.status = ugripper::runtime::HealthStatus::Error;
+        healthState_.last_error_key = errorKey;
+        healthState_.last_check_ms = currentSteadyMs();
+        handleHardwareFault(*cameraHangFault, shouldNotifyFault);
         return;
     }
 
@@ -7595,7 +7835,7 @@ void RecordRuntime::maybeTriggerRestoreUsbForHardwareFault(const ugripper::runti
     {
         return;
     }
-    triggerRestoreUsbOnError(reason);
+    triggerRestoreUsbOnError(reason, IsCameraRecorderKernelHangFault(fault));
 }
 
 std::string RecordRuntime::readEnvValue(const std::string &envFile, const std::string &key)

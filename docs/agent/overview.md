@@ -137,6 +137,7 @@
 - 主相机时间戳当前优先取 `VIDIOC_DQBUF` 返回的 `v4l2_buffer.timestamp`，若驱动标记为 monotonic 则在进程内通过 `boot_time_offset_us` 转成 unix 时间；这样 `system_time_us` 的打点位置尽量前移到内核缓冲出队附近，而不是依赖后置日志解析。
 - 主相机 `PTS/DTS` 当前按“相对首帧 system time 的增量”在进程内生成，并做单调钳制；内部 `<camera>_record_time_offset_us` 的语义保持为 `first_frame_unix_time_us - first_frame_pts_us`，停录后折算进 `metadata.json.video_details[].start_offset_us`。
 - 主相机链路当前使用可配置的 V4L2 MMAP 压缩缓冲池，`v4l2_buffer_count` 默认按 `16` 个 buffer 的折中口径运行，避免回退到历史上更容易触发主摄短时背压/坏流的 8-buffer 口径，同时降低 RK3588 上多路相机反复起停时的 CMA/连续 DMA 内存压力；`appsrc`/`queue` 仍在背压时阻塞等待，避免下游繁忙时主动丢弃编码包。
+- 录制中 `record_runtime` 会只读检查 `CameraRecorder` 进程的 `/proc/<pid>/task/*/stat`；若发现线程连续处于内核 `D` 状态超过阈值，会按主摄 V4L2/USB 内核等待故障归类到 `ERROR_2` 并触发 USB 复位。该检查不打开相机设备、不占用 V4L2 fd，只用于兜底发现 `VIDIOC_*` ioctl 卡在内核而无法由应用层返回错误的场景；触发后即使 camera recorder 无法被正常停住，也会允许进入复位流程释放内核等待。
 - 主摄 YAML 不再支持 `uvc_roll_absolute`。主摄厂商扩展控制工具 `main_camera_xu_tool` 与 `ensure_main_camera_packet_size_once.sh` 当前随包保留，但 udev 自动触发暂时停用；普通录制阶段不做 UVC 控制写入。`main_camera_xu_tool` 支持 `--read-sn` 仅读取 SN 所在 chunk、`--read-calib`/`--validate` 仅读取当前 V1 标定结构所需前 10 个 chunk，用于快速验证 SN 与 `MCAL` 标定是否可读。
 - 触觉 / 双目模式保留 `hybrid-decode-encode` / `stereo-hybrid-decode-encode`。
 - stereo 当前默认按设备 `1280x400@60` 常驻采集 MJPEG，session writer 按 `30fps` 抽帧后再编码成 `H.265` 写入 `mkv`；当前不再依赖后台 live encode + UDP relay。
