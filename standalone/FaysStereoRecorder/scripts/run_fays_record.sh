@@ -6,7 +6,7 @@ BUILD_DIR="$(dirname "$SCRIPT_DIR")"
 
 CONFIG_FILE=""
 EXECUTABLE="$BUILD_DIR/fays_record_example"
-CMD_FIFO="/tmp/umi_fays_cmd"
+CMD_FIFO="/dev/shm/ugripper/umi_fays_cmd"
 ARCH="$(uname -m)"
 LOCAL_FAYS_LIB_DIR="$BUILD_DIR/lib/fays_atrak/${ARCH}/Release"
 LOCAL_FTDI_LIB_DIR="$BUILD_DIR/lib/ft602-linux-${ARCH}"
@@ -103,6 +103,7 @@ require_config_file() {
 }
 
 ensure_fifo() {
+    mkdir -p "$(dirname "$CMD_FIFO")"
     if [ -e "$CMD_FIFO" ] && [ ! -p "$CMD_FIFO" ]; then
         echo "Error: $CMD_FIFO exists but is not a FIFO"
         return 1

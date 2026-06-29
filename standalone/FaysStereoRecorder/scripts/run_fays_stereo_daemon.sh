@@ -5,12 +5,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$(dirname "$SCRIPT_DIR")"
 RUN_FAYS_RECORD="$SCRIPT_DIR/run_fays_record.sh"
 
-CONTROL_FIFO="/tmp/umi_stereo_camera_control.pipe"
+CONTROL_FIFO="/dev/shm/ugripper/umi_stereo_camera_control.pipe"
 STATUS_FILE="/tmp/umi_stereo_camera_status.json"
 LEFT_CONFIG="$BUILD_DIR/config/fays_vikit_left.yaml"
 RIGHT_CONFIG="$BUILD_DIR/config/fays_vikit_right.yaml"
-LEFT_FIFO="/tmp/umi_left_fays_cmd"
-RIGHT_FIFO="/tmp/umi_right_fays_cmd"
+LEFT_FIFO="/dev/shm/ugripper/umi_left_fays_cmd"
+RIGHT_FIFO="/dev/shm/ugripper/umi_right_fays_cmd"
 LEFT_CALIB_JSON="/tmp/umi_left_fays_calibration.json"
 RIGHT_CALIB_JSON="/tmp/umi_right_fays_calibration.json"
 LEFT_RUNTIME_STATUS_JSON="/dev/shm/umi_left_fays_runtime_status.json"
@@ -18,12 +18,14 @@ RIGHT_RUNTIME_STATUS_JSON="/dev/shm/umi_right_fays_runtime_status.json"
 POLL_INTERVAL_SEC="${FAYS_STEREO_POLL_INTERVAL_SEC:-0.2}"
 HEALTH_POLL_INTERVAL_SEC="${FAYS_STEREO_HEALTH_POLL_INTERVAL_SEC:-1}"
 FINALIZE_TIMEOUT_SEC="${FAYS_STEREO_FINALIZE_TIMEOUT_SEC:-10}"
-START_DELAY_SEC="${FAYS_STEREO_START_DELAY_SEC:-3}"
-START_COMPLETE_TIMEOUT_SEC="${FAYS_STEREO_START_COMPLETE_TIMEOUT_SEC:-10}"
-HEALTH_GRACE_SEC="${FAYS_STEREO_HEALTH_GRACE_SEC:-3}"
+DAEMON_INITIAL_SETTLE_SEC="${FAYS_STEREO_DAEMON_INITIAL_SETTLE_SEC:-0}"
+START_DELAY_SEC="${FAYS_STEREO_START_DELAY_SEC:-0}"
+START_COMPLETE_TIMEOUT_SEC="${FAYS_STEREO_START_COMPLETE_TIMEOUT_SEC:-20}"
+FIFO_STARTUP_TIMEOUT_SEC="${FAYS_STEREO_FIFO_STARTUP_TIMEOUT_SEC:-12}"
+HEALTH_GRACE_SEC="${FAYS_STEREO_HEALTH_GRACE_SEC:-12}"
 FRAME_STALE_SEC="${FAYS_STEREO_FRAME_STALE_SEC:-3}"
-SYMLINK_STABLE_SEC="${FAYS_STEREO_SYMLINK_STABLE_SEC:-1}"
-SYMLINK_STABLE_TIMEOUT_SEC="${FAYS_STEREO_SYMLINK_STABLE_TIMEOUT_SEC:-8}"
+SYMLINK_STABLE_SEC="${FAYS_STEREO_SYMLINK_STABLE_SEC:-5}"
+SYMLINK_STABLE_TIMEOUT_SEC="${FAYS_STEREO_SYMLINK_STABLE_TIMEOUT_SEC:-20}"
 EXIT_GRACE_SEC="${FAYS_STEREO_EXIT_GRACE_SEC:-2}"
 TERM_GRACE_SEC="${FAYS_STEREO_TERM_GRACE_SEC:-2}"
 PORT_FREE_TIMEOUT_SEC="${FAYS_STEREO_PORT_FREE_TIMEOUT_SEC:-3}"
@@ -33,6 +35,8 @@ LEFT_PID=""
 RIGHT_PID=""
 LEFT_STARTED_AT=0
 RIGHT_STARTED_AT=0
+LEFT_LAST_UNHEALTHY_REASON=""
+RIGHT_LAST_UNHEALTHY_REASON=""
 LAST_COMMAND_SEQ=0
 ACTIVE_EPISODE_DIR=""
 ACTIVE_START_US=0
@@ -44,6 +48,7 @@ LAST_HEALTH_CHECK_MS=0
 RECORDING=false
 FINALIZE_PENDING=false
 CLEANED_UP=false
+DAEMON_STARTED_MS="$(date +%s%3N)"
 
 mark_session_error() {
     local message="$1"
@@ -58,6 +63,16 @@ now_ms() {
     date +%s%3N
 }
 
+boot_uptime_ms() {
+    awk '{ printf "%d", $1 * 1000 }' /proc/uptime 2>/dev/null || printf '0'
+}
+
+daemon_elapsed_ms() {
+    local current_ms
+    current_ms="$(now_ms)"
+    echo $((current_ms - DAEMON_STARTED_MS))
+}
+
 fays_ts() {
     date +"%H:%M:%S.%6N"
 }
@@ -65,6 +80,8 @@ fays_ts() {
 fays_log() {
     printf '[FAYS_TS %s] [fays_stereo_daemon] %s\n' "$(fays_ts)" "$*" >&2
 }
+
+fays_log "daemon starting: uptime_ms=$(boot_uptime_ms) initial_settle_s=$DAEMON_INITIAL_SETTLE_SEC start_delay_s=$START_DELAY_SEC fifo_startup_timeout_s=$FIFO_STARTUP_TIMEOUT_SEC start_complete_timeout_s=$START_COMPLETE_TIMEOUT_SEC symlink_stable_s=$SYMLINK_STABLE_SEC symlink_timeout_s=$SYMLINK_STABLE_TIMEOUT_SEC health_grace_s=$HEALTH_GRACE_SEC"
 
 usage() {
     cat <<'EOF'
@@ -144,6 +161,7 @@ while [ "$#" -gt 0 ]; do
 done
 
 ensure_control_fifo() {
+    mkdir -p "$(dirname "$CONTROL_FIFO")"
     if [ -e "$CONTROL_FIFO" ] && [ ! -p "$CONTROL_FIFO" ]; then
         echo "Error: stereo control path exists but is not a FIFO: $CONTROL_FIFO" >&2
         return 1
@@ -638,6 +656,52 @@ check_side_device_paths() {
     return 0
 }
 
+check_side_working_state_reason() {
+    local side="$1"
+    local config="$2"
+    local fifo="$3"
+    local calib_json="$4"
+    local pid="$5"
+    local quiet="${6:-false}"
+
+    if ! check_side_device_paths "$side" "$config" "$fifo" true "$quiet"; then
+        local stereo_path imu_path
+        stereo_path="$(config_value "$config" stereo_dev_port)"
+        imu_path="$(config_value "$config" imu_dev_port)"
+        if [ -z "$stereo_path" ] || [ "$stereo_path" = "NULL" ] || [ ! -e "$stereo_path" ]; then
+            printf 'stereo symlink missing: %s\n' "${stereo_path:-<empty>}"
+        elif [ -z "$imu_path" ] || [ "$imu_path" = "NULL" ] || [ ! -e "$imu_path" ]; then
+            printf 'IMU symlink missing: %s\n' "${imu_path:-<empty>}"
+        else
+            printf 'FIFO missing: %s\n' "$fifo"
+        fi
+        return 1
+    fi
+
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        printf 'process not running\n'
+        return 1
+    fi
+
+    if calibration_serial "$calib_json" >/dev/null 2>&1; then
+        if runtime_frame_fresh "$side"; then
+            return 0
+        fi
+        if side_in_health_grace "$side"; then
+            return 0
+        fi
+        printf 'warmup frame stale after %ss\n' "$FRAME_STALE_SEC"
+        return 1
+    fi
+
+    if side_in_health_grace "$side"; then
+        return 0
+    fi
+
+    printf 'calibration/serial not ready after %ss: %s\n' "$HEALTH_GRACE_SEC" "$calib_json"
+    return 1
+}
+
 wait_for_side_symlinks_stable() {
     local side="$1"
     local config="$2"
@@ -700,6 +764,30 @@ side_in_health_grace() {
     local started_at
     started_at="$(side_started_at "$side")"
     [ "$started_at" -gt 0 ] && [ $((SECONDS - started_at)) -lt "$HEALTH_GRACE_SEC" ]
+}
+
+side_last_unhealthy_reason() {
+    local side="$1"
+    if [ "$side" = "left" ]; then
+        printf '%s\n' "$LEFT_LAST_UNHEALTHY_REASON"
+    else
+        printf '%s\n' "$RIGHT_LAST_UNHEALTHY_REASON"
+    fi
+}
+
+set_side_last_unhealthy_reason() {
+    local side="$1"
+    local reason="$2"
+    if [ "$side" = "left" ]; then
+        LEFT_LAST_UNHEALTHY_REASON="$reason"
+    else
+        RIGHT_LAST_UNHEALTHY_REASON="$reason"
+    fi
+}
+
+clear_side_last_unhealthy_reason() {
+    local side="$1"
+    set_side_last_unhealthy_reason "$side" ""
 }
 
 calibration_serial() {
@@ -911,6 +999,7 @@ start_side_daemon() {
     wait_kill_and_confirm_side_ports_free "$side" "$config" || return 1
     fays_log "$side recorder start requested: config=$config fifo=$fifo video=$video_name mcap=$mcap_name delay_s=$START_DELAY_SEC"
     sleep "$START_DELAY_SEC"
+    mkdir -p "$(dirname "$fifo")"
     rm -f "$fifo"
     rm -f "$runtime_status_json"
     setsid "$RUN_FAYS_RECORD" \
@@ -922,7 +1011,7 @@ start_side_daemon() {
         --status-json "$runtime_status_json" \
         daemon &
     local pid="$!"
-    if ! wait_for_fifo "$fifo" 8; then
+    if ! wait_for_fifo "$fifo" "$FIFO_STARTUP_TIMEOUT_SEC"; then
         log_fifo_startup_timeout "$side" "$fifo" "$pid" "$config" "$runtime_status_json"
         terminate_process_tree "$pid" "$side Fays recorder failed startup"
         return 1
@@ -993,11 +1082,20 @@ maintain_side_daemon() {
 
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && [ -p "$fifo" ] &&
        check_side_working_state "$side" "$config" "$fifo" "$calib_json" "$pid" true; then
+        clear_side_last_unhealthy_reason "$side"
         return 0
     fi
 
     if [ -n "$pid" ] || [ -p "$fifo" ]; then
-        fays_log "$side recorder unhealthy; restarting pid=${pid:-none} recording=$RECORDING finalizing=$FINALIZE_PENDING"
+        local unhealthy_reason
+        unhealthy_reason="$(check_side_working_state_reason "$side" "$config" "$fifo" "$calib_json" "$pid" true)"
+        if [ -z "$unhealthy_reason" ]; then
+            unhealthy_reason="unknown"
+        fi
+        if [ "$(side_last_unhealthy_reason "$side")" != "$unhealthy_reason" ]; then
+            fays_log "$side recorder unhealthy; restarting pid=${pid:-none} recording=$RECORDING finalizing=$FINALIZE_PENDING reason=$unhealthy_reason"
+            set_side_last_unhealthy_reason "$side" "$unhealthy_reason"
+        fi
         mark_session_error "$side Fays recorder unhealthy during session"
         stop_side_daemon "$side" "$fifo" "$pid"
     fi
@@ -1088,6 +1186,10 @@ start_daemons() {
     cleanup_stale_fays_recorders
     rm -f "$LEFT_CALIB_JSON" "$RIGHT_CALIB_JSON"
     rm -f "$LEFT_RUNTIME_STATUS_JSON" "$RIGHT_RUNTIME_STATUS_JSON"
+    if [ "$DAEMON_INITIAL_SETTLE_SEC" != "0" ]; then
+        fays_log "initial daemon settle before recorder start: seconds=$DAEMON_INITIAL_SETTLE_SEC elapsed_ms=$(daemon_elapsed_ms) uptime_ms=$(boot_uptime_ms)"
+        sleep "$DAEMON_INITIAL_SETTLE_SEC"
+    fi
 
     # Avoid creating extra short-lived SDK handles before the warmup daemons.
     # The vendor SDK can cross-bind or re-enumerate devices when calibration
