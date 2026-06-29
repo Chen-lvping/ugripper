@@ -26,14 +26,14 @@
 | 模块 | 入口 | 当前职责 | 关键输入/输出 |
 | --- | --- | --- | --- |
 | systemd 主服务 | `pack_script/ugripper.service` | 以 `ubuntu` 用户拉起录制服务 | `/opt/ugripper/run_record.sh` |
-| 薄壳启动脚本 | `run_record.sh` | 切到安装目录、等待 `/mnt/data_disk` 可写、维护本地 `/tmp` 到 `/mnt/data_disk/logs` 的增量日志同步，再拉起 `record_runtime` | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/umi_sys_<sn>_<date>.log` |
-| 主运行时 | `bin/UgripperRuntime/UgripperRuntime` | HMI 按键状态机、软件录制控制、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_record_control.pipe`、`/tmp/umi_shutdown_request` |
+| 薄壳启动脚本 | `run_record.sh` | 切到安装目录、维护本地 `/tmp` 到 `/mnt/data_disk/logs` 的增量日志同步，再拉起 `record_runtime`；数据盘等待由 runtime 处理 | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/umi_sys_<sn>_<date>.log` |
+| 主运行时 | `bin/UgripperRuntime/UgripperRuntime` | HMI 按键状态机、软件录制控制、LED 灯效、提示音、pre/post 音频、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/dev/shm/ugripper/umi_record_control.pipe`、`/tmp/umi_shutdown_request` |
 | 安全 NTP 同步 | `time_sync/safe_ntp_sync.sh` / `ugripper-ntp-sync.service` | 开机或安装后只在非录制态执行一次性时间同步，优先使用板端现有 `sntp -S`，再 fallback 到 `ntpd -q -g` / `timedatectl`；同步完成、超时或录制开始后停止常驻 NTP 服务 | `/tmp/umi_recording.lock`、`sntp`/`ntp` |
 | 相机录制 | `bin/CameraRecorder/CameraRecorder` | 普通录制模式下负责主摄/触觉会话录制；`--stereo-daemon` 模式下负责双目常驻预热、热插拔恢复与 session finalize | 8 路 `mkv`（默认） |
 | 传感器录制 | `bin/SensorRecorder/SensorRecorder` | 录制左右 IMU/encoder，按“采样入队 + 每侧独立 MCAP 写线程”分别输出 MCAP | `sensor_left.mcap`、`sensor_right.mcap` |
 | Ego 联动采集 | `bin/UgripperRuntime/ego/ego_recording_worker.py` + `bin/UgripperRuntime/adb/adb` | 录制起停阶段通过内置 ADB 联动 SXR ego app，起录前同步 ego 系统时间并按增量方式同步 ego episode 到当前 UGripper episode；当前不主动启动 app、不参与强校验 | `ego/`、`ego/ego_sync.json` |
 | HMI 类库 | `standalone/GripperHmiTool` | 读取夹爪按键，并在驱动内部以单线程 owner 线程完成状态查询、灯效生成与 RGB 指令发送；默认由状态机切灯效，必要时仍可直接下发 RGB；当前也提供 SN 与 1024-byte 标定参数读写 API | 按键快照、RGB 指令、SN/标定参数读写 |
-| 音频播放 | `bin/UgripperRuntime/audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/tmp/umi_audio_pipe` |
+| 音频播放 | `bin/UgripperRuntime/audio/audio_play.py` | 优先绑定受支持 USB 耳机、无耳机时回退系统默认声卡；播放提示音并处理耳机 HID 音量键；初始化阶段受控处理 idle suspend | `/dev/shm/ugripper/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | 优先从受支持 USB 耳机麦克风录音，无耳机时回退系统默认 source，供 pre/post 处理链路使用 | 临时 wav 文件 |
 | 数据盘挂载 | `config/99-fixed-usb-map.rules` | 限定允许物理 USB 口，使用独立 mount helper 将数据盘挂到 `/mnt/data_disk`；主包只负责挂载/卸载，不再直接拉起 updater | `/mnt/data_disk` |
 | 硬件健康检查 | `scripts/hws` / `/usr/local/bin/hws` | 一行命令列出左右手全部传感器、胸部相机与数据盘 symlink 的在线状态，便于现场快速确认是否全部在线 | 终端状态表 |
@@ -263,8 +263,8 @@
 ### 8.2 关键持久化与临时路径
 - 持久化标定：`/etc/ugripper/config/calibration/calibration.json`
 - USB 标定导入阶段会在 `/etc/ugripper/config/calibration/.import_stage.*` 下生成临时 `calibration.json` 与夹爪 `payload bin`；由于 HMI helper 当前会以 `ubuntu` 用户运行，stage 目录需保持可遍历、payload bin 需保持可读，否则会出现“bin 已生成但 helper 无法读取”的写入失败。
-- 运行时音频 FIFO：`/tmp/umi_audio_pipe`
-- 运行时软件录制控制 FIFO：`/tmp/umi_record_control.pipe`
+- 运行时音频 FIFO：`/dev/shm/ugripper/umi_audio_pipe`
+- 运行时软件录制控制 FIFO：`/dev/shm/ugripper/umi_record_control.pipe`
 - 音频临时目录：`/tmp/umi_audio`
 - 系统动作请求文件：`/run/ugripper/system_action_request`
 - 系统动作结果文件：`/run/ugripper/system_action_result`
@@ -272,14 +272,14 @@
 - 运行日志：`/tmp/umi_sys_<device_sn_lower>_<YYYYMMDD>.log`
 - 数据盘日志镜像：`/mnt/data_disk/logs/umi_sys_<device_sn_lower>_<YYYYMMDD>.log`
 - stereo daemon 状态：`/tmp/umi_stereo_camera_status.json`
-- 左右 Fays recorder 控制 FIFO：`/tmp/umi_left_fays_cmd`、`/tmp/umi_right_fays_cmd`
-- stereo daemon 顶层控制 FIFO：`/tmp/umi_stereo_camera_control.pipe`（保留兼容入口，当前普通录制起停由 `record_runtime` 直接写左右 Fays recorder FIFO）
+- 左右 Fays recorder 控制 FIFO：`/dev/shm/ugripper/umi_left_fays_cmd`、`/dev/shm/ugripper/umi_right_fays_cmd`
+- stereo daemon 顶层控制 FIFO：`/dev/shm/ugripper/umi_stereo_camera_control.pipe`（保留兼容入口，当前普通录制起停由 `record_runtime` 直接写左右 Fays recorder FIFO）
 - 触觉传感器持久化状态：`/var/lib/ugripper/tactile_state`（包含 `reference/`、`persistent/`子目录与 `history.json`；`persistent/` 存放跨关机有效的长周期 baseline）
 - `/mnt/data_disk` 只作为固定挂载点使用：安装阶段会预创建为 `root:root 0555`，业务不会把本地空目录当成数据目录；只有真实数据盘挂载成功后才允许继续启动录制服务。
 - 运行日志维护当前参考 V1 口径：本地先写 `/tmp`，在视频停录、音频停录和运行时退出时增量同步到 `/mnt/data_disk/logs`，并只保留当天同 SN 日志。
 
 ### 8.3 软件录制控制
-- `record_runtime` 启动后会创建并非阻塞打开 `/tmp/umi_record_control.pipe`，供本机受控脚本触发录制起停；若 FIFO 创建或打开失败，只记录告警并继续保留原有 HMI 按键控制能力。
+- `record_runtime` 启动后会创建并非阻塞打开 `/dev/shm/ugripper/umi_record_control.pipe`，供本机受控脚本触发录制起停；若 FIFO 创建或打开失败，只记录告警并继续保留原有 HMI 按键控制能力。
 - `test/src/gripper_disconnect_repro_sop/` 提供可单独打包的现场复现工具，主机侧 `./scripts/prepare_240_repro.sh` 会通过 SSH 下发板端 worker，并复用该 FIFO 做连续软件录制与错误现场抓取；系统/服务实时日志仍建议测试人员另开终端手动观察。
 - FIFO 按行接收文本命令，当前支持：
   - `SHORT_UP`：严格模拟右手上键短按语义；空闲时起录，录制中停录。
@@ -289,9 +289,9 @@
 - 被接受的软件命令会在同一主循环内复用 `handleShortUpAction()` / `handleShortDownAction()`，因此停录会进入与按键短按相同的 stop、finalize、merge、validation、LED/audio 恢复路径；不要通过直接写 stereo FIFO、kill recorder 或删除 lock 文件来替代停录。
 - 控制入口带 `300ms` 防抖，单轮主循环最多处理 `8` 条命令，避免外部脚本重复写入导致 start/stop 连续抖动；同一轮中若已接受软件控制命令，会跳过本轮物理按键事件处理，降低叠加触发风险。
 - 建议使用示例：
-  - `echo START > /tmp/umi_record_control.pipe`
-  - `echo STOP > /tmp/umi_record_control.pipe`
-  - 如需严格模拟按键：`echo SHORT_UP > /tmp/umi_record_control.pipe`、`echo SHORT_DOWN > /tmp/umi_record_control.pipe`
+  - `echo START > /dev/shm/ugripper/umi_record_control.pipe`
+  - `echo STOP > /dev/shm/ugripper/umi_record_control.pipe`
+  - 如需严格模拟按键：`echo SHORT_UP > /dev/shm/ugripper/umi_record_control.pipe`、`echo SHORT_DOWN > /dev/shm/ugripper/umi_record_control.pipe`
 
 ### 8.4 PERF 日志
 - 停录收尾、文件 flush、视频探测和 episode validation 会输出 `[PERF]` 耗时日志，用于现场拆分蓝灯延迟。
@@ -301,9 +301,9 @@
 ### 8.5 音频链路关键行为
 - `audio/audio_play.py` 启动时按 `UGRIPPER_LANG` 选语音，并优先绑定 PulseAudio 中受支持的 USB 音频设备；当前兼容 `0020:0b21 (liyuany USB Audio)` 与 `0023:0b23 (liyuany USB PnP Sound Device)`。若无耳机，则回退系统默认 sink/source；耳机晚于服务启动才出现时，守护进程会先启动 FIFO 和监听线程，再在耳机出现后自动切回耳机。
 - 提示音主线程通过 FIFO 收命令后使用 `pygame.mixer` 播放到当前选中的 PulseAudio sink；启动时只做一次短静音预热、每段提示音前补前导静音，不再维持常驻静音 keepalive。
-- `audio/audio_play.py` 只有在真实绑定到一个可用的 PulseAudio 播放目标并完成后端初始化后才会写 `/tmp/umi_audio_ready`；当前无论是受支持 USB 耳机还是系统默认声卡，都需要建好 backend 才会进入 ready，backend teardown 时会移除该标记，避免业务把“进程活着”误判成“提示音已可播放”。
+- `audio/audio_play.py` 只有在真实绑定到一个可用的 PulseAudio 播放目标并完成后端初始化后才会写 `/dev/shm/ugripper/umi_audio_ready`；当前无论是受支持 USB 耳机还是系统默认声卡，都需要建好 backend 才会进入 ready，backend teardown 时会移除该标记，避免业务把“进程活着”误判成“提示音已可播放”。
 - 提示音调度采用“后触发抢占前触发”的语义，不做排队串行；新的命令到达后会立即停止当前 one-shot 或 loop 提示，再播放最新命令。当前 `writing`、`calibrating` 属于 loop 提示，但同样会被后续命令直接打断。
-- `record_runtime` 会在主循环内监测音频守护进程；若守护进程异常退出会按节流策略自动重拉起。正常情况下，音频守护进程会在“受支持 USB 耳机”和“系统默认声卡”之间自动切换，并在 `/tmp/umi_audio_ready` 恢复后补发空闲态 `ready` 或当前阶段提示。
+- `record_runtime` 会在主循环内监测音频守护进程；若守护进程异常退出会按节流策略自动重拉起。正常情况下，音频守护进程会在“受支持 USB 耳机”和“系统默认声卡”之间自动切换，并在 `/dev/shm/ugripper/umi_audio_ready` 恢复后补发空闲态 `ready` 或当前阶段提示。
 - 耳机运行中被拔掉时，音频守护进程不会退出，而是自动退回系统默认声卡；耳机重新插入并重新出现在 PulseAudio 后，会自动重新绑定回耳机，后续提示音恢复。
 - 播放/录音初始化前会受控执行 `pactl unload-module module-suspend-on-idle`，避免 USB 耳机或默认声卡在长时间空闲、热插拔恢复或首次切换后出现首段吞音；该动作只收敛在初始化阶段，不在每次提示音、录音或音量键事件里重复切换模块。
 - `py_script/usb_audio_mic_test.py --playback` 默认只做“原生采集 + SoX 后处理导出”，不再默认硬套旧 `noise.prof`；若需去噪，先运行 `py_script/usb_audio_noise_profile.py` 生成当前环境底噪 profile，再显式传入 `--denoise --noise-profile <path>`。

@@ -203,8 +203,13 @@ force_cleanup_recording_processes() {
         pkill -KILL -f 'audio/audio_play.py' >/dev/null 2>&1 || true
     fi
 
-    rm -f /tmp/umi_audio_pipe /tmp/umi_stereo_camera_control.pipe /tmp/umi_stereo_camera_control.json \
-        /tmp/umi_recording.lock /tmp/umi_system_action_request /tmp/umi_system_action_result \
+    rm -f /dev/shm/ugripper/umi_audio_pipe \
+        /dev/shm/ugripper/umi_audio_ready \
+        /dev/shm/ugripper/umi_record_control.pipe \
+        /dev/shm/ugripper/umi_stereo_camera_control.pipe \
+        /dev/shm/ugripper/umi_left_fays_cmd \
+        /dev/shm/ugripper/umi_right_fays_cmd \
+        /tmp/umi_recording.lock \
         "${SYSTEM_ACTION_RUNTIME_DIR}/system_action_request" \
         "${SYSTEM_ACTION_RUNTIME_DIR}/system_action_result" || true
 }

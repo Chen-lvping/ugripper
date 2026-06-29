@@ -33,15 +33,15 @@ struct RecordRuntimeOptions
     std::string faysStereoDaemonScript = "./bin/FaysStereoRecorder/scripts/run_fays_stereo_daemon.sh";
     std::string leftFaysConfig = "./bin/FaysStereoRecorder/config/fays_vikit_left.yaml";
     std::string rightFaysConfig = "./bin/FaysStereoRecorder/config/fays_vikit_right.yaml";
-    std::string leftFaysControlFifo = "/tmp/umi_left_fays_cmd";
-    std::string rightFaysControlFifo = "/tmp/umi_right_fays_cmd";
+    std::string leftFaysControlFifo = "/dev/shm/ugripper/umi_left_fays_cmd";
+    std::string rightFaysControlFifo = "/dev/shm/ugripper/umi_right_fays_cmd";
     std::string audioPlayScript = "./bin/UgripperRuntime/audio/audio_play.py";
     std::string audioRecordScript = "./bin/UgripperRuntime/audio/record_usb_audio.py";
     std::string egoRecordingScript = "./bin/UgripperRuntime/ego/ego_recording_worker.py";
-    std::string audioPipe = "/tmp/umi_audio_pipe";
-    std::string audioReadyFile = "/tmp/umi_audio_ready";
+    std::string audioPipe = "/dev/shm/ugripper/umi_audio_pipe";
+    std::string audioReadyFile = "/dev/shm/ugripper/umi_audio_ready";
     std::string audioTempDir = "/tmp/umi_audio";
-    std::string recordControlPipe = "/tmp/umi_record_control.pipe";
+    std::string recordControlPipe = "/dev/shm/ugripper/umi_record_control.pipe";
     std::string recordingLockFile = "/tmp/umi_recording.lock";
     std::string noiseProfile = "./bin/UgripperRuntime/audio/noise.prof";
     std::string systemActionRequestFile = "/run/ugripper/system_action_request";
@@ -54,7 +54,7 @@ struct RecordRuntimeOptions
     std::string fallbackCalibrationFile = "./bin/UgripperRuntime/config/fakeCamCalib.json";
     std::string tactileStateDir = "/var/lib/ugripper/tactile_state";
     std::string cameraCodec = "h264";
-    std::string stereoControlPipe = "/tmp/umi_stereo_camera_control.pipe";
+    std::string stereoControlPipe = "/dev/shm/ugripper/umi_stereo_camera_control.pipe";
     std::string stereoStatusFile = "/tmp/umi_stereo_camera_status.json";
     int pollMs = 20;
 };
@@ -79,6 +79,7 @@ private:
     enum class LedState
     {
         Init,
+        WaitStorage,
         Ready,
         Warning,
         Recording,
@@ -379,6 +380,8 @@ private:
     bool cleanupEgoRemote(const std::string &episodeDir, std::string *errorMessage);
     bool mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const;
     bool syncRuntimeLogToDisk(const char *reason) const;
+    bool maintainDataStorage();
+    bool ensureEpisodeManagerInitialized();
     void markTactileReferencePendingForSide(const std::string &side,
                                             const std::string &reason);
     void scheduleBackgroundTactileValidation(const std::string &episodeDir);
@@ -470,6 +473,8 @@ private:
     uint64_t restoreUsbFailureAlarmStartMs_ = 0;
     uint64_t restoreUsbPreflightFailureUntilMs_ = 0;
     bool restoreUsbStereoDaemonStopped_ = false;
+    bool episodeManagerInitialized_ = false;
+    bool dataStorageWaitLogged_ = false;
     std::array<bool, 2> restoreUsbSidePresent_{};
     std::array<uint64_t, 2> restoreUsbInsertGraceUntilMs_{};
     std::string restoreUsbPendingTriggerKey_;

@@ -25,10 +25,55 @@ std::string ErrnoMessage(const std::string& prefix, int saved_errno)
     return prefix + ": " + std::strerror(saved_errno);
 }
 
+bool EnsureParentDirectories(const std::string& path, std::string* error_message)
+{
+    const size_t slash = path.find_last_of('/');
+    if (slash == std::string::npos || slash == 0)
+    {
+        return true;
+    }
+
+    std::string current;
+    size_t pos = 0;
+    while (pos < slash)
+    {
+        const size_t next = path.find('/', pos + 1);
+        if (next == std::string::npos || next > slash)
+        {
+            break;
+        }
+        current = path.substr(0, next);
+        if (current.empty())
+        {
+            pos = next;
+            continue;
+        }
+        if (mkdir(current.c_str(), 0775) != 0 && errno != EEXIST)
+        {
+            SetError(error_message, ErrnoMessage("failed to create FIFO parent directory " + current, errno));
+            return false;
+        }
+        pos = next;
+    }
+
+    current = path.substr(0, slash);
+    if (!current.empty() && mkdir(current.c_str(), 0775) != 0 && errno != EEXIST)
+    {
+        SetError(error_message, ErrnoMessage("failed to create FIFO parent directory " + current, errno));
+        return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 bool EnsureFifo(const std::string& path, mode_t mode, std::string* error_message)
 {
+    if (!EnsureParentDirectories(path, error_message))
+    {
+        return false;
+    }
+
     struct stat st {};
     if (stat(path.c_str(), &st) == 0)
     {

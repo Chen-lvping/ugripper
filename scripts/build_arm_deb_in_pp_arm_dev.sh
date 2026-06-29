@@ -13,7 +13,7 @@ PACKAGE_DEB_NAME="${APP_NAME}_${VERSION}_${ARCH}.deb"
 
 TOOLCHAIN_FILE="${TOOLCHAIN_FILE:-${REPO_ROOT}/cmake/arm-linux-toolchain.cmake}"
 PACKAGED_BUILD_DIR="${PACKAGED_BUILD_DIR:-build/arm_container_release}"
-PARALLEL="${PARALLEL:-8}"
+PARALLEL="${PARALLEL:-16}"
 HOST_UID="${HOST_UID:-$(stat -c %u "${REPO_ROOT}")}"
 HOST_GID="${HOST_GID:-$(stat -c %g "${REPO_ROOT}")}"
 QUICK_MODE=false
@@ -32,7 +32,7 @@ Modes:
 
 Options:
   --build-dir PATH  Override PACKAGED_BUILD_DIR (default: build/arm_container_release).
-  -j, --parallel N  Override CMake build parallelism (default: 8 or PARALLEL env).
+  -j, --parallel N  Override CMake build parallelism (default: 16 or PARALLEL env).
   --clean           Remove PACKAGED_BUILD_DIR before a full C++ build (default).
   --no-clean        Reuse PACKAGED_BUILD_DIR during a full C++ build.
   -h, --help        Show this help message.

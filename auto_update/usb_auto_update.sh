@@ -597,7 +597,13 @@ stop_record_stack_fast() {
     done
   fi
 
-  rm -f /tmp/umi_audio_pipe /tmp/umi_recording.lock || true
+  rm -f /dev/shm/ugripper/umi_audio_pipe \
+    /dev/shm/ugripper/umi_audio_ready \
+    /dev/shm/ugripper/umi_record_control.pipe \
+    /dev/shm/ugripper/umi_stereo_camera_control.pipe \
+    /dev/shm/ugripper/umi_left_fays_cmd \
+    /dev/shm/ugripper/umi_right_fays_cmd \
+    /tmp/umi_recording.lock || true
 }
 
 kill_tree() {

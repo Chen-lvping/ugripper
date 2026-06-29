@@ -88,23 +88,23 @@
 | `CAMERA_CODEC` | camera 编码器口径 `h264/h265` | runtime、camera recorder、`usb_auto_update.sh` | `usb_auto_update.sh` |
 
 ### 4.3 当前运行时控制通道
-- stereo 控制 FIFO：`/tmp/umi_stereo_camera_control.pipe`
+- stereo 控制 FIFO：`/dev/shm/ugripper/umi_stereo_camera_control.pipe`
 - stereo 状态文件：`/tmp/umi_stereo_camera_status.json`
 - 关机触发文件：`/tmp/umi_shutdown_request`
-- 音频命令 FIFO：`/tmp/umi_audio_pipe`
-- 音频 ready 标记：`/tmp/umi_audio_ready`
+- 音频命令 FIFO：`/dev/shm/ugripper/umi_audio_pipe`
+- 音频 ready 标记：`/dev/shm/ugripper/umi_audio_ready`
 - 录制锁文件：`/tmp/umi_recording.lock`
 
 ## 5. 当前模块总览
 | 模块 | 入口 | 当前职责 | 关键输入/输出 |
 | --- | --- | --- | --- |
 | systemd 主服务 | `pack_script/ugripper.service` | 拉起录制服务 | `/opt/ugripper/run_record.sh` |
-| 薄壳启动脚本 | `run_record.sh` | 等待 `/mnt/data_disk` 可写、维护日志同步、拉起 runtime | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/...` |
+| 薄壳启动脚本 | `run_record.sh` | 维护日志同步、拉起 runtime；数据盘等待由 runtime 处理 | `/tmp/umi_sys_<sn>_<date>.log`、`/mnt/data_disk/logs/...` |
 | 主运行时 | `bin/UgripperRuntime/UgripperRuntime` | HMI 状态机、LED、提示音、camera/sensor 子进程管理、停录校验、关机请求 | episode 目录、`/tmp/umi_shutdown_request` |
 | 相机录制 | `bin/CameraRecorder/CameraRecorder` | 主摄/触觉录制；`--stereo-daemon` 常驻预热、热插拔恢复与 session finalize | 8 路 `mkv` |
 | 传感器录制 | `bin/SensorRecorder/SensorRecorder` | 左右 IMU/encoder 录制并分别输出 MCAP | `sensor_left.mcap`、`sensor_right.mcap` |
 | HMI 类库/工具 | `standalone/GripperHmiTool` | 按键读取、灯效生成、RGB 指令发送、SN/标定参数读写 | 按键快照、RGB 指令、SN/标定参数 |
-| 音频播放 | `bin/UgripperRuntime/audio/audio_play.py` | 绑定 USB 耳机或回退默认声卡，播放提示音 | `/tmp/umi_audio_pipe` |
+| 音频播放 | `bin/UgripperRuntime/audio/audio_play.py` | 绑定 USB 耳机或回退默认声卡，播放提示音 | `/dev/shm/ugripper/umi_audio_pipe` |
 | 音频采集 | `audio/record_usb_audio.py` | pre/post 音频录制 | 临时 wav 文件 |
 | USB 升级/导入 | `auto_update/usb_auto_update.sh` | `deb` 升级/重装、配置导入、标定导入、encoder 校准触发 | `/etc/environment`、`calibration.json` |
 | 校准执行 | `auto_calibration/run_calibration.sh` | 左右编码器 zeroing | `bin/SensorRecorder/zeroing` |

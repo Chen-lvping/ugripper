@@ -27,7 +27,6 @@ ENV_FILE="/etc/environment"
 DISK_ROOT="/mnt/data_disk"
 LOG_DIR_LOCAL="/tmp"
 LOG_DIR_DISK="$DISK_ROOT/logs"
-WAIT_INTERVAL_SEC=2
 
 # Keep Rockchip MPP encoder chatter out of journald during normal recording.
 export mpp_debug="${mpp_debug:-0}"
@@ -153,19 +152,6 @@ log_info "logging locally to: $LOG_FILE_LOCAL"
 exec > >(tee -a "$LOG_FILE_LOCAL") 2>&1
 
 trap cleanup EXIT
-
-wait_logged=false
-while ! is_storage_ready; do
-    if [ "$wait_logged" = false ]; then
-        log_info "waiting for writable data storage on $DISK_ROOT"
-        wait_logged=true
-    fi
-    sleep "$WAIT_INTERVAL_SEC"
-done
-
-if [ "$wait_logged" = true ]; then
-    log_info "writable data storage ready on $DISK_ROOT"
-fi
 
 cleanup_old_logs
 

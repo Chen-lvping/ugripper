@@ -46,7 +46,7 @@ BOARD_SSH_PASSWORD=ubuntu BOARD_SUDO_PASSWORD=ubuntu ./scripts/prepare_240_repro
 
 - 把主机当前时间同步到 `240` 设备。
 - 把板端脚本下发到 `/tmp/gripper_disconnect_repro_sop/scripts/board_repro_log.sh`。
-- 通过 `/tmp/umi_record_control.pipe` 触发连续软件录制。
+- 通过 `/dev/shm/ugripper/umi_record_control.pipe` 触发连续软件录制。
 - 在主机终端实时刷新 `/usr/local/bin/hws`。
 - 检测到录制错误后自动执行 `capture-now` 抓取错误窗口日志和快照，然后暂停等待测试同学记录现象、恢复或确认硬件连接，按 Enter 后继续。
 

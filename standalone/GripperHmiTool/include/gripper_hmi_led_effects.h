@@ -9,6 +9,7 @@
 enum class GripperLedEffectState
 {
     Init,
+    WaitStorage,
     Ready,
     Warning,
     TactileWarningLeftSensor,

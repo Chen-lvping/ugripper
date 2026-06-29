@@ -101,7 +101,7 @@ run_hws_once_color() {
   run_hws_once | colorize_hws
 }
 
-record_control_pipe="/tmp/umi_record_control.pipe"
+record_control_pipe="/dev/shm/ugripper/umi_record_control.pipe"
 recording_lock="/tmp/umi_recording.lock"
 
 wait_for_control_pipe() {

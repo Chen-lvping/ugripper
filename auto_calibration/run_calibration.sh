@@ -41,7 +41,7 @@ HMI_PORT_ARGS=(--port /dev/right_gripper --port /dev/left_gripper)
 # --- 音频配置 ---
 DEFAULT_AUDIO_PLAY_SCRIPT="$project_root/bin/UgripperRuntime/audio/audio_play.py"
 AUDIO_PLAY_SCRIPT="${AUDIO_PLAY_SCRIPT_OVERRIDE:-$DEFAULT_AUDIO_PLAY_SCRIPT}"
-AUDIO_PIPE="/tmp/umi_audio_pipe"
+AUDIO_PIPE="/dev/shm/ugripper/umi_audio_pipe"
 AUDIO_PYTHON=""
 
 # 全局变量存储 PID
@@ -179,7 +179,8 @@ kill_tree() {
 
 start_helpers() {
     log_info "Starting helper processes..."
-    
+
+    mkdir -p "$(dirname "$AUDIO_PIPE")"
     rm -f "$AUDIO_PIPE"
     mkfifo "$AUDIO_PIPE"
     chmod 666 "$AUDIO_PIPE"

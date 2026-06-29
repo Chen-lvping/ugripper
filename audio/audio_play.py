@@ -31,8 +31,8 @@ KEY_VOLUMEUP = 115
 DEFAULT_EVENT_SYMLINK = Path("/dev/input/ugripper_usb_audio_keys")
 VOLUME_STEP = "5%"
 RETRY_SEC = 1.0
-PIPE_PATH = Path("/tmp/umi_audio_pipe")
-READY_PATH = Path("/tmp/umi_audio_ready")
+PIPE_PATH = Path("/dev/shm/ugripper/umi_audio_pipe")
+READY_PATH = Path("/dev/shm/ugripper/umi_audio_ready")
 MIXER_FREQUENCY = 48000
 MIXER_SIZE = -16
 MIXER_CHANNELS = 2
@@ -163,6 +163,7 @@ class AudioPlayer:
 
     def _ensure_pipe(self):
         try:
+            self.pipe_path.parent.mkdir(parents=True, exist_ok=True)
             if self.pipe_path.exists() and not self.pipe_path.is_fifo():
                 self.pipe_path.unlink()
             if not self.pipe_path.exists():
@@ -178,6 +179,7 @@ class AudioPlayer:
             pass
 
     def _write_ready_marker(self):
+        self.ready_path.parent.mkdir(parents=True, exist_ok=True)
         self.ready_path.write_text("ready\n", encoding="utf-8")
 
     def init_mixer(self):

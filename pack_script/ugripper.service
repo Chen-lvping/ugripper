@@ -1,7 +1,7 @@
 [Unit]
 Description=Ugripper Recorder
 Wants=umi-shutdown-trigger.path
-After=network.target local-fs.target umi-shutdown-trigger.path
+After=network.target local-fs.target umi-shutdown-trigger.path cftc_users.service
 
 [Service]
 Type=simple

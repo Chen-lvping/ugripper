@@ -3695,6 +3695,8 @@ GripperLedEffect RecordRuntime::makeLedEffect(LedState state, double progress)
     {
     case RecordRuntime::LedState::Init:
         return {GripperLedEffectState::Init, progress};
+    case RecordRuntime::LedState::WaitStorage:
+        return {GripperLedEffectState::WaitStorage, progress};
     case RecordRuntime::LedState::Ready:
         return {GripperLedEffectState::Ready, progress};
     case RecordRuntime::LedState::Warning:
@@ -3761,6 +3763,8 @@ const char *RecordRuntime::ledStateName(LedState state)
     {
     case LedState::Init:
         return "Init";
+    case LedState::WaitStorage:
+        return "WaitStorage";
     case LedState::Ready:
         return "Ready";
     case LedState::Warning:
@@ -3901,12 +3905,7 @@ bool RecordRuntime::initialize()
         packageVersion_,
         updaterVersion_);
 
-    if (!episodeManager_->initialize())
-    {
-        DM_LOG_ERROR("{}", (::DA::utils::LogString() << "failed to initialize episode manager for disk root: "
-                  << options_.diskRoot << std::endl).str());
-        return false;
-    }
+    episodeManagerInitialized_ = false;
     initializeMainCameraRuntimeStates();
     initializeTactileCameraRuntimeStates();
     maintainTactileCameraRuntimeStates();
@@ -4246,7 +4245,8 @@ bool RecordRuntime::initialize()
 
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     applyIdleState();
-    if (!tactileWarningActive_)
+    maintainDataStorage();
+    if (!tactileWarningActive_ && episodeManagerInitialized_)
     {
         setAudioRecoveryCommand("ready");
         sendAudioCommand("ready");
@@ -4274,6 +4274,7 @@ int RecordRuntime::run()
         maintainTactileCameraRuntimeStates();
         maintainAudioPlayer();
         maintainStereoDaemon();
+        maintainDataStorage();
         maintainBackgroundTactileValidation();
         maintainRestoreUsbDevicePresence();
         maintainRestoreUsbRetry();
@@ -5147,6 +5148,84 @@ bool RecordRuntime::syncRuntimeLogToDisk(const char *reason) const
     return true;
 }
 
+bool RecordRuntime::ensureEpisodeManagerInitialized()
+{
+    if (episodeManagerInitialized_)
+    {
+        return true;
+    }
+    if (episodeManager_ == nullptr)
+    {
+        DM_LOG_ERROR("{}", (::DA::utils::LogString()
+            << "episode manager is not constructed"
+            << std::endl).str());
+        return false;
+    }
+
+    if (!episodeManager_->initialize())
+    {
+        if (!dataStorageWaitLogged_)
+        {
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                << "waiting for writable data storage: episode manager initialization failed"
+                << " disk_root=" << options_.diskRoot
+                << std::endl).str());
+            dataStorageWaitLogged_ = true;
+        }
+        setLedState(LedState::WaitStorage);
+        return false;
+    }
+
+    episodeManagerInitialized_ = true;
+    dataStorageWaitLogged_ = false;
+    activeHardwareFault_.reset();
+    episodeManager_->setGripperRuntimeStates(gripperRuntimeStates_);
+    syncMainCameraRuntimeStatesToEpisodeManager();
+    syncTactileCameraRuntimeStatesToEpisodeManager();
+
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+        << "data storage ready"
+        << " episode_root=" << episodeManager_->dataRoot()
+        << std::endl).str());
+    if (!isRecordingActive())
+    {
+        applyIdleState();
+        if (!tactileWarningActive_)
+        {
+            setAudioRecoveryCommand("ready");
+            sendAudioCommand("ready");
+        }
+    }
+    return true;
+}
+
+bool RecordRuntime::maintainDataStorage()
+{
+    if (episodeManagerInitialized_)
+    {
+        return true;
+    }
+
+    const auto diskFault = detectDiskHealthFault(options_.diskRoot);
+    if (diskFault.has_value())
+    {
+        if (!dataStorageWaitLogged_)
+        {
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                << "waiting for writable data storage"
+                << " disk_root=" << options_.diskRoot
+                << " detail=" << diskFault->detail
+                << std::endl).str());
+            dataStorageWaitLogged_ = true;
+        }
+        setLedState(LedState::WaitStorage);
+        return false;
+    }
+
+    dataStorageWaitLogged_ = false;
+    return ensureEpisodeManagerInitialized();
+}
+
 void RecordRuntime::handleGripperConnectionEvents()
 {
     bool updatedAny = false;
@@ -5760,6 +5839,11 @@ void RecordRuntime::cancelBackgroundTactileValidation()
 void RecordRuntime::applyIdleState()
 {
     resetRestoreUsbErrorWindow();
+    if (!episodeManagerInitialized_)
+    {
+        setLedState(LedState::WaitStorage);
+        return;
+    }
     if (tactileWarningActive_)
     {
         setTactileWarningLedState();
@@ -6691,6 +6775,15 @@ bool RecordRuntime::startRecording(bool resetRecording)
         DM_LOG_ERROR("{}", (::DA::utils::LogString() << "recording orchestrator not initialized" << std::endl).str());
         return false;
     }
+    if (!maintainDataStorage())
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "ignore start recording while data storage is not ready"
+            << " disk_root=" << options_.diskRoot
+            << std::endl).str());
+        setLedState(LedState::WaitStorage);
+        return false;
+    }
     cancelBackgroundTactileValidation();
     tactileTriggeredAudioCommand_.clear();
     activeHardwareFault_.reset();
@@ -7248,6 +7341,11 @@ void RecordRuntime::monitorHardwareHealth()
 {
     if (healthMonitor_ == nullptr)
     {
+        return;
+    }
+    if (!episodeManagerInitialized_)
+    {
+        setLedState(LedState::WaitStorage);
         return;
     }
 
