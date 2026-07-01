@@ -148,6 +148,9 @@ bool IsHardwareErrorType(const std::string& error_type)
            error_type == "hmi_input_disconnected" ||
            error_type == "hmi_input_inactive" ||
            error_type == "hmi_ports_inactive" ||
+           error_type == "main_camera_v4l2_startup_failure" ||
+           error_type == "main_camera_v4l2_kernel_hang" ||
+           error_type == "main_camera_short_stream" ||
            error_type == ugripper::runtime::kErrorTypeDeviceDisconnected;
 }
 
@@ -1160,6 +1163,23 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
                 std::to_string((steady_ms_fn_ != nullptr ? steady_ms_fn_() : workers_stop_start_ms) -
                                workers_stop_start_ms));
 
+    std::string recording_hardware_fault_reason;
+    if (dependencies_.detect_recording_hardware_fault != nullptr)
+    {
+        const std::optional<HealthFault> recording_fault =
+            dependencies_.detect_recording_hardware_fault(state_.current_episode_dir);
+        if (recording_fault.has_value())
+        {
+            due_to_error = true;
+            AddErrorType(&error_types, recording_fault->key.empty()
+                                           ? std::string(kErrorTypeRuntimeError)
+                                           : recording_fault->key);
+            recording_hardware_fault_reason =
+                "recording hardware fault (" + recording_fault->key + "): " + recording_fault->detail;
+            CallLog(dependencies_.log_error, recording_hardware_fault_reason);
+        }
+    }
+
     if (dependencies_.set_led_state != nullptr)
     {
         dependencies_.set_led_state(RuntimeLedState::Ready, 0.0);
@@ -1185,7 +1205,7 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     }
     if (dependencies_.set_led_state != nullptr)
     {
-        dependencies_.set_led_state(RuntimeLedState::Init, 0.0);
+        dependencies_.set_led_state(RuntimeLedState::Writing, 0.0);
     }
 
     bool ego_stop_ok = true;
@@ -1283,7 +1303,11 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
                                write_phase_start_ms));
 
     std::string episode_validation_error;
-    std::string final_error_message = due_to_error ? reason : std::string();
+    std::string final_error_message = due_to_error
+                                          ? (recording_hardware_fault_reason.empty()
+                                                 ? reason
+                                                 : recording_hardware_fault_reason)
+                                          : std::string();
     HardwareFaultSide stereo_control_failure_side = HardwareFaultSide::Unknown;
     if (!stereo_stop_ok)
     {

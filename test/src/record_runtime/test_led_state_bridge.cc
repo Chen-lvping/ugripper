@@ -169,7 +169,7 @@ TEST(LedStateBridgeTest, StopRecordingSuccessReturnsToReadyLed)
     ASSERT_GE(harness.led_states.size(), 4U);
     EXPECT_EQ(harness.led_states[0], RuntimeLedState::Recording);
     EXPECT_EQ(harness.led_states[harness.led_states.size() - 3], RuntimeLedState::Ready);
-    EXPECT_EQ(harness.led_states[harness.led_states.size() - 2], RuntimeLedState::Init);
+    EXPECT_EQ(harness.led_states[harness.led_states.size() - 2], RuntimeLedState::Writing);
     EXPECT_EQ(harness.led_states.back(), RuntimeLedState::Ready);
 }
 

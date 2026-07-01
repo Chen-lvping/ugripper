@@ -6,7 +6,9 @@
 
 ## v2.1.2 - Unreleased
 
-- 录制中新增 CameraRecorder 内核 D 状态监控：`record_runtime` 会只读检查 `/proc/<camera_recorder_pid>/task/*/stat`，当 CameraRecorder 线程连续处于 `TASK_UNINTERRUPTIBLE` 超过阈值时，将其归类为主摄 V4L2/USB 内核等待故障 `ERROR_2`，并触发现有 USB 复位流程；该路径允许在 camera recorder 因内核等待无法正常停录时继续复位，以释放卡死的 V4L2/USB ioctl。
+- 自动复位 symlink 齐全后的 ready 等待窗口从约 `25s` 提到约 `45s`，降低 Fays stereo daemon 重启和主摄缓存刷新接近边界时被误判为复位失败的概率。
+- Fays stereo daemon 不再按单侧 SDK startup complete 串行启动左右 recorder；同轮维护中会直接拉起可用侧 recorder，ready 状态继续由健康检查收敛。
+- 录制中新增 CameraRecorder 主摄 V4L2/USB 故障直达 `ERROR_2`：主摄启动阶段若返回 `VIDIOC_*`、I/O error、设备消失或超时，CameraRecorder 会写入 `/dev/shm` 故障证据，`record_runtime` 立即中断录制并触发现有 USB 复位流程；主摄录制窗口达到约 `5s` 后若仍只有明显短流，也按同一路径处理，`5s` 内快速启停不触发短流判定；CameraRecorder 内核 D 状态兜底阈值同步收敛为 `5s`，用于应用层无法返回错误的 ioctl 卡死场景。
 - 构建脚本默认主包版本调整到 `2.1.2`。
 
 ## v2.1.1 - Unreleased

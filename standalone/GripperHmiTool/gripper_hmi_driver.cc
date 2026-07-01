@@ -538,15 +538,14 @@ bool GripperHmiDriver::setLedEffect(const GripperLedEffect &effect)
 bool GripperHmiDriver::setBeepState(const GripperBeepState &state)
 {
     std::lock_guard<std::mutex> ioLock(ioMutex_);
-    if (serialPort_ == nullptr)
-    {
-        return false;
-    }
-
     pendingBeepState_ = state;
     activeBeepState_ = state;
     pendingBeepUpdate_ = true;
     ioCv_.notify_one();
+    if (serialPort_ == nullptr)
+    {
+        return false;
+    }
     return true;
 }
 

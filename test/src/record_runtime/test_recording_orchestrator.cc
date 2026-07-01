@@ -348,7 +348,7 @@ TEST(RecordingOrchestratorTest, StopRecordingSuccessSignalsWritingThenReady)
               (std::vector<RuntimeLedState>{
                   RuntimeLedState::Recording,
                   RuntimeLedState::Ready,
-                  RuntimeLedState::Init,
+                  RuntimeLedState::Writing,
                   RuntimeLedState::Ready,
               }));
     EXPECT_EQ(harness.sync_reason, "video stop");

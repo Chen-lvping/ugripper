@@ -8,7 +8,9 @@
 
 enum class GripperLedEffectState
 {
+    BootInit,
     Init,
+    Writing,
     WaitStorage,
     Ready,
     Warning,

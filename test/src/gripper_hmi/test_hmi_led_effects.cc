@@ -30,14 +30,22 @@ TEST(GripperLedEffectRendererTest, ParseStateTextAcceptsWarning)
     EXPECT_EQ(effect.state, GripperLedEffectState::Warning);
 }
 
+TEST(GripperLedEffectRendererTest, ParseStateTextAcceptsWriting)
+{
+    GripperLedEffect effect;
+
+    ASSERT_TRUE(GripperLedEffectRenderer::parseStateText("WRITING", &effect));
+    EXPECT_EQ(effect.state, GripperLedEffectState::Writing);
+}
+
 TEST(GripperLedEffectRendererTest, RenderProducesStableColorsForSimpleStates)
 {
     GripperLedEffectRenderer renderer;
 
-    const auto initColor = renderer.render(GripperLedEffect{GripperLedEffectState::Init, 0.0}, 0, 0);
-    EXPECT_EQ(initColor.red, 0);
-    EXPECT_EQ(initColor.green, 122);
-    EXPECT_EQ(initColor.blue, 255);
+    const auto writingColor = renderer.render(GripperLedEffect{GripperLedEffectState::Writing, 0.0}, 0, 0);
+    EXPECT_EQ(writingColor.red, 0);
+    EXPECT_EQ(writingColor.green, 122);
+    EXPECT_EQ(writingColor.blue, 255);
 
     const auto recordingOn = renderer.render(GripperLedEffect{GripperLedEffectState::Recording, 0.0}, 100, 0);
     EXPECT_EQ(recordingOn.red, 0);
@@ -48,6 +56,21 @@ TEST(GripperLedEffectRendererTest, RenderProducesStableColorsForSimpleStates)
     EXPECT_EQ(recordingOff.red, 0);
     EXPECT_EQ(recordingOff.green, 0);
     EXPECT_EQ(recordingOff.blue, 0);
+}
+
+TEST(GripperLedEffectRendererTest, InitBlinksBlue)
+{
+    GripperLedEffectRenderer renderer;
+
+    const auto initOn = renderer.render(GripperLedEffect{GripperLedEffectState::Init, 0.0}, 0, 0);
+    EXPECT_EQ(initOn.red, 0);
+    EXPECT_EQ(initOn.green, 122);
+    EXPECT_EQ(initOn.blue, 255);
+
+    const auto initOff = renderer.render(GripperLedEffect{GripperLedEffectState::Init, 0.0}, 700, 0);
+    EXPECT_EQ(initOff.red, 0);
+    EXPECT_EQ(initOff.green, 0);
+    EXPECT_EQ(initOff.blue, 0);
 }
 
 TEST(GripperLedEffectRendererTest, ReadyBreathStartsBright)

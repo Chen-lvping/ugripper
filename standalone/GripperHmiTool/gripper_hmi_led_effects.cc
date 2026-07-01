@@ -100,9 +100,17 @@ bool GripperLedEffectRenderer::parseStateText(const std::string &text, GripperLe
     const std::string progressText = (colon == std::string::npos) ? std::string() : text.substr(colon + 1);
 
     GripperLedEffect parsed;
-    if (stateText == "INIT")
+    if (stateText == "BOOT_INIT")
+    {
+        parsed.state = GripperLedEffectState::BootInit;
+    }
+    else if (stateText == "INIT")
     {
         parsed.state = GripperLedEffectState::Init;
+    }
+    else if (stateText == "WRITING")
+    {
+        parsed.state = GripperLedEffectState::Writing;
     }
     else if (stateText == "WAIT_STORAGE")
     {
@@ -197,8 +205,12 @@ std::string GripperLedEffectRenderer::stateText(const GripperLedEffect &effect)
 {
     switch (effect.state)
     {
+    case GripperLedEffectState::BootInit:
+        return "BOOT_INIT";
     case GripperLedEffectState::Init:
         return "INIT";
+    case GripperLedEffectState::Writing:
+        return "WRITING";
     case GripperLedEffectState::WaitStorage:
         return "WAIT_STORAGE";
     case GripperLedEffectState::Ready:
@@ -241,11 +253,18 @@ GripperLedColor GripperLedEffectRenderer::render(const GripperLedEffect &effect,
 {
     switch (effect.state)
     {
+    case GripperLedEffectState::BootInit:
+    {
+        const bool on = (steadyMs % kCalibBlinkPeriodMs) < (kCalibBlinkPeriodMs / 2);
+        return on ? GripperLedColor{0, 122, 255} : GripperLedColor{0, 0, 0};
+    }
     case GripperLedEffectState::Init:
     {
         const bool on = (steadyMs % kCalibBlinkPeriodMs) < (kCalibBlinkPeriodMs / 2);
         return on ? GripperLedColor{0, 122, 255} : GripperLedColor{0, 0, 0};
     }
+    case GripperLedEffectState::Writing:
+        return GripperLedColor{0, 122, 255};
     case GripperLedEffectState::WaitStorage:
         return GripperLedColor{255, 255, 255};
     case GripperLedEffectState::Ready:

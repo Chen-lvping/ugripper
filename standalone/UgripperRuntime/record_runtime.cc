@@ -59,17 +59,19 @@ constexpr uint64_t kPostUmountAudioDelayMs = 2000;
 constexpr uint64_t kAudioPlayerRestartIntervalMs = 2000;
 constexpr uint64_t kAudioPlayerReadyGraceMs = 3000;
 constexpr uint64_t kStereoDaemonRestartIntervalMs = 2000;
+constexpr uint64_t kStereoStartupReadyTimeoutMs = 40000;
 constexpr uint64_t kStereoFinalizeWaitPollMs = 100;
 constexpr uint64_t kRecordControlDebounceMs = 300;
 constexpr uint64_t kRestoreUsbSymlinkPollIntervalMs = 1000;
 constexpr uint64_t kRestoreUsbSymlinkMaxWaitMs = 25000;
-constexpr uint64_t kRestoreUsbReadyCheckDelayMs = 25000;
+constexpr uint64_t kRestoreUsbReadyCheckDelayMs = 45000;
 constexpr uint64_t kRestoreUsbFailureAlarmDurationMs = 5000;
+constexpr uint64_t kRestoreUsbFailureAlarmSilenceRetryMs = 250;
 constexpr uint64_t kRestoreUsbManualInsertGraceMs = 20000;
 constexpr uint64_t kRestoreUsbTriggerStableMs = 6000;
 constexpr uint64_t kRestoreUsbPreflightFailureCooldownMs = 30000;
 constexpr int kRestoreUsbMaxAttemptsPerError = 3;
-constexpr uint64_t kCameraRecorderDStateFaultMs = 8000;
+constexpr uint64_t kCameraRecorderDStateFaultMs = 5000;
 constexpr uint64_t kCameraRecorderDStateLogIntervalMs = 3000;
 constexpr uint64_t kEgoFinalizeWaitPollMs = 100;
 constexpr uint64_t kEgoStartAckWaitMs = 5000;
@@ -118,8 +120,20 @@ constexpr size_t kTactileHistoryWindow = 3;
 constexpr int kTactileSnapshotTimeoutMs = 2500;
 constexpr const char *kEpisodeTimingFileName = ".recording_timing.json";
 constexpr const char *kEpisodeTimingShmPrefix = "ugripper_recording_timing_";
+constexpr const char *kCameraRecorderFaultShmPrefix = "ugripper_camera_recorder_fault_";
 constexpr const char *kEgoSyncStatusFileName = "ego_sync.json";
 constexpr const char *kMainCameraV4l2KernelHangKey = "main_camera_v4l2_kernel_hang";
+constexpr const char *kMainCameraV4l2StartupFailureKey = "main_camera_v4l2_startup_failure";
+constexpr const char *kMainCameraShortStreamKey = "main_camera_short_stream";
+
+bool IsStereoStartupFaultKey(const std::string& key)
+{
+    return key == "stereo_daemon_not_running" ||
+           key == "stereo_status_missing" ||
+           key == "stereo_status_invalid" ||
+           key == "stereo_not_ready" ||
+           key == ugripper::runtime::kErrorTypeStereoControlFailed;
+}
 
 #ifndef UGRIPPER_ENABLE_PERF_LOG
 #define UGRIPPER_ENABLE_PERF_LOG 0
@@ -286,9 +300,18 @@ bool IsCameraRecorderKernelHangReason(const std::string &reason)
     return reason.find(kMainCameraV4l2KernelHangKey) != std::string::npos;
 }
 
-bool IsCameraRecorderKernelHangFault(const ugripper::runtime::HealthFault &fault)
+bool IsCameraRecorderMainCameraFault(const ugripper::runtime::HealthFault &fault)
 {
-    return fault.key == kMainCameraV4l2KernelHangKey;
+    return fault.key == kMainCameraV4l2KernelHangKey ||
+           fault.key == kMainCameraV4l2StartupFailureKey ||
+           fault.key == kMainCameraShortStreamKey;
+}
+
+bool IsImmediateRestoreUsbTriggerCause(const std::string &cause)
+{
+    return cause == kMainCameraV4l2KernelHangKey ||
+           cause == kMainCameraV4l2StartupFailureKey ||
+           cause == kMainCameraShortStreamKey;
 }
 
 bool isMountedDiskRoot(const fs::path &diskRoot)
@@ -644,6 +667,13 @@ fs::path episodeTimingPath(const fs::path &episodeDir)
     const std::string parent = sanitizeFileComponent(episodeDir.parent_path().filename().string());
     const std::string name = sanitizeFileComponent(episodeDir.filename().string());
     return fs::path("/dev/shm") / (std::string(kEpisodeTimingShmPrefix) + parent + "_" + name + ".json");
+}
+
+fs::path cameraRecorderFaultPath(const fs::path &episodeDir)
+{
+    const std::string parent = sanitizeFileComponent(episodeDir.parent_path().filename().string());
+    const std::string name = sanitizeFileComponent(episodeDir.filename().string());
+    return fs::path("/dev/shm") / (std::string(kCameraRecorderFaultShmPrefix) + parent + "_" + name + ".json");
 }
 
 std::string stripEpisodeTempSuffix(const std::string &name)
@@ -3798,8 +3828,12 @@ GripperLedEffect RecordRuntime::makeLedEffect(LedState state, double progress)
 {
     switch (state)
     {
+    case RecordRuntime::LedState::BootInit:
+        return {GripperLedEffectState::BootInit, progress};
     case RecordRuntime::LedState::Init:
         return {GripperLedEffectState::Init, progress};
+    case RecordRuntime::LedState::Writing:
+        return {GripperLedEffectState::Writing, progress};
     case RecordRuntime::LedState::WaitStorage:
         return {GripperLedEffectState::WaitStorage, progress};
     case RecordRuntime::LedState::Ready:
@@ -3836,6 +3870,8 @@ RecordRuntime::LedState RecordRuntime::toLedState(ugripper::runtime::RuntimeLedS
     {
     case ugripper::runtime::RuntimeLedState::Init:
         return LedState::Init;
+    case ugripper::runtime::RuntimeLedState::Writing:
+        return LedState::Writing;
     case ugripper::runtime::RuntimeLedState::Ready:
         return LedState::Ready;
     case ugripper::runtime::RuntimeLedState::Recording:
@@ -3866,8 +3902,12 @@ const char *RecordRuntime::ledStateName(LedState state)
 {
     switch (state)
     {
+    case LedState::BootInit:
+        return "BootInit";
     case LedState::Init:
         return "Init";
+    case LedState::Writing:
+        return "Writing";
     case LedState::WaitStorage:
         return "WaitStorage";
     case LedState::Ready:
@@ -4023,7 +4063,7 @@ bool RecordRuntime::initialize()
 
     ledController_ = std::make_unique<HmiLedController>(&panelManager_);
     ledController_->start();
-    setLedState(LedState::Init);
+    setLedState(LedState::BootInit);
 
     hmiController_ = std::make_unique<ugripper::runtime::HmiController>(
         ugripper::runtime::HmiControllerOptions{
@@ -4091,7 +4131,7 @@ bool RecordRuntime::initialize()
                 std::vector<std::string>(criticalDevicePaths.begin(), criticalDevicePaths.end()),
             .poll_interval_ms = kHealthCheckIntervalMs,
             .hmi_active_timeout_ms = kHmiActiveTimeoutMs,
-            .stereo_startup_grace_ms = 12000,
+            .stereo_startup_grace_ms = kStereoStartupReadyTimeoutMs,
         },
         ugripper::runtime::HealthMonitor::Dependencies{
             .get_disk_fault =
@@ -4281,6 +4321,15 @@ bool RecordRuntime::initialize()
                     }
                     return episodeManager_->finalizeEpisodeDir(episode_dir, error_message);
                 },
+            .detect_recording_hardware_fault =
+                [this](const std::string& episode_dir) {
+                    const auto fault = detectCameraRecorderStartupFailureForEpisode(episode_dir);
+                    if (fault.has_value())
+                    {
+                        activeHardwareFault_ = *fault;
+                    }
+                    return fault;
+                },
             .write_recording_lock =
                 [this](const std::string& episode_dir) {
                     return writeRecordingLock(episode_dir);
@@ -4345,13 +4394,14 @@ bool RecordRuntime::initialize()
     panelManager_.consumeConnectionEvents();
 
     startAudioPlayer();
+    healthState_.first_seen_ms = currentSteadyMs();
     startStereoDaemon();
     initializeRecordControlPipe();
 
     std::this_thread::sleep_for(std::chrono::milliseconds(150));
     applyIdleState();
     maintainDataStorage();
-    if (!tactileWarningActive_ && episodeManagerInitialized_)
+    if (!tactileWarningActive_ && episodeManagerInitialized_ && !currentHealthFault().has_value())
     {
         setAudioRecoveryCommand("ready");
         sendAudioCommand("ready");
@@ -4501,6 +4551,28 @@ void RecordRuntime::maintainStereoDaemon()
     {
         stereoSessionClient_->MaintainDaemon();
     }
+}
+
+std::optional<ugripper::runtime::HealthFault> RecordRuntime::currentHealthFault() const
+{
+    if (healthMonitor_ == nullptr)
+    {
+        return std::nullopt;
+    }
+    return healthMonitor_->EvaluateHealth();
+}
+
+bool RecordRuntime::isStereoStartupWaiting() const
+{
+    const uint64_t nowMs = currentSteadyMs();
+    const uint64_t firstSeenMs = healthState_.first_seen_ms == 0 ? nowMs : healthState_.first_seen_ms;
+    if ((nowMs - firstSeenMs) >= kStereoStartupReadyTimeoutMs)
+    {
+        return false;
+    }
+
+    const std::optional<ugripper::runtime::HealthFault> fault = currentHealthFault();
+    return fault.has_value() && IsStereoStartupFaultKey(fault->key);
 }
 
 void RecordRuntime::suspendStereoDaemonForRestoreUsb(const std::string &reason)
@@ -5295,7 +5367,7 @@ bool RecordRuntime::ensureEpisodeManagerInitialized()
     if (!isRecordingActive())
     {
         applyIdleState();
-        if (!tactileWarningActive_)
+        if (!tactileWarningActive_ && !currentHealthFault().has_value())
         {
             setAudioRecoveryCommand("ready");
             sendAudioCommand("ready");
@@ -5949,6 +6021,19 @@ void RecordRuntime::applyIdleState()
         setLedState(LedState::WaitStorage);
         return;
     }
+    const std::optional<ugripper::runtime::HealthFault> fault = currentHealthFault();
+    if (fault.has_value())
+    {
+        if (isStereoStartupWaiting())
+        {
+            setLedState(LedState::Init);
+        }
+        else
+        {
+            setHardwareFaultLedState(*fault);
+        }
+        return;
+    }
     if (tactileWarningActive_)
     {
         setTactileWarningLedState();
@@ -6078,6 +6163,106 @@ void RecordRuntime::resetCameraRecorderDStateTracking()
     cameraRecorderDStateTaskId_.clear();
     cameraRecorderDStateFirstSeenMs_ = 0;
     cameraRecorderDStateLastLogMs_ = 0;
+}
+
+std::optional<ugripper::runtime::HealthFault> RecordRuntime::detectCameraRecorderStartupFailure()
+{
+    if (!isRecordingActive())
+    {
+        return std::nullopt;
+    }
+
+    const std::string episodeDir = currentEpisodeDir();
+    if (episodeDir.empty())
+    {
+        return std::nullopt;
+    }
+
+    return detectCameraRecorderStartupFailureForEpisode(episodeDir);
+}
+
+std::optional<ugripper::runtime::HealthFault> RecordRuntime::detectCameraRecorderStartupFailureForEpisode(const std::string &episodeDir)
+{
+    if (episodeDir.empty())
+    {
+        return std::nullopt;
+    }
+
+    const fs::path faultPath = cameraRecorderFaultPath(episodeDir);
+    std::error_code error;
+    if (!fs::exists(faultPath, error) || error)
+    {
+        return std::nullopt;
+    }
+
+    std::ifstream input(faultPath);
+    if (!input.is_open())
+    {
+        return std::nullopt;
+    }
+
+    json root;
+    try
+    {
+        root = json::parse(input);
+    }
+    catch (const std::exception &ex)
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "camera recorder fault file parse failed: path=" << faultPath
+            << " error=" << ex.what()
+            << std::endl).str());
+        return std::nullopt;
+    }
+
+    const std::string faultType = root.value("fault_type", std::string());
+    if (faultType != kMainCameraV4l2StartupFailureKey &&
+        faultType != kMainCameraShortStreamKey)
+    {
+        return std::nullopt;
+    }
+
+    const std::string faultEpisodeDir = root.value("episode_dir", std::string());
+    if (!faultEpisodeDir.empty() && faultEpisodeDir != episodeDir)
+    {
+        return std::nullopt;
+    }
+
+    const std::string cameraName = root.value("camera_name", std::string());
+    const std::string device = root.value("device", std::string());
+    const std::string faultError = root.value("error", std::string());
+    if (cameraName.empty() && device.empty() && faultError.empty())
+    {
+        return std::nullopt;
+    }
+
+    const bool shortStreamFault = faultType == kMainCameraShortStreamKey;
+    const char *faultKey = shortStreamFault
+        ? kMainCameraShortStreamKey
+        : kMainCameraV4l2StartupFailureKey;
+    std::ostringstream detail;
+    detail << (shortStreamFault
+                   ? "CameraRecorder main camera short stream"
+                   : "CameraRecorder main camera startup failure")
+           << " camera=" << (cameraName.empty() ? "unknown" : cameraName)
+           << " device=" << (device.empty() ? "unknown" : device)
+           << " error=" << (faultError.empty() ? "unknown" : faultError);
+    if (shortStreamFault)
+    {
+        detail << " frame_count=" << root.value("frame_count", static_cast<uint64_t>(0))
+               << " span_us=" << root.value("span_us", static_cast<int64_t>(-1))
+               << " session_us=" << root.value("session_us", static_cast<int64_t>(-1))
+               << " phase=" << root.value("phase", std::string("unknown"));
+    }
+    detail << " fault_file=" << faultPath.string();
+
+    const std::string sideText = cameraName + " " + device + " " + faultError;
+    return ugripper::runtime::HealthFault{
+        ugripper::runtime::RuntimeLedState::Error2,
+        restoreUsbSideForText(sideText),
+        faultKey,
+        detail.str(),
+    };
 }
 
 std::optional<ugripper::runtime::HealthFault> RecordRuntime::detectCameraRecorderKernelHang()
@@ -6304,38 +6489,16 @@ void RecordRuntime::triggerRestoreUsbFailureAlarm(const std::string &reason)
     }
     restoreUsbFailureAlarmActive_ = true;
     restoreUsbFailureAlarmStartMs_ = currentSteadyMs();
+    restoreUsbFailureAlarmLastSilenceMs_ = 0;
 
-    const auto side = activeHardwareFault_.has_value()
-                          ? activeHardwareFault_->side
-                          : ugripper::runtime::HardwareFaultSide::Unknown;
-    const char *sideName = "unknown";
     bool wroteAny = false;
-    switch (side)
-    {
-    case ugripper::runtime::HardwareFaultSide::Left:
-        sideName = "left";
-        wroteAny = panelManager_.setBeepEnabledForSide("left", true);
-        break;
-    case ugripper::runtime::HardwareFaultSide::Right:
-        sideName = "right";
-        wroteAny = panelManager_.setBeepEnabledForSide("right", true);
-        break;
-    case ugripper::runtime::HardwareFaultSide::Both:
-        sideName = "both";
-        wroteAny = panelManager_.setBeepEnabledForSide("left", true) || wroteAny;
-        wroteAny = panelManager_.setBeepEnabledForSide("right", true) || wroteAny;
-        break;
-    case ugripper::runtime::HardwareFaultSide::Unknown:
-    default:
-        wroteAny = panelManager_.setBeepEnabledForSide("left", true) || wroteAny;
-        wroteAny = panelManager_.setBeepEnabledForSide("right", true) || wroteAny;
-        break;
-    }
+    wroteAny = panelManager_.setBeepEnabledForSide("left", true) || wroteAny;
+    wroteAny = panelManager_.setBeepEnabledForSide("right", true) || wroteAny;
 
     DM_LOG_ERROR("{}", (::DA::utils::LogString()
         << "restore usb failed after max attempts; hmi beep alarm triggered"
         << " attempts=" << restoreUsbAttemptsInCurrentError_
-        << " side=" << sideName
+        << " side=both"
         << " wrote_any=" << boolText(wroteAny)
         << " reason=" << reason
         << std::endl).str());
@@ -6353,9 +6516,16 @@ void RecordRuntime::maintainRestoreUsbFailureAlarm()
     {
         return;
     }
+    if (restoreUsbFailureAlarmLastSilenceMs_ == 0 ||
+        nowMs - restoreUsbFailureAlarmLastSilenceMs_ >= kRestoreUsbFailureAlarmSilenceRetryMs)
+    {
+        panelManager_.silenceBeep();
+        restoreUsbFailureAlarmLastSilenceMs_ = nowMs;
+    }
     panelManager_.silenceBeep();
     restoreUsbFailureAlarmActive_ = false;
     restoreUsbFailureAlarmStartMs_ = 0;
+    restoreUsbFailureAlarmLastSilenceMs_ = 0;
     DM_LOG_INFO("{}", (::DA::utils::LogString()
         << "restore usb failure hmi beep alarm auto silenced"
         << " duration_ms=" << kRestoreUsbFailureAlarmDurationMs
@@ -6458,6 +6628,7 @@ void RecordRuntime::resetRestoreUsbErrorWindow()
         restoreUsbFailureAlarmActive_ = false;
     }
     restoreUsbFailureAlarmStartMs_ = 0;
+    restoreUsbFailureAlarmLastSilenceMs_ = 0;
     restoreUsbPreflightFailureUntilMs_ = 0;
     if (!restoreUsbInProgress_->load())
     {
@@ -6633,6 +6804,31 @@ void RecordRuntime::logRestoreUsbRequested(const RestoreUsbTriggerContext &conte
 bool RecordRuntime::confirmRestoreUsbTrigger(const RestoreUsbTriggerContext &context)
 {
     const uint64_t nowMs = currentSteadyMs();
+    if (IsImmediateRestoreUsbTriggerCause(context.cause))
+    {
+        if (!restoreUsbPendingTriggerKey_.empty())
+        {
+            const uint64_t ageMs = restoreUsbPendingTriggerFirstSeenMs_ == 0
+                                       ? 0
+                                       : nowMs - restoreUsbPendingTriggerFirstSeenMs_;
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "restore usb pending cleared"
+                << " cause=" << restoreUsbPendingTriggerCause_
+                << " evidence=" << restoreUsbPendingTriggerEvidence_
+                << " side=" << restoreUsbPendingTriggerSide_
+                << " age_ms=" << ageMs
+                << std::endl).str());
+        }
+        restoreUsbPendingTriggerKey_.clear();
+        restoreUsbPendingTriggerCause_.clear();
+        restoreUsbPendingTriggerEvidence_.clear();
+        restoreUsbPendingTriggerSide_.clear();
+        restoreUsbPendingTriggerFirstSeenMs_ = 0;
+        restoreUsbPendingTriggerLastSeenMs_ = 0;
+        restoreUsbPendingTriggerLogged_ = false;
+        return true;
+    }
+
     const std::string key = context.cause + "|" + context.side + "|" + context.evidence;
     if (restoreUsbPendingTriggerKey_ != key)
     {
@@ -6999,6 +7195,24 @@ bool RecordRuntime::startRecording(bool resetRecording)
         setLedState(LedState::WaitStorage);
         return false;
     }
+    if (isStereoStartupWaiting())
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "ignore start recording while Fays stereo recorder is still starting"
+            << std::endl).str());
+        setLedState(LedState::Init);
+        return false;
+    }
+    if (const std::optional<ugripper::runtime::HealthFault> fault = currentHealthFault())
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "ignore start recording while hardware health fault is present"
+            << " key=" << fault->key
+            << std::endl).str());
+        setHardwareFaultLedState(*fault);
+        sendAudioCommand("error");
+        return false;
+    }
     cancelBackgroundTactileValidation();
     tactileTriggeredAudioCommand_.clear();
     activeHardwareFault_.reset();
@@ -7015,6 +7229,10 @@ bool RecordRuntime::stopRecording(bool dueToError, const std::string &reason, co
     }
     const bool ok = recordingOrchestrator_->StopRecording(dueToError, reason, errorType, nullptr);
     const std::string completedEpisodeDir = lastEpisodeDir();
+    if (!dueToError && activeHardwareFault_.has_value() && IsCameraRecorderMainCameraFault(*activeHardwareFault_))
+    {
+        maybeTriggerRestoreUsbForHardwareFault(*activeHardwareFault_);
+    }
     if (ok && !dueToError && !completedEpisodeDir.empty())
     {
         scheduleBackgroundTactileValidation(completedEpisodeDir);
@@ -7137,7 +7355,7 @@ bool RecordRuntime::handleLeftDualUmountAction()
         return false;
     }
 
-    setLedState(LedState::Init);
+    setLedState(LedState::Writing);
     setAudioRecoveryCommand("writing");
     sendAudioCommand("writing");
     syncRuntimeLogToDisk("left dual-button umount");
@@ -7590,12 +7808,12 @@ void RecordRuntime::monitorHardwareHealth()
                 }
                 const bool stopOk = stopRecording(true, stopReason, fault.key);
                 const bool recordingStopped = !isRecordingActive();
-                if (stopOk || recordingStopped || IsCameraRecorderKernelHangFault(fault))
+                if (stopOk || recordingStopped || IsCameraRecorderMainCameraFault(fault))
                 {
                     if (!stopOk && !recordingStopped)
                     {
                         DM_LOG_WARN("{}", (::DA::utils::LogString()
-                            << "recording did not stop; continue restore usb for camera recorder kernel hang"
+                            << "recording did not stop; continue restore usb for camera recorder main camera fault"
                             << " key=" << fault.key
                             << std::endl).str());
                     }
@@ -7637,6 +7855,19 @@ void RecordRuntime::monitorHardwareHealth()
         return;
     }
 
+    if (const auto cameraStartupFault = detectCameraRecorderStartupFailure())
+    {
+        const std::string errorKey = cameraStartupFault->key + "|" + cameraStartupFault->detail;
+        const bool shouldNotifyFault =
+            healthState_.status != ugripper::runtime::HealthStatus::Error ||
+            healthState_.last_error_key != errorKey;
+        healthState_.status = ugripper::runtime::HealthStatus::Error;
+        healthState_.last_error_key = errorKey;
+        healthState_.last_check_ms = currentSteadyMs();
+        handleHardwareFault(*cameraStartupFault, shouldNotifyFault);
+        return;
+    }
+
     if (const auto cameraHangFault = detectCameraRecorderKernelHang())
     {
         const std::string errorKey = cameraHangFault->key + "|" + cameraHangFault->detail;
@@ -7650,7 +7881,10 @@ void RecordRuntime::monitorHardwareHealth()
         return;
     }
 
-    if (result.recovered)
+    const bool becameReadyAfterStartup =
+        previousHealthState.status == ugripper::runtime::HealthStatus::Unknown &&
+        healthState_.status == ugripper::runtime::HealthStatus::Ok;
+    if (result.recovered || becameReadyAfterStartup)
     {
         if (!restoreUsbPendingTriggerKey_.empty())
         {
@@ -7674,16 +7908,25 @@ void RecordRuntime::monitorHardwareHealth()
             restoreUsbPendingTriggerLogged_ = false;
         }
         activeHardwareFault_.reset();
-        DM_LOG_INFO("{}", (::DA::utils::LogString()
-                           << "hardware health recovered"
-                           << (previousHealthState.last_error_key.empty()
-                                   ? std::string()
-                                   : " from " + previousHealthState.last_error_key)
-                           << std::endl)
-                              .str());
-        DM_LOG_INFO("{}", (::DA::utils::LogString()
-            << "[HMI_DIAG] category=health_recovered"
-            << " recording=" << boolText(isRecordingActive())).str());
+        if (result.recovered)
+        {
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                               << "hardware health recovered"
+                               << (previousHealthState.last_error_key.empty()
+                                       ? std::string()
+                                       : " from " + previousHealthState.last_error_key)
+                               << std::endl)
+                                  .str());
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "[HMI_DIAG] category=health_recovered"
+                << " recording=" << boolText(isRecordingActive())).str());
+        }
+        else
+        {
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "[HMI_DIAG] category=health_ready"
+                << " recording=" << boolText(isRecordingActive())).str());
+        }
         if (isRecordingActive())
         {
             setLedState(LedState::Recording);
@@ -7835,7 +8078,7 @@ void RecordRuntime::maybeTriggerRestoreUsbForHardwareFault(const ugripper::runti
     {
         return;
     }
-    triggerRestoreUsbOnError(reason, IsCameraRecorderKernelHangFault(fault));
+    triggerRestoreUsbOnError(reason, IsCameraRecorderMainCameraFault(fault));
 }
 
 std::string RecordRuntime::readEnvValue(const std::string &envFile, const std::string &key)
@@ -8404,6 +8647,11 @@ bool RecordRuntime::GripperPanelManager::setBeepEnabledForSide(const std::string
         }
         if (driver == nullptr || !driver->isConnected())
         {
+            if (!enabled && driver != nullptr &&
+                sideForPort(driver->getPort()) == side)
+            {
+                driver->silenceBeep();
+            }
             continue;
         }
         if (sideForPort(driver->getPort()) != side)
@@ -8430,7 +8678,7 @@ void RecordRuntime::GripperPanelManager::silenceBeep()
             currentDriverBeepStates_[index] = GripperBeepState{0, 0};
         }
         auto &driver = drivers_[index];
-        if (driver != nullptr && driver->isConnected())
+        if (driver != nullptr)
         {
             driver->silenceBeep();
         }

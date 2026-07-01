@@ -78,7 +78,9 @@ private:
 
     enum class LedState
     {
+        BootInit,
         Init,
+        Writing,
         WaitStorage,
         Ready,
         Warning,
@@ -353,6 +355,8 @@ private:
     bool startStereoDaemon();
     void stopStereoDaemon();
     void maintainStereoDaemon();
+    std::optional<ugripper::runtime::HealthFault> currentHealthFault() const;
+    bool isStereoStartupWaiting() const;
     void maintainRestoreUsbRetry();
     void maintainRestoreUsbFailureAlarm();
     void maintainRestoreUsbDevicePresence();
@@ -396,6 +400,8 @@ private:
     void setTactileWarningLedState();
     void setHardwareFaultLedState(const ugripper::runtime::HealthFault &fault);
     void maybeTriggerRestoreUsbForHardwareFault(const ugripper::runtime::HealthFault &fault);
+    std::optional<ugripper::runtime::HealthFault> detectCameraRecorderStartupFailure();
+    std::optional<ugripper::runtime::HealthFault> detectCameraRecorderStartupFailureForEpisode(const std::string &episodeDir);
     std::optional<ugripper::runtime::HealthFault> detectCameraRecorderKernelHang();
     void resetCameraRecorderDStateTracking();
     void handleFailureState(ugripper::runtime::RuntimeLedState state,
@@ -473,6 +479,7 @@ private:
     bool restoreUsbCheckMainCameraRecovery_ = false;
     bool restoreUsbFailureAlarmActive_ = false;
     uint64_t restoreUsbFailureAlarmStartMs_ = 0;
+    uint64_t restoreUsbFailureAlarmLastSilenceMs_ = 0;
     uint64_t restoreUsbPreflightFailureUntilMs_ = 0;
     bool restoreUsbStereoDaemonStopped_ = false;
     bool episodeManagerInitialized_ = false;

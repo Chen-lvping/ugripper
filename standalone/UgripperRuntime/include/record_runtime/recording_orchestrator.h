@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -47,6 +48,7 @@ public:
     using WriteEpisodeMetadataFn = std::function<void(const std::string&, bool, const std::string&, const std::string&)>;
     using WriteValidationErrorLogFn = std::function<void(const std::string&, const std::string&)>;
     using FinalizeEpisodeDirFn = std::function<std::string(const std::string&, std::string*)>;
+    using DetectRecordingHardwareFaultFn = std::function<std::optional<HealthFault>(const std::string&)>;
     using WriteRecordingLockFn = std::function<bool(const std::string&)>;
     using RemoveRecordingLockFn = std::function<void()>;
     using StartWorkerFn = std::function<bool(WorkerName, const ProcessSpec&, std::string*)>;
@@ -81,6 +83,7 @@ public:
         WriteEpisodeMetadataFn write_episode_metadata;
         WriteValidationErrorLogFn write_validation_error_log;
         FinalizeEpisodeDirFn finalize_episode_dir;
+        DetectRecordingHardwareFaultFn detect_recording_hardware_fault;
         WriteRecordingLockFn write_recording_lock;
         RemoveRecordingLockFn remove_recording_lock;
         StartWorkerFn start_worker;
