@@ -1117,34 +1117,79 @@ maintain_side_daemon() {
 
 maintain_side_daemon_by_name() {
     local side="$1"
-    local already_working=false
 
     if [ "$side" = "left" ]; then
-        if [ -n "$LEFT_PID" ] && kill -0 "$LEFT_PID" 2>/dev/null && [ -p "$LEFT_FIFO" ] &&
-           check_side_working_state left "$LEFT_CONFIG" "$LEFT_FIFO" "$LEFT_CALIB_JSON" "$LEFT_PID" true; then
-            already_working=true
-        fi
         maintain_side_daemon left "$LEFT_CONFIG" "$LEFT_FIFO" stereo_left.mkv fays_data_left.mcap "$LEFT_CALIB_JSON" "$LEFT_PID"
-        [ "$already_working" = "true" ] || wait_for_side_start_complete left "$LEFT_CONFIG" "$LEFT_FIFO" "$LEFT_CALIB_JSON" || true
     else
-        if [ -n "$RIGHT_PID" ] && kill -0 "$RIGHT_PID" 2>/dev/null && [ -p "$RIGHT_FIFO" ] &&
-           check_side_working_state right "$RIGHT_CONFIG" "$RIGHT_FIFO" "$RIGHT_CALIB_JSON" "$RIGHT_PID" true; then
-            already_working=true
-        fi
         maintain_side_daemon right "$RIGHT_CONFIG" "$RIGHT_FIFO" stereo_right.mkv fays_data_right.mcap "$RIGHT_CALIB_JSON" "$RIGHT_PID"
-        [ "$already_working" = "true" ] || wait_for_side_start_complete right "$RIGHT_CONFIG" "$RIGHT_FIFO" "$RIGHT_CALIB_JSON" || true
     fi
 }
 
-maintain_stereo_daemons_in_insert_order() {
-    local side
+write_side_maintain_result() {
+    local side="$1"
+    local result_path="$2"
+    local pid started_at unhealthy_reason
 
-    while IFS= read -r side; do
-        [ -n "$side" ] || continue
-        maintain_side_daemon_by_name "$side"
-    done <<EOF
-$(stereo_start_order)
-EOF
+    pid="$(side_pid "$side")"
+    started_at="$(side_started_at "$side")"
+    unhealthy_reason="$(side_last_unhealthy_reason "$side")"
+    {
+        printf 'pid=%q\n' "$pid"
+        printf 'started_at=%q\n' "$started_at"
+        printf 'unhealthy_reason=%q\n' "$unhealthy_reason"
+        printf 'last_finalize_error=%q\n' "$LAST_FINALIZE_ERROR"
+    } > "$result_path"
+}
+
+maintain_side_daemon_worker() {
+    local side="$1"
+    local result_path="$2"
+
+    maintain_side_daemon_by_name "$side"
+    write_side_maintain_result "$side" "$result_path"
+}
+
+apply_side_maintain_result() {
+    local side="$1"
+    local result_path="$2"
+    local pid="" started_at=0 unhealthy_reason="" last_finalize_error=""
+
+    [ -f "$result_path" ] || return 0
+    # shellcheck disable=SC1090
+    source "$result_path"
+    if [ "$side" = "left" ]; then
+        LEFT_PID="$pid"
+        LEFT_STARTED_AT="$started_at"
+        LEFT_LAST_UNHEALTHY_REASON="$unhealthy_reason"
+    else
+        RIGHT_PID="$pid"
+        RIGHT_STARTED_AT="$started_at"
+        RIGHT_LAST_UNHEALTHY_REASON="$unhealthy_reason"
+    fi
+    if [ -n "$last_finalize_error" ] && [ -z "$LAST_FINALIZE_ERROR" ]; then
+        LAST_FINALIZE_ERROR="$last_finalize_error"
+    fi
+}
+
+maintain_stereo_daemons_parallel() {
+    local result_dir left_result right_result left_worker="" right_worker=""
+
+    result_dir="$(dirname "$CONTROL_FIFO")"
+    mkdir -p "$result_dir"
+    left_result="$(mktemp "$result_dir/fays_left_maintain.XXXXXX")"
+    right_result="$(mktemp "$result_dir/fays_right_maintain.XXXXXX")"
+
+    maintain_side_daemon_worker left "$left_result" &
+    left_worker="$!"
+    maintain_side_daemon_worker right "$right_result" &
+    right_worker="$!"
+
+    wait "$left_worker" || true
+    wait "$right_worker" || true
+
+    apply_side_maintain_result left "$left_result"
+    apply_side_maintain_result right "$right_result"
+    rm -f "$left_result" "$right_result"
 }
 
 handle_multi_device_health() {
@@ -1196,7 +1241,7 @@ start_daemons() {
     # probes are opened immediately before the long-lived recorder handles.
     # Each recorder daemon writes its own calibration JSON after its stable
     # handle is created.
-    maintain_stereo_daemons_in_insert_order
+    maintain_stereo_daemons_parallel
 }
 
 send_side_command() {
@@ -1513,7 +1558,7 @@ while true; do
     if [ "$LAST_HEALTH_CHECK_MS" -eq 0 ] ||
        [ $((current_ms - LAST_HEALTH_CHECK_MS)) -ge $((HEALTH_POLL_INTERVAL_SEC * 1000)) ]; then
         LAST_HEALTH_CHECK_MS="$current_ms"
-        maintain_stereo_daemons_in_insert_order
+        maintain_stereo_daemons_parallel
         handle_multi_device_health
         clear_recovery_error_if_ready
 
