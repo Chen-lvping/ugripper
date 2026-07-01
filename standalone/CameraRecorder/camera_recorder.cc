@@ -83,6 +83,8 @@ constexpr auto kMainCameraQueueDiagInterval = std::chrono::milliseconds(1000);
 constexpr auto kMainCameraPushWarnThreshold = std::chrono::milliseconds(200);
 constexpr auto kMainCameraStopEosGrace = std::chrono::milliseconds(500);
 constexpr auto kMainCameraStopPollInterval = std::chrono::milliseconds(10);
+constexpr int64_t kMainCameraShortStreamMinSessionUs = 5 * kUsPerSecond;
+constexpr int64_t kMainCameraShortStreamMaxSpanUs = 2 * kUsPerSecond;
 
 #ifndef UGRIPPER_ENABLE_PERF_LOG
 #define UGRIPPER_ENABLE_PERF_LOG 0
@@ -193,6 +195,12 @@ fs::path RecordingTimingPathForEpisode(const fs::path& episode_dir) {
     const std::string parent = SanitizeTimingPathComponent(episode_dir.parent_path().filename().string());
     const std::string name = SanitizeTimingPathComponent(episode_dir.filename().string());
     return fs::path("/dev/shm") / ("ugripper_recording_timing_" + parent + "_" + name + ".json");
+}
+
+fs::path CameraRecorderFaultPathForEpisode(const fs::path& episode_dir) {
+    const std::string parent = SanitizeTimingPathComponent(episode_dir.parent_path().filename().string());
+    const std::string name = SanitizeTimingPathComponent(episode_dir.filename().string());
+    return fs::path("/dev/shm") / ("ugripper_camera_recorder_fault_" + parent + "_" + name + ".json");
 }
 
 std::string ShellQuote(const std::string& value) {
@@ -454,6 +462,117 @@ bool IsMainCamera(const CameraConfig& config) {
     return config.name == "left_cam_main" ||
            config.name == "right_cam_main" ||
            config.name == "chest_cam_main";
+}
+
+bool IsMainCameraStartupHardwareFailure(const CameraConfig& config, const std::string& error_message) {
+    if (!IsMainCamera(config)) {
+        return false;
+    }
+    static const std::vector<std::string> kNeedles = {
+        "VIDIOC_",
+        "Input/output error",
+        "Connection timed out",
+        "No such device",
+        "device poll error",
+        "device lacks capture/streaming capability",
+    };
+    return ContainsAny(error_message, kNeedles);
+}
+
+int64_t FrameSpanUs(const std::optional<int64_t>& first_pts_us,
+                    const std::optional<int64_t>& last_pts_us) {
+    if (!first_pts_us.has_value() || !last_pts_us.has_value() ||
+        *last_pts_us <= *first_pts_us) {
+        return 0;
+    }
+    return *last_pts_us - *first_pts_us;
+}
+
+bool IsMainCameraShortStreamFault(int64_t session_us,
+                                  uint64_t frame_count,
+                                  int64_t span_us,
+                                  int fps) {
+    if (session_us < kMainCameraShortStreamMinSessionUs) {
+        return false;
+    }
+    const uint64_t min_expected_frames =
+        static_cast<uint64_t>(std::max(1, fps)) * 2ULL;
+    return span_us <= kMainCameraShortStreamMaxSpanUs ||
+           frame_count < min_expected_frames;
+}
+
+int64_t CurrentSystemTimeUs();
+
+void RemoveCameraRecorderFaultFile(const fs::path& episode_dir) {
+    std::error_code error;
+    fs::remove(CameraRecorderFaultPathForEpisode(episode_dir), error);
+}
+
+void WriteCameraRecorderFaultJson(const fs::path& episode_dir,
+                                  const CameraConfig& config,
+                                  const std::string& fault_type,
+                                  const std::string& error_message,
+                                  const json& extra = json::object()) {
+    if (episode_dir.empty() || !IsMainCamera(config)) {
+        return;
+    }
+    const fs::path path = CameraRecorderFaultPathForEpisode(episode_dir);
+    const fs::path tmp_path = path.string() + ".tmp";
+    json root = json::object();
+    root["schema"] = "ugripper_camera_recorder_fault_v1";
+    root["fault_type"] = fault_type;
+    root["episode_dir"] = episode_dir.string();
+    root["camera_name"] = config.name;
+    root["device"] = config.device;
+    root["error"] = error_message;
+    root["system_time_us"] = CurrentSystemTimeUs();
+    for (auto it = extra.begin(); it != extra.end(); ++it) {
+        root[it.key()] = it.value();
+    }
+
+    std::ofstream output(tmp_path, std::ios::trunc);
+    if (!output.is_open()) {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+                           << "[camera_recorder] failed to open fault file for write: "
+                           << tmp_path).str());
+        return;
+    }
+    output << root.dump(2) << "\n";
+    output.close();
+    if (!output) {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+                           << "[camera_recorder] failed to close fault file after write: "
+                           << tmp_path).str());
+        return;
+    }
+    std::error_code error;
+    fs::rename(tmp_path, path, error);
+    if (error) {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+                           << "[camera_recorder] failed to publish fault file: "
+                           << path << " error=" << error.message()).str());
+        fs::remove(tmp_path, error);
+        return;
+    }
+    DM_LOG_ERROR("{}", (::DA::utils::LogString()
+                       << "[camera_recorder] main camera hardware fault published: "
+                       << path << " camera=" << config.name
+                       << " device=" << config.device
+                       << " fault_type=" << fault_type
+                       << " error=" << error_message).str());
+}
+
+void WriteCameraRecorderFault(const fs::path& episode_dir,
+                              const CameraConfig& config,
+                              const std::string& error_message) {
+    if (!IsMainCameraStartupHardwareFailure(config, error_message)) {
+        return;
+    }
+    WriteCameraRecorderFaultJson(
+        episode_dir,
+        config,
+        "main_camera_v4l2_startup_failure",
+        error_message);
 }
 
 int64_t CurrentSystemTimeUs() {
@@ -824,6 +943,11 @@ public:
         return last_frame_system_time_us_;
     }
 
+    uint64_t ObservedFrameCount() const override {
+        std::lock_guard<std::mutex> lock(first_frame_mutex_);
+        return observed_output_frame_count_;
+    }
+
 protected:
     virtual bool BeforeStart() {
         return true;
@@ -1013,6 +1137,7 @@ public:
             last_error_ = error_message;
             DM_LOG_ERROR("{}", (::DA::utils::LogString() << "[camera_recorder] failed to start " << config_.name
                                   << ": " << error_message).str());
+            WriteCameraRecorderFault(options_.output_dir, config_, error_message);
             CleanupPipeline();
             CleanupDevice();
             return false;
@@ -1020,6 +1145,7 @@ public:
 
         started_ = true;
         running_ = true;
+        started_system_time_us_ = CurrentSystemTimeUs();
         stop_requested_.store(false, std::memory_order_release);
         capture_thread_done_.store(false, std::memory_order_release);
         capture_thread_ = std::thread([this]() { CaptureLoop(); });
@@ -1036,6 +1162,10 @@ public:
     void Stop() override {
         const auto stop_start = std::chrono::steady_clock::now();
         stop_requested_.store(true, std::memory_order_release);
+        if (!short_stream_fault_checked_) {
+            short_stream_fault_checked_ = true;
+            MaybePublishShortStreamFault("stop_begin");
+        }
         DM_LOG_INFO("{}", (::DA::utils::LogString()
                            << "[camera_recorder][main_stop_diag] category=stop_begin"
                            << " name=" << config_.name
@@ -1141,6 +1271,11 @@ public:
     std::optional<int64_t> LastFrameSystemTimeUs() const override {
         std::lock_guard<std::mutex> lock(timing_mutex_);
         return last_frame_system_time_us_;
+    }
+
+    uint64_t ObservedFrameCount() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return frame_count_;
     }
 
 private:
@@ -1638,6 +1773,68 @@ private:
         return true;
     }
 
+    void MaybePublishShortStreamFault(const char* phase) const {
+        if (started_system_time_us_ <= 0) {
+            return;
+        }
+
+        std::optional<int64_t> first_pts_us;
+        std::optional<int64_t> last_pts_us;
+        std::optional<int64_t> first_system_time_us;
+        std::optional<int64_t> last_system_time_us;
+        uint64_t frame_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(timing_mutex_);
+            first_pts_us = first_frame_pts_us_;
+            last_pts_us = last_frame_pts_us_;
+            first_system_time_us = first_frame_system_time_us_;
+            last_system_time_us = last_frame_system_time_us_;
+            frame_count = frame_count_;
+        }
+
+        const int64_t stop_system_time_us = CurrentSystemTimeUs();
+        const int64_t session_us =
+            std::max<int64_t>(0, stop_system_time_us - started_system_time_us_);
+        const int64_t span_us = FrameSpanUs(first_pts_us, last_pts_us);
+        if (!IsMainCameraShortStreamFault(session_us, frame_count, span_us, config_.fps)) {
+            if (session_us < kMainCameraShortStreamMinSessionUs) {
+                DM_LOG_INFO("{}", (::DA::utils::LogString()
+                                   << "[camera_recorder] skip main camera short stream check for short session"
+                                   << " camera=" << config_.name
+                                   << " session_us=" << session_us
+                                   << " min_session_us=" << kMainCameraShortStreamMinSessionUs).str());
+            }
+            return;
+        }
+
+        std::ostringstream error;
+        error << "main camera short stream"
+              << " camera=" << config_.name
+              << " device=" << config_.device
+              << " frame_count=" << frame_count
+              << " span_us=" << span_us
+              << " session_us=" << session_us
+              << " first_pts_us=" << first_pts_us.value_or(-1)
+              << " last_pts_us=" << last_pts_us.value_or(-1);
+
+        json extra = json::object();
+        extra["phase"] = phase == nullptr ? "unknown" : phase;
+        extra["frame_count"] = frame_count;
+        extra["span_us"] = span_us;
+        extra["session_us"] = session_us;
+        extra["started_system_time_us"] = started_system_time_us_;
+        extra["stop_system_time_us"] = stop_system_time_us;
+        extra["first_pts_us"] = first_pts_us.value_or(-1);
+        extra["last_pts_us"] = last_pts_us.value_or(-1);
+        extra["first_system_time_us"] = first_system_time_us.value_or(-1);
+        extra["last_system_time_us"] = last_system_time_us.value_or(-1);
+        WriteCameraRecorderFaultJson(options_.output_dir,
+                                     config_,
+                                     "main_camera_short_stream",
+                                     error.str(),
+                                     extra);
+    }
+
     void RequestAppsrcEosForStop() {
         if (appsrc_ == nullptr) {
             return;
@@ -1728,6 +1925,7 @@ private:
     bool started_ = false;
     bool running_ = false;
     bool failure_ = false;
+    bool short_stream_fault_checked_ = false;
     std::optional<int> exit_code_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> capture_thread_done_{true};
@@ -1739,6 +1937,7 @@ private:
     GstBus* bus_ = nullptr;
     std::string last_error_;
     std::chrono::steady_clock::time_point last_queue_diag_log_{};
+    int64_t started_system_time_us_ = 0;
     mutable std::mutex timing_mutex_;
     std::optional<int64_t> first_frame_pts_us_;
     std::optional<int64_t> first_frame_system_time_us_;
@@ -1780,6 +1979,7 @@ public:
             last_error_ = error_message;
             std::cerr << "[camera_recorder] failed to start " << config_.name
                       << ": " << error_message << std::endl;
+            WriteCameraRecorderFault(options_.output_dir, config_, error_message);
             CleanupPipeline();
             CleanupDevice();
             return false;
@@ -1787,6 +1987,7 @@ public:
 
         started_ = true;
         running_ = true;
+        started_system_time_us_ = CurrentSystemTimeUs();
         stop_requested_.store(false, std::memory_order_release);
         capture_thread_ = std::thread([this]() { CaptureLoop(); });
         return true;
@@ -1801,6 +2002,10 @@ public:
 
     void Stop() override {
         stop_requested_.store(true, std::memory_order_release);
+        if (!short_stream_fault_checked_) {
+            short_stream_fault_checked_ = true;
+            MaybePublishShortStreamFault("stop_begin");
+        }
         if (capture_thread_.joinable()) {
             capture_thread_.join();
         }
@@ -1871,6 +2076,11 @@ public:
         return last_frame_system_time_us_;
     }
 
+    uint64_t ObservedFrameCount() const override {
+        std::lock_guard<std::mutex> lock(timing_mutex_);
+        return frame_count_;
+    }
+
 private:
     std::string BuildCommand() const override {
         return ugripper::camera::BuildMainCameraCommand(
@@ -1879,6 +2089,68 @@ private:
              .codec = options_.codec,
              .ffmpeg_bin = options_.ffmpeg_bin,
              .gst_bin = options_.gst_bin});
+    }
+
+    void MaybePublishShortStreamFault(const char* phase) const {
+        if (started_system_time_us_ <= 0) {
+            return;
+        }
+
+        std::optional<int64_t> first_pts_us;
+        std::optional<int64_t> last_pts_us;
+        std::optional<int64_t> first_system_time_us;
+        std::optional<int64_t> last_system_time_us;
+        uint64_t frame_count = 0;
+        {
+            std::lock_guard<std::mutex> lock(timing_mutex_);
+            first_pts_us = first_frame_pts_us_;
+            last_pts_us = last_frame_pts_us_;
+            first_system_time_us = first_frame_system_time_us_;
+            last_system_time_us = last_frame_system_time_us_;
+            frame_count = frame_count_;
+        }
+
+        const int64_t stop_system_time_us = CurrentSystemTimeUs();
+        const int64_t session_us =
+            std::max<int64_t>(0, stop_system_time_us - started_system_time_us_);
+        const int64_t span_us = FrameSpanUs(first_pts_us, last_pts_us);
+        if (!IsMainCameraShortStreamFault(session_us, frame_count, span_us, config_.fps)) {
+            if (session_us < kMainCameraShortStreamMinSessionUs) {
+                DM_LOG_INFO("{}", (::DA::utils::LogString()
+                                   << "[camera_recorder] skip main camera short stream check for short session"
+                                   << " camera=" << config_.name
+                                   << " session_us=" << session_us
+                                   << " min_session_us=" << kMainCameraShortStreamMinSessionUs).str());
+            }
+            return;
+        }
+
+        std::ostringstream error;
+        error << "main camera short stream"
+              << " camera=" << config_.name
+              << " device=" << config_.device
+              << " frame_count=" << frame_count
+              << " span_us=" << span_us
+              << " session_us=" << session_us
+              << " first_pts_us=" << first_pts_us.value_or(-1)
+              << " last_pts_us=" << last_pts_us.value_or(-1);
+
+        json extra = json::object();
+        extra["phase"] = phase == nullptr ? "unknown" : phase;
+        extra["frame_count"] = frame_count;
+        extra["span_us"] = span_us;
+        extra["session_us"] = session_us;
+        extra["started_system_time_us"] = started_system_time_us_;
+        extra["stop_system_time_us"] = stop_system_time_us;
+        extra["first_pts_us"] = first_pts_us.value_or(-1);
+        extra["last_pts_us"] = last_pts_us.value_or(-1);
+        extra["first_system_time_us"] = first_system_time_us.value_or(-1);
+        extra["last_system_time_us"] = last_system_time_us.value_or(-1);
+        WriteCameraRecorderFaultJson(options_.output_dir,
+                                     config_,
+                                     "main_camera_short_stream",
+                                     error.str(),
+                                     extra);
     }
 
     bool CreatePipeline(std::string* error_message) {
@@ -2174,6 +2446,7 @@ private:
     bool started_ = false;
     bool running_ = false;
     bool failure_ = false;
+    bool short_stream_fault_checked_ = false;
     std::optional<int> exit_code_;
     std::atomic<bool> stop_requested_{false};
     std::thread capture_thread_;
@@ -2182,6 +2455,7 @@ private:
     GstElement* appsrc_ = nullptr;
     GstBus* bus_ = nullptr;
     std::string last_error_;
+    int64_t started_system_time_us_ = 0;
     mutable std::mutex timing_mutex_;
     std::optional<int64_t> first_frame_pts_us_;
     std::optional<int64_t> first_frame_system_time_us_;
@@ -2776,6 +3050,11 @@ public:
     std::optional<int64_t> LastFrameSystemTimeUs() const override {
         std::lock_guard<std::mutex> lock(timing_mutex_);
         return last_frame_system_time_us_;
+    }
+
+    uint64_t ObservedFrameCount() const override {
+        std::lock_guard<std::mutex> lock(submitted_mutex_);
+        return submitted_frame_count_;
     }
 
     bool PushFrame(std::vector<uint8_t> frame_bytes, int64_t system_time_us) {
@@ -3675,10 +3954,15 @@ private:
 CameraRecorderManager::CameraRecorderManager(Options options)
     : options_(std::move(options)) {}
 
+void ClearCameraRecorderFault(const fs::path& episode_dir) {
+    RemoveCameraRecorderFaultFile(episode_dir);
+}
+
 bool CameraRecorderManager::Prepare(const std::vector<CameraConfig>& configs, std::vector<std::string>* missing_devices) {
     recorders_.clear();
     expected_configs_.clear();
     had_failure_ = false;
+    partial_timing_written_ = false;
 
     auto selected = [&](const std::string& name) {
         return options_.only_names.empty() || options_.only_names.count(name) > 0;
@@ -3733,6 +4017,10 @@ bool CameraRecorderManager::MonitorUntilStop() {
             }
         }
 
+        if (!partial_timing_written_ && AllExpectedTimingOffsetsAvailable()) {
+            partial_timing_written_ = WriteInfoJson(true);
+        }
+
         if (!any_running) {
             break;
         }
@@ -3778,7 +4066,24 @@ const std::vector<std::unique_ptr<CameraRecorder>>& CameraRecorderManager::recor
     return recorders_;
 }
 
-bool CameraRecorderManager::WriteInfoJson() const {
+bool CameraRecorderManager::AllExpectedTimingOffsetsAvailable() const {
+    for (const auto& config : expected_configs_) {
+        const CameraRecorder* matching_recorder = nullptr;
+        for (const auto& recorder : recorders_) {
+            if (recorder->config().name == config.name) {
+                matching_recorder = recorder.get();
+                break;
+            }
+        }
+        if (matching_recorder == nullptr ||
+            !matching_recorder->RecordTimeOffsetUs().has_value()) {
+            return false;
+        }
+    }
+    return !expected_configs_.empty();
+}
+
+bool CameraRecorderManager::WriteInfoJson(bool allow_missing_offsets) const {
     const int64_t boot_time_offset_us = BootTimeOffsetUs();
     const fs::path info_json_path = RecordingTimingPathForEpisode(options_.output_dir);
     std::ofstream output(info_json_path, std::ios::trunc);
@@ -3892,7 +4197,9 @@ bool CameraRecorderManager::WriteInfoJson() const {
                             << info_json_path
                             << " missing_record_time_offset_us="
                             << oss.str()).str());
-        return false;
+        if (!allow_missing_offsets) {
+            return false;
+        }
     }
     DM_LOG_INFO("{}", (::DA::utils::LogString()
                        << "[camera_recorder] wrote recording timing file: "

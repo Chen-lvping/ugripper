@@ -74,6 +74,7 @@ int main(int argc, char** argv) {
         }
 
         std::filesystem::create_directories(options.output_dir);
+        ClearCameraRecorderFault(options.output_dir);
 
         CameraRecorderManager manager(options);
         std::vector<std::string> missing_devices;

@@ -52,6 +52,7 @@ public:
     virtual std::optional<int64_t> FirstFrameSystemTimeUs() const = 0;
     virtual std::optional<int64_t> LastFramePtsUs() const = 0;
     virtual std::optional<int64_t> LastFrameSystemTimeUs() const = 0;
+    virtual uint64_t ObservedFrameCount() const = 0;
 };
 
 class CameraRecorderManager {
@@ -66,19 +67,23 @@ public:
     bool empty() const;
     bool had_failure() const;
     const std::vector<std::unique_ptr<CameraRecorder>>& recorders() const;
-    bool WriteInfoJson() const;
+    bool WriteInfoJson(bool allow_missing_offsets = false) const;
 
 private:
+    bool AllExpectedTimingOffsetsAvailable() const;
+
     Options options_;
     std::vector<CameraConfig> expected_configs_;
     std::vector<std::unique_ptr<CameraRecorder>> recorders_;
     bool had_failure_ = false;
+    bool partial_timing_written_ = false;
 };
 
 Options ParseArgs(int argc, char** argv);
 std::vector<CameraConfig> LoadCameraConfigList(const fs::path& yaml_path);
 std::string ModeName(CameraRecordMode mode);
 void InstallSignalHandlers();
+void ClearCameraRecorderFault(const fs::path& episode_dir);
 bool RunStereoDaemon(const Options& options, const std::vector<CameraConfig>& configs);
 
 }  // namespace camera_recorder
