@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_SOURCE="${BASH_SOURCE[0]:-$0}"
+SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SOURCE")" && pwd)"
 DEFAULT_ROOT="/opt/ugripper"
 if [ -n "${UGRIPPER_ROOT:-}" ]; then
     ROOT_DIR="${UGRIPPER_ROOT}"
@@ -83,8 +84,94 @@ resolve_path() {
     fi
 }
 
+is_data_disk_path() {
+    [ "$1" = "/mnt/data_disk" ]
+}
+
+is_exact_mountpoint() {
+    local path="$1"
+    local line left_part mount_point
+
+    [ -r /proc/self/mountinfo ] || return 1
+    while IFS= read -r line; do
+        left_part="${line%% - *}"
+        set -- $left_part
+        mount_point="${5:-}"
+        if [ "$mount_point" = "$path" ]; then
+            return 0
+        fi
+    done < /proc/self/mountinfo
+    return 1
+}
+
+mount_source_for_path() {
+    local path="$1"
+    findmnt -rn -o SOURCE --mountpoint "$path" 2>/dev/null | head -n 1
+}
+
+mount_options_for_path() {
+    local path="$1"
+    findmnt -rn -o OPTIONS --mountpoint "$path" 2>/dev/null | head -n 1
+}
+
+data_disk_fault() {
+    local path="$1"
+    local source options available_kb
+
+    if [ ! -d "$path" ]; then
+        printf 'missing'
+        return
+    fi
+
+    if ! is_exact_mountpoint "$path"; then
+        printf 'not-mounted'
+        return
+    fi
+
+    source="$(mount_source_for_path "$path")"
+    if [ -z "$source" ]; then
+        printf 'source-missing'
+        return
+    fi
+    if [ "${source#/}" != "$source" ] && [ ! -e "$source" ]; then
+        printf 'source-missing'
+        return
+    fi
+
+    options="$(mount_options_for_path "$path")"
+    case ",$options," in
+        *,rw,*)
+            ;;
+        *)
+            printf 'read-only'
+            return
+            ;;
+    esac
+
+    if [ ! -w "$path" ]; then
+        printf 'not-writable'
+        return
+    fi
+
+    available_kb="$(df -Pk "$path" 2>/dev/null | awk 'NR == 2 {print $4}')"
+    if [ -z "$available_kb" ]; then
+        printf 'space-unavailable'
+        return
+    fi
+    if [ "$available_kb" -le 0 ] 2>/dev/null; then
+        printf 'full'
+        return
+    fi
+
+    printf ''
+}
+
 is_online() {
     local path="$1"
+    if is_data_disk_path "$path"; then
+        [ -z "$(data_disk_fault "$path")" ]
+        return
+    fi
     if [ -e "$path" ]; then
         return 0
     fi
@@ -120,6 +207,17 @@ target_for_path() {
     local resolved=""
     if [ "$path" = "/dev/cam_chest" ] && ! chest_cam_enabled; then
         printf '未启用'
+        return
+    fi
+    if is_data_disk_path "$path"; then
+        local fault source
+        fault="$(data_disk_fault "$path")"
+        if [ -z "$fault" ]; then
+            source="$(mount_source_for_path "$path")"
+            printf '%s' "${source:-$path}"
+        else
+            printf '<%s>' "$fault"
+        fi
         return
     fi
     resolved="$(resolve_path "$path")"
@@ -245,7 +343,7 @@ all_count=0
 online_count=0
 for path_label in "${left_items[@]}" "${right_items[@]}" "${camera_items[@]}" "${usb_items[@]}"; do
     entry_enabled "$path_label" || continue
-    if [ -e "${path_label%%|*}" ]; then
+    if is_online "${path_label%%|*}"; then
         online_count=$((online_count + 1))
     fi
     all_count=$((all_count + 1))
@@ -287,7 +385,7 @@ for path_label in "${left_items[@]}" "${right_items[@]}" "${camera_items[@]}" "$
     entry_enabled "$path_label" || continue
     path="${path_label%%|*}"
     label="${path_label#*|}"
-    [ -e "$path" ] && continue
+    is_online "$path" && continue
     missing_list+=("$label")
 done
 
