@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
-
+LOCAL_DEPS_DIR="${LOCAL_DEPS_DIR:-${REPO_ROOT}/.local-deps}"
 APP_NAME="ugripper"
 ARCH="arm64"
 BASE_VERSION="${BASE_VERSION:-2.1.3}"
@@ -119,10 +119,10 @@ else
   echo "  toolchain=${TOOLCHAIN_FILE}"
   echo "  parallel=${PARALLEL}"
 
-  if [[ ! -f ".local-deps/arm-build-env.sh" ]]; then
+  if [[ ! -f "${LOCAL_DEPS_DIR}/arm-build-env.sh" ]]; then
       ./scripts/setup_arm_build_env.sh
   fi
-  source ".local-deps/arm-build-env.sh"
+  source "${LOCAL_DEPS_DIR}/arm-build-env.sh"
 
   NEED_SYSROOT_REFRESH=false
   for module in fmt spdlog gstreamer-1.0 gstreamer-app-1.0 gstreamer-base-1.0; do
@@ -141,7 +141,7 @@ else
   done
   if [[ "${NEED_SYSROOT_REFRESH}" == true ]]; then
       ./scripts/setup_arm_build_env.sh --skip-host-install --skip-arm-index-update
-      source ".local-deps/arm-build-env.sh"
+      source "${LOCAL_DEPS_DIR}/arm-build-env.sh"
   fi
 
   if [[ "${CLEAN_BUILD}" == true ]]; then
