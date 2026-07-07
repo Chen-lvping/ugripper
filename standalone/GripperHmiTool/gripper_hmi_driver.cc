@@ -7,6 +7,7 @@
 #include <chrono>
 #include <cstring>
 #include <filesystem>
+#include <fcntl.h>
 #include <iostream>
 #include <sstream>
 #include <sys/ioctl.h>
@@ -350,8 +351,17 @@ bool GripperHmiDriver::connect()
         return false;
     }
 
-#ifdef TIOCEXCL
     int portHandle = -1;
+    if (sp_get_port_handle(serialPort_, &portHandle) == SP_OK && portHandle >= 0)
+    {
+        const int flags = fcntl(portHandle, F_GETFD);
+        if (flags >= 0)
+        {
+            fcntl(portHandle, F_SETFD, flags | FD_CLOEXEC);
+        }
+    }
+
+#ifdef TIOCEXCL
     if (sp_get_port_handle(serialPort_, &portHandle) != SP_OK || portHandle < 0 || ioctl(portHandle, TIOCEXCL) != 0)
     {
         logConnectFailureLocked("cannot exclusively lock port " + port_ + " (resolved=" + resolvedPort + ")");

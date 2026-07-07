@@ -26,6 +26,8 @@
 
 #include <fcntl.h>
 #include <nlohmann/json.hpp>
+#include <limits>
+#include <sys/resource.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -91,6 +93,55 @@ bool McapFileComplete(const fs::path& path)
     input.read(tail.data(), static_cast<std::streamsize>(tail.size()));
     return input.good() && head == std::string(kMcapMagic, kMagicSize) &&
            tail == std::string(kMcapMagic, kMagicSize);
+}
+
+int ChildFdScanLimit()
+{
+    struct rlimit limit = {};
+    if (getrlimit(RLIMIT_NOFILE, &limit) == 0 && limit.rlim_cur != RLIM_INFINITY)
+    {
+        return static_cast<int>(
+            std::min<rlim_t>(limit.rlim_cur, static_cast<rlim_t>(std::numeric_limits<int>::max())));
+    }
+
+    const long open_max = sysconf(_SC_OPEN_MAX);
+    if (open_max > 0)
+    {
+        return static_cast<int>(
+            std::min<long>(open_max, static_cast<long>(std::numeric_limits<int>::max())));
+    }
+
+    return 1024;
+}
+
+bool IsInheritedFd(int fd, const std::vector<int>& inherited_fds)
+{
+    return std::find(inherited_fds.begin(), inherited_fds.end(), fd) != inherited_fds.end();
+}
+
+void PrepareChildFileDescriptors(const std::vector<int>& inherited_fds, int fd_scan_limit)
+{
+    for (const int fd : inherited_fds)
+    {
+        if (fd < 0)
+        {
+            continue;
+        }
+        const int flags = fcntl(fd, F_GETFD);
+        if (flags >= 0)
+        {
+            fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC);
+        }
+    }
+
+    for (int fd = 3; fd < fd_scan_limit; ++fd)
+    {
+        if (IsInheritedFd(fd, inherited_fds))
+        {
+            continue;
+        }
+        close(fd);
+    }
 }
 
 json BuildStereoSessionJson(const std::string& episode_dir,
@@ -608,6 +659,7 @@ bool SubprocessHandle::Start(const std::vector<std::string>& arguments,
 
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "launching " << name_ << ": " << JoinArguments(arguments)).str());
 
+    const int child_fd_scan_limit = ChildFdScanLimit();
     pid_ = fork();
     if (pid_ < 0)
     {
@@ -622,18 +674,7 @@ bool SubprocessHandle::Start(const std::vector<std::string>& arguments,
     if (pid_ == 0)
     {
         setpgid(0, 0);
-        for (const int fd : inherited_fds)
-        {
-            if (fd < 0)
-            {
-                continue;
-            }
-            const int flags = fcntl(fd, F_GETFD);
-            if (flags >= 0)
-            {
-                fcntl(fd, F_SETFD, flags & ~FD_CLOEXEC);
-            }
-        }
+        PrepareChildFileDescriptors(inherited_fds, child_fd_scan_limit);
         execvp(argv[0], argv.data());
         _exit(127);
     }

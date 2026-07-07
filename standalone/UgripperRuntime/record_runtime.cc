@@ -2947,7 +2947,7 @@ std::optional<YuzhouMainCameraIdentity> readYuzhouMainCameraIdentity(const std::
         return std::nullopt;
     }
 
-    const int fd = open(devicePath.c_str(), O_RDWR | O_NONBLOCK);
+    const int fd = open(devicePath.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
     if (fd < 0)
     {
         if (detail != nullptr)
