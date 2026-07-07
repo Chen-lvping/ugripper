@@ -4,6 +4,13 @@
 >
 > 仓库没有 `v2.0.x` git tag。下面的发布边界按 `build_deb.sh` / `scripts/build_arm_deb_in_pp_arm_dev.sh` 中 `BASE_VERSION` 的提交记录推定：`2caf6e0` 为 v2.0.0，`d81c3c1` 为 v2.0.1。
 
+## v2.1.3 - Unreleased
+
+- 子进程启动前主动关闭未白名单继承的 fd，并为主摄 XU 与夹爪串口 fd 设置 close-on-exec，避免 Fays recorder 继承主摄、串口等父进程外设句柄。
+- 新 hub 评估板 udev rules 保留板端已验证映射：右侧主摄 `1-1.4`、左侧主摄 `9-1.4`，四路触觉分别覆盖 `1-1.3.1/1-1.3.6/9-1.3.1/9-1.3.6`。
+- 数据盘未挂载或不可写时只保持等待/`ERROR_3`，不进入 USB restore 复位流程。
+- 构建脚本默认主包版本调整到 `2.1.3`。
+
 ## v2.1.2 - Unreleased
 
 - 自动复位 symlink 齐全后的 ready 等待窗口从约 `25s` 提到约 `45s`，降低 Fays stereo daemon 重启和主摄缓存刷新接近边界时被误判为复位失败的概率。

@@ -307,6 +307,15 @@ bool IsCameraRecorderMainCameraFault(const ugripper::runtime::HealthFault &fault
            fault.key == kMainCameraShortStreamKey;
 }
 
+bool IsDiskHealthFault(const ugripper::runtime::HealthFault &fault)
+{
+    return fault.key == "disk_mount_lost" ||
+           fault.key == "disk_not_writable" ||
+           fault.key == "disk_full" ||
+           fault.key == "disk_space_unavailable" ||
+           fault.led_state == ugripper::runtime::RuntimeLedState::Error3;
+}
+
 bool IsImmediateRestoreUsbTriggerCause(const std::string &cause)
 {
     return cause == kMainCameraV4l2KernelHangKey ||
@@ -8059,6 +8068,13 @@ void RecordRuntime::setHardwareFaultLedState(const ugripper::runtime::HealthFaul
 
 void RecordRuntime::maybeTriggerRestoreUsbForHardwareFault(const ugripper::runtime::HealthFault &fault)
 {
+    if (IsDiskHealthFault(fault))
+    {
+        logRestoreUsbSkipOnce("disk_fault:" + fault.key,
+                              "skip restore usb on data disk fault: " + fault.key);
+        return;
+    }
+
     if (fault.led_state != ugripper::runtime::RuntimeLedState::Error2 &&
         fault.led_state != ugripper::runtime::RuntimeLedState::Error4)
     {
