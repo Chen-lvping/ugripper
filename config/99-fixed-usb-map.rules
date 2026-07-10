@@ -62,10 +62,10 @@ KERNEL=="video*", KERNELS=="9-1.4:1.0", ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_
 KERNEL=="video*", KERNELS=="11-1.4:1.0", ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", SYMLINK+="tcam_left_r"
 
 # Taobao commercial hub compatibility
-KERNEL=="video*", KERNELS=="1-1.3.1", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_l"
-KERNEL=="video*", KERNELS=="1-1.3.6", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_r"
-KERNEL=="video*", KERNELS=="9-1.3.1", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
-KERNEL=="video*", KERNELS=="9-1.3.6", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_r"
+KERNEL=="video*", KERNELS=="1-1.2.3", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_l"
+KERNEL=="video*", KERNELS=="1-1.2.4", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_r"
+KERNEL=="video*", KERNELS=="9-1.2.3", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
+KERNEL=="video*", KERNELS=="9-1.2.4", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_r"
 GOTO="ugripper_fixed_end"
 
 LABEL="ugripper_fixed_tty"
