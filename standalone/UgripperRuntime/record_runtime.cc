@@ -2693,7 +2693,7 @@ std::optional<std::vector<uint8_t>> captureTactileGrayFrame(const std::vector<st
     arguments.push_back("-frames:v");
     arguments.push_back("1");
     arguments.push_back("-vf");
-    arguments.push_back("crop=iw*0.88:ih:iw*0.12:0,scale=160:120,format=gray");
+    arguments.push_back("crop=iw*0.82:ih:iw*0.18:0,scale=160:120,format=gray");
     arguments.push_back("-f");
     arguments.push_back("rawvideo");
     arguments.push_back("-");

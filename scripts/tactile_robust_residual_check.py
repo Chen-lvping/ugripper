@@ -50,7 +50,7 @@ def load_tactile_frame(path: Path) -> np.ndarray:
 
     image = image.convert("RGB")
     width, height = image.size
-    left = int(width * 0.12)
+    left = int(width * 0.18)
     image = image.crop((left, 0, width, height))
     image = image.resize((FRAME_WIDTH, FRAME_HEIGHT), _resampling_filter()).convert("L")
     return np.asarray(image, dtype=np.float32)
