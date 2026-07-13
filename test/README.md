@@ -64,6 +64,14 @@
 - `test/scripts/board_hmi_record_start_matrix.sh`
   - 按真实故障前左右灯效还原录制启动边界：左 HMI 为 `Ready`、右 HMI 为触觉告警，启动时两侧切换到 `Recording`；HMI 端口全程只打开一次，状态查询保持真实 `1Hz`，LED保持颜色变化或 `250ms` 重发策略，不发送蜂鸣器命令。
   - `combo` 在灯效切换边界同步启停 `SensorRecorder`；`timing` 扫描 encoder open/config 相对灯效切换的时间偏移；`led-only` 让 encoder 全程常开、仅重复灯效切换，以依次隔离组合竞争、CH9344并发时序和Recording灯效自身影响。
+- `test/scripts/board_tactile_ffmpeg_streamon_soak.sh`
+  - 对单个触觉相机节点反复执行短时 FFmpeg 拉流和关闭，重点复现 `VIDIOC_STREAMON`、零帧、低帧及进程卡死。
+  - 测试期间临时停止 `ugripper.service` 释放硬件，脚本通过退出 trap 自动恢复服务；失败轮次会额外保存 USB/UVC、设备占用和内核日志快照。
+- `test/scripts/board_tactile_ffmpeg_parallel_soak.sh`
+  - 四路触觉相机并发短周期拉流，默认每 `1s` 同时关闭并立即重新打开四路设备，用于提高 USB/UVC 并发启停压力。
+  - 按设备、轮次记录结果；任一路异常都会保存该轮四路原始日志和统一现场快照。
+- `test/scripts/board_encoder_cmd_ack_latency.sh`
+  - 临时停止服务后左右并行发送生产 encoder 位置读取命令，统计合法 Modbus 应答的 `cmd -> ack` 延迟、超时和 CRC 错误，退出时自动恢复服务。
 
 ## 建议用法
 在仓库根目录执行：
