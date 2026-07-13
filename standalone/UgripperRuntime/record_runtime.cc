@@ -87,7 +87,8 @@ constexpr uint64_t kRestoreUsbSymlinkPollIntervalMs = 1000;
 constexpr uint64_t kRestoreUsbSymlinkMaxWaitMs = 25000;
 constexpr uint64_t kRestoreUsbReadyCheckDelayMs = 45000;
 constexpr uint64_t kRestoreUsbFailureAlarmDurationMs = 5000;
-constexpr uint64_t kRestoreUsbFailureAlarmSilenceRetryMs = 250;
+constexpr int kBeepSilenceRetryLimit = 5;
+constexpr int kBeepSilenceConfirmMs = 150;
 constexpr uint64_t kRestoreUsbManualInsertGraceMs = 20000;
 constexpr uint64_t kRestoreUsbTriggerStableMs = 6000;
 constexpr uint64_t kRestoreUsbPreflightFailureCooldownMs = 30000;
@@ -6521,7 +6522,6 @@ void RecordRuntime::triggerRestoreUsbFailureAlarm(const std::string &reason)
     }
     restoreUsbFailureAlarmActive_ = true;
     restoreUsbFailureAlarmStartMs_ = currentSteadyMs();
-    restoreUsbFailureAlarmLastSilenceMs_ = 0;
 
     bool wroteAny = false;
     wroteAny = panelManager_.setBeepEnabledForSide("left", true) || wroteAny;
@@ -6548,16 +6548,9 @@ void RecordRuntime::maintainRestoreUsbFailureAlarm()
     {
         return;
     }
-    if (restoreUsbFailureAlarmLastSilenceMs_ == 0 ||
-        nowMs - restoreUsbFailureAlarmLastSilenceMs_ >= kRestoreUsbFailureAlarmSilenceRetryMs)
-    {
-        panelManager_.silenceBeep();
-        restoreUsbFailureAlarmLastSilenceMs_ = nowMs;
-    }
     panelManager_.silenceBeep();
     restoreUsbFailureAlarmActive_ = false;
     restoreUsbFailureAlarmStartMs_ = 0;
-    restoreUsbFailureAlarmLastSilenceMs_ = 0;
     DM_LOG_INFO("{}", (::DA::utils::LogString()
         << "restore usb failure hmi beep alarm auto silenced"
         << " duration_ms=" << kRestoreUsbFailureAlarmDurationMs
@@ -6660,7 +6653,6 @@ void RecordRuntime::resetRestoreUsbErrorWindow()
         restoreUsbFailureAlarmActive_ = false;
     }
     restoreUsbFailureAlarmStartMs_ = 0;
-    restoreUsbFailureAlarmLastSilenceMs_ = 0;
     restoreUsbPreflightFailureUntilMs_ = 0;
     if (!restoreUsbInProgress_->load())
     {
@@ -8721,7 +8713,37 @@ void RecordRuntime::GripperPanelManager::silenceBeep()
         auto &driver = drivers_[index];
         if (driver != nullptr)
         {
-            driver->silenceBeep();
+            bool silenced = false;
+            for (int attempt = 1; attempt <= kBeepSilenceRetryLimit; ++attempt)
+            {
+                const uint64_t previousStateCount = driver->getSnapshot().beepStateCount;
+                const bool commandOk = driver->silenceBeep();
+                driver->requestState();
+
+                const auto deadline = std::chrono::steady_clock::now() +
+                                      std::chrono::milliseconds(kBeepSilenceConfirmMs);
+                while (std::chrono::steady_clock::now() < deadline)
+                {
+                    driver->pollOnce(10);
+                    const auto snapshot = driver->getSnapshot();
+                    if (snapshot.beepStateCount > previousStateCount)
+                    {
+                        silenced = snapshot.beepState.duty == 0 && snapshot.beepState.frequency == 0;
+                        break;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
+                if (silenced)
+                {
+                    break;
+                }
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                    << "failed to confirm hmi beep silence"
+                    << " port=" << driver->getPort()
+                    << " attempt=" << attempt
+                    << " command_ok=" << boolText(commandOk)
+                    << std::endl).str());
+            }
         }
     }
 }

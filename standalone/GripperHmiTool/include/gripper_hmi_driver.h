@@ -23,6 +23,7 @@ struct GripperHmiSnapshot
     std::array<bool, 6> keyPressed{};
     bool active = false;
     uint64_t lastRxAgeMs = 0;
+    uint64_t beepStateCount = 0;
     GripperBeepState beepState{};
     std::optional<GripperKeyReport> lastKeyReport;
 };

@@ -2193,6 +2193,7 @@ GripperHmiSnapshot GripperHmiDriver::getSnapshot(uint64_t activeTimeoutMs) const
 
     GripperHmiSnapshot snapshot;
     snapshot.keyPressed = keyPressed_;
+    snapshot.beepStateCount = rxBeepStateCount_.load();
     snapshot.beepState = beepState_;
     snapshot.lastKeyReport = lastKeyReport_;
     if (lastReceiveTimeMs_ == 0)

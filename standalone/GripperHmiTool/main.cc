@@ -25,6 +25,8 @@ namespace {
 std::atomic<bool> g_stop_requested{false};
 constexpr int kBeepStateProbeDelayMs = 80;
 constexpr int kBeepStateProbeIntervalMs = 100;
+constexpr int kBeepSilenceRetryLimit = 5;
+constexpr int kBeepSilenceConfirmMs = 150;
 
 template <size_t N>
 std::string joinFloatArray(const float (&values)[N])
@@ -124,6 +126,44 @@ static std::string keyName(int keyIndex)
     default:
         return "KEY" + std::to_string(keyIndex);
     }
+}
+
+static bool silenceBeepWithRetries(GripperHmiDriver *device)
+{
+    if (device == nullptr)
+    {
+        return false;
+    }
+
+    for (int attempt = 1; attempt <= kBeepSilenceRetryLimit; ++attempt)
+    {
+        const uint64_t previousStateCount = device->getSnapshot().beepStateCount;
+        const bool commandOk = device->silenceBeep();
+        device->requestState();
+
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(kBeepSilenceConfirmMs);
+        while (std::chrono::steady_clock::now() < deadline)
+        {
+            device->pollOnce(10);
+            const auto snapshot = device->getSnapshot();
+            if (snapshot.beepStateCount > previousStateCount)
+            {
+                if (snapshot.beepState.duty == 0 && snapshot.beepState.frequency == 0)
+                {
+                    return true;
+                }
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+
+        std::cerr << "Failed to confirm beep silence on: " << device->getPort()
+                  << " attempt=" << attempt
+                  << " command_ok=" << (commandOk ? "true" : "false")
+                  << std::endl;
+    }
+    return false;
 }
 
 static std::string toHexString(const std::string &text)
@@ -717,7 +757,7 @@ int main(int argc, char **argv)
             {
                 for (auto &device : devices)
                 {
-                    if (!device->silenceBeep())
+                    if (!silenceBeepWithRetries(device.get()))
                     {
                         std::cerr << "Failed to silence beep on: " << device->getPort() << std::endl;
                     }
