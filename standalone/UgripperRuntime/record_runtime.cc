@@ -71,7 +71,7 @@ void CloseChildFileDescriptors(int fdLimit)
 }
 
 constexpr const char *kChestCameraEnvKey = "ENABLE_CHEST_CAM_MAIN";
-constexpr uint64_t kActionDebounceMs = 250;
+constexpr uint64_t kActionDebounceMs = 80;
 constexpr uint64_t kLongPressThresholdMs = 800;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
 constexpr uint64_t kShutdownPromptThresholdMs = 2000;
@@ -93,6 +93,13 @@ constexpr int kBeepSilenceConfirmMs = 150;
 constexpr uint64_t kRestoreUsbManualInsertGraceMs = 20000;
 constexpr uint64_t kRestoreUsbTriggerStableMs = 6000;
 constexpr uint64_t kRestoreUsbPreflightFailureCooldownMs = 30000;
+constexpr int kOperatorMarkBeepOnMs = 120;
+constexpr int kOperatorMarkBeepOffMs = 120;
+constexpr int kOperatorMarkBeepSilenceRetryAttempts = 5;
+constexpr int kOperatorMarkBeepSilenceRetryIntervalMs = 80;
+constexpr uint8_t kOperatorMarkLedRed = 180;
+constexpr uint8_t kOperatorMarkLedGreen = 0;
+constexpr uint8_t kOperatorMarkLedBlue = 255;
 constexpr int kRestoreUsbMaxAttemptsPerError = 3;
 constexpr uint64_t kCameraRecorderDStateFaultMs = 5000;
 constexpr uint64_t kCameraRecorderDStateLogIntervalMs = 3000;
@@ -7491,6 +7498,141 @@ bool RecordRuntime::handleLeftDualUmountAction()
     return false;
 }
 
+bool RecordRuntime::markEpisodeOperatorFailed(const std::string &episodeDir, std::string *errorMessage) const
+{
+    if (episodeDir.empty())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "no completed episode available";
+        }
+        return false;
+    }
+
+    const fs::path episodePath(episodeDir);
+    const fs::path metadataPath = episodePath / "metadata.json";
+    std::ifstream input(metadataPath);
+    if (!input.is_open())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "metadata.json not found: " + metadataPath.string();
+        }
+        return false;
+    }
+
+    ordered_json metadata;
+    try
+    {
+        input >> metadata;
+    }
+    catch (const std::exception &ex)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = std::string("failed to parse metadata.json: ") + ex.what();
+        }
+        return false;
+    }
+    if (!metadata.is_object())
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "metadata.json top-level value must be an object";
+        }
+        return false;
+    }
+
+    metadata["quality_check_status"] = "fail";
+    metadata["quality_check_err_type"] = ugripper::runtime::kErrorTypeOperatorMarkedFailed;
+
+    std::string writeError;
+    if (!writeTextFileAtomically(metadataPath, metadata.dump(2) + "\n", &writeError))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to write metadata.json: " + writeError;
+        }
+        return false;
+    }
+
+    std::error_code flushError;
+    if (!flushFileToDisk(metadataPath, &flushError))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to flush metadata.json: " + flushError.message();
+        }
+        return false;
+    }
+
+    writeValidationErrorLog(episodePath, "operator marked episode failed by left-hand single long press");
+    if (!flushDirectoryToDisk(episodePath, &flushError))
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "failed to flush episode directory after operator mark: " + flushError.message();
+        }
+        return false;
+    }
+    return true;
+}
+
+void RecordRuntime::playOperatorMarkFailedFeedback()
+{
+    for (int pulse = 0; pulse < 2; ++pulse)
+    {
+        panelManager_.setLedColor(kOperatorMarkLedRed, kOperatorMarkLedGreen, kOperatorMarkLedBlue);
+        panelManager_.setBeepEnabledForSide("left", true);
+        panelManager_.setBeepEnabledForSide("right", true);
+        std::this_thread::sleep_for(std::chrono::milliseconds(kOperatorMarkBeepOnMs));
+        panelManager_.turnOff();
+        for (int attempt = 0; attempt < kOperatorMarkBeepSilenceRetryAttempts; ++attempt)
+        {
+            panelManager_.silenceBeepForSide("left");
+            panelManager_.silenceBeepForSide("right");
+            if (attempt + 1 < kOperatorMarkBeepSilenceRetryAttempts)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(kOperatorMarkBeepSilenceRetryIntervalMs));
+            }
+        }
+        if (pulse == 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kOperatorMarkBeepOffMs));
+        }
+    }
+    applyIdleState();
+}
+
+bool RecordRuntime::handleLeftSingleLongMarkFailedAction()
+{
+    if (isRecordingActive())
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString() << "ignore operator fail mark while recording" << std::endl).str());
+        sendAudioCommand("error");
+        return false;
+    }
+
+    const std::string episodeDir = lastEpisodeDir();
+    std::string errorMessage;
+    if (!markEpisodeOperatorFailed(episodeDir, &errorMessage))
+    {
+        DM_LOG_ERROR("{}", (::DA::utils::LogString()
+            << "failed to mark episode as operator failed"
+            << " episode_dir=" << episodeDir
+            << " error=" << errorMessage << std::endl).str());
+        sendAudioCommand("error");
+        return false;
+    }
+
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+        << "episode marked as operator failed"
+        << " episode_dir=" << episodeDir << std::endl).str());
+    playOperatorMarkFailedFeedback();
+    syncRuntimeLogToDisk("operator mark failed");
+    return true;
+}
+
 bool RecordRuntime::recordAudioClip(const std::string &audioType, bool monitorUpButton)
 {
     if (!fs::exists(options_.audioRecordScript))
@@ -7688,6 +7830,8 @@ void RecordRuntime::handleLeftButtons(const ButtonSnapshot &buttons)
             leftDualChordActive_ = true;
             leftBothPressedSinceMs_ = nowMs;
             leftDualLongHandled_ = false;
+            leftSinglePressedSinceMs_ = 0;
+            leftSingleLongHandled_ = false;
             DM_LOG_INFO("{}", (::DA::utils::LogString() << "left dual-button chord armed" << std::endl).str());
         }
 
@@ -7702,12 +7846,44 @@ void RecordRuntime::handleLeftButtons(const ButtonSnapshot &buttons)
         return;
     }
 
-    if (leftDualChordActive_ && !buttons.upPressed && !buttons.downPressed)
+    if (leftDualChordActive_)
     {
-        leftDualChordActive_ = false;
-        leftBothPressedSinceMs_ = 0;
-        leftDualLongHandled_ = false;
+        if (!buttons.upPressed && !buttons.downPressed)
+        {
+            leftDualChordActive_ = false;
+            leftBothPressedSinceMs_ = 0;
+            leftDualLongHandled_ = false;
+        }
+        lastLeftButtons_ = buttons;
+        return;
     }
+
+    if (buttons.upPressed || buttons.downPressed)
+    {
+        const bool freshSinglePress =
+            (!lastLeftButtons_.upPressed && !lastLeftButtons_.downPressed) ||
+            buttons.upPressed != lastLeftButtons_.upPressed ||
+            buttons.downPressed != lastLeftButtons_.downPressed;
+        if (freshSinglePress)
+        {
+            leftSinglePressedSinceMs_ = nowMs;
+            leftSingleLongHandled_ = false;
+        }
+
+        const uint64_t heldMs = leftSinglePressedSinceMs_ > 0 && nowMs >= leftSinglePressedSinceMs_
+                                    ? nowMs - leftSinglePressedSinceMs_
+                                    : 0;
+        if (heldMs >= kLongPressThresholdMs && !leftSingleLongHandled_)
+        {
+            leftSingleLongHandled_ = true;
+            handleLeftSingleLongMarkFailedAction();
+        }
+        lastLeftButtons_ = buttons;
+        return;
+    }
+
+    leftSinglePressedSinceMs_ = 0;
+    leftSingleLongHandled_ = false;
     lastLeftButtons_ = buttons;
 }
 

@@ -9,7 +9,7 @@ namespace ugripper::runtime {
 
 struct HmiControllerOptions
 {
-    uint64_t action_debounce_ms = 250;
+    uint64_t action_debounce_ms = 80;
     uint64_t long_press_threshold_ms = 800;
     uint64_t dual_long_press_threshold_ms = 4000;
     uint64_t shutdown_prompt_threshold_ms = 2000;

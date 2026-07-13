@@ -340,6 +340,7 @@ private:
     bool handleLongDownAction();
     void handleDualShutdownAction();
     bool handleLeftDualUmountAction();
+    bool handleLeftSingleLongMarkFailedAction();
     void handleLeftButtons(const ButtonSnapshot &buttons);
     bool initializeRecordControlPipe();
     void closeRecordControlPipe();
@@ -386,6 +387,8 @@ private:
     bool cleanupEgoRemote(const std::string &episodeDir, std::string *errorMessage);
     bool mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const;
     bool syncRuntimeLogToDisk(const char *reason) const;
+    bool markEpisodeOperatorFailed(const std::string &episodeDir, std::string *errorMessage) const;
+    void playOperatorMarkFailedFeedback();
     bool maintainDataStorage();
     bool ensureEpisodeManagerInitialized();
     void markTactileReferencePendingForSide(const std::string &side,
@@ -449,6 +452,8 @@ private:
     uint64_t leftBothPressedSinceMs_ = 0;
     bool leftDualChordActive_ = false;
     bool leftDualLongHandled_ = false;
+    uint64_t leftSinglePressedSinceMs_ = 0;
+    bool leftSingleLongHandled_ = false;
     utils::BufferedFifoLineReader recordControlReader_{4096};
     uint64_t lastRecordControlActionMs_ = 0;
     bool hasPendingPhysicalRecordShortPress_ = false;
