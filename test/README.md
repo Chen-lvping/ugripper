@@ -42,6 +42,28 @@
   - 递归扫描一个或多个目录中的 `cam_left.mkv` / `cam_right.mkv`，并发检查包时间戳异常、显著时间洞和可疑解码报错。
   - 默认先做快速 `ffprobe` 包级扫描，只对可疑文件追加 `ffmpeg` 解码扫描；适合批量数据排查。
   - 会按同目录左右主摄对齐“大时间洞”事件，便于判断是否存在左右同时异常。
+- `test/scripts/board_gripper_hmi_link_stress.sh`
+  - 停止 `ugripper.service` 后反复独占连接左右 HMI，执行 RGB、蜂鸣器开关和状态回读，统计合法回复、蜂鸣器状态确认、最大回复年龄与失败轮次。
+  - 默认在整个压力窗口并行运行 `SensorRecorder`，持续记录左右 encoder，以区分 HMI 单 UART/控制板异常和整颗 CH9344 或 USB 上行链路异常。
+  - 使用 `trap` 在正常结束、失败或信号退出时停止传感器探针并恢复原本运行中的服务；结果默认写入 `/dev/shm`，适合加密环境下中转下发和回收。
+- `test/scripts/board_ch9344_interference_matrix.sh`
+  - 针对 CH9344 多 UART 相互干扰做分组归因：依次执行 encoder 空载基线、HMI UART 原始 open/close、termios 重配置、`TCIOFLUSH`、`TIOCEXCL`、原始状态/RGB/蜂鸣器帧、完整 HMI 反复重连和单次长连接。
+  - 每个阶段独立记录左右 encoder MCAP 和 gap 事件，将同侧 encoder 与异侧 encoder 对照，用于判断问题由端口打开、串口配置、flush、协议流量还是整颗 CH9344/USB 链路触发。
+- `test/scripts/board_encoder_to_hmi_interference_matrix.sh`
+  - 反向验证 encoder UART 是否会干扰同颗 CH9344 的 HMI：左右 HMI 保持长连接和周期状态查询，同时对指定 encoder UART 高频执行 open/close、termios、flush 和真实 1Mbps 位置请求。
+  - 统计左右 HMI 最大合法回复年龄、inactive 样本和 I/O failure，以异侧 HMI 为对照判断 encoder 操作是否能够触发同侧 HMI 无响应。
+- `test/scripts/board_hmi_self_timeout_soak.sh`
+  - 左右 HMI 各只打开一次并在整个测试窗口保持连接，持续执行动态灯效、蜂鸣器开关确认和状态查询，同时由 `SensorRecorder` 连续记录左右 encoder。
+  - 自动统计 HMI 最大合法回复年龄、超过 runtime `5500ms` 门限的 inactive 样本、I/O failure 和收发计数，并统计 encoder 的 `>2/5/10/20/100/1000ms` gap 数量；用于确认 HMI 是否会被自身指令流卡死，且避免反复 tty open/close 污染结论。
+- `test/scripts/board_hmi_high_rate_soak.sh`
+  - 两侧 HMI 全程各只打开一次，将状态查询从 `1Hz` 阶梯提升到 `50/100/250/500/800/1200Hz`，并叠加最高 `250Hz` RGB 与 `50Hz` 蜂鸣器脉冲；可通过 `--saturation-repeat` 延长接近串口带宽上限的最高档，最后回到 `1Hz` 观察是否恢复。
+  - 原始串口监视会分别统计 RX 字节、合法 XOR 帧、非法 XOR、丢弃字节、残留半帧、最大合法回复年龄与 `5500ms` timeout 事件；双 encoder 同期持续录制，用于提高偶发 HMI 自卡死的触发概率并区分协议过载、解析异常和物理无回包。
+- `test/scripts/board_hmi_strict_reply_soak.sh`
+  - 不发送 RGB 或蜂鸣器控制，只执行 HMI 状态查询；每侧严格限制为单请求在途，收到对应的下一条状态帧或单轮超时后才允许继续发送。
+  - 单轮超时后进入静默隔离窗口，将迟到帧单独计数，避免高频积压回复被错误匹配到下一轮；同步记录原始字节、合法帧、非法 XOR、单轮延迟分位数和双 encoder gap，用于验证 HMI 是否会偶发吞掉状态查询。
+- `test/scripts/board_hmi_record_start_matrix.sh`
+  - 按真实故障前左右灯效还原录制启动边界：左 HMI 为 `Ready`、右 HMI 为触觉告警，启动时两侧切换到 `Recording`；HMI 端口全程只打开一次，状态查询保持真实 `1Hz`，LED保持颜色变化或 `250ms` 重发策略，不发送蜂鸣器命令。
+  - `combo` 在灯效切换边界同步启停 `SensorRecorder`；`timing` 扫描 encoder open/config 相对灯效切换的时间偏移；`led-only` 让 encoder 全程常开、仅重复灯效切换，以依次隔离组合竞争、CH9344并发时序和Recording灯效自身影响。
 
 ## 建议用法
 在仓库根目录执行：
@@ -68,7 +90,30 @@ BASE_DIR=/tmp/ugripper_cam_check DURATION=30 CAMERA_SET=non_main_merge_tactile \
 python3 test/scripts/scan_main_camera_mkv_issues.py /mnt/data_disk
 python3 test/scripts/scan_main_camera_mkv_issues.py --root /mnt/data_disk --root ./tmp --jobs 12
 python3 test/scripts/scan_main_camera_mkv_issues.py /mnt/data_disk --decode-mode full --json
+bash test/scripts/board_gripper_hmi_link_stress.sh --cycles 20 --side both
+bash test/scripts/board_ch9344_interference_matrix.sh --side left --quick-repeats 1000 --tool-cycles 40
+bash test/scripts/board_encoder_to_hmi_interference_matrix.sh --side left --quick-repeats 2000 --query-cycles 100
+bash test/scripts/board_hmi_self_timeout_soak.sh --duration-sec 600
+bash test/scripts/board_hmi_high_rate_soak.sh --stage-sec 60 --saturation-repeat 10
+bash test/scripts/board_hmi_strict_reply_soak.sh --baseline-sec 60 --stress-sec 300
+bash test/scripts/board_hmi_record_start_matrix.sh --mode combo --cycles 50
 ```
+
+HMI 链路压力测试会直接占用夹爪和 encoder 串口，必须以 root 权限执行。现场推荐先将仓库脚本和 `board_test_common.sh` 复制到 `/dev/shm/ugripper_hmi_test/`，校验 SHA-256 后执行：
+
+```bash
+sudo bash /dev/shm/ugripper_hmi_test/board_gripper_hmi_link_stress.sh \
+  --cycles 20 \
+  --side both \
+  --output-dir /dev/shm/ugripper_hmi_test/result
+```
+
+判断口径：
+
+- HMI 轮次失败、但左右 encoder 探针持续有样本，优先判断 HMI UART、线缆、协议或夹爪控制板异常。
+- HMI 与同侧 encoder 同时停止产出，并伴随 CH9344/USB 内核错误，优先判断 CH9344、Hub、供电或 USB 上行链路异常。
+- encoder MCAP 默认要求最大相邻时间戳 gap 不超过 `100ms`；即使总样本数和平均频率看似正常，单次秒级数据洞也会使测试失败，可通过 `--encoder-max-gap-ms` 调整门限。
+- 蜂鸣器测试要求同时观察到非零 duty 的开启回读与 `duty=0` 的关闭回读；部分固件关闭后会保留最后一次 frequency 字段，因此关闭判据只看 duty。仅串口写成功不算通过。
 
 常用参数：
 
