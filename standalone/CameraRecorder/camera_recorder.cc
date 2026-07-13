@@ -85,6 +85,8 @@ constexpr auto kMainCameraStopEosGrace = std::chrono::milliseconds(500);
 constexpr auto kMainCameraStopPollInterval = std::chrono::milliseconds(10);
 constexpr int64_t kMainCameraShortStreamMinSessionUs = 5 * kUsPerSecond;
 constexpr int64_t kMainCameraShortStreamMaxSpanUs = 2 * kUsPerSecond;
+constexpr int kMainCameraStartupGateMaxFrames = 90;
+constexpr auto kMainCameraStartupGateMaxWait = std::chrono::milliseconds(1500);
 
 #ifndef UGRIPPER_ENABLE_PERF_LOG
 #define UGRIPPER_ENABLE_PERF_LOG 0
@@ -112,6 +114,22 @@ bool ConfigureManagedChildProcessGroup() {
         return false;
     }
     return true;
+}
+
+int ChildFileDescriptorLimit() {
+    const long open_max = sysconf(_SC_OPEN_MAX);
+    return open_max > 0 ? static_cast<int>(open_max) : 1024;
+}
+
+void CloseChildFileDescriptors(int fd_limit) {
+#ifdef SYS_close_range
+    if (syscall(SYS_close_range, 3U, ~0U, 0U) == 0) {
+        return;
+    }
+#endif
+    for (int fd = 3; fd < fd_limit; ++fd) {
+        close(fd);
+    }
 }
 
 #if CAMERA_RECORDER_HAS_GSTREAMER
@@ -164,6 +182,144 @@ std::string GstMessageSourceName(GstMessage* message) {
     return (name != nullptr && *name != '\0') ? std::string(name) : "unknown";
 }
 #endif
+
+struct CompressedAccessUnitCheck {
+    bool parsed = false;
+    bool has_vps = false;
+    bool has_sps = false;
+    bool has_pps = false;
+    bool has_idr = false;
+    size_t nal_count = 0;
+    std::string nal_types;
+};
+
+std::optional<std::pair<size_t, size_t>> FindAnnexBStartCode(
+    const uint8_t* data, size_t size, size_t from) {
+    if (data == nullptr || size < 4 || from >= size) {
+        return std::nullopt;
+    }
+    for (size_t i = from; i + 3 <= size; ++i) {
+        if (i + 3 <= size &&
+            data[i] == 0x00 && data[i + 1] == 0x00 && data[i + 2] == 0x01) {
+            return std::make_pair(i, size_t{3});
+        }
+        if (i + 4 <= size &&
+            data[i] == 0x00 && data[i + 1] == 0x00 &&
+            data[i + 2] == 0x00 && data[i + 3] == 0x01) {
+            return std::make_pair(i, size_t{4});
+        }
+    }
+    return std::nullopt;
+}
+
+void AppendNalTypeSummary(CompressedAccessUnitCheck* check, int nal_type) {
+    if (check == nullptr) {
+        return;
+    }
+    if (!check->nal_types.empty()) {
+        check->nal_types += ",";
+    }
+    if (check->nal_types.size() < 96) {
+        check->nal_types += std::to_string(nal_type);
+    }
+}
+
+CompressedAccessUnitCheck CheckAnnexBAccessUnit(
+    const uint8_t* data, size_t size, const std::string& codec) {
+    CompressedAccessUnitCheck check;
+    auto current = FindAnnexBStartCode(data, size, 0);
+    while (current.has_value()) {
+        const size_t nal_start = current->first + current->second;
+        auto next = FindAnnexBStartCode(data, size, nal_start);
+        const size_t nal_end = next.has_value() ? next->first : size;
+        if (nal_start < nal_end) {
+            check.parsed = true;
+            ++check.nal_count;
+            int nal_type = -1;
+            if (codec == "h265") {
+                nal_type = (data[nal_start] >> 1) & 0x3f;
+                check.has_vps = check.has_vps || nal_type == 32;
+                check.has_sps = check.has_sps || nal_type == 33;
+                check.has_pps = check.has_pps || nal_type == 34;
+                check.has_idr = check.has_idr || nal_type == 19 || nal_type == 20 || nal_type == 21;
+            } else {
+                nal_type = data[nal_start] & 0x1f;
+                check.has_sps = check.has_sps || nal_type == 7;
+                check.has_pps = check.has_pps || nal_type == 8;
+                check.has_idr = check.has_idr || nal_type == 5;
+            }
+            AppendNalTypeSummary(&check, nal_type);
+        }
+        current = next;
+    }
+    return check;
+}
+
+bool ReadBigEndianNalSize(const uint8_t* data, size_t size, size_t offset, uint32_t* nal_size) {
+    if (data == nullptr || nal_size == nullptr || offset + 4 > size) {
+        return false;
+    }
+    *nal_size = (static_cast<uint32_t>(data[offset]) << 24) |
+                (static_cast<uint32_t>(data[offset + 1]) << 16) |
+                (static_cast<uint32_t>(data[offset + 2]) << 8) |
+                static_cast<uint32_t>(data[offset + 3]);
+    return true;
+}
+
+CompressedAccessUnitCheck CheckLengthPrefixedAccessUnit(
+    const uint8_t* data, size_t size, const std::string& codec) {
+    CompressedAccessUnitCheck check;
+    size_t offset = 0;
+    while (offset + 5 <= size) {
+        uint32_t nal_size = 0;
+        if (!ReadBigEndianNalSize(data, size, offset, &nal_size) ||
+            nal_size == 0 || offset + 4 + nal_size > size) {
+            break;
+        }
+        const size_t nal_start = offset + 4;
+        check.parsed = true;
+        ++check.nal_count;
+        int nal_type = -1;
+        if (codec == "h265") {
+            nal_type = (data[nal_start] >> 1) & 0x3f;
+            check.has_vps = check.has_vps || nal_type == 32;
+            check.has_sps = check.has_sps || nal_type == 33;
+            check.has_pps = check.has_pps || nal_type == 34;
+            check.has_idr = check.has_idr || nal_type == 19 || nal_type == 20 || nal_type == 21;
+        } else {
+            nal_type = data[nal_start] & 0x1f;
+            check.has_sps = check.has_sps || nal_type == 7;
+            check.has_pps = check.has_pps || nal_type == 8;
+            check.has_idr = check.has_idr || nal_type == 5;
+        }
+        AppendNalTypeSummary(&check, nal_type);
+        offset += 4 + nal_size;
+    }
+    if (offset != size) {
+        return {};
+    }
+    return check;
+}
+
+CompressedAccessUnitCheck CheckCompressedAccessUnit(
+    const void* data, size_t size, const std::string& codec) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    CompressedAccessUnitCheck check = CheckAnnexBAccessUnit(bytes, size, codec);
+    if (!check.parsed) {
+        check = CheckLengthPrefixedAccessUnit(bytes, size, codec);
+    }
+    return check;
+}
+
+bool IsCleanStartupAccessUnit(const CompressedAccessUnitCheck& check, const std::string& codec) {
+    if (!check.parsed || !check.has_sps || !check.has_pps || !check.has_idr) {
+        return false;
+    }
+    if (codec == "h265" && !check.has_vps) {
+        return false;
+    }
+    return true;
+}
 
 std::string Trim(const std::string& input) {
     const std::string whitespace = " \t\r\n";
@@ -1148,6 +1304,7 @@ public:
         started_system_time_us_ = CurrentSystemTimeUs();
         stop_requested_.store(false, std::memory_order_release);
         capture_thread_done_.store(false, std::memory_order_release);
+        bus_eos_seen_.store(false, std::memory_order_release);
         capture_thread_ = std::thread([this]() { CaptureLoop(); });
         return true;
     }
@@ -1195,21 +1352,29 @@ public:
             gst_app_src_end_of_stream(GST_APP_SRC(appsrc_));
         }
         if (bus_ != nullptr) {
-            const auto bus_wait_start = std::chrono::steady_clock::now();
-            GstMessage* message = gst_bus_timed_pop_filtered(
-                bus_,
-                static_cast<GstClockTime>(kRecorderStopSigintTimeout.count()) * GST_MSECOND,
-                static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
-            if (message != nullptr) {
-                HandleBusMessage(message);
-                gst_message_unref(message);
-            } else {
-                const auto bus_wait_elapsed = std::chrono::steady_clock::now() - bus_wait_start;
-                DM_LOG_WARN("{}", (::DA::utils::LogString()
-                                   << "[camera_recorder][main_stop_diag] category=bus_wait_timeout"
+            if (bus_eos_seen_.load(std::memory_order_acquire)) {
+                DM_LOG_INFO("{}", (::DA::utils::LogString()
+                                   << "[camera_recorder][main_stop_diag] category=bus_wait_skipped"
                                    << " name=" << config_.name
-                                   << " wait_elapsed_ms="
-                                   << std::chrono::duration_cast<std::chrono::milliseconds>(bus_wait_elapsed).count()).str());
+                                   << " reason=eos_already_seen").str());
+            } else {
+                const auto bus_wait_start = std::chrono::steady_clock::now();
+                GstMessage* message = gst_bus_timed_pop_filtered(
+                    bus_,
+                    static_cast<GstClockTime>(kRecorderStopSigintTimeout.count()) * GST_MSECOND,
+                    static_cast<GstMessageType>(GST_MESSAGE_EOS | GST_MESSAGE_ERROR));
+                if (message != nullptr) {
+                    HandleBusMessage(message);
+                    gst_message_unref(message);
+                } else {
+                    const auto bus_wait_elapsed = std::chrono::steady_clock::now() - bus_wait_start;
+                    DM_LOG_WARN("{}", (::DA::utils::LogString()
+                                       << "[camera_recorder][main_stop_diag] category=bus_wait_timeout"
+                                       << " name=" << config_.name
+                                       << " wait_elapsed_ms="
+                                       << std::chrono::duration_cast<std::chrono::milliseconds>(bus_wait_elapsed).count()
+                                       << " eos_seen=false").str());
+                }
             }
         }
 
@@ -1535,6 +1700,17 @@ private:
                 break;
             }
 
+            if (!StartupGateAllowsBuffer(buffers_[buffer.index].data, buffer.bytesused)) {
+                if (!RetryIoctl(fd_, VIDIOC_QBUF, &buffer)) {
+                    SetFailure("VIDIOC_QBUF failed for " + config_.name + ": " + std::strerror(errno));
+                    break;
+                }
+                if (failure_) {
+                    break;
+                }
+                continue;
+            }
+
             const int64_t system_time_us = V4l2BufferSystemTimeUs(buffer).value_or(CurrentSystemTimeUs());
             const int64_t pts_us = UpdateFrameTimingFromCapture(system_time_us);
 
@@ -1600,6 +1776,81 @@ private:
                            << " frame_count=" << frame_count_
                            << " last_pts_us=" << LastFramePtsUs().value_or(-1)
                            << " last_system_time_us=" << LastFrameSystemTimeUs().value_or(-1)).str());
+    }
+
+    bool StartupGateAllowsBuffer(const void* data, uint32_t bytesused) {
+        if (startup_gate_open_) {
+            return true;
+        }
+        if (startup_gate_checked_frames_ == 0) {
+            startup_gate_start_ = std::chrono::steady_clock::now();
+        }
+
+        ++startup_gate_checked_frames_;
+        const auto check_start = std::chrono::steady_clock::now();
+        const CompressedAccessUnitCheck check =
+            CheckCompressedAccessUnit(data, bytesused, options_.codec);
+        const auto check_elapsed = std::chrono::steady_clock::now() - check_start;
+        const auto check_elapsed_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(check_elapsed).count();
+        startup_gate_max_check_us_ =
+            std::max<uint64_t>(startup_gate_max_check_us_, static_cast<uint64_t>(std::max<int64_t>(0, check_elapsed_us)));
+
+        const auto gate_elapsed = std::chrono::steady_clock::now() - startup_gate_start_;
+        const auto gate_elapsed_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(gate_elapsed).count();
+        if (IsCleanStartupAccessUnit(check, options_.codec)) {
+            startup_gate_open_ = true;
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                               << "[camera_recorder][main_startup_gate]"
+                               << " event=accepted"
+                               << " name=" << config_.name
+                               << " codec=" << options_.codec
+                               << " wait_ms=" << gate_elapsed_ms
+                               << " checked_frames=" << startup_gate_checked_frames_
+                               << " dropped_frames=" << startup_gate_dropped_frames_
+                               << " bytes=" << bytesused
+                               << " nal_count=" << check.nal_count
+                               << " nal_types=" << check.nal_types
+                               << " max_check_us=" << startup_gate_max_check_us_).str());
+            return true;
+        }
+
+        ++startup_gate_dropped_frames_;
+        if (startup_gate_dropped_frames_ <= 3 ||
+            startup_gate_checked_frames_ == kMainCameraStartupGateMaxFrames) {
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                               << "[camera_recorder][main_startup_gate]"
+                               << " event=dropped"
+                               << " name=" << config_.name
+                               << " codec=" << options_.codec
+                               << " wait_ms=" << gate_elapsed_ms
+                               << " checked_frames=" << startup_gate_checked_frames_
+                               << " dropped_frames=" << startup_gate_dropped_frames_
+                               << " bytes=" << bytesused
+                               << " parsed=" << (check.parsed ? "true" : "false")
+                               << " has_sps=" << (check.has_sps ? "true" : "false")
+                               << " has_pps=" << (check.has_pps ? "true" : "false")
+                               << " has_idr=" << (check.has_idr ? "true" : "false")
+                               << " nal_count=" << check.nal_count
+                               << " nal_types=" << check.nal_types
+                               << " check_us=" << check_elapsed_us).str());
+        }
+
+        if (startup_gate_checked_frames_ >= kMainCameraStartupGateMaxFrames ||
+            gate_elapsed >= kMainCameraStartupGateMaxWait) {
+            std::ostringstream error;
+            error << "main camera startup gate timed out"
+                  << " camera=" << config_.name
+                  << " checked_frames=" << startup_gate_checked_frames_
+                  << " dropped_frames=" << startup_gate_dropped_frames_
+                  << " wait_ms=" << gate_elapsed_ms
+                  << " max_wait_ms=" << kMainCameraStartupGateMaxWait.count()
+                  << " max_check_us=" << startup_gate_max_check_us_;
+            SetFailure(error.str());
+            WriteCameraRecorderFault(options_.output_dir, config_, error.str());
+        }
+        return false;
     }
 
     int64_t NominalFrameDurationUs() const {
@@ -1691,6 +1942,7 @@ private:
             break;
         }
         case GST_MESSAGE_EOS:
+            bus_eos_seen_.store(true, std::memory_order_release);
             DM_LOG_INFO("{}", (::DA::utils::LogString()
                                << "[camera_recorder][main_bus_diag] category=bus_eos"
                                << " name=" << config_.name
@@ -1874,7 +2126,20 @@ private:
 
     void CleanupPipeline() {
         if (pipeline_ != nullptr) {
-            gst_element_set_state(pipeline_, GST_STATE_NULL);
+            const auto null_start = std::chrono::steady_clock::now();
+            const GstStateChangeReturn null_result = gst_element_set_state(pipeline_, GST_STATE_NULL);
+            std::error_code size_error;
+            const uintmax_t output_size = fs::exists(output_path_, size_error)
+                                            ? fs::file_size(output_path_, size_error)
+                                            : 0;
+            const auto null_elapsed = std::chrono::steady_clock::now() - null_start;
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                               << "[camera_recorder][main_stop_diag] category=pipeline_null"
+                               << " name=" << config_.name
+                               << " result=" << gst_element_state_change_return_get_name(null_result)
+                               << " elapsed_ms="
+                               << std::chrono::duration_cast<std::chrono::milliseconds>(null_elapsed).count()
+                               << " output_size=" << (size_error ? 0 : output_size)).str());
         }
         if (bus_ != nullptr) {
             gst_object_unref(bus_);
@@ -1929,6 +2194,7 @@ private:
     std::optional<int> exit_code_;
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> capture_thread_done_{true};
+    std::atomic<bool> bus_eos_seen_{false};
     std::thread capture_thread_;
     std::vector<MmapBuffer> buffers_;
     GstElement* pipeline_ = nullptr;
@@ -1945,6 +2211,11 @@ private:
     std::optional<int64_t> last_frame_system_time_us_;
     std::optional<int64_t> record_time_offset_us_;
     uint64_t frame_count_ = 0;
+    bool startup_gate_open_ = false;
+    int startup_gate_checked_frames_ = 0;
+    int startup_gate_dropped_frames_ = 0;
+    uint64_t startup_gate_max_check_us_ = 0;
+    std::chrono::steady_clock::time_point startup_gate_start_{};
 };
 #else
 class MainCameraRecorder final : public ShellCameraRecorder {
@@ -2887,6 +3158,7 @@ public:
             return false;
         }
 
+        const int child_fd_limit = ChildFileDescriptorLimit();
         pid_t pid = fork();
         if (pid < 0) {
             close(input_pipe[0]);
@@ -2909,6 +3181,7 @@ public:
             close(input_pipe[1]);
             close(output_pipe[0]);
             close(output_pipe[1]);
+            CloseChildFileDescriptors(child_fd_limit);
             execl("/bin/bash", "bash", "-lc", command_.c_str(), static_cast<char*>(nullptr));
             _exit(127);
         }
