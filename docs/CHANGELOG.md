@@ -1,8 +1,21 @@
 # Changelog
 
+## Unreleased
+
+- 新增 `test/scripts/board_gripper_hmi_link_stress.sh` 现场测试入口：可在临时停止 `ugripper.service` 后循环验证左右 HMI 状态回复、RGB 与蜂鸣器开关回读，并并行记录 encoder 数据，用于区分 HMI 单通道/控制板卡死与 CH9344、Hub 或 USB 上行链路故障；测试结果默认落在 `/dev/shm`。
+- 新增 `test/scripts/board_ch9344_interference_matrix.sh` 分组归因工具，将 HMI UART 的 open/close、termios 重配置、flush、完整协议重连和蜂鸣器流量拆分为独立阶段，并以左右 encoder MCAP gap 对照定位 CH9344 多端口干扰触发条件。
+- 新增 `test/scripts/board_encoder_to_hmi_interference_matrix.sh` 反向干扰工具，在左右 HMI 持续状态查询期间对 encoder UART 高频建立会话和发送真实请求，用于验证 encoder 侧操作是否能够触发同颗 CH9344 的 HMI 无响应。
+
 > 说明：本文件只保留 v2.0.0 以来的高信号发布变更；当前系统行为以 `docs/agent/overview.md` 为准。
 >
 > 仓库没有 `v2.0.x` git tag。下面的发布边界按 `build_deb.sh` / `scripts/build_arm_deb_in_pp_arm_dev.sh` 中 `BASE_VERSION` 的提交记录推定：`2caf6e0` 为 v2.0.0，`d81c3c1` 为 v2.0.1。
+
+## v2.1.4 - Unreleased
+
+- 主摄压缩码流在写入最终容器前等待包含参数集与 IDR 的 clean keyframe，避免设备冷启动坏首包进入 MKV；停录时若 EOS 已被轮询线程消费，则不再重复等待并误报 `bus_wait_timeout`。
+- HMI 蜂鸣关闭改为发送命令后回读确认，状态不为 `0/0` 时最多重试 `5` 次。
+- CameraRecorder、Fays recorder 及运行时直接启动的辅助子进程在 `exec` 前关闭非标准 fd；Fays daemon 启动左右 recorder 时不再向下继承顶层控制 FIFO，避免 ffmpeg 或 recorder 额外持有 CH9344、相机、IMU 等无关硬件资源。
+- 构建脚本默认主包版本调整到 `2.1.4`。
 
 ## v2.1.3 - Unreleased
 

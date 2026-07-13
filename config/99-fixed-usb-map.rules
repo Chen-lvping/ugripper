@@ -20,24 +20,36 @@ GOTO="ugripper_fixed_end"
 LABEL="ugripper_fixed_usb"
 # Fays SDK needs access to the USB device/control node. Match only SuperSpeed
 # ports in the current UGripper side topology.
+ENV{DEVTYPE}=="usb_device", KERNEL=="[68]-1", ATTR{idVendor}=="0403", ATTR{idProduct}=="602e", ATTR{speed}=="5000", MODE:="0777", GROUP:="plugdev"
 ENV{DEVTYPE}=="usb_device", KERNEL=="[68]-1.[1-4]", ATTR{idVendor}=="0403", ATTR{idProduct}=="602e", ATTR{speed}=="5000", MODE:="0777", GROUP:="plugdev"
+ENV{DEVTYPE}=="usb_device", KERNEL=="1[02]-1", ATTR{idVendor}=="0403", ATTR{idProduct}=="602e", ATTR{speed}=="5000", MODE:="0777", GROUP:="plugdev"
 ENV{DEVTYPE}=="usb_device", KERNEL=="1[02]-1.[1-4]", ATTR{idVendor}=="0403", ATTR{idProduct}=="602e", ATTR{speed}=="5000", MODE:="0777", GROUP:="plugdev"
 GOTO="ugripper_fixed_end"
 
 LABEL="ugripper_fixed_video"
 # Fays video + IMU streams on USB3. Interface 00 is stereo; interface 02 is IMU.
+KERNEL=="video*", KERNELS=="[68]-1", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
 KERNEL=="video*", KERNELS=="[68]-1.[1-4]", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="stereo_right", SYMLINK+="right_fays_stereo"
+KERNEL=="video*", KERNELS=="[68]-1", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="right_fays_imu"
 KERNEL=="video*", KERNELS=="[68]-1.[1-4]", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="right_fays_imu"
+KERNEL=="video*", KERNELS=="1[02]-1", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
 KERNEL=="video*", KERNELS=="1[02]-1.[1-4]", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="00", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="stereo_left", SYMLINK+="left_fays_stereo"
+KERNEL=="video*", KERNELS=="1[02]-1", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="left_fays_imu"
 KERNEL=="video*", KERNELS=="1[02]-1.[1-4]", ATTRS{idVendor}=="0403", ATTRS{idProduct}=="602e", ATTRS{speed}=="5000", ENV{ID_USB_INTERFACE_NUM}=="02", ATTR{index}=="0", MODE:="0777", GROUP:="video", SYMLINK+="left_fays_imu"
 
 # Left/right main cameras on the hand USB2 hubs.
 KERNEL=="video*", KERNELS=="[15]-1.4.4", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_right"
 KERNEL=="video*", KERNELS=="[15]-1.1", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_right"
+KERNEL=="video*", KERNELS=="[15]-1.2.1", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_right"
+KERNEL=="video*", KERNELS=="[15]-1.7", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_right"
 KERNEL=="video*", KERNELS=="9-1.4.[24]", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
 KERNEL=="video*", KERNELS=="11-1.4.[24]", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
 KERNEL=="video*", KERNELS=="9-1.1", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
 KERNEL=="video*", KERNELS=="11-1.1", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
+KERNEL=="video*", KERNELS=="9-1.2.1", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
+KERNEL=="video*", KERNELS=="11-1.2.1", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
+KERNEL=="video*", KERNELS=="9-1.7", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
+KERNEL=="video*", KERNELS=="11-1.7", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
 
 # Taobao commercial hub compatibility
 KERNEL=="video*", KERNELS=="9-1.4", ATTRS{idVendor}=="27c2", ATTRS{idProduct}=="0530", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="cam_left"
@@ -52,6 +64,7 @@ KERNEL=="video*", KERNELS=="[15]-1.4.2", ATTRS{idVendor}=="0bda", ATTRS{idProduc
 KERNEL=="video*", KERNELS=="[15]-1.3", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_l"
 KERNEL=="video*", KERNELS=="[15]-1.4.1", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_r"
 KERNEL=="video*", KERNELS=="[15]-1.4:1.0", ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", SYMLINK+="tcam_right_r"
+KERNEL=="video*", KERNELS=="[15]-1.5", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_r"
 KERNEL=="video*", KERNELS=="9-1.4.[24]", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
 KERNEL=="video*", KERNELS=="11-1.4.[24]", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
 KERNEL=="video*", KERNELS=="9-1.3", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
@@ -60,6 +73,8 @@ KERNEL=="video*", KERNELS=="9-1.4.1", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=
 KERNEL=="video*", KERNELS=="11-1.4.1", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_r"
 KERNEL=="video*", KERNELS=="9-1.4:1.0", ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", SYMLINK+="tcam_left_r"
 KERNEL=="video*", KERNELS=="11-1.4:1.0", ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", SYMLINK+="tcam_left_r"
+KERNEL=="video*", KERNELS=="9-1.5", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_r"
+KERNEL=="video*", KERNELS=="11-1.5", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_r"
 
 # Taobao commercial hub compatibility
 KERNEL=="video*", KERNELS=="1-1.2.3", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_l"
