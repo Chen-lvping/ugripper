@@ -80,6 +80,9 @@
 bash test/scripts/camera_test.sh
 bash test/scripts/camera_crash_capture.sh
 bash test/scripts/testVideoPipe.sh
+bash test/scripts/board_tactile_ffmpeg_streamon_soak.sh --device /dev/tcam_left_l --duration-sec 1800 --cycle-sec 5
+bash test/scripts/board_tactile_ffmpeg_parallel_soak.sh --duration-sec 1800 --cycle-sec 1
+bash test/scripts/board_encoder_cmd_ack_latency.sh --iterations 5000 --timeout-ms 20
 bash -n run_record.sh auto_update/usb_auto_update.sh auto_calibration/run_calibration.sh
 python3 -m py_compile audio/*.py
 python3 audio/record_usb_audio.py --help
