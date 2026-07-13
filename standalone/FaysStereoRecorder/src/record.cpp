@@ -26,6 +26,7 @@
 #include <cerrno>
 #include <cstring>
 #include <sys/types.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 #include <mcap/writer.hpp>
 #include <limits.h>
@@ -37,6 +38,22 @@
 #include "common/print_helpers.h"
 
 namespace {
+int ChildFileDescriptorLimit() {
+    const long openMax = sysconf(_SC_OPEN_MAX);
+    return openMax > 0 ? static_cast<int>(openMax) : 1024;
+}
+
+void CloseChildFileDescriptors(int fdLimit) {
+#ifdef SYS_close_range
+    if (syscall(SYS_close_range, 3U, ~0U, 0U) == 0) {
+        return;
+    }
+#endif
+    for (int fd = 3; fd < fdLimit; ++fd) {
+        close(fd);
+    }
+}
+
 std::string TrimCopy(const std::string& input) {
     const auto begin = input.find_first_not_of(" \t\r\n");
     if (begin == std::string::npos) {
@@ -1332,6 +1349,7 @@ public:
             return false;
         }
 
+        const int childFdLimit = ChildFileDescriptorLimit();
         const pid_t pid = fork();
         if (pid < 0) {
             std::cerr << "[FFmpeg] Failed to fork: " << std::strerror(errno) << std::endl;
@@ -1357,6 +1375,7 @@ public:
                     }
                 }
             }
+            CloseChildFileDescriptors(childFdLimit);
             execl("/bin/sh", "sh", "-c", cmd.str().c_str(), static_cast<char*>(nullptr));
             _exit(127);
         }

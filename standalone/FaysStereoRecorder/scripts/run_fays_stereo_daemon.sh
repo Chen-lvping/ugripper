@@ -1009,7 +1009,7 @@ start_side_daemon() {
         --mcap-name "$mcap_name" \
         --calib-json "$calib_json" \
         --status-json "$runtime_status_json" \
-        daemon &
+        daemon 9>&- &
     local pid="$!"
     if ! wait_for_fifo "$fifo" "$FIFO_STARTUP_TIMEOUT_SEC"; then
         log_fifo_startup_timeout "$side" "$fifo" "$pid" "$config" "$runtime_status_json"

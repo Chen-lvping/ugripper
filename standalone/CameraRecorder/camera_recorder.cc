@@ -40,6 +40,7 @@
 #include <sys/prctl.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -939,6 +940,7 @@ public:
             return false;
         }
 
+        const int child_fd_limit = ChildFileDescriptorLimit();
         pid_t pid = fork();
         if (pid < 0) {
             perror("fork");
@@ -957,6 +959,7 @@ public:
             dup2(output_pipe[1], STDOUT_FILENO);
             dup2(output_pipe[1], STDERR_FILENO);
             close(output_pipe[1]);
+            CloseChildFileDescriptors(child_fd_limit);
             execl("/bin/bash", "bash", "-lc", command_.c_str(), static_cast<char*>(nullptr));
             _exit(127);
         }
