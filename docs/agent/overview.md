@@ -71,10 +71,10 @@
 - 长按判定阈值 `800ms`，右手双键关机提示阈值 `2000ms`，双键执行阈值 `4000ms`。
 
 ### 5.2 按键动作
-- `BTN_UP` 短按释放：
+- `BTN_UP` 短按释放：物理按键需同键在 `1s` 内双击才触发，第一次短按只进入待确认窗口。
   - 空闲时开始普通录制。
   - 录制中停止当前录制。
-- `BTN_DOWN` 短按释放：
+- `BTN_DOWN` 短按释放：物理按键需同键在 `1s` 内双击才触发，第一次短按只进入待确认窗口。
   - 空闲且存在上一条 episode 时开始 reset 录制。
   - 空闲但无上一条 episode 时只播报 `no_reset_needed`。
   - 录制中停止当前录制。
@@ -289,7 +289,7 @@
   - `SHORT_DOWN`：严格模拟右手下键短按语义；空闲且存在上一条 episode 时重录，录制中停录。
   - `START`：仅空闲时接受，并映射到 `ShortUpPressed`；录制中会忽略并记录 `[CONTROL_DIAG] ... reason=already_recording`。
   - `STOP`：仅录制中接受，并映射到 `ShortDownPressed`；空闲时会忽略并记录 `[CONTROL_DIAG] ... reason=not_recording`。
-- 被接受的软件命令会在同一主循环内复用 `handleShortUpAction()` / `handleShortDownAction()`，因此停录会进入与按键短按相同的 stop、finalize、merge、validation、LED/audio 恢复路径；不要通过直接写 stereo FIFO、kill recorder 或删除 lock 文件来替代停录。
+- 被接受的软件命令会在同一主循环内复用 `handleShortUpAction()` / `handleShortDownAction()`，不经过物理按键 `1s` 双击防误触门槛，因此停录会进入与按键双击确认后的相同 stop、finalize、merge、validation、LED/audio 恢复路径；不要通过直接写 stereo FIFO、kill recorder 或删除 lock 文件来替代停录。
 - 控制入口带 `300ms` 防抖，单轮主循环最多处理 `8` 条命令，避免外部脚本重复写入导致 start/stop 连续抖动；同一轮中若已接受软件控制命令，会跳过本轮物理按键事件处理，降低叠加触发风险。
 - 建议使用示例：
   - `echo START > /dev/shm/ugripper/umi_record_control.pipe`

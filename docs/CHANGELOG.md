@@ -15,6 +15,7 @@
 - 主摄压缩码流在写入最终容器前等待包含参数集与 IDR 的 clean keyframe，避免设备冷启动坏首包进入 MKV；停录时若 EOS 已被轮询线程消费，则不再重复等待并误报 `bus_wait_timeout`。
 - HMI 蜂鸣关闭改为发送命令后回读确认，状态不为 `0/0` 时最多重试 `5` 次。
 - CameraRecorder、Fays recorder 及运行时直接启动的辅助子进程在 `exec` 前关闭非标准 fd；Fays daemon 启动左右 recorder 时不再向下继承顶层控制 FIFO，避免 ffmpeg 或 recorder 额外持有 CH9344、相机、IMU 等无关硬件资源。
+- 物理 `BTN_UP` / `BTN_DOWN` 录制启停改为 `1s` 内同键双击触发，降低单次短按误触；软件 FIFO 控制命令仍保持单次触发，便于自动化录制与现场复现。
 - 构建脚本默认主包版本调整到 `2.1.4`。
 
 ## v2.1.3 - Unreleased

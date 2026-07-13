@@ -334,6 +334,8 @@ private:
     void handleButtons(const ButtonSnapshot &buttons);
     bool handleShortUpAction();
     bool handleShortDownAction();
+    bool handlePhysicalRecordShortPress(ugripper::runtime::HmiEventType eventType);
+    void clearPendingPhysicalRecordShortPress(const char *reason, uint64_t nowMs);
     bool handleLongUpAction();
     bool handleLongDownAction();
     void handleDualShutdownAction();
@@ -449,6 +451,10 @@ private:
     bool leftDualLongHandled_ = false;
     utils::BufferedFifoLineReader recordControlReader_{4096};
     uint64_t lastRecordControlActionMs_ = 0;
+    bool hasPendingPhysicalRecordShortPress_ = false;
+    ugripper::runtime::HmiEventType pendingPhysicalRecordShortPress_ =
+        ugripper::runtime::HmiEventType::ShortUpPressed;
+    uint64_t pendingPhysicalRecordShortPressMs_ = 0;
     struct TactileWarningSideState
     {
         bool leftSensor = false;

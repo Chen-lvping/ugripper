@@ -83,6 +83,7 @@ constexpr uint64_t kStereoDaemonRestartIntervalMs = 2000;
 constexpr uint64_t kStereoStartupReadyTimeoutMs = 40000;
 constexpr uint64_t kStereoFinalizeWaitPollMs = 100;
 constexpr uint64_t kRecordControlDebounceMs = 300;
+constexpr uint64_t kPhysicalRecordDoubleClickMs = 1000;
 constexpr uint64_t kRestoreUsbSymlinkPollIntervalMs = 1000;
 constexpr uint64_t kRestoreUsbSymlinkMaxWaitMs = 25000;
 constexpr uint64_t kRestoreUsbReadyCheckDelayMs = 45000;
@@ -7322,6 +7323,72 @@ bool RecordRuntime::handleShortDownAction()
     return stopRecording(false, "BTN_DOWN short stop");
 }
 
+bool RecordRuntime::handlePhysicalRecordShortPress(ugripper::runtime::HmiEventType eventType)
+{
+    const uint64_t nowMs = currentSteadyMs();
+    const char *eventName = hmiEventName(eventType);
+    if (hasPendingPhysicalRecordShortPress_)
+    {
+        const uint64_t elapsedMs = nowMs >= pendingPhysicalRecordShortPressMs_
+                                       ? nowMs - pendingPhysicalRecordShortPressMs_
+                                       : 0;
+        if (pendingPhysicalRecordShortPress_ == eventType && elapsedMs <= kPhysicalRecordDoubleClickMs)
+        {
+            hasPendingPhysicalRecordShortPress_ = false;
+            pendingPhysicalRecordShortPressMs_ = 0;
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "[HMI_DIAG] category=record_double_click"
+                << " event=" << eventName
+                << " result=accepted"
+                << " elapsed_ms=" << elapsedMs
+                << " window_ms=" << kPhysicalRecordDoubleClickMs).str());
+            if (eventType == ugripper::runtime::HmiEventType::ShortUpPressed)
+            {
+                return handleShortUpAction();
+            }
+            return handleShortDownAction();
+        }
+
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+            << "[HMI_DIAG] category=record_double_click"
+            << " event=" << eventName
+            << " result=cancel_previous"
+            << " previous_event=" << hmiEventName(pendingPhysicalRecordShortPress_)
+            << " elapsed_ms=" << elapsedMs
+            << " window_ms=" << kPhysicalRecordDoubleClickMs).str());
+    }
+
+    hasPendingPhysicalRecordShortPress_ = true;
+    pendingPhysicalRecordShortPress_ = eventType;
+    pendingPhysicalRecordShortPressMs_ = nowMs;
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+        << "[HMI_DIAG] category=record_double_click"
+        << " event=" << eventName
+        << " result=armed"
+        << " window_ms=" << kPhysicalRecordDoubleClickMs).str());
+    return false;
+}
+
+void RecordRuntime::clearPendingPhysicalRecordShortPress(const char *reason, uint64_t nowMs)
+{
+    if (!hasPendingPhysicalRecordShortPress_)
+    {
+        return;
+    }
+    const uint64_t elapsedMs = nowMs >= pendingPhysicalRecordShortPressMs_
+                                   ? nowMs - pendingPhysicalRecordShortPressMs_
+                                   : 0;
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+        << "[HMI_DIAG] category=record_double_click"
+        << " result=cleared"
+        << " reason=" << (reason == nullptr ? "" : reason)
+        << " pending_event=" << hmiEventName(pendingPhysicalRecordShortPress_)
+        << " elapsed_ms=" << elapsedMs
+        << " window_ms=" << kPhysicalRecordDoubleClickMs).str());
+    hasPendingPhysicalRecordShortPress_ = false;
+    pendingPhysicalRecordShortPressMs_ = 0;
+}
+
 bool RecordRuntime::handleLongUpAction()
 {
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "BTN_UP long press" << std::endl).str());
@@ -7573,22 +7640,26 @@ void RecordRuntime::handleButtons(const ButtonSnapshot &buttons)
         switch (event.type)
         {
         case ugripper::runtime::HmiEventType::ShortUpPressed:
-            handleShortUpAction();
+            handlePhysicalRecordShortPress(event.type);
             break;
         case ugripper::runtime::HmiEventType::ShortDownPressed:
-            handleShortDownAction();
+            handlePhysicalRecordShortPress(event.type);
             break;
         case ugripper::runtime::HmiEventType::LongUpPressed:
+            clearPendingPhysicalRecordShortPress("long_up", currentSteadyMs());
             handleLongUpAction();
             break;
         case ugripper::runtime::HmiEventType::LongDownPressed:
+            clearPendingPhysicalRecordShortPress("long_down", currentSteadyMs());
             handleLongDownAction();
             break;
         case ugripper::runtime::HmiEventType::ShutdownPromptRequested:
+            clearPendingPhysicalRecordShortPress("shutdown_prompt", currentSteadyMs());
             DM_LOG_INFO("{}", (::DA::utils::LogString() << "dual-button chord armed" << std::endl).str());
             sendAudioCommand("shutdown");
             break;
         case ugripper::runtime::HmiEventType::ShutdownRequested:
+            clearPendingPhysicalRecordShortPress("shutdown", currentSteadyMs());
             handleDualShutdownAction();
             break;
         }
