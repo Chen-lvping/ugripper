@@ -30,9 +30,8 @@ std::string resolveEncoderLabel(const std::string &argument) {
     return argument;
 }
 
-void signalHandler(int signum) {
-    DM_LOG_INFO("{}", (::DA::utils::LogString() << "Interrupt signal (" << signum << ") received. Stopping...").str());
-    g_stopFlag = true;
+void signalHandler(int) {
+    g_stopFlag.store(true, std::memory_order_relaxed);
 }
 
 void encoderReadThreadFunc(EncoderDriver *encoder) {

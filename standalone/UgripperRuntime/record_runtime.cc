@@ -72,6 +72,8 @@ void CloseChildFileDescriptors(int fdLimit)
 
 constexpr const char *kChestCameraEnvKey = "ENABLE_CHEST_CAM_MAIN";
 constexpr uint64_t kActionDebounceMs = 80;
+constexpr uint64_t kButtonPressDebounceMs = 40;
+constexpr uint64_t kButtonReleaseDebounceMs = 40;
 constexpr uint64_t kLongPressThresholdMs = 800;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
 constexpr uint64_t kShutdownPromptThresholdMs = 2000;
@@ -4108,6 +4110,8 @@ bool RecordRuntime::initialize()
 
     hmiController_ = std::make_unique<ugripper::runtime::HmiController>(
         ugripper::runtime::HmiControllerOptions{
+            .press_debounce_ms = kButtonPressDebounceMs,
+            .release_debounce_ms = kButtonReleaseDebounceMs,
             .action_debounce_ms = kActionDebounceMs,
             .long_press_threshold_ms = kLongPressThresholdMs,
             .dual_long_press_threshold_ms = kDualLongPressThresholdMs,
@@ -4463,7 +4467,7 @@ int RecordRuntime::run()
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "device_sn=" << deviceSn_ << std::endl).str());
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "episode_root=" << episodeManager_->dataRoot() << std::endl).str());
 
-    while (!stopRequested_.load())
+    while (!stopRequested_.load(std::memory_order_relaxed))
     {
         const uint64_t loopStartMs = currentSteadyMs();
         maintainMainCameraRuntimeStates();
@@ -4510,18 +4514,9 @@ int RecordRuntime::run()
     return 0;
 }
 
-void RecordRuntime::requestStop()
+void RecordRuntime::requestStop() noexcept
 {
-    stopRequested_.store(true);
-    if (egoRecordingWorker_.has_value())
-    {
-        std::string ignoredError;
-        egoRecordingWorker_->Stop(
-            ugripper::runtime::ProcessStopMode::SigTermThenKill,
-            1000,
-            &ignoredError);
-        egoRecordingWorker_.reset();
-    }
+    stopRequested_.store(true, std::memory_order_relaxed);
 }
 
 bool RecordRuntime::startAudioPlayer()

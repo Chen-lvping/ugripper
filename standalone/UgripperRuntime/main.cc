@@ -82,10 +82,14 @@ int main(int argc, char **argv)
     std::signal(SIGINT, handleSignal);
     std::signal(SIGTERM, handleSignal);
 
-    if (!runtime.initialize())
+    int exitCode = 1;
+    if (runtime.initialize())
     {
-        return 1;
+        exitCode = runtime.run();
     }
 
-    return runtime.run();
+    std::signal(SIGINT, SIG_DFL);
+    std::signal(SIGTERM, SIG_DFL);
+    g_runtime = nullptr;
+    return exitCode;
 }

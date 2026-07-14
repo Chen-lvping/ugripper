@@ -3,6 +3,7 @@
 ## Unreleased
 
 - HMI 物理按键在动作状态机前新增按下、松开各 `40ms` 的双向稳定滤波，过滤短暂电平毛刺；原有 `80ms` 短按动作间隔保持不变。
+- UgripperRuntime、SensorRecorder 与 encoder zeroing 的信号处理路径只设置停止标志，不再在信号上下文执行日志、子进程等待或复杂对象清理；SensorRecorder 退出时先等待编码器读写线程停止，再关闭串口，避免服务停止或停录时发生死锁、资源竞态及 sensor MCAP Footer 未封口。
 
 > 说明：本文件只保留 v2.0.0 以来的高信号发布变更；当前系统行为以 `docs/agent/overview.md` 为准。
 >
