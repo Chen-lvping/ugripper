@@ -13,11 +13,20 @@ uint64_t FakeNowMs()
 
 using ugripper::runtime::ButtonSnapshot;
 using ugripper::runtime::HmiController;
+using ugripper::runtime::HmiControllerOptions;
 using ugripper::runtime::HmiEventType;
+
+HmiControllerOptions ImmediateStateDebounceOptions()
+{
+    HmiControllerOptions options;
+    options.press_debounce_ms = 0;
+    options.release_debounce_ms = 0;
+    return options;
+}
 
 TEST(HmiControllerTest, EmitsShortPressEventOnRelease)
 {
-    HmiController controller({}, &FakeNowMs);
+    HmiController controller(ImmediateStateDebounceOptions(), &FakeNowMs);
 
     g_now_ms = 100;
     EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true}).empty());
@@ -30,7 +39,7 @@ TEST(HmiControllerTest, EmitsShortPressEventOnRelease)
 
 TEST(HmiControllerTest, EmitsLongPressInsteadOfShortPress)
 {
-    HmiController controller({}, &FakeNowMs);
+    HmiController controller(ImmediateStateDebounceOptions(), &FakeNowMs);
 
     g_now_ms = 100;
     EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.down_pressed = true}).empty());
@@ -46,7 +55,7 @@ TEST(HmiControllerTest, EmitsLongPressInsteadOfShortPress)
 
 TEST(HmiControllerTest, EmitsShutdownPromptAndShutdownForDualHold)
 {
-    HmiController controller({}, &FakeNowMs);
+    HmiController controller(ImmediateStateDebounceOptions(), &FakeNowMs);
 
     g_now_ms = 100;
     EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true, .down_pressed = true}).empty());
@@ -64,7 +73,7 @@ TEST(HmiControllerTest, EmitsShutdownPromptAndShutdownForDualHold)
 
 TEST(HmiControllerTest, DebouncesRepeatedShortPresses)
 {
-    HmiController controller({}, &FakeNowMs);
+    HmiController controller(ImmediateStateDebounceOptions(), &FakeNowMs);
 
     g_now_ms = 100;
     EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true}).empty());
@@ -92,7 +101,7 @@ TEST(HmiControllerTest, DebouncesRepeatedShortPresses)
 
 TEST(HmiControllerTest, AcceptsFastSecondShortPressAfterDefaultDebounce)
 {
-    HmiController controller({}, &FakeNowMs);
+    HmiController controller(ImmediateStateDebounceOptions(), &FakeNowMs);
 
     g_now_ms = 100;
     EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true}).empty());
@@ -113,7 +122,7 @@ TEST(HmiControllerTest, AcceptsFastSecondShortPressAfterDefaultDebounce)
 
 TEST(HmiControllerTest, DualChordReleaseDoesNotEmitShortPress)
 {
-    HmiController controller({}, &FakeNowMs);
+    HmiController controller(ImmediateStateDebounceOptions(), &FakeNowMs);
 
     g_now_ms = 100;
     EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true, .down_pressed = true}).empty());
@@ -130,7 +139,7 @@ TEST(HmiControllerTest, DualChordReleaseDoesNotEmitShortPress)
 
 TEST(HmiControllerTest, ShutdownPromptOnlyEmitsOncePerHold)
 {
-    HmiController controller({}, &FakeNowMs);
+    HmiController controller(ImmediateStateDebounceOptions(), &FakeNowMs);
 
     g_now_ms = 100;
     EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true, .down_pressed = true}).empty());
@@ -147,7 +156,7 @@ TEST(HmiControllerTest, ShutdownPromptOnlyEmitsOncePerHold)
 
 TEST(HmiControllerTest, ResetClearsPendingChordAndAllowsFreshShortPress)
 {
-    HmiController controller({}, &FakeNowMs);
+    HmiController controller(ImmediateStateDebounceOptions(), &FakeNowMs);
 
     g_now_ms = 100;
     EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true, .down_pressed = true}).empty());
@@ -164,6 +173,73 @@ TEST(HmiControllerTest, ResetClearsPendingChordAndAllowsFreshShortPress)
 
     g_now_ms = 2900;
     events = controller.HandleButtons(ButtonSnapshot{});
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events.front().type, HmiEventType::ShortUpPressed);
+}
+
+TEST(HmiControllerTest, FiltersPressPulseShorterThanDefaultStableWindow)
+{
+    HmiController controller({}, &FakeNowMs);
+
+    g_now_ms = 100;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true}).empty());
+
+    g_now_ms = 120;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{}).empty());
+
+    g_now_ms = 200;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{}).empty());
+}
+
+TEST(HmiControllerTest, FiltersReleasePulseShorterThanDefaultStableWindow)
+{
+    HmiController controller({}, &FakeNowMs);
+
+    g_now_ms = 100;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true}).empty());
+
+    g_now_ms = 140;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true}).empty());
+
+    g_now_ms = 200;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{}).empty());
+
+    g_now_ms = 220;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true}).empty());
+
+    g_now_ms = 300;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true}).empty());
+
+    g_now_ms = 400;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{}).empty());
+
+    g_now_ms = 440;
+    const auto events = controller.HandleButtons(ButtonSnapshot{});
+    ASSERT_EQ(events.size(), 1U);
+    EXPECT_EQ(events.front().type, HmiEventType::ShortUpPressed);
+}
+
+TEST(HmiControllerTest, ConfirmsPressAndReleaseAfterDefaultStableWindows)
+{
+    HmiController controller({}, &FakeNowMs);
+
+    g_now_ms = 100;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true}).empty());
+
+    g_now_ms = 139;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true}).empty());
+
+    g_now_ms = 140;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.up_pressed = true}).empty());
+
+    g_now_ms = 300;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{}).empty());
+
+    g_now_ms = 339;
+    EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{}).empty());
+
+    g_now_ms = 340;
+    const auto events = controller.HandleButtons(ButtonSnapshot{});
     ASSERT_EQ(events.size(), 1U);
     EXPECT_EQ(events.front().type, HmiEventType::ShortUpPressed);
 }
