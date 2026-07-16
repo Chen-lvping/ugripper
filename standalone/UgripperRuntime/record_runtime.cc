@@ -71,6 +71,16 @@ void CloseChildFileDescriptors(int fdLimit)
 }
 
 constexpr const char *kChestCameraEnvKey = "ENABLE_CHEST_CAM_MAIN";
+#ifndef UGRIPPER_ENABLE_STEREO
+#define UGRIPPER_ENABLE_STEREO 1
+#endif
+#if UGRIPPER_ENABLE_STEREO
+constexpr bool kPackageStereoEnabled = true;
+constexpr const char *kPackageStereoBuildMarker = "UGRIPPER_STEREO_BUILD=ON";
+#else
+constexpr bool kPackageStereoEnabled = false;
+constexpr const char *kPackageStereoBuildMarker = "UGRIPPER_STEREO_BUILD=OFF";
+#endif
 constexpr uint64_t kActionDebounceMs = 80;
 constexpr uint64_t kButtonPressDebounceMs = 40;
 constexpr uint64_t kButtonReleaseDebounceMs = 40;
@@ -797,13 +807,29 @@ bool isFalseLikeValue(const std::string &value)
            lowered == "off" || lowered == "disable" || lowered == "disabled";
 }
 
-std::vector<EpisodeVideoArtifact> activeEpisodeVideoArtifacts(bool chestCameraEnabled)
+bool isStereoCameraName(const char *cameraName)
+{
+    return cameraName != nullptr && std::strstr(cameraName, "stereo") != nullptr;
+}
+
+bool isStereoDevicePath(const char *path)
+{
+    return path != nullptr &&
+           (std::strstr(path, "/stereo_") != nullptr || std::strstr(path, "_fays_imu") != nullptr);
+}
+
+std::vector<EpisodeVideoArtifact> activeEpisodeVideoArtifacts(bool chestCameraEnabled,
+                                                              bool stereoEnabled)
 {
     std::vector<EpisodeVideoArtifact> artifacts;
     artifacts.reserve(kAllEpisodeVideoArtifacts.size());
     for (const auto &artifact : kAllEpisodeVideoArtifacts)
     {
         if (!chestCameraEnabled && std::strcmp(artifact.cameraName, "chest_cam_main") == 0)
+        {
+            continue;
+        }
+        if (!stereoEnabled && isStereoCameraName(artifact.cameraName))
         {
             continue;
         }
@@ -824,13 +850,17 @@ const char *episodeVideoFileNameForCamera(const char *cameraName)
     return nullptr;
 }
 
-std::vector<const char *> activeCriticalDevicePaths(bool chestCameraEnabled)
+std::vector<const char *> activeCriticalDevicePaths(bool chestCameraEnabled, bool stereoEnabled)
 {
     std::vector<const char *> paths;
     paths.reserve(kAllCriticalDevicePaths.size());
     for (const char *path : kAllCriticalDevicePaths)
     {
         if (!chestCameraEnabled && std::strcmp(path, "/dev/cam_chest") == 0)
+        {
+            continue;
+        }
+        if (!stereoEnabled && isStereoDevicePath(path))
         {
             continue;
         }
@@ -2235,7 +2265,10 @@ bool shouldFlushPathForPhase(const fs::path &episodeDir,
     return true;
 }
 
-void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEnabled, const char *phaseLabel)
+void flushEpisodeArtifactsToDisk(const fs::path &episodeDir,
+                                 bool chestCameraEnabled,
+                                 bool stereoEnabled,
+                                 const char *phaseLabel)
 {
     if (episodeDir.empty())
     {
@@ -2244,7 +2277,7 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
 
     const std::string phase = phaseLabel != nullptr ? phaseLabel : "";
     std::vector<fs::path> paths;
-    const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled);
+    const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled, stereoEnabled);
     std::set<std::string> selectedVideoFileNames;
     paths.reserve(artifacts.size() + 9);
 
@@ -2259,8 +2292,11 @@ void flushEpisodeArtifactsToDisk(const fs::path &episodeDir, bool chestCameraEna
 
     paths.push_back(episodeDir / "sensor_left.mcap");
     paths.push_back(episodeDir / "sensor_right.mcap");
-    paths.push_back(episodeDir / "fays_data_left.mcap");
-    paths.push_back(episodeDir / "fays_data_right.mcap");
+    if (stereoEnabled)
+    {
+        paths.push_back(episodeDir / "fays_data_left.mcap");
+        paths.push_back(episodeDir / "fays_data_right.mcap");
+    }
     paths.push_back(episodeDir / "metadata.json");
     paths.push_back(episodeDir / "calibration.json");
     paths.push_back(episodeDir / "validation_error.log");
@@ -4051,6 +4087,11 @@ bool RecordRuntime::initialize()
     DM_LOG_INFO("{}", (::DA::utils::LogString() << kChestCameraEnvKey << "="
                          << (chestCameraEnabled_ ? "true" : "false") << std::endl).str());
 
+    stereoEnabled_ = kPackageStereoEnabled;
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << kPackageStereoBuildMarker
+                         << " PACKAGE_STEREO_ENABLED="
+                         << (stereoEnabled_ ? "true" : "false") << std::endl).str());
+
     perfLogEnabled_ = kPerfLogEnabled;
     g_perfLogEnabled = perfLogEnabled_;
     DM_LOG_INFO("{}", (::DA::utils::LogString() << "UGRIPPER_ENABLE_PERF_LOG="
@@ -4084,6 +4125,7 @@ bool RecordRuntime::initialize()
         language_,
         options_.cameraCodec,
         chestCameraEnabled_,
+        stereoEnabled_,
         options_.tactileStateDir,
         options_.persistCalibrationFile,
         options_.exampleCalibrationFile,
@@ -4134,44 +4176,48 @@ bool RecordRuntime::initialize()
         },
         &utils::CurrentSteadyMs);
 
-    stereoSessionClient_ = std::make_unique<ugripper::runtime::StereoSessionClient>(
-        &processSupervisor_,
-        ugripper::runtime::StereoSessionClientOptions{
-            .daemon_arguments =
-                {
-                    options_.faysStereoDaemonScript,
-                    "--control-fifo",
-                    options_.stereoControlPipe,
-                    "--status-file",
-                    options_.stereoStatusFile,
-                    "--left-config",
-                    options_.leftFaysConfig,
-                    "--right-config",
-                    options_.rightFaysConfig,
-                    "--left-fifo",
-                    options_.leftFaysControlFifo,
-                    "--right-fifo",
-                    options_.rightFaysControlFifo,
+    if (stereoEnabled_)
+    {
+        stereoSessionClient_ = std::make_unique<ugripper::runtime::StereoSessionClient>(
+            &processSupervisor_,
+            ugripper::runtime::StereoSessionClientOptions{
+                .daemon_arguments =
+                    {
+                        options_.faysStereoDaemonScript,
+                        "--control-fifo",
+                        options_.stereoControlPipe,
+                        "--status-file",
+                        options_.stereoStatusFile,
+                        "--left-config",
+                        options_.leftFaysConfig,
+                        "--right-config",
+                        options_.rightFaysConfig,
+                        "--left-fifo",
+                        options_.leftFaysControlFifo,
+                        "--right-fifo",
+                        options_.rightFaysControlFifo,
+                },
+                .control_pipe = options_.stereoControlPipe,
+                .left_control_fifo = options_.leftFaysControlFifo,
+                .right_control_fifo = options_.rightFaysControlFifo,
+                .status_file = options_.stereoStatusFile,
+                .daemon_stop_timeout_ms = 2000,
+                .restart_interval_ms = kStereoDaemonRestartIntervalMs,
+                .finalize_wait_poll_ms = kStereoFinalizeWaitPollMs,
             },
-            .control_pipe = options_.stereoControlPipe,
-            .left_control_fifo = options_.leftFaysControlFifo,
-            .right_control_fifo = options_.rightFaysControlFifo,
-            .status_file = options_.stereoStatusFile,
-            .daemon_stop_timeout_ms = 2000,
-            .restart_interval_ms = kStereoDaemonRestartIntervalMs,
-            .finalize_wait_poll_ms = kStereoFinalizeWaitPollMs,
-        },
-        &utils::CurrentSteadyMs);
+            &utils::CurrentSteadyMs);
+    }
     shutdownRequestPort_ =
         ugripper::runtime::CreateFileShutdownRequestPort(
             options_.systemActionRequestFile,
             options_.systemActionResultFile);
 
-    const auto criticalDevicePaths = activeCriticalDevicePaths(chestCameraEnabled_);
+    const auto criticalDevicePaths = activeCriticalDevicePaths(chestCameraEnabled_, stereoEnabled_);
     healthMonitor_ = std::make_unique<ugripper::runtime::HealthMonitor>(
         ugripper::runtime::HealthMonitorOptions{
             .disk_root = options_.diskRoot,
             .stereo_status_file = options_.stereoStatusFile,
+            .stereo_enabled = stereoEnabled_,
             .critical_device_paths =
                 std::vector<std::string>(criticalDevicePaths.begin(), criticalDevicePaths.end()),
             .poll_interval_ms = kHealthCheckIntervalMs,
@@ -4214,6 +4260,7 @@ bool RecordRuntime::initialize()
             .sensor_recorder_bin = options_.sensorRecorderBin,
             .camera_codec = options_.cameraCodec,
             .session_camera_streams_csv = joinCsv(sessionCameraStreams(chestCameraEnabled_)),
+            .stereo_enabled = stereoEnabled_,
             .worker_stop_timeout_ms = 5000,
             .stereo_finalize_timeout_ms = 10000,
         },
@@ -4325,7 +4372,8 @@ bool RecordRuntime::initialize()
                 },
             .flush_episode_artifacts =
                 [this](const std::string& episode_dir, const char* stage) {
-                    flushEpisodeArtifactsToDisk(fs::path(episode_dir), chestCameraEnabled_, stage);
+                    flushEpisodeArtifactsToDisk(
+                        fs::path(episode_dir), chestCameraEnabled_, stereoEnabled_, stage);
                 },
             .write_episode_metadata =
                 [this](const std::string& episode_dir,
@@ -4348,7 +4396,8 @@ bool RecordRuntime::initialize()
                                       << metadataError << std::endl).str());
                         return;
                     }
-                    flushEpisodeArtifactsToDisk(fs::path(episode_dir), chestCameraEnabled_, "metadata_final");
+                    flushEpisodeArtifactsToDisk(
+                        fs::path(episode_dir), chestCameraEnabled_, stereoEnabled_, "metadata_final");
                 },
             .write_validation_error_log =
                 [](const std::string& episode_dir, const std::string& error_message) {
@@ -4558,6 +4607,10 @@ void RecordRuntime::maintainAudioPlayer()
 
 bool RecordRuntime::startStereoDaemon()
 {
+    if (!stereoEnabled_)
+    {
+        return true;
+    }
     std::string errorMessage;
     const bool started = stereoSessionClient_ != nullptr && stereoSessionClient_->StartDaemon(&errorMessage);
     if (!started)
@@ -4600,6 +4653,10 @@ std::optional<ugripper::runtime::HealthFault> RecordRuntime::currentHealthFault(
 
 bool RecordRuntime::isStereoStartupWaiting() const
 {
+    if (!stereoEnabled_)
+    {
+        return false;
+    }
     const uint64_t nowMs = currentSteadyMs();
     const uint64_t firstSeenMs = healthState_.first_seen_ms == 0 ? nowMs : healthState_.first_seen_ms;
     if ((nowMs - firstSeenMs) >= kStereoStartupReadyTimeoutMs)
@@ -4613,6 +4670,10 @@ bool RecordRuntime::isStereoStartupWaiting() const
 
 void RecordRuntime::suspendStereoDaemonForRestoreUsb(const std::string &reason)
 {
+    if (!stereoEnabled_)
+    {
+        return;
+    }
     if (restoreUsbStereoDaemonStopped_)
     {
         DM_LOG_INFO("{}", (::DA::utils::LogString()
@@ -4632,6 +4693,10 @@ void RecordRuntime::suspendStereoDaemonForRestoreUsb(const std::string &reason)
 
 void RecordRuntime::resumeStereoDaemonAfterRestoreUsb(const std::string &reason)
 {
+    if (!stereoEnabled_)
+    {
+        return;
+    }
     if (!restoreUsbStereoDaemonStopped_)
     {
         return;
@@ -4650,6 +4715,10 @@ bool RecordRuntime::writeStereoControl(bool recording,
                                        int64_t startSystemTimeUs,
                                        int64_t stopSystemTimeUs)
 {
+    if (!stereoEnabled_)
+    {
+        return true;
+    }
     std::string errorMessage;
     bool ok = false;
     if (stereoSessionClient_ != nullptr)
@@ -4672,6 +4741,10 @@ bool RecordRuntime::writeStereoControl(bool recording,
 
 bool RecordRuntime::waitForStereoFinalize(const std::string &episodeDir, int timeoutMs, std::string *errorMessage)
 {
+    if (!stereoEnabled_)
+    {
+        return true;
+    }
     if (stereoSessionClient_ == nullptr)
     {
         if (errorMessage != nullptr)
@@ -4944,7 +5017,7 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
         }
         return std::string();
     };
-    for (const auto &artifact : activeEpisodeVideoArtifacts(chestCameraEnabled_))
+    for (const auto &artifact : activeEpisodeVideoArtifacts(chestCameraEnabled_, stereoEnabled_))
     {
         if (std::string(artifact.cameraName).find("stereo") != std::string::npos)
         {
@@ -4968,6 +5041,11 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
             }
             return false;
         }
+    }
+
+    if (!stereoEnabled_)
+    {
+        return true;
     }
 
     if (stereoSessionClient_ == nullptr)
@@ -6083,6 +6161,10 @@ bool RecordRuntime::areSideCriticalDevicesReady(const std::string &side) const
     const auto &paths = side == "left" ? kLeftCriticalDevicePaths : kRightCriticalDevicePaths;
     for (const char *path : paths)
     {
+        if (!stereoEnabled_ && isStereoDevicePath(path))
+        {
+            continue;
+        }
         std::error_code error;
         if (!fs::exists(path, error))
         {
@@ -6419,7 +6501,7 @@ bool RecordRuntime::restoreUsbTargetRecovered() const
 bool RecordRuntime::restoreUsbCriticalSymlinksPresent(std::string *detail) const
 {
     std::vector<std::string> missing;
-    const auto paths = activeCriticalDevicePaths(chestCameraEnabled_);
+    const auto paths = activeCriticalDevicePaths(chestCameraEnabled_, stereoEnabled_);
     for (const char *path : paths)
     {
         std::error_code error;
@@ -6468,6 +6550,10 @@ bool RecordRuntime::sideHasAnyRestoreUsbDevice(const std::string &side) const
     const auto &paths = side == "left" ? kLeftCriticalDevicePaths : kRightCriticalDevicePaths;
     for (const char *path : paths)
     {
+        if (!stereoEnabled_ && isStereoDevicePath(path))
+        {
+            continue;
+        }
         error.clear();
         if (path != nullptr && *path != '\0' && fs::exists(path, error))
         {
@@ -9107,6 +9193,7 @@ RecordRuntime::EpisodeManager::EpisodeManager(std::string diskRoot,
                                               std::string language,
                                               std::string cameraCodec,
                                               bool chestCameraEnabled,
+                                              bool stereoEnabled,
                                               std::string tactileStateDir,
                                               std::string persistCalibrationFile,
                                               std::string exampleCalibrationFile,
@@ -9121,6 +9208,7 @@ RecordRuntime::EpisodeManager::EpisodeManager(std::string diskRoot,
       language_(std::move(language)),
       cameraCodec_(std::move(cameraCodec)),
       chestCameraEnabled_(chestCameraEnabled),
+      stereoEnabled_(stereoEnabled),
       tactileStateDir_(std::move(tactileStateDir)),
       persistCalibrationFile_(std::move(persistCalibrationFile)),
       exampleCalibrationFile_(std::move(exampleCalibrationFile)),
@@ -9376,7 +9464,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
 {
     const int64_t validateStartMs = steadyNowMs();
     logPerf((::DA::utils::LogString() << "[PERF] validateEpisode begin: episode_dir=" << episodeDir).str());
-    const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled_);
+    const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled_, stereoEnabled_);
     const std::vector<std::string> requiredFiles = {
         "sensor_left.mcap",
         "sensor_right.mcap",
@@ -9567,7 +9655,8 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
 
     const int64_t tailCheckStartMs = steadyNowMs();
     std::vector<std::future<TailCheckTaskResult>> tailCheckFutures;
-    tailCheckFutures.reserve(kEncoderTailCheckTargets.size() + kFaysTailCheckTargets.size());
+    tailCheckFutures.reserve(
+        kEncoderTailCheckTargets.size() + (stereoEnabled_ ? kFaysTailCheckTargets.size() : 0));
 
     for (const auto &target : kEncoderTailCheckTargets)
     {
@@ -9600,56 +9689,59 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
             }));
     }
 
-    for (const auto &target : kFaysTailCheckTargets)
+    if (stereoEnabled_)
     {
-        tailCheckFutures.push_back(std::async(
-            std::launch::async,
-            [episodeDir, target]() {
-                TailCheckTaskResult result;
-                FaysMcapSummary faysSummary;
-                std::string faysTailError;
-                if (!loadFaysMcapSummary(
-                        episodeDir + "/" + target.mcapFileName,
-                        target.imuTopic,
-                        target.cameraTopic,
-                        &faysSummary,
-                        &faysTailError))
-                {
-                    result.errorMessage = std::string("Fays MCAP tail check failed for side=") + target.side +
-                                          ": " + faysTailError;
-                    return result;
-                }
+        for (const auto &target : kFaysTailCheckTargets)
+        {
+            tailCheckFutures.push_back(std::async(
+                std::launch::async,
+                [episodeDir, target]() {
+                    TailCheckTaskResult result;
+                    FaysMcapSummary faysSummary;
+                    std::string faysTailError;
+                    if (!loadFaysMcapSummary(
+                            episodeDir + "/" + target.mcapFileName,
+                            target.imuTopic,
+                            target.cameraTopic,
+                            &faysSummary,
+                            &faysTailError))
+                    {
+                        result.errorMessage = std::string("Fays MCAP tail check failed for side=") + target.side +
+                                              ": " + faysTailError;
+                        return result;
+                    }
 
-                int64_t lagNs = static_cast<int64_t>(faysSummary.lastCameraLogTimeNs) -
-                                static_cast<int64_t>(faysSummary.lastImuLogTimeNs);
-                if (lagNs < 0)
-                {
-                    lagNs = 0;
-                }
-                if (lagNs > kFaysImuTailMaxLagNs)
-                {
-                    result.errorMessage = std::string("Fays IMU tail lag too large for side=") + target.side +
-                                          " (lag_ns=" + std::to_string(lagNs) +
-                                          ", threshold_ns=" + std::to_string(kFaysImuTailMaxLagNs) +
-                                          ", last_camera_ns=" + std::to_string(faysSummary.lastCameraLogTimeNs) +
-                                          ", last_imu_ns=" + std::to_string(faysSummary.lastImuLogTimeNs) + ")";
-                    return result;
-                }
+                    int64_t lagNs = static_cast<int64_t>(faysSummary.lastCameraLogTimeNs) -
+                                    static_cast<int64_t>(faysSummary.lastImuLogTimeNs);
+                    if (lagNs < 0)
+                    {
+                        lagNs = 0;
+                    }
+                    if (lagNs > kFaysImuTailMaxLagNs)
+                    {
+                        result.errorMessage = std::string("Fays IMU tail lag too large for side=") + target.side +
+                                              " (lag_ns=" + std::to_string(lagNs) +
+                                              ", threshold_ns=" + std::to_string(kFaysImuTailMaxLagNs) +
+                                              ", last_camera_ns=" + std::to_string(faysSummary.lastCameraLogTimeNs) +
+                                              ", last_imu_ns=" + std::to_string(faysSummary.lastImuLogTimeNs) + ")";
+                        return result;
+                    }
 
-                result.ok = true;
-                result.detail = (::DA::utils::LogString()
-                                 << "fays_" << target.side
-                                 << "{imu_count=" << faysSummary.imuMessageCount
-                                 << ", camera_count=" << faysSummary.cameraMessageCount
-                                 << ", span_ms=" << (faysSummary.spanNs / 1000000.0)
-                                 << ", camera_span_ms=" << (faysSummary.cameraSpanNs / 1000000.0)
-                                 << ", first_camera_ns=" << faysSummary.firstCameraLogTimeNs
-                                 << ", last_camera_ns=" << faysSummary.lastCameraLogTimeNs
-                                 << ", last_imu_ns=" << faysSummary.lastImuLogTimeNs
-                                 << ", lag_ms=" << (lagNs / 1000000.0)
-                                 << "}").str();
-                return result;
-            }));
+                    result.ok = true;
+                    result.detail = (::DA::utils::LogString()
+                                     << "fays_" << target.side
+                                     << "{imu_count=" << faysSummary.imuMessageCount
+                                     << ", camera_count=" << faysSummary.cameraMessageCount
+                                     << ", span_ms=" << (faysSummary.spanNs / 1000000.0)
+                                     << ", camera_span_ms=" << (faysSummary.cameraSpanNs / 1000000.0)
+                                     << ", first_camera_ns=" << faysSummary.firstCameraLogTimeNs
+                                     << ", last_camera_ns=" << faysSummary.lastCameraLogTimeNs
+                                     << ", last_imu_ns=" << faysSummary.lastImuLogTimeNs
+                                     << ", lag_ms=" << (lagNs / 1000000.0)
+                                     << "}").str();
+                    return result;
+                }));
+        }
     }
 
     std::vector<std::string> tailDetails;
@@ -10086,7 +10178,7 @@ double nominalFpsForCamera(const std::string &cameraName)
     return 60.0;
 }
 
-std::vector<EpisodeVideoArtifact> metadataVideoArtifacts(bool chestCameraEnabled)
+std::vector<EpisodeVideoArtifact> metadataVideoArtifacts(bool chestCameraEnabled, bool stereoEnabled)
 {
     std::vector<EpisodeVideoArtifact> artifacts = {
         {"left_cam_main", "cam_left.mkv"},
@@ -10101,6 +10193,15 @@ std::vector<EpisodeVideoArtifact> metadataVideoArtifacts(bool chestCameraEnabled
     if (chestCameraEnabled)
     {
         artifacts.push_back({"chest_cam_main", "cam_chest.mkv"});
+    }
+    if (!stereoEnabled)
+    {
+        artifacts.erase(
+            std::remove_if(
+                artifacts.begin(), artifacts.end(), [](const EpisodeVideoArtifact &artifact) {
+                    return isStereoCameraName(artifact.cameraName);
+                }),
+            artifacts.end());
     }
     return artifacts;
 }
@@ -10153,15 +10254,20 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
     hardwareList["tactile_left_r_sn"] = cachedTactileSerialForName("left_tcam_r");
 
     json stereoStatus = json::object();
-    loadJsonFile(stereoStatusFile_, &stereoStatus, &ignoredError);
-    hardwareList["stereo_right_sn"] = jsonStringPath(stereoStatus, "cameras.right_stereo.serial_number");
-    hardwareList["stereo_left_sn"] = jsonStringPath(stereoStatus, "cameras.left_stereo.serial_number");
+    if (stereoEnabled_)
+    {
+        loadJsonFile(stereoStatusFile_, &stereoStatus, &ignoredError);
+    }
+    hardwareList["stereo_right_sn"] =
+        stereoEnabled_ ? jsonStringPath(stereoStatus, "cameras.right_stereo.serial_number") : "";
+    hardwareList["stereo_left_sn"] =
+        stereoEnabled_ ? jsonStringPath(stereoStatus, "cameras.left_stereo.serial_number") : "";
 
     json infoRoot = json::object();
     loadJsonFile(episodeTimingPath(episodePath).string(), &infoRoot, &ignoredError);
     std::map<std::string, int64_t> offsetByCamera;
     int64_t minOffsetUs = std::numeric_limits<int64_t>::max();
-    for (const auto &artifact : metadataVideoArtifacts(chestCameraEnabled_))
+    for (const auto &artifact : metadataVideoArtifacts(chestCameraEnabled_, stereoEnabled_))
     {
         const std::string key = std::string(artifact.cameraName) + "_record_time_offset_us";
         if (infoRoot.contains(key) && infoRoot[key].is_number_integer())
@@ -10181,7 +10287,7 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
 
     if (qualityOk)
     {
-        const auto metadataArtifacts = metadataVideoArtifacts(chestCameraEnabled_);
+        const auto metadataArtifacts = metadataVideoArtifacts(chestCameraEnabled_, stereoEnabled_);
         if (!infoRoot.is_object())
         {
             if (errorMessage != nullptr)
@@ -10202,7 +10308,7 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
 
     ordered_json videoDetails = ordered_json::array();
     double collectionDurationS = 0.0;
-    for (const auto &artifact : metadataVideoArtifacts(chestCameraEnabled_))
+    for (const auto &artifact : metadataVideoArtifacts(chestCameraEnabled_, stereoEnabled_))
     {
         const fs::path videoPath = episodePath / artifact.fileName;
         if (!RecordRuntime::fileExistsAndNotEmpty(videoPath.string()))
@@ -10260,17 +10366,20 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
         "calibration.json",
         "cam_left.mkv",
         "cam_right.mkv",
-        "stereo_left.mkv",
-        "stereo_right.mkv",
         "tcam_left_l.mkv",
         "tcam_left_r.mkv",
         "tcam_right_l.mkv",
         "tcam_right_r.mkv",
         "sensor_left.mcap",
         "sensor_right.mcap",
-        "fays_data_left.mcap",
-        "fays_data_right.mcap",
     });
+    if (stereoEnabled_)
+    {
+        requiredFiles.push_back("stereo_left.mkv");
+        requiredFiles.push_back("stereo_right.mkv");
+        requiredFiles.push_back("fays_data_left.mcap");
+        requiredFiles.push_back("fays_data_right.mcap");
+    }
     if (chestCameraEnabled_)
     {
         requiredFiles.push_back("cam_chest.mkv");
@@ -10409,27 +10518,30 @@ bool RecordRuntime::EpisodeManager::writeFilteredCalibration(const std::string &
     }
 
     bool allFaysCalibrationValid = true;
-    for (const auto &entry : std::vector<std::pair<std::string, std::string>>{
-             {"left", "left_stereo"},
-             {"right", "right_stereo"},
-         })
+    if (stereoEnabled_)
     {
-        json faysCalibration;
-        std::string faysStatus;
-        if (!loadFaysCalibrationFromStatus(stereoStatusFile_, entry.second, &faysCalibration, &faysStatus))
+        for (const auto &entry : std::vector<std::pair<std::string, std::string>>{
+                 {"left", "left_stereo"},
+                 {"right", "right_stereo"},
+             })
         {
-            allFaysCalibrationValid = false;
-            DM_LOG_WARN("{}", (::DA::utils::LogString() << "Fays calibration unavailable for "
-                                 << entry.second << ": " << faysStatus << std::endl).str());
-            continue;
-        }
+            json faysCalibration;
+            std::string faysStatus;
+            if (!loadFaysCalibrationFromStatus(stereoStatusFile_, entry.second, &faysCalibration, &faysStatus))
+            {
+                allFaysCalibrationValid = false;
+                DM_LOG_WARN("{}", (::DA::utils::LogString() << "Fays calibration unavailable for "
+                                     << entry.second << ": " << faysStatus << std::endl).str());
+                continue;
+            }
 
-        images[entry.first == "left" ? "stereo_left" : "stereo_right"] =
-            makeFaysStereoCalibrationEntry(faysCalibration);
-        imu[entry.first == "left" ? "imu_left" : "imu_right"] =
-            makeFaysImuCalibrationEntry(faysCalibration);
-        DM_LOG_INFO("{}", (::DA::utils::LogString() << "Fays calibration loaded for "
-                            << entry.second << ": " << faysStatus << std::endl).str());
+            images[entry.first == "left" ? "stereo_left" : "stereo_right"] =
+                makeFaysStereoCalibrationEntry(faysCalibration);
+            imu[entry.first == "left" ? "imu_left" : "imu_right"] =
+                makeFaysImuCalibrationEntry(faysCalibration);
+            DM_LOG_INFO("{}", (::DA::utils::LogString() << "Fays calibration loaded for "
+                                << entry.second << ": " << faysStatus << std::endl).str());
+        }
     }
 
     for (const auto &target : kTactileCalibrationTargets)

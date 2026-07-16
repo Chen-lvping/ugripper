@@ -15,6 +15,7 @@ struct HealthMonitorOptions
 {
     std::string disk_root;
     std::string stereo_status_file;
+    bool stereo_enabled = true;
     std::vector<std::string> critical_device_paths;
     uint64_t poll_interval_ms = 1000;
     uint64_t hmi_active_timeout_ms = 5500;

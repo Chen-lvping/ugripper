@@ -238,6 +238,7 @@ private:
                        std::string language,
                        std::string cameraCodec,
                        bool chestCameraEnabled,
+                       bool stereoEnabled,
                        std::string tactileStateDir,
                        std::string persistCalibrationFile,
                        std::string exampleCalibrationFile,
@@ -284,6 +285,7 @@ private:
         std::string language_;
         std::string cameraCodec_;
         bool chestCameraEnabled_ = true;
+        bool stereoEnabled_ = true;
         std::string tactileStateDir_;
         std::string persistCalibrationFile_;
         std::string exampleCalibrationFile_;
@@ -438,6 +440,7 @@ private:
     std::string deviceSn_;
     std::string language_;
     bool chestCameraEnabled_ = true;
+    bool stereoEnabled_ = true;
     bool perfLogEnabled_ = false;
     std::string hardwareVersion_;
     std::string packageVersion_;

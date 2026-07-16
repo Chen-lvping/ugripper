@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <map>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -33,6 +34,7 @@ using ugripper::runtime::WorkerName;
 
 struct RecordingHarness
 {
+    std::mutex worker_mutex;
     std::map<WorkerName, ProcessStatus> worker_status;
     std::map<WorkerName, ProcessSpec> started_specs;
     std::vector<std::string> audio_commands;
@@ -50,6 +52,10 @@ struct RecordingHarness
     std::string last_validation_log;
     std::string sync_reason;
     int validate_calls = 0;
+    int stereo_start_calls = 0;
+    int stereo_stop_calls = 0;
+    int stereo_finalize_calls = 0;
+    bool stereo_enabled = true;
     bool prepare_ok = true;
     bool validate_ok = true;
     bool merge_ok = true;
@@ -75,6 +81,7 @@ struct RecordingHarness
              .sensor_recorder_bin = "/tmp/sensor_recorder",
              .camera_codec = "h264",
              .session_camera_streams_csv = "left,right",
+             .stereo_enabled = stereo_enabled,
              .worker_stop_timeout_ms = 5000,
              .stereo_finalize_timeout_ms = 10000},
             {.create_next_episode_dir =
@@ -163,6 +170,7 @@ struct RecordingHarness
                  },
              .start_stereo_session =
                  [this](const std::string&, int64_t, std::string* error) {
+                     ++stereo_start_calls;
                      if (!stereo_start_ok && error != nullptr)
                      {
                          *error = stereo_start_error;
@@ -171,10 +179,12 @@ struct RecordingHarness
                  },
              .stop_stereo_session =
                  [this](const std::string&, int64_t, std::string*) {
+                     ++stereo_stop_calls;
                      return stereo_stop_ok;
                  },
              .wait_for_stereo_finalize =
                  [this](const std::string&, int, std::string* error) {
+                     ++stereo_finalize_calls;
                      if (!wait_finalize_ok && error != nullptr)
                      {
                          *error = wait_finalize_error;
@@ -204,6 +214,7 @@ struct RecordingHarness
                  },
              .start_worker =
                  [this](WorkerName worker, const ProcessSpec& spec, std::string*) {
+                     const std::lock_guard<std::mutex> lock(worker_mutex);
                      started_specs[worker] = spec;
                      const bool should_start = worker == WorkerName::CameraRecorder ? camera_start_ok : sensor_start_ok;
                      if (worker == WorkerName::SensorRecorder)
@@ -229,6 +240,7 @@ struct RecordingHarness
                  },
              .stop_worker =
                  [this](WorkerName worker, const std::string& reason, std::string*) {
+                     const std::lock_guard<std::mutex> lock(worker_mutex);
                      const char* worker_name =
                          worker == WorkerName::CameraRecorder ? "camera_recorder" : "sensor_recorder";
                      stop_reasons.push_back(std::string(worker_name) + ":" + reason);
@@ -238,6 +250,7 @@ struct RecordingHarness
                  },
              .get_worker_status =
                  [this](WorkerName worker) {
+                     const std::lock_guard<std::mutex> lock(worker_mutex);
                      const auto it = worker_status.find(worker);
                      return it == worker_status.end() ? ProcessStatus{} : it->second;
                  },
@@ -292,6 +305,25 @@ TEST(RecordingOrchestratorTest, StartRecordingUpdatesStateAndSignalsReadyFlow)
     ASSERT_TRUE(harness.started_specs.count(WorkerName::SensorRecorder) > 0);
     EXPECT_EQ(harness.started_specs[WorkerName::SensorRecorder].stop_mode,
               ugripper::runtime::ProcessStopMode::SigTermThenKill);
+}
+
+TEST(RecordingOrchestratorTest, StereoDisabledSkipsSessionControlAndFinalize)
+{
+    RecordingHarness harness;
+    harness.stereo_enabled = false;
+    harness.stereo_start_ok = false;
+    harness.stereo_stop_ok = false;
+    harness.wait_finalize_ok = false;
+    auto orchestrator = harness.Make();
+
+    ASSERT_TRUE(orchestrator.StartRecording(false));
+    g_steady_ms += 100;
+    ASSERT_TRUE(orchestrator.StopRecording(false, "stop"));
+
+    EXPECT_EQ(harness.stereo_start_calls, 0);
+    EXPECT_EQ(harness.stereo_stop_calls, 0);
+    EXPECT_EQ(harness.stereo_finalize_calls, 0);
+    EXPECT_EQ(harness.validate_calls, 1);
 }
 
 TEST(RecordingOrchestratorTest, StopRecordingHandlesValidationFailure)

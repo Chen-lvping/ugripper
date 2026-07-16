@@ -8,7 +8,8 @@ APP_NAME="ugripper"
 ARCH="arm64"
 BASE_VERSION="${BASE_VERSION:-2.1.6}"
 VERSION_SUFFIX="${VERSION_SUFFIX:-}"
-VERSION="${VERSION:-${BASE_VERSION}${VERSION_SUFFIX}}"
+source "${REPO_ROOT}/scripts/lib/ugripper_build_variant.sh"
+ugripper_resolve_stereo_build_variant
 PACKAGE_DEB_NAME="${APP_NAME}_${VERSION}_${ARCH}.deb"
 
 TOOLCHAIN_FILE="${TOOLCHAIN_FILE:-${REPO_ROOT}/cmake/arm-linux-toolchain.cmake}"
@@ -40,6 +41,7 @@ Options:
 Common env:
   VERSION=1.2.12 ./scripts/build_arm_deb_in_pp_arm_dev.sh
   VERSION=1.2.12 ./scripts/build_arm_deb_in_pp_arm_dev.sh --quick
+  UGRIPPER_ENABLE_STEREO=OFF ./scripts/build_arm_deb_in_pp_arm_dev.sh
   PACKAGED_VENV_URL='' PACKAGED_VENV_SOURCE=/path/to/.venv ./scripts/build_arm_deb_in_pp_arm_dev.sh --quick
 EOF
 }
@@ -118,6 +120,7 @@ else
   echo "  build_dir=${REPO_ROOT}/${PACKAGED_BUILD_DIR}"
   echo "  toolchain=${TOOLCHAIN_FILE}"
   echo "  parallel=${PARALLEL}"
+  echo "  stereo=${UGRIPPER_ENABLE_STEREO}"
 
   if [[ ! -f "${LOCAL_DEPS_DIR}/arm-build-env.sh" ]]; then
       ./scripts/setup_arm_build_env.sh
@@ -151,6 +154,7 @@ else
     -DCMAKE_BUILD_TYPE=Release \
     -DBUILD_TESTING=OFF \
     -DUGRIPPER_ENABLE_MCAP_BUILDER=OFF \
+    -DUGRIPPER_ENABLE_STEREO="${UGRIPPER_ENABLE_STEREO}" \
     -DCMAKE_TOOLCHAIN_FILE="${TOOLCHAIN_FILE}" \
     "${UGRIPPER_ARM_CMAKE_ARGS[@]}"
 
@@ -162,6 +166,7 @@ fi
 BASE_VERSION="${BASE_VERSION}" \
 VERSION_SUFFIX="${VERSION_SUFFIX}" \
 VERSION="${VERSION}" \
+UGRIPPER_ENABLE_STEREO="${UGRIPPER_ENABLE_STEREO}" \
 PACKAGED_BUILD_DIR="${PACKAGED_BUILD_DIR}" \
 ./build_deb.sh -q
 

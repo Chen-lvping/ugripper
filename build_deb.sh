@@ -6,7 +6,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 APP_NAME="ugripper"
 BASE_VERSION="${BASE_VERSION:-2.1.6}"
 VERSION_SUFFIX="${VERSION_SUFFIX:-}"
-VERSION="${VERSION:-${BASE_VERSION}${VERSION_SUFFIX}}"
+source "${script_dir}/scripts/lib/ugripper_build_variant.sh"
+ugripper_resolve_stereo_build_variant
 ARCH="arm64"
 INSTALL_DIR="/opt/${APP_NAME}"
 BUILD_ROOT="temp_build_deb"
@@ -119,6 +120,16 @@ validate_packaged_binaries() {
     validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/GripperHmiTool/GripperHmiTool" "GripperHmiTool"
     validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/UgripperRuntime/UgripperRuntime" "UgripperRuntime"
     validate_binary_arch "$PACKAGED_BUILD_DIR/standalone/FaysStereoRecorder/fays_record_example" "Fays stereo recorder"
+
+    local runtime_binary="$PACKAGED_BUILD_DIR/standalone/UgripperRuntime/UgripperRuntime"
+    local expected_marker="UGRIPPER_STEREO_BUILD=${UGRIPPER_ENABLE_STEREO}"
+    if ! grep -aFq "$expected_marker" "$runtime_binary"; then
+        echo "❌ UgripperRuntime stereo build variant mismatch" >&2
+        echo "   - expected: $expected_marker" >&2
+        echo "   - binary:   $runtime_binary" >&2
+        echo "   - action: rebuild C++ with -DUGRIPPER_ENABLE_STEREO=${UGRIPPER_ENABLE_STEREO}" >&2
+        exit 1
+    fi
 }
 
 ensure_dir() {
@@ -392,7 +403,8 @@ else
     cmake -S . -B "$PACKAGED_BUILD_DIR" \
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_TESTING=OFF \
-        -DUGRIPPER_ENABLE_MCAP_BUILDER=OFF
+        -DUGRIPPER_ENABLE_MCAP_BUILDER=OFF \
+        -DUGRIPPER_ENABLE_STEREO="${UGRIPPER_ENABLE_STEREO}"
     cmake --build "$PACKAGED_BUILD_DIR" \
         --target CameraRecorder main_camera_xu_tool SensorRecorder zeroing GripperHmiTool UgripperRuntime fays_record_example \
         --parallel "$(nproc)"

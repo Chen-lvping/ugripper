@@ -8,6 +8,7 @@ include(CTest)
 
 option(UGRIPPER_ENABLE_MCAP_BUILDER "Build optional src/third_party/mcap_builder target" OFF)
 option(UGRIPPER_ENABLE_PERF_LOG "Build UGripper with verbose PERF timing logs enabled" OFF)
+option(UGRIPPER_ENABLE_STEREO "Build UGripper with Fays stereo recording enabled" ON)
 
 find_package(yaml-cpp REQUIRED)
 find_package(nlohmann_json REQUIRED)

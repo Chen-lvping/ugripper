@@ -593,92 +593,95 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
         }
     }
 
-    if (dependencies_.get_process_status != nullptr &&
-        dependencies_.get_process_status(WorkerName::StereoDaemon).pid <= 0)
+    if (options_.stereo_enabled)
     {
-        return HealthFault{
-            RuntimeLedState::Error2,
-            HardwareFaultSide::Unknown,
-            "stereo_daemon_not_running",
-            "Stereo warmup daemon is not running",
-        };
-    }
-
-    std::ifstream stereo_status_input(options_.stereo_status_file);
-    if (!stereo_status_input.is_open())
-    {
-        return HealthFault{
-            RuntimeLedState::Error2,
-            HardwareFaultSide::Unknown,
-            "stereo_status_missing",
-            "Stereo status file missing: " + options_.stereo_status_file,
-        };
-    }
-
-    try
-    {
-        json stereo_status = json::parse(stereo_status_input);
-        if (!stereo_status.value("ready", false))
+        if (dependencies_.get_process_status != nullptr &&
+            dependencies_.get_process_status(WorkerName::StereoDaemon).pid <= 0)
         {
-            HardwareFaultSide side = HardwareFaultSide::Unknown;
-            HardwareFaultSide control_failure_side = HardwareFaultSide::Unknown;
-            if (stereo_status.contains("cameras") && stereo_status["cameras"].is_object())
-            {
-                const json& cameras = stereo_status["cameras"];
-                if (cameras.contains("left_stereo") && cameras["left_stereo"].is_object() &&
-                    !cameras["left_stereo"].value("ready", false))
-                {
-                    side = MergeSides(side, HardwareFaultSide::Left);
-                    const json& camera = cameras["left_stereo"];
-                    const bool devices_online = camera.value("stereo_symlink_online", false) &&
-                                                camera.value("imu_symlink_online", false);
-                    const std::string state = camera.value("state", std::string());
-                    if (devices_online && IsStereoControlFailureText(state))
-                    {
-                        control_failure_side = MergeSides(control_failure_side, HardwareFaultSide::Left);
-                    }
-                }
-                if (cameras.contains("right_stereo") && cameras["right_stereo"].is_object() &&
-                    !cameras["right_stereo"].value("ready", false))
-                {
-                    side = MergeSides(side, HardwareFaultSide::Right);
-                    const json& camera = cameras["right_stereo"];
-                    const bool devices_online = camera.value("stereo_symlink_online", false) &&
-                                                camera.value("imu_symlink_online", false);
-                    const std::string state = camera.value("state", std::string());
-                    if (devices_online && IsStereoControlFailureText(state))
-                    {
-                        control_failure_side = MergeSides(control_failure_side, HardwareFaultSide::Right);
-                    }
-                }
-            }
-            if (control_failure_side != HardwareFaultSide::Unknown)
-            {
-                return HealthFault{
-                    RuntimeLedState::Error4,
-                    control_failure_side,
-                    ugripper::runtime::kErrorTypeStereoControlFailed,
-                    "Stereo warmup control failed: " +
-                        stereo_status.value("service_state", std::string("unknown")) + "; " +
-                        StereoControlReconnectHint(control_failure_side),
-                };
-            }
             return HealthFault{
                 RuntimeLedState::Error2,
-                side,
-                "stereo_not_ready",
-                "Stereo warmup not ready: " + stereo_status.value("service_state", std::string("unknown")),
+                HardwareFaultSide::Unknown,
+                "stereo_daemon_not_running",
+                "Stereo warmup daemon is not running",
             };
         }
-    }
-    catch (const std::exception& ex)
-    {
-        return HealthFault{
-            RuntimeLedState::Error2,
-            HardwareFaultSide::Unknown,
-            "stereo_status_invalid",
-            std::string("Stereo status invalid: ") + ex.what(),
-        };
+
+        std::ifstream stereo_status_input(options_.stereo_status_file);
+        if (!stereo_status_input.is_open())
+        {
+            return HealthFault{
+                RuntimeLedState::Error2,
+                HardwareFaultSide::Unknown,
+                "stereo_status_missing",
+                "Stereo status file missing: " + options_.stereo_status_file,
+            };
+        }
+
+        try
+        {
+            json stereo_status = json::parse(stereo_status_input);
+            if (!stereo_status.value("ready", false))
+            {
+                HardwareFaultSide side = HardwareFaultSide::Unknown;
+                HardwareFaultSide control_failure_side = HardwareFaultSide::Unknown;
+                if (stereo_status.contains("cameras") && stereo_status["cameras"].is_object())
+                {
+                    const json& cameras = stereo_status["cameras"];
+                    if (cameras.contains("left_stereo") && cameras["left_stereo"].is_object() &&
+                        !cameras["left_stereo"].value("ready", false))
+                    {
+                        side = MergeSides(side, HardwareFaultSide::Left);
+                        const json& camera = cameras["left_stereo"];
+                        const bool devices_online = camera.value("stereo_symlink_online", false) &&
+                                                    camera.value("imu_symlink_online", false);
+                        const std::string state = camera.value("state", std::string());
+                        if (devices_online && IsStereoControlFailureText(state))
+                        {
+                            control_failure_side = MergeSides(control_failure_side, HardwareFaultSide::Left);
+                        }
+                    }
+                    if (cameras.contains("right_stereo") && cameras["right_stereo"].is_object() &&
+                        !cameras["right_stereo"].value("ready", false))
+                    {
+                        side = MergeSides(side, HardwareFaultSide::Right);
+                        const json& camera = cameras["right_stereo"];
+                        const bool devices_online = camera.value("stereo_symlink_online", false) &&
+                                                    camera.value("imu_symlink_online", false);
+                        const std::string state = camera.value("state", std::string());
+                        if (devices_online && IsStereoControlFailureText(state))
+                        {
+                            control_failure_side = MergeSides(control_failure_side, HardwareFaultSide::Right);
+                        }
+                    }
+                }
+                if (control_failure_side != HardwareFaultSide::Unknown)
+                {
+                    return HealthFault{
+                        RuntimeLedState::Error4,
+                        control_failure_side,
+                        ugripper::runtime::kErrorTypeStereoControlFailed,
+                        "Stereo warmup control failed: " +
+                            stereo_status.value("service_state", std::string("unknown")) + "; " +
+                            StereoControlReconnectHint(control_failure_side),
+                    };
+                }
+                return HealthFault{
+                    RuntimeLedState::Error2,
+                    side,
+                    "stereo_not_ready",
+                    "Stereo warmup not ready: " + stereo_status.value("service_state", std::string("unknown")),
+                };
+            }
+        }
+        catch (const std::exception& ex)
+        {
+            return HealthFault{
+                RuntimeLedState::Error2,
+                HardwareFaultSide::Unknown,
+                "stereo_status_invalid",
+                std::string("Stereo status invalid: ") + ex.what(),
+            };
+        }
     }
 
     if (dependencies_.get_hmi_health != nullptr)
@@ -1069,8 +1072,9 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
         return false;
     }
 
-    if (dependencies_.start_stereo_session == nullptr ||
-        !dependencies_.start_stereo_session(state_.current_episode_dir, session_start_system_time_us, &local_error))
+    if (options_.stereo_enabled &&
+        (dependencies_.start_stereo_session == nullptr ||
+         !dependencies_.start_stereo_session(state_.current_episode_dir, session_start_system_time_us, &local_error)))
     {
         CallLog(dependencies_.log_error,
                 "failed to start stereo session for episode " + state_.current_episode_dir);
@@ -1163,11 +1167,16 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
             "[PERF] stop phase begin: reason=" + reason + " episode_dir=" + state_.current_episode_dir);
 
     std::string stereo_error;
-    bool stereo_stop_ok = dependencies_.stop_stereo_session != nullptr &&
-                          dependencies_.stop_stereo_session(state_.current_episode_dir, stop_system_time_us, &stereo_error);
-    if (!stereo_stop_ok)
+    bool stereo_stop_ok = true;
+    if (options_.stereo_enabled)
     {
-        CallLog(dependencies_.log_error, "failed to send stereo stop command");
+        stereo_stop_ok = dependencies_.stop_stereo_session != nullptr &&
+                         dependencies_.stop_stereo_session(
+                             state_.current_episode_dir, stop_system_time_us, &stereo_error);
+        if (!stereo_stop_ok)
+        {
+            CallLog(dependencies_.log_error, "failed to send stereo stop command");
+        }
     }
 
     const int64_t workers_stop_start_ms = steady_ms_fn_ != nullptr ? steady_ms_fn_() : 0;
@@ -1288,7 +1297,7 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
                     std::to_string((steady_ms_fn_ != nullptr ? steady_ms_fn_() : ego_finalize_start_ms) -
                                    ego_finalize_start_ms));
     }
-    if (stereo_stop_ok && dependencies_.wait_for_stereo_finalize != nullptr)
+    if (options_.stereo_enabled && stereo_stop_ok && dependencies_.wait_for_stereo_finalize != nullptr)
     {
         const int64_t stereo_finalize_start_ms = steady_ms_fn_ != nullptr ? steady_ms_fn_() : 0;
         if (!dependencies_.wait_for_stereo_finalize(

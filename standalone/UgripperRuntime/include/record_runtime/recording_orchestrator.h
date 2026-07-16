@@ -17,6 +17,7 @@ struct RecordingOrchestratorOptions
     std::string sensor_recorder_bin;
     std::string camera_codec;
     std::string session_camera_streams_csv;
+    bool stereo_enabled = true;
     int worker_stop_timeout_ms = 5000;
     int stereo_finalize_timeout_ms = 10000;
 };

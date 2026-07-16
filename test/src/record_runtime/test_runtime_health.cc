@@ -86,6 +86,48 @@ TEST(HealthMonitorTest, ReportsHealthyStateWhenDependenciesAreReady)
     fs::remove_all(temp_dir);
 }
 
+TEST(HealthMonitorTest, StereoDisabledIgnoresDaemonAndStatusFile)
+{
+    const fs::path temp_dir = MakeTempDir();
+
+    HealthMonitor monitor(
+        {.disk_root = temp_dir.string(),
+         .stereo_status_file = (temp_dir / "missing_status.json").string(),
+         .stereo_enabled = false,
+         .critical_device_paths = {"/dev/cam0"},
+         .poll_interval_ms = 1000,
+         .hmi_active_timeout_ms = 2500},
+        {.is_disk_writable =
+             [](const std::string&) {
+                 return true;
+             },
+         .path_exists =
+             [](const std::string& path) {
+                 return path == "/dev/cam0";
+             },
+         .get_process_status =
+             [](WorkerName) {
+                 return ProcessStatus{.state = ProcessState::ExitedUnexpected, .running = false, .pid = 0};
+             },
+         .get_hmi_health =
+             [](uint64_t) {
+                 return HmiHealthSnapshot{
+                     .has_connected_device = true,
+                     .input_connected = true,
+                     .input_active = true,
+                 };
+             }},
+        &FakeNowMs);
+
+    g_now_ms = 1500;
+    const auto result = monitor.Poll(HealthState{});
+    ASSERT_TRUE(result.checked);
+    EXPECT_FALSE(result.fault.has_value());
+    EXPECT_EQ(result.state.status, HealthStatus::Ok);
+
+    fs::remove_all(temp_dir);
+}
+
 TEST(HealthMonitorTest, ReportsFaultOnlyOnceUntilStateChanges)
 {
     const fs::path temp_dir = MakeTempDir();

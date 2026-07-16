@@ -137,6 +137,7 @@ target_link_libraries(${APP_NAME}
 target_compile_definitions(${APP_NAME}
     PRIVATE
         UGRIPPER_ENABLE_PERF_LOG=$<BOOL:${UGRIPPER_ENABLE_PERF_LOG}>
+        UGRIPPER_ENABLE_STEREO=$<BOOL:${UGRIPPER_ENABLE_STEREO}>
 )
 
 install(TARGETS ${APP_NAME}
