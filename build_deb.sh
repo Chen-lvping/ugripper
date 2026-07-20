@@ -4,7 +4,7 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ================= 变量定义区域 =================
 APP_NAME="ugripper"
-BASE_VERSION="${BASE_VERSION:-2.1.6}"
+BASE_VERSION="${BASE_VERSION:-2.1.7}"
 VERSION_SUFFIX="${VERSION_SUFFIX:-}"
 source "${script_dir}/scripts/lib/ugripper_build_variant.sh"
 ugripper_resolve_stereo_build_variant
