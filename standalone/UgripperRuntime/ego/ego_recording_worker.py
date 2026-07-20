@@ -11,7 +11,9 @@ from pathlib import Path
 
 
 PACKAGE = "com.ssnwt.helloxr"
-REMOTE_ROOT = "/sdcard/Android/data/com.ssnwt.helloxr/files/dataset"
+APP_EXTERNAL_ROOT = f"/sdcard/Android/data/{PACKAGE}/files"
+LEGACY_REMOTE_ROOT = f"{APP_EXTERNAL_ROOT}/dataset"
+REMOTE_ROOT_OVERRIDE_ENV = "UGRIPPER_EGO_REMOTE_ROOT"
 FILES = (
     "rgb.mp4",
     "tracking.mp4",
@@ -234,13 +236,14 @@ def is_ego_device(adb: Adb) -> tuple[bool, dict]:
     props = get_props(adb)
     props_match = all(props.get(key) == value for key, value in SXR_PROPS.items())
     package_result = adb.run("shell", "pm", "path", PACKAGE, timeout=8)
-    dataset_result = adb.run("shell", "test", "-d", REMOTE_ROOT, timeout=8)
+    dataset_roots = list_dataset_roots(adb)
     detail = {
         "serial": adb.serial,
         "props": props,
         "props_match": props_match,
         "package_present": package_result.returncode == 0 and bool(package_result.stdout.strip()),
-        "dataset_present": dataset_result.returncode == 0,
+        "dataset_present": bool(dataset_roots),
+        "dataset_roots": dataset_roots,
     }
     return props_match, detail
 
@@ -260,13 +263,50 @@ def detect_ego(preferred_serial: str = "") -> tuple[Adb | None, dict]:
     return None, {"selected": None, "candidates": details}
 
 
-def list_temp_episodes(adb: Adb) -> list[str]:
-    root_q = shell_quote(REMOTE_ROOT)
+def configured_remote_root() -> str:
+    return os.environ.get(REMOTE_ROOT_OVERRIDE_ENV, "").strip().rstrip("/")
+
+
+def list_dataset_roots(adb: Adb) -> list[str]:
+    configured = configured_remote_root()
+    if configured:
+        return [configured]
+
+    external_root_q = shell_quote(APP_EXTERNAL_ROOT)
+    command = (
+        f"find {external_root_q} -mindepth 1 -maxdepth 4 -type d -name dataset -print "
+        "2>/dev/null | sort"
+    )
+    result = adb.run("shell", command, timeout=8)
+    roots = [line.strip().replace("\r", "") for line in result.stdout.splitlines() if line.strip()]
+    if LEGACY_REMOTE_ROOT not in roots:
+        legacy = adb.run("shell", "test", "-d", LEGACY_REMOTE_ROOT, timeout=8)
+        if legacy.returncode == 0:
+            roots.append(LEGACY_REMOTE_ROOT)
+    return sorted(set(roots))
+
+
+def list_temp_episodes(adb: Adb, remote_root: str) -> list[str]:
+    root_q = shell_quote(remote_root)
     command = f'for d in {root_q}/episode_*-temp; do [ -d "$d" ] && basename "$d"; done | sort'
     result = adb.run("shell", command, timeout=8)
     if result.returncode != 0:
         return []
     return [line.strip().replace("\r", "") for line in result.stdout.splitlines() if line.strip()]
+
+
+def snapshot_temp_episodes(adb: Adb) -> dict[str, set[str]]:
+    return {root: set(list_temp_episodes(adb, root)) for root in list_dataset_roots(adb)}
+
+
+def find_new_temp_episodes(adb: Adb, previous: dict[str, set[str]]) -> list[tuple[str, str]]:
+    candidates = []
+    for root in list_dataset_roots(adb):
+        existing = previous.get(root, set())
+        for episode in list_temp_episodes(adb, root):
+            if episode not in existing:
+                candidates.append((root, episode))
+    return candidates
 
 
 def parse_epoch_ms(text: str) -> tuple[int | None, str]:
@@ -417,24 +457,18 @@ def sync_ego_time(adb: Adb) -> dict:
         return detail
 
 
-def latest_temp_episode(adb: Adb, exclude: set[str] | None = None) -> str:
-    excluded = exclude or set()
-    candidates = [episode for episode in list_temp_episodes(adb) if episode not in excluded]
-    return candidates[-1] if candidates else ""
-
-
-def remote_path(episode_name: str, file_name: str = "") -> str:
-    base = f"{REMOTE_ROOT.rstrip('/')}/{episode_name}"
+def remote_path(remote_root: str, episode_name: str, file_name: str = "") -> str:
+    base = f"{remote_root.rstrip('/')}/{episode_name}"
     return f"{base}/{file_name}" if file_name else base
 
 
-def remote_dir_exists(adb: Adb, episode_name: str) -> bool:
-    result = adb.run("shell", "test", "-d", remote_path(episode_name), timeout=8)
+def remote_dir_exists(adb: Adb, remote_root: str, episode_name: str) -> bool:
+    result = adb.run("shell", "test", "-d", remote_path(remote_root, episode_name), timeout=8)
     return result.returncode == 0
 
 
-def remote_dir_missing(adb: Adb, episode_name: str) -> bool:
-    result = adb.run("shell", "test", "!", "-e", remote_path(episode_name), timeout=8)
+def remote_dir_missing(adb: Adb, remote_root: str, episode_name: str) -> bool:
+    result = adb.run("shell", "test", "!", "-e", remote_path(remote_root, episode_name), timeout=8)
     return result.returncode == 0
 
 
@@ -448,12 +482,13 @@ def remote_file_size(adb: Adb, remote_file: str) -> int | None:
 
 def sync_one_file(
     adb: Adb,
+    remote_root: str,
     remote_episode: str,
     local_episode_dir: Path,
     file_name: str,
     replace_shrunk: bool = False,
 ) -> int:
-    remote_file = remote_path(remote_episode, file_name)
+    remote_file = remote_path(remote_root, remote_episode, file_name)
     size = remote_file_size(adb, remote_file)
     if size is None:
         return 0
@@ -474,6 +509,7 @@ def sync_one_file(
 
 def sync_episode_once(
     adb: Adb,
+    remote_root: str,
     remote_episode: str,
     local_episode_dir: Path,
     replace_shrunk: bool = False,
@@ -481,7 +517,7 @@ def sync_episode_once(
     copied = {}
     for file_name in FILES:
         try:
-            delta = sync_one_file(adb, remote_episode, local_episode_dir, file_name, replace_shrunk=replace_shrunk)
+            delta = sync_one_file(adb, remote_root, remote_episode, local_episode_dir, file_name, replace_shrunk=replace_shrunk)
         except Exception as exc:
             copied[file_name] = {"delta": 0, "error": str(exc)}
         else:
@@ -580,9 +616,11 @@ def merge_ranges(ranges: list[tuple[int, int]], gap: int) -> list[tuple[int, int
     return merged
 
 
-def refresh_final_mp4_header(adb: Adb, remote_episode: str, local_episode_dir: Path, file_name: str) -> dict:
+def refresh_final_mp4_header(
+    adb: Adb, remote_root: str, remote_episode: str, local_episode_dir: Path, file_name: str
+) -> dict:
     detail = {"file": file_name, "status": "skipped", "reason": ""}
-    remote_file = remote_path(remote_episode, file_name)
+    remote_file = remote_path(remote_root, remote_episode, file_name)
     remote_size = remote_file_size(adb, remote_file)
     if remote_size is None:
         detail["reason"] = "remote_missing"
@@ -634,11 +672,11 @@ def refresh_final_mp4_header(adb: Adb, remote_episode: str, local_episode_dir: P
     return detail
 
 
-def refresh_final_mp4_headers(adb: Adb, remote_episode: str, local_episode_dir: Path) -> dict:
+def refresh_final_mp4_headers(adb: Adb, remote_root: str, remote_episode: str, local_episode_dir: Path) -> dict:
     details = {}
     for file_name in MP4_FILES:
         try:
-            details[file_name] = refresh_final_mp4_header(adb, remote_episode, local_episode_dir, file_name)
+            details[file_name] = refresh_final_mp4_header(adb, remote_root, remote_episode, local_episode_dir, file_name)
         except Exception as exc:
             details[file_name] = {"file": file_name, "status": "error", "error": str(exc)}
     return details
@@ -748,13 +786,15 @@ def safe_remote_episode_name(name: str) -> bool:
     return bool(name) and name.startswith("episode_") and "/" not in name and ".." not in name and not name.endswith("-temp")
 
 
-def verify_remote_and_local_file_sizes(adb: Adb, remote_episode: str, local_episode_dir: Path) -> tuple[bool, dict]:
+def verify_remote_and_local_file_sizes(
+    adb: Adb, remote_root: str, remote_episode: str, local_episode_dir: Path
+) -> tuple[bool, dict]:
     details = {}
     ok = True
     for file_name in FILES:
         local_file = local_episode_dir / file_name
         local_size = local_file.stat().st_size if local_file.exists() else None
-        remote_size = remote_file_size(adb, remote_path(remote_episode, file_name))
+        remote_size = remote_file_size(adb, remote_path(remote_root, remote_episode, file_name))
         file_ok = local_size is not None and remote_size is not None and int(local_size) == int(remote_size)
         if not file_ok:
             ok = False
@@ -766,15 +806,15 @@ def verify_remote_and_local_file_sizes(adb: Adb, remote_episode: str, local_epis
     return ok, details
 
 
-def remove_remote_episode(adb: Adb, remote_episode: str) -> tuple[bool, str]:
+def remove_remote_episode(adb: Adb, remote_root: str, remote_episode: str) -> tuple[bool, str]:
     if not safe_remote_episode_name(remote_episode):
         return False, f"unsafe remote episode name: {remote_episode}"
-    remote_q = shell_quote(remote_path(remote_episode))
+    remote_q = shell_quote(remote_path(remote_root, remote_episode))
     command = f"rm -rf {remote_q}"
     result = adb.run("shell", command, timeout=30)
     if result.returncode != 0:
         return False, (result.stderr or result.stdout).strip() or "remote rm failed"
-    if not remote_dir_missing(adb, remote_episode):
+    if not remote_dir_missing(adb, remote_root, remote_episode):
         return False, "remote episode still exists after rm"
     return True, ""
 
@@ -785,6 +825,7 @@ def run_cleanup(args: argparse.Namespace) -> int:
     status.update({"phase": "cleanup", "updated_at_ms": now_ms()})
 
     remote_episode = str(status.get("remote_episode") or "")
+    remote_root = str(status.get("remote_root") or "").rstrip("/")
     local_episode = str(status.get("local_episode") or "")
     serial = str(status.get("serial") or args.serial or "")
 
@@ -798,6 +839,8 @@ def run_cleanup(args: argparse.Namespace) -> int:
         return finish(cleanup_status("skipped", remote_episode, "ego sync status is not finalized"))
     if not safe_remote_episode_name(remote_episode):
         return finish(cleanup_status("skipped", remote_episode, "remote episode is missing, unsafe, or still temporary"), False)
+    if not remote_root:
+        return finish(cleanup_status("skipped", remote_episode, "remote root missing from ego_sync.json"), False)
     local_episode_dir = Path(local_episode) if local_episode else args.episode_dir / "ego"
     if not local_episode_dir.exists():
         return finish(cleanup_status("skipped", remote_episode, f"local ego episode missing: {local_episode_dir}"), False)
@@ -806,12 +849,12 @@ def run_cleanup(args: argparse.Namespace) -> int:
         adb = Adb(serial) if serial else detect_ego(args.serial)[0]
         if adb is None:
             return finish(cleanup_status("error", remote_episode, "no SXR/SXR_1 ego device found during cleanup"), False)
-        if not remote_dir_exists(adb, remote_episode):
+        if not remote_dir_exists(adb, remote_root, remote_episode):
             return finish(cleanup_status("already_missing", remote_episode, deleted_at_ms=now_ms()))
-        sizes_ok, size_details = verify_remote_and_local_file_sizes(adb, remote_episode, local_episode_dir)
+        sizes_ok, size_details = verify_remote_and_local_file_sizes(adb, remote_root, remote_episode, local_episode_dir)
         if not sizes_ok:
             return finish(cleanup_status("skipped", remote_episode, "remote/local file sizes do not match", files=size_details), False)
-        deleted, error = remove_remote_episode(adb, remote_episode)
+        deleted, error = remove_remote_episode(adb, remote_root, remote_episode)
         if not deleted:
             return finish(cleanup_status("error", remote_episode, error, files=size_details), False)
         return finish(cleanup_status("deleted", remote_episode, deleted_at_ms=now_ms(), files=size_details))
@@ -849,7 +892,8 @@ def run_start(args: argparse.Namespace) -> int:
         status["updated_at_ms"] = now_ms()
         write_status(args.status_file, status)
 
-        existing_temp_episodes = list_temp_episodes(adb)
+        existing_temp_episodes = snapshot_temp_episodes(adb)
+        status["remote_roots"] = sorted(existing_temp_episodes)
         status["video_codec"] = set_ego_video_codec(adb, args.codec)
         status["updated_at_ms"] = now_ms()
         write_status(args.status_file, status)
@@ -864,13 +908,27 @@ def run_start(args: argparse.Namespace) -> int:
             write_status(args.status_file, status)
             return 0
 
+        remote_root = ""
         remote_episode = ""
         deadline = time.monotonic() + args.detect_timeout
-        excluded_temp_episodes = set(existing_temp_episodes)
         while time.monotonic() < deadline:
-            remote_episode = latest_temp_episode(adb, excluded_temp_episodes)
-            if remote_episode:
+            candidates = find_new_temp_episodes(adb, existing_temp_episodes)
+            if len(candidates) == 1:
+                remote_root, remote_episode = candidates[0]
                 break
+            if len(candidates) > 1:
+                status.update(
+                    {
+                        "status": "start_ambiguous_remote_episode",
+                        "error": "multiple new ego episode_*-temp directories found",
+                        "remote_episode_candidates": [
+                            {"remote_root": root, "remote_episode": episode} for root, episode in candidates
+                        ],
+                        "updated_at_ms": now_ms(),
+                    }
+                )
+                write_status(args.status_file, status)
+                return 0
             time.sleep(args.interval)
 
         if not remote_episode:
@@ -883,6 +941,7 @@ def run_start(args: argparse.Namespace) -> int:
             {
                 "status": "recording",
                 "phase": "sync",
+                "remote_root": remote_root,
                 "remote_episode": remote_episode,
                 "local_episode": str(args.episode_dir / "ego"),
             }
@@ -891,7 +950,7 @@ def run_start(args: argparse.Namespace) -> int:
 
         local_episode_dir = args.episode_dir / "ego"
         while True:
-            sync_episode_once(adb, remote_episode, local_episode_dir)
+            sync_episode_once(adb, remote_root, remote_episode, local_episode_dir)
             status["updated_at_ms"] = now_ms()
             write_status(args.status_file, status)
             time.sleep(args.interval)
@@ -911,6 +970,7 @@ def run_stop(args: argparse.Namespace) -> int:
     status.update({"phase": "stop", "updated_at_ms": now_ms()})
 
     serial = str(status.get("serial") or args.serial or "")
+    remote_root = str(status.get("remote_root") or "").rstrip("/")
     remote_episode = str(status.get("remote_episode") or "")
     try:
         if not serial:
@@ -938,22 +998,29 @@ def run_stop(args: argparse.Namespace) -> int:
         status["updated_at_ms"] = now_ms()
         write_status(args.status_file, status)
         return 0
+    if not remote_root:
+        status["status"] = "stop_no_remote_root"
+        status["error"] = "remote_root missing from ego_sync.json"
+        status["updated_at_ms"] = now_ms()
+        write_status(args.status_file, status)
+        return 0
 
     local_episode_dir = args.episode_dir / "ego"
     final_episode = final_name(remote_episode)
     final_local_dir = args.episode_dir / "ego"
     deadline = time.monotonic() + args.finalize_timeout
     while time.monotonic() < deadline:
-        current_remote = remote_episode if remote_dir_exists(adb, remote_episode) else final_episode
-        if remote_dir_exists(adb, current_remote):
+        current_remote = remote_episode if remote_dir_exists(adb, remote_root, remote_episode) else final_episode
+        if remote_dir_exists(adb, remote_root, current_remote):
             sync_episode_once(
                 adb,
+                remote_root,
                 current_remote,
                 local_episode_dir,
                 replace_shrunk=(current_remote == final_episode),
             )
         if current_remote == final_episode:
-            header_refresh_detail = refresh_final_mp4_headers(adb, final_episode, final_local_dir)
+            header_refresh_detail = refresh_final_mp4_headers(adb, remote_root, final_episode, final_local_dir)
             repair_detail = repair_mp4_files(final_local_dir)
             status.update(
                 {
