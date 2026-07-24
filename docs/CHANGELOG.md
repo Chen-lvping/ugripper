@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Fays VIKit SDK 从 `3.5.1` 更新到上游 `main` 的 `3.8.0`（`b1d74499`），同步 aarch64/x86_64 运行库与公开 API/版本头；FT602 `1.0.17` 运行库保持不变。主包版本同步提升到 `2.1.8`。
 - 新增构建期开关 `UGRIPPER_ENABLE_STEREO`，默认 `ON` 并沿用普通版本/包名；显式设为 `OFF` 时生成 `+nostereo` 包变体，运行时不启动 Fays daemon、不检查 stereo/Fays 健康、不执行双目 session/finalize，也不生成或校验 `stereo_left/right.mkv` 与 `fays_data_left/right.mcap`。该开关不提供 `/etc/environment`、`config.txt` 或命令行运行时覆盖。
 - HMI 物理按键在动作状态机前新增按下、松开各 `40ms` 的双向稳定滤波，过滤短暂电平毛刺；原有 `80ms` 短按动作间隔保持不变。
 - UgripperRuntime、SensorRecorder 与 encoder zeroing 的信号处理路径只设置停止标志，不再在信号上下文执行日志、子进程等待或复杂对象清理；SensorRecorder 退出时先等待编码器读写线程停止，再关闭串口，避免服务停止或停录时发生死锁、资源竞态及 sensor MCAP Footer 未封口。

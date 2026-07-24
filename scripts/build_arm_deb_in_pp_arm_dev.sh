@@ -6,7 +6,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 LOCAL_DEPS_DIR="${LOCAL_DEPS_DIR:-${REPO_ROOT}/.local-deps}"
 APP_NAME="ugripper"
 ARCH="arm64"
-BASE_VERSION="${BASE_VERSION:-2.1.7}"
+BASE_VERSION="${BASE_VERSION:-2.1.8}"
 VERSION_SUFFIX="${VERSION_SUFFIX:-}"
 source "${REPO_ROOT}/scripts/lib/ugripper_build_variant.sh"
 ugripper_resolve_stereo_build_variant
