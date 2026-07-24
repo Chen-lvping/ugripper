@@ -129,7 +129,8 @@
 - 配置入口：`config/camera_recorder.yaml`。
 - 当前 YAML 定义 9 路相机：左右主摄、可选胸部主摄、左右 stereo、4 路触觉。
 - `udev` 口位策略当前口径：
-  - stereo 与 CH9344 串口桥允许同侧 hub 的内部端口 `.1/.2` 互换；
+  - stereo 允许同侧 hub 的内部端口 `.1/.2` 互换；CH9344 同时兼容旧版/嵌套 hub 的 `.1/.2` 与四口 hub 的 `.4`，同组序号最小两路依次映射为 `*_gripper`、`*_encoder`；
+  - 四口 USB2 hub 的固定映射为 `.1 -> cam_*`、`.2 -> tcam_*_r`、`.3 -> tcam_*_l`、`.4 -> CH9344`，右侧兼容 bus `1/5`，左侧兼容 bus `9/11`；
   - tactile `l/r` 仍按左右侧固定 kernel 路径命名，不做跨侧互换；
   - 左侧更换新 hub 后，左主摄与左触觉 `l` 不再只按 `.4.2/.4.4` 固定口位判断，当前优先按设备类型识别：`27c2:0530` 归 `/dev/cam_left`，`0bda:5846` 归 `/dev/tcam_left_l`，USB2 口位仅用于限定属于左侧链路；
   - 左手新 hub 的 tactile 口位与右手保持同构：`.3 -> /dev/tcam_left_l`、`.4 -> /dev/tcam_left_r`；同时继续兼容旧特殊 hub 的 `/dev/tcam_left_r <- .3`。

@@ -2142,7 +2142,7 @@
       "source_file": "py_script/usb_audio_play_test.py",
       "source_location": "L1",
       "id": "py_script_usb_audio_play_test_py",
-      "community": 352,
+      "community": 174,
       "norm_label": "usb_audio_play_test.py"
     },
     {
@@ -2151,7 +2151,7 @@
       "source_file": "py_script/usb_audio_play_test.py",
       "source_location": "L18",
       "id": "py_script_usb_audio_play_test_generate_tone_wav",
-      "community": 352,
+      "community": 174,
       "norm_label": "generate_tone_wav()"
     },
     {
@@ -2160,7 +2160,7 @@
       "source_file": "py_script/usb_audio_play_test.py",
       "source_location": "L32",
       "id": "py_script_usb_audio_play_test_main",
-      "community": 352,
+      "community": 174,
       "norm_label": "main()"
     },
     {
@@ -9612,7 +9612,7 @@
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L162",
       "id": "sensorrecorder_encoder_driver_sendconfigtoencoder",
-      "community": 342,
+      "community": 163,
       "norm_label": "sendconfigtoencoder()"
     },
     {
@@ -9684,7 +9684,7 @@
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L406",
       "id": "sensorrecorder_encoder_driver_calculatecrc16",
-      "community": 342,
+      "community": 163,
       "norm_label": "calculatecrc16()"
     },
     {
@@ -9702,7 +9702,7 @@
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L422",
       "id": "sensorrecorder_encoder_driver_setdeviceaddress",
-      "community": 342,
+      "community": 163,
       "norm_label": "setdeviceaddress()"
     },
     {
@@ -9711,7 +9711,7 @@
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L441",
       "id": "sensorrecorder_encoder_driver_setbaudrate",
-      "community": 342,
+      "community": 163,
       "norm_label": "setbaudrate()"
     },
     {
@@ -9720,7 +9720,7 @@
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L487",
       "id": "sensorrecorder_encoder_driver_setcurrentasmiddle",
-      "community": 342,
+      "community": 163,
       "norm_label": "setcurrentasmiddle()"
     },
     {
@@ -9729,7 +9729,7 @@
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L505",
       "id": "sensorrecorder_encoder_driver_setcurrentaszero",
-      "community": 342,
+      "community": 163,
       "norm_label": "setcurrentaszero()"
     },
     {
@@ -9738,7 +9738,7 @@
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L523",
       "id": "sensorrecorder_encoder_driver_setrotationdirection",
-      "community": 342,
+      "community": 163,
       "norm_label": "setrotationdirection()"
     },
     {
@@ -9747,7 +9747,7 @@
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L540",
       "id": "sensorrecorder_encoder_driver_setconfigstore",
-      "community": 342,
+      "community": 163,
       "norm_label": "setconfigstore()"
     },
     {
@@ -9756,7 +9756,7 @@
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L557",
       "id": "sensorrecorder_encoder_driver_setrestart",
-      "community": 342,
+      "community": 163,
       "norm_label": "setrestart()"
     },
     {
@@ -9765,7 +9765,7 @@
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L574",
       "id": "sensorrecorder_encoder_driver_setrefactory",
-      "community": 342,
+      "community": 163,
       "norm_label": "setrefactory()"
     },
     {
@@ -9774,7 +9774,7 @@
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L591",
       "id": "sensorrecorder_encoder_driver_reset",
-      "community": 342,
+      "community": 163,
       "norm_label": "reset()"
     },
     {
@@ -18520,7 +18520,7 @@
       "label": "v2.1.5 - 2026-07-13",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L14",
+      "source_location": "L15",
       "id": "docs_changelog_v2_1_5_2026_07_13",
       "community": 35,
       "norm_label": "v2.1.5 - 2026-07-13"
@@ -18529,7 +18529,7 @@
       "label": "v2.1.4 - Unreleased",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L24",
+      "source_location": "L25",
       "id": "docs_changelog_v2_1_4_unreleased",
       "community": 35,
       "norm_label": "v2.1.4 - unreleased"
@@ -18538,7 +18538,7 @@
       "label": "v2.1.3 - Unreleased",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L31",
+      "source_location": "L32",
       "id": "docs_changelog_v2_1_3_unreleased",
       "community": 35,
       "norm_label": "v2.1.3 - unreleased"
@@ -18547,7 +18547,7 @@
       "label": "v2.1.2 - Unreleased",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L38",
+      "source_location": "L39",
       "id": "docs_changelog_v2_1_2_unreleased",
       "community": 35,
       "norm_label": "v2.1.2 - unreleased"
@@ -18556,7 +18556,7 @@
       "label": "v2.1.1 - Unreleased",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L45",
+      "source_location": "L46",
       "id": "docs_changelog_v2_1_1_unreleased",
       "community": 35,
       "norm_label": "v2.1.1 - unreleased"
@@ -18565,7 +18565,7 @@
       "label": "v2.0.13 - Unreleased",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L63",
+      "source_location": "L64",
       "id": "docs_changelog_v2_0_13_unreleased",
       "community": 35,
       "norm_label": "v2.0.13 - unreleased"
@@ -18574,7 +18574,7 @@
       "label": "v2.0.4 - Unreleased",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L83",
+      "source_location": "L84",
       "id": "docs_changelog_v2_0_4_unreleased",
       "community": 35,
       "norm_label": "v2.0.4 - unreleased"
@@ -18583,7 +18583,7 @@
       "label": "v2.0.1 - 2026-05-21",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L97",
+      "source_location": "L98",
       "id": "docs_changelog_v2_0_1_2026_05_21",
       "community": 35,
       "norm_label": "v2.0.1 - 2026-05-21"
@@ -18592,7 +18592,7 @@
       "label": "v2.0.0 - 2026-04-29",
       "file_type": "document",
       "source_file": "docs/CHANGELOG.md",
-      "source_location": "L110",
+      "source_location": "L111",
       "id": "docs_changelog_v2_0_0_2026_04_29",
       "community": 35,
       "norm_label": "v2.0.0 - 2026-04-29"
@@ -18988,7 +18988,7 @@
       "label": "6.3 \u4f20\u611f\u5668\u94fe\u8def",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L172",
+      "source_location": "L173",
       "id": "agent_overview_6_3_\u4f20\u611f\u5668\u94fe\u8def",
       "community": 293,
       "norm_label": "6.3 \u4f20\u611f\u5668\u94fe\u8def"
@@ -18997,7 +18997,7 @@
       "label": "6.4 \u505c\u6b62\u5f55\u5236",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L187",
+      "source_location": "L188",
       "id": "agent_overview_6_4_\u505c\u6b62\u5f55\u5236",
       "community": 293,
       "norm_label": "6.4 \u505c\u6b62\u5f55\u5236"
@@ -19006,7 +19006,7 @@
       "label": "7. Episode \u4ea7\u7269\u4e0e\u68c0\u67e5",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L197",
+      "source_location": "L198",
       "id": "agent_overview_7_episode_\u4ea7\u7269\u4e0e\u68c0\u67e5",
       "community": 294,
       "norm_label": "7. episode \u4ea7\u7269\u4e0e\u68c0\u67e5"
@@ -19015,7 +19015,7 @@
       "label": "7.1 \u9ed8\u8ba4\u4ea7\u7269",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L198",
+      "source_location": "L199",
       "id": "agent_overview_7_1_\u9ed8\u8ba4\u4ea7\u7269",
       "community": 294,
       "norm_label": "7.1 \u9ed8\u8ba4\u4ea7\u7269"
@@ -19024,7 +19024,7 @@
       "label": "7.2 metadata.json",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L223",
+      "source_location": "L224",
       "id": "agent_overview_7_2_metadata_json",
       "community": 294,
       "norm_label": "7.2 metadata.json"
@@ -19033,7 +19033,7 @@
       "label": "7.3 \u505c\u5f55\u5f3a\u6821\u9a8c",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L237",
+      "source_location": "L238",
       "id": "agent_overview_7_3_\u505c\u5f55\u5f3a\u6821\u9a8c",
       "community": 294,
       "norm_label": "7.3 \u505c\u5f55\u5f3a\u6821\u9a8c"
@@ -19042,7 +19042,7 @@
       "label": "8. \u706f\u6548\u3001\u97f3\u9891\u4e0e\u5173\u952e\u8def\u5f84",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L257",
+      "source_location": "L258",
       "id": "agent_overview_8_\u706f\u6548_\u97f3\u9891\u4e0e\u5173\u952e\u8def\u5f84",
       "community": 21,
       "norm_label": "8. \u706f\u6548\u3001\u97f3\u9891\u4e0e\u5173\u952e\u8def\u5f84"
@@ -19051,7 +19051,7 @@
       "label": "8.1 \u5f53\u524d\u72b6\u6001\u706f\u8bed\u4e49",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L258",
+      "source_location": "L259",
       "id": "agent_overview_8_1_\u5f53\u524d\u72b6\u6001\u706f\u8bed\u4e49",
       "community": 21,
       "norm_label": "8.1 \u5f53\u524d\u72b6\u6001\u706f\u8bed\u4e49"
@@ -19060,7 +19060,7 @@
       "label": "8.2 \u5173\u952e\u6301\u4e45\u5316\u4e0e\u4e34\u65f6\u8def\u5f84",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L268",
+      "source_location": "L269",
       "id": "agent_overview_8_2_\u5173\u952e\u6301\u4e45\u5316\u4e0e\u4e34\u65f6\u8def\u5f84",
       "community": 21,
       "norm_label": "8.2 \u5173\u952e\u6301\u4e45\u5316\u4e0e\u4e34\u65f6\u8def\u5f84"
@@ -19069,7 +19069,7 @@
       "label": "8.3 \u8f6f\u4ef6\u5f55\u5236\u63a7\u5236",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L286",
+      "source_location": "L287",
       "id": "agent_overview_8_3_\u8f6f\u4ef6\u5f55\u5236\u63a7\u5236",
       "community": 21,
       "norm_label": "8.3 \u8f6f\u4ef6\u5f55\u5236\u63a7\u5236"
@@ -19078,7 +19078,7 @@
       "label": "8.4 PERF \u65e5\u5fd7",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L301",
+      "source_location": "L302",
       "id": "agent_overview_8_4_perf_\u65e5\u5fd7",
       "community": 21,
       "norm_label": "8.4 perf \u65e5\u5fd7"
@@ -19087,7 +19087,7 @@
       "label": "8.5 \u97f3\u9891\u94fe\u8def\u5173\u952e\u884c\u4e3a",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L306",
+      "source_location": "L307",
       "id": "agent_overview_8_5_\u97f3\u9891\u94fe\u8def\u5173\u952e\u884c\u4e3a",
       "community": 21,
       "norm_label": "8.5 \u97f3\u9891\u94fe\u8def\u5173\u952e\u884c\u4e3a"
@@ -19096,7 +19096,7 @@
       "label": "8.6 \u76f8\u5173\u8f85\u52a9\u5355\u5143",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L319",
+      "source_location": "L320",
       "id": "agent_overview_8_6_\u76f8\u5173\u8f85\u52a9\u5355\u5143",
       "community": 21,
       "norm_label": "8.6 \u76f8\u5173\u8f85\u52a9\u5355\u5143"
@@ -19105,7 +19105,7 @@
       "label": "8.7 \u786c\u4ef6\u5065\u5eb7\u76d1\u63a7",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L325",
+      "source_location": "L326",
       "id": "agent_overview_8_7_\u786c\u4ef6\u5065\u5eb7\u76d1\u63a7",
       "community": 21,
       "norm_label": "8.7 \u786c\u4ef6\u5065\u5eb7\u76d1\u63a7"
@@ -19114,7 +19114,7 @@
       "label": "9. \u914d\u7f6e\u3001\u5b89\u88c5\u4e0e U \u76d8\u6d41\u7a0b",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L334",
+      "source_location": "L335",
       "id": "agent_overview_9_\u914d\u7f6e_\u5b89\u88c5\u4e0e_u_\u76d8\u6d41\u7a0b",
       "community": 236,
       "norm_label": "9. \u914d\u7f6e\u3001\u5b89\u88c5\u4e0e u \u76d8\u6d41\u7a0b"
@@ -19123,7 +19123,7 @@
       "label": "9.1 \u5f53\u524d\u4e3b\u8981\u914d\u7f6e\u5165\u53e3",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L335",
+      "source_location": "L336",
       "id": "agent_overview_9_1_\u5f53\u524d\u4e3b\u8981\u914d\u7f6e\u5165\u53e3",
       "community": 236,
       "norm_label": "9.1 \u5f53\u524d\u4e3b\u8981\u914d\u7f6e\u5165\u53e3"
@@ -19132,7 +19132,7 @@
       "label": "9.2 \u5f53\u524d\u9ed8\u8ba4\u9879",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L350",
+      "source_location": "L351",
       "id": "agent_overview_9_2_\u5f53\u524d\u9ed8\u8ba4\u9879",
       "community": 236,
       "norm_label": "9.2 \u5f53\u524d\u9ed8\u8ba4\u9879"
@@ -19141,7 +19141,7 @@
       "label": "9.3 U \u76d8\u652f\u6301\u5185\u5bb9",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L358",
+      "source_location": "L359",
       "id": "agent_overview_9_3_u_\u76d8\u652f\u6301\u5185\u5bb9",
       "community": 236,
       "norm_label": "9.3 u \u76d8\u652f\u6301\u5185\u5bb9"
@@ -19150,7 +19150,7 @@
       "label": "9.4 U \u76d8\u540c\u6b21\u63d2\u5165\u987a\u5e8f",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L373",
+      "source_location": "L374",
       "id": "agent_overview_9_4_u_\u76d8\u540c\u6b21\u63d2\u5165\u987a\u5e8f",
       "community": 236,
       "norm_label": "9.4 u \u76d8\u540c\u6b21\u63d2\u5165\u987a\u5e8f"
@@ -19159,7 +19159,7 @@
       "label": "9.5 \u5b89\u88c5\u811a\u672c\u4e0e\u7f51\u7edc\u884c\u4e3a",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L386",
+      "source_location": "L387",
       "id": "agent_overview_9_5_\u5b89\u88c5\u811a\u672c\u4e0e\u7f51\u7edc\u884c\u4e3a",
       "community": 236,
       "norm_label": "9.5 \u5b89\u88c5\u811a\u672c\u4e0e\u7f51\u7edc\u884c\u4e3a"
@@ -19168,7 +19168,7 @@
       "label": "9.6 \u7f51\u7ebf\u76d1\u6d4b\u884c\u4e3a",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L408",
+      "source_location": "L409",
       "id": "agent_overview_9_6_\u7f51\u7ebf\u76d1\u6d4b\u884c\u4e3a",
       "community": 236,
       "norm_label": "9.6 \u7f51\u7ebf\u76d1\u6d4b\u884c\u4e3a"
@@ -19177,7 +19177,7 @@
       "label": "9.7 \u4e3b\u5305\u6253\u5305\u7ea6\u675f",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L414",
+      "source_location": "L415",
       "id": "agent_overview_9_7_\u4e3b\u5305\u6253\u5305\u7ea6\u675f",
       "community": 236,
       "norm_label": "9.7 \u4e3b\u5305\u6253\u5305\u7ea6\u675f"
@@ -19186,7 +19186,7 @@
       "label": "10. \u5e38\u7528\u68c0\u67e5\u4e0e\u6392\u969c\u5165\u53e3",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L421",
+      "source_location": "L422",
       "id": "agent_overview_10_\u5e38\u7528\u68c0\u67e5\u4e0e\u6392\u969c\u5165\u53e3",
       "community": 194,
       "norm_label": "10. \u5e38\u7528\u68c0\u67e5\u4e0e\u6392\u969c\u5165\u53e3"
@@ -19195,7 +19195,7 @@
       "label": "10.1 \u670d\u52a1\u7ba1\u7406",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L422",
+      "source_location": "L423",
       "id": "agent_overview_10_1_\u670d\u52a1\u7ba1\u7406",
       "community": 194,
       "norm_label": "10.1 \u670d\u52a1\u7ba1\u7406"
@@ -19204,7 +19204,7 @@
       "label": "code:bash (sudo systemctl status ugripper.service)",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L423",
+      "source_location": "L424",
       "id": "agent_overview_codeblock_1",
       "community": 194,
       "norm_label": "code:bash (sudo systemctl status ugripper.service)"
@@ -19213,7 +19213,7 @@
       "label": "10.2 \u5f55\u5236\u76f8\u5173\u8fdb\u7a0b",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L429",
+      "source_location": "L430",
       "id": "agent_overview_10_2_\u5f55\u5236\u76f8\u5173\u8fdb\u7a0b",
       "community": 194,
       "norm_label": "10.2 \u5f55\u5236\u76f8\u5173\u8fdb\u7a0b"
@@ -19222,7 +19222,7 @@
       "label": "10.3 U \u76d8\u6d41\u7a0b\u65e5\u5fd7",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L435",
+      "source_location": "L436",
       "id": "agent_overview_10_3_u_\u76d8\u6d41\u7a0b\u65e5\u5fd7",
       "community": 194,
       "norm_label": "10.3 u \u76d8\u6d41\u7a0b\u65e5\u5fd7"
@@ -19231,7 +19231,7 @@
       "label": "code:bash (sudo tail -n 200 /var/log/ugripper/usb_auto_update.log)",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L436",
+      "source_location": "L437",
       "id": "agent_overview_codeblock_2",
       "community": 194,
       "norm_label": "code:bash (sudo tail -n 200 /var/log/ugripper/usb_auto_update.log)"
@@ -19240,7 +19240,7 @@
       "label": "10.4 \u8fd0\u884c\u65e5\u5fd7",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L441",
+      "source_location": "L442",
       "id": "agent_overview_10_4_\u8fd0\u884c\u65e5\u5fd7",
       "community": 194,
       "norm_label": "10.4 \u8fd0\u884c\u65e5\u5fd7"
@@ -19249,7 +19249,7 @@
       "label": "code:bash (tail -n 200 /tmp/umi_sys_<device_sn_lower>_$(date +%Y%m%d).l)",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L442",
+      "source_location": "L443",
       "id": "agent_overview_codeblock_3",
       "community": 194,
       "norm_label": "code:bash (tail -n 200 /tmp/umi_sys_<device_sn_lower>_$(date +%y%m%d).l)"
@@ -19258,7 +19258,7 @@
       "label": "10.5 \u8bbe\u5907\u6620\u5c04\u4f18\u5148\u68c0\u67e5",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L447",
+      "source_location": "L448",
       "id": "agent_overview_10_5_\u8bbe\u5907\u6620\u5c04\u4f18\u5148\u68c0\u67e5",
       "community": 194,
       "norm_label": "10.5 \u8bbe\u5907\u6620\u5c04\u4f18\u5148\u68c0\u67e5"
@@ -19267,7 +19267,7 @@
       "label": "10.6 \u5feb\u901f\u5b9a\u4f4d\u5efa\u8bae",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L461",
+      "source_location": "L462",
       "id": "agent_overview_10_6_\u5feb\u901f\u5b9a\u4f4d\u5efa\u8bae",
       "community": 194,
       "norm_label": "10.6 \u5feb\u901f\u5b9a\u4f4d\u5efa\u8bae"
@@ -19276,7 +19276,7 @@
       "label": "10.7 tactile serial \u5b9a\u5411\u6838\u5bf9",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L472",
+      "source_location": "L473",
       "id": "agent_overview_10_7_tactile_serial_\u5b9a\u5411\u6838\u5bf9",
       "community": 194,
       "norm_label": "10.7 tactile serial \u5b9a\u5411\u6838\u5bf9"
@@ -19285,7 +19285,7 @@
       "label": "code:bash (journalctl -u ugripper.service --since \"2 hours ago\" | grep )",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L473",
+      "source_location": "L474",
       "id": "agent_overview_codeblock_4",
       "community": 194,
       "norm_label": "code:bash (journalctl -u ugripper.service --since \"2 hours ago\" | grep )"
@@ -19294,7 +19294,7 @@
       "label": "10.8 \u4ed3\u5e93\u5185\u6d4b\u8bd5\u811a\u672c",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L503",
+      "source_location": "L504",
       "id": "agent_overview_10_8_\u4ed3\u5e93\u5185\u6d4b\u8bd5\u811a\u672c",
       "community": 194,
       "norm_label": "10.8 \u4ed3\u5e93\u5185\u6d4b\u8bd5\u811a\u672c"
@@ -19303,7 +19303,7 @@
       "label": "11. \u5f53\u524d\u4f7f\u7528\u6ce8\u610f\u70b9",
       "file_type": "document",
       "source_file": "docs/agent/overview.md",
-      "source_location": "L520",
+      "source_location": "L521",
       "id": "agent_overview_11_\u5f53\u524d\u4f7f\u7528\u6ce8\u610f\u70b9",
       "community": 211,
       "norm_label": "11. \u5f53\u524d\u4f7f\u7528\u6ce8\u610f\u70b9"
@@ -27637,7 +27637,7 @@
       "label": "\u5efa\u8bae\u7528\u6cd5",
       "file_type": "document",
       "source_file": "test/README.md",
-      "source_location": "L76",
+      "source_location": "L78",
       "id": "test_readme_\u5efa\u8bae\u7528\u6cd5",
       "community": 57,
       "norm_label": "\u5efa\u8bae\u7528\u6cd5"
@@ -27646,7 +27646,7 @@
       "label": "code:bash (bash test/scripts/camera_test.sh)",
       "file_type": "document",
       "source_file": "test/README.md",
-      "source_location": "L79",
+      "source_location": "L81",
       "id": "test_readme_codeblock_1",
       "community": 57,
       "norm_label": "code:bash (bash test/scripts/camera_test.sh)"
@@ -27655,7 +27655,7 @@
       "label": "code:bash (BASE_DIR=/tmp/ugripper_cam_check DURATION=30 CAMERA_SET=non_)",
       "file_type": "document",
       "source_file": "test/README.md",
-      "source_location": "L93",
+      "source_location": "L95",
       "id": "test_readme_codeblock_2",
       "community": 57,
       "norm_label": "code:bash (base_dir=/tmp/ugripper_cam_check duration=30 camera_set=non_)"
@@ -27664,7 +27664,7 @@
       "label": "code:bash (python3 test/scripts/scan_main_camera_mkv_issues.py /mnt/dat)",
       "file_type": "document",
       "source_file": "test/README.md",
-      "source_location": "L100",
+      "source_location": "L102",
       "id": "test_readme_codeblock_3",
       "community": 57,
       "norm_label": "code:bash (python3 test/scripts/scan_main_camera_mkv_issues.py /mnt/dat)"
@@ -27673,7 +27673,7 @@
       "label": "code:bash (sudo bash /dev/shm/ugripper_hmi_test/board_gripper_hmi_link_)",
       "file_type": "document",
       "source_file": "test/README.md",
-      "source_location": "L115",
+      "source_location": "L117",
       "id": "test_readme_codeblock_4",
       "community": 57,
       "norm_label": "code:bash (sudo bash /dev/shm/ugripper_hmi_test/board_gripper_hmi_link_)"
@@ -27682,7 +27682,7 @@
       "label": "\u6ce8\u610f\u4e8b\u9879",
       "file_type": "document",
       "source_file": "test/README.md",
-      "source_location": "L142",
+      "source_location": "L144",
       "id": "test_readme_\u6ce8\u610f\u4e8b\u9879",
       "community": 57,
       "norm_label": "\u6ce8\u610f\u4e8b\u9879"
@@ -30158,7 +30158,7 @@
       "file_type": "code",
       "source_file": "py_script/usb_audio_play_test.py",
       "source_location": "L18",
-      "community": 352,
+      "community": 174,
       "norm_label": "generate_tone_wav()",
       "id": "usb_audio_play_test_generate_tone_wav"
     },
@@ -30167,7 +30167,7 @@
       "file_type": "code",
       "source_file": "py_script/usb_audio_play_test.py",
       "source_location": "L32",
-      "community": 352,
+      "community": 174,
       "norm_label": "main()",
       "id": "usb_audio_play_test_main"
     },
@@ -35090,7 +35090,7 @@
       "file_type": "code",
       "source_file": "audio/pulse_audio_utils.py",
       "source_location": "L388",
-      "community": 11,
+      "community": 174,
       "norm_label": "pulse_audio_env()",
       "id": "pulse_audio_utils_pulse_audio_env"
     },
@@ -37187,7 +37187,7 @@
       "file_type": "code",
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L145",
-      "community": 163,
+      "community": 191,
       "norm_label": "sendtoencoder()",
       "id": "encoder_driver_sendtoencoder"
     },
@@ -37223,7 +37223,7 @@
       "file_type": "code",
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L345",
-      "community": 163,
+      "community": 191,
       "norm_label": "getencoderposition()",
       "id": "encoder_driver_getencoderposition"
     },
@@ -37232,7 +37232,7 @@
       "file_type": "code",
       "source_file": "standalone/SensorRecorder/encoder_driver.cc",
       "source_location": "L359",
-      "community": 163,
+      "community": 191,
       "norm_label": "getencodervelocity()",
       "id": "encoder_driver_getencodervelocity"
     },
@@ -41876,7 +41876,7 @@
       "file_type": "code",
       "source_file": "test/scripts/board_encoder_cmd_ack_latency.py",
       "source_location": "L43",
-      "community": 336,
+      "community": 202,
       "norm_label": "percentile()",
       "id": "board_encoder_cmd_ack_latency_percentile"
     },
@@ -42065,7 +42065,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L32",
-      "community": 339,
+      "community": 4,
       "norm_label": "gapevent",
       "id": "scan_main_camera_mkv_issues_gapevent"
     },
@@ -42074,7 +42074,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L40",
-      "community": 339,
+      "community": 4,
       "norm_label": "decodesummary",
       "id": "scan_main_camera_mkv_issues_decodesummary"
     },
@@ -42083,7 +42083,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L49",
-      "community": 339,
+      "community": 4,
       "norm_label": "filesummary",
       "id": "scan_main_camera_mkv_issues_filesummary"
     },
@@ -42101,7 +42101,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L82",
-      "community": 203,
+      "community": 202,
       "norm_label": "build_parser()",
       "id": "scan_main_camera_mkv_issues_build_parser"
     },
@@ -42119,7 +42119,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L152",
-      "community": 203,
+      "community": 202,
       "norm_label": "parse_args()",
       "id": "scan_main_camera_mkv_issues_parse_args"
     },
@@ -42137,7 +42137,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L176",
-      "community": 339,
+      "community": 4,
       "norm_label": "side_from_name()",
       "id": "scan_main_camera_mkv_issues_side_from_name"
     },
@@ -42164,7 +42164,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L218",
-      "community": 339,
+      "community": 4,
       "norm_label": "safe_float()",
       "id": "scan_main_camera_mkv_issues_safe_float"
     },
@@ -42173,7 +42173,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L230",
-      "community": 339,
+      "community": 4,
       "norm_label": "parse_rate()",
       "id": "scan_main_camera_mkv_issues_parse_rate"
     },
@@ -42182,7 +42182,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L246",
-      "community": 339,
+      "community": 4,
       "norm_label": "load_stream_info()",
       "id": "scan_main_camera_mkv_issues_load_stream_info"
     },
@@ -42191,7 +42191,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L273",
-      "community": 339,
+      "community": 4,
       "norm_label": "maybe_append_limited()",
       "id": "scan_main_camera_mkv_issues_maybe_append_limited"
     },
@@ -42200,7 +42200,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L278",
-      "community": 339,
+      "community": 4,
       "norm_label": "maybe_append_unique_limited()",
       "id": "scan_main_camera_mkv_issues_maybe_append_unique_limited"
     },
@@ -42209,7 +42209,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L285",
-      "community": 339,
+      "community": 4,
       "norm_label": "analyze_packets()",
       "id": "scan_main_camera_mkv_issues_analyze_packets"
     },
@@ -42218,7 +42218,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L379",
-      "community": 339,
+      "community": 4,
       "norm_label": "run_decode_scan()",
       "id": "scan_main_camera_mkv_issues_run_decode_scan"
     },
@@ -42227,7 +42227,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L419",
-      "community": 339,
+      "community": 4,
       "norm_label": "classify_status()",
       "id": "scan_main_camera_mkv_issues_classify_status"
     },
@@ -42236,7 +42236,7 @@
       "file_type": "code",
       "source_file": "test/scripts/scan_main_camera_mkv_issues.py",
       "source_location": "L438",
-      "community": 339,
+      "community": 4,
       "norm_label": "analyze_file()",
       "id": "scan_main_camera_mkv_issues_analyze_file"
     },
@@ -97793,9 +97793,9 @@
       "source_file": "src/third_party/fays_lib/UPSTREAM.md",
       "source_location": "L1",
       "weight": 1.0,
+      "confidence_score": 1.0,
       "source": "src_third_party_fays_lib_upstream_md",
-      "target": "fays_lib_upstream_fays_vikit_sdk_provenance",
-      "confidence_score": 1.0
+      "target": "fays_lib_upstream_fays_vikit_sdk_provenance"
     },
     {
       "relation": "contains",
@@ -149999,5 +149999,5 @@
     }
   ],
   "hyperedges": [],
-  "built_at_commit": "62d86dd2c67c026e753aadf52d1882cfba21c042"
+  "built_at_commit": "5c0e83dbb4ebe883122247d3b55d7ac7568c7f09"
 }

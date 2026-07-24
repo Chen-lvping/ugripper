@@ -1,16 +1,16 @@
 # Graph Report - UGripper  (2026-07-24)
 
 ## Corpus Check
-- 215 files · ~234,739 words
+- 215 files · ~234,795 words
 - Verdict: corpus is large enough that graph structure adds value.
 
 ## Summary
-- 5011 nodes · 10265 edges · 356 communities (317 shown, 39 thin omitted)
+- 5011 nodes · 10265 edges · 353 communities (314 shown, 39 thin omitted)
 - Extraction: 90% EXTRACTED · 10% INFERRED · 0% AMBIGUOUS · INFERRED: 1038 edges (avg confidence: 0.8)
 - Token cost: 0 input · 0 output
 
 ## Graph Freshness
-- Built from commit: `62d86dd2`
+- Built from commit: `5c0e83db`
 - Run `git rev-parse HEAD` and compare to check if the graph is stale.
 - Run `graphify update .` after code changes (no API cost).
 
@@ -304,10 +304,8 @@
 - [[_COMMUNITY_Community 336|Community 336]]
 - [[_COMMUNITY_Community 337|Community 337]]
 - [[_COMMUNITY_Community 338|Community 338]]
-- [[_COMMUNITY_Community 339|Community 339]]
 - [[_COMMUNITY_Community 340|Community 340]]
 - [[_COMMUNITY_Community 341|Community 341]]
-- [[_COMMUNITY_Community 342|Community 342]]
 - [[_COMMUNITY_Community 343|Community 343]]
 - [[_COMMUNITY_Community 344|Community 344]]
 - [[_COMMUNITY_Community 345|Community 345]]
@@ -317,7 +315,6 @@
 - [[_COMMUNITY_Community 349|Community 349]]
 - [[_COMMUNITY_Community 350|Community 350]]
 - [[_COMMUNITY_Community 351|Community 351]]
-- [[_COMMUNITY_Community 352|Community 352]]
 - [[_COMMUNITY_Community 353|Community 353]]
 - [[_COMMUNITY_Community 354|Community 354]]
 - [[_COMMUNITY_Community 355|Community 355]]
@@ -346,7 +343,7 @@
 - `docs/ugripper-refactor-architecture.md` --semantically_similar_to--> `ugripper refactor architecture`  [INFERRED] [semantically similar]
   README.md → docs/ugripper-refactor-architecture.md
 
-## Communities (356 total, 39 thin omitted)
+## Communities (353 total, 39 thin omitted)
 
 ### Community 0 - "Community 0"
 Cohesion: 0.07
@@ -365,8 +362,8 @@ Cohesion: 0.07
 Nodes (41): clampProgress(), clampToU8(), errorLevel(), parseStateText(), render(), renderPulseSequence(), renderTactileWarningPattern(), stateText() (+33 more)
 
 ### Community 4 - "Community 4"
-Cohesion: 0.17
-Nodes (22): align_shared_events(), auto_jobs(), build_pair_summaries(), discover_target_files(), ensure_binary(), format_float(), main(), PairSummary (+14 more)
+Cohesion: 0.11
+Nodes (35): align_shared_events(), analyze_file(), analyze_packets(), auto_jobs(), build_pair_summaries(), classify_status(), DecodeSummary, discover_target_files() (+27 more)
 
 ### Community 5 - "Community 5"
 Cohesion: 0.12
@@ -393,8 +390,8 @@ Cohesion: 0.17
 Nodes (17): CAMERA_CODEC, DEVICE_SN, Config Entrypoints Baseline, /etc/environment, Control Channel Ledger Baseline, Audio Command FIFO /tmp/umi_audio_pipe, Audio Ready File /tmp/umi_audio_ready, Stereo Control File /tmp/umi_stereo_camera_control.json (+9 more)
 
 ### Community 11 - "Community 11"
-Cohesion: 0.17
-Nodes (7): audio_log(), read_env_file_value(), audio_log(), read_env_file_value(), AudioPlayer, setup_audio_device(), pulse_audio_env()
+Cohesion: 0.18
+Nodes (6): audio_log(), read_env_file_value(), audio_log(), read_env_file_value(), AudioPlayer, setup_audio_device()
 
 ### Community 12 - "Community 12"
 Cohesion: 0.08
@@ -730,7 +727,7 @@ Nodes (31): ClientOptions, build_calibration_bin(), colorize(), column_letters_t
 
 ### Community 163 - "Community 163"
 Cohesion: 0.14
-Nodes (14): EncoderDriver(), getEncoderPosition(), getEncoderVelocity(), sendToEncoder(), connect(), disconnect(), EncoderDriver(), getEncoderPosition() (+6 more)
+Nodes (22): EncoderDriver(), calculateCRC16(), connect(), disconnect(), EncoderDriver(), getEncoderPosition(), getEncoderVelocity(), markDisconnected() (+14 more)
 
 ### Community 164 - "Community 164"
 Cohesion: 0.15
@@ -773,8 +770,8 @@ Cohesion: 0.18
 Nodes (16): choose_primary_reason(), load_report(), main(), summarize_episode_reports(), summarize_sensor_reports(), summarize_simple_report(), summarize_video_reports(), choose_primary_reason() (+8 more)
 
 ### Community 174 - "Community 174"
-Cohesion: 0.17
-Nodes (19): RunStereoDaemon(), run_asr(), setup_gpio_high(), main(), record_capture(), render_output(), require_sox(), main() (+11 more)
+Cohesion: 0.14
+Nodes (24): RunStereoDaemon(), run_asr(), setup_gpio_high(), pulse_audio_env(), main(), record_capture(), render_output(), require_sox() (+16 more)
 
 ### Community 175 - "Community 175"
 Cohesion: 0.21
@@ -841,8 +838,8 @@ Cohesion: 0.2
 Nodes (9): configured_remote_root(), find_new_temp_episodes(), list_dataset_roots(), list_temp_episodes(), run_start(), shell_quote(), snapshot_temp_episodes(), EgoRecordingWorkerTest (+1 more)
 
 ### Community 191 - "Community 191"
-Cohesion: 0.47
-Nodes (6): markDisconnected(), parseReceivedData(), readDataNonBlocking(), updateActiveStatus(), encoderReadThreadFunc(), encoderReadThreadFunc()
+Cohesion: 0.28
+Nodes (9): getEncoderPosition(), getEncoderVelocity(), markDisconnected(), parseReceivedData(), readDataNonBlocking(), sendToEncoder(), updateActiveStatus(), encoderReadThreadFunc() (+1 more)
 
 ### Community 193 - "Community 193"
 Cohesion: 0.15
@@ -881,12 +878,12 @@ Cohesion: 0.17
 Nodes (12): 8.1 在 `ugripper` 内部的建议切分, 8.2 Phase 1 施工目录树, 8.3 Phase 1 最小头文件草案, 8.4 合并到 `pp_main` 时的建议落点, 8. 推荐的目录和代码切分方式, code:text (src/camera_domain/), code:text (src/camera_domain/), code:cpp (#pragma once) (+4 more)
 
 ### Community 202 - "Community 202"
-Cohesion: 0.36
-Nodes (9): configure_serial(), crc16_modbus(), main(), run_side(), configure_serial(), crc16_modbus(), main(), percentile() (+1 more)
+Cohesion: 0.26
+Nodes (12): configure_serial(), crc16_modbus(), main(), percentile(), run_side(), build_parser(), parse_args(), configure_serial() (+4 more)
 
 ### Community 203 - "Community 203"
-Cohesion: 0.26
-Nodes (12): classify_topic(), fail(), load_chunk_records(), main(), validate_tail_imu(), classify_topic(), fail(), load_chunk_records() (+4 more)
+Cohesion: 0.33
+Nodes (10): classify_topic(), fail(), load_chunk_records(), main(), validate_tail_imu(), classify_topic(), fail(), load_chunk_records() (+2 more)
 
 ### Community 204 - "Community 204"
 Cohesion: 0.21
@@ -1345,8 +1342,8 @@ Cohesion: 0.13
 Nodes (19): currentBootId(), currentEpochMs(), EpisodeManager::initialize(), EpisodeManager::markTactileReferencePendingForSide(), EpisodeManager::validateTactileEpisode(), episodeVideoFileNameForCamera(), formatFixed(), formatTactileMetrics() (+11 more)
 
 ### Community 336 - "Community 336"
-Cohesion: 0.28
-Nodes (15): percentile(), box_blur(), filter_residual_mask(), load_tactile_frame(), main(), _resampling_filter(), robust_residual_area(), save_overlay() (+7 more)
+Cohesion: 0.3
+Nodes (14): box_blur(), filter_residual_mask(), load_tactile_frame(), main(), _resampling_filter(), robust_residual_area(), save_overlay(), box_blur() (+6 more)
 
 ### Community 337 - "Community 337"
 Cohesion: 0.26
@@ -1356,10 +1353,6 @@ Nodes (10): _find_event_device(), _handle_volume_key(), main(), _run_pactl(), _f
 Cohesion: 0.19
 Nodes (14): analyze_file(), analyze_packets(), classify_status(), DecodeSummary, FileSummary, GapEvent, load_stream_info(), maybe_append_limited() (+6 more)
 
-### Community 339 - "Community 339"
-Cohesion: 0.19
-Nodes (13): analyze_file(), analyze_packets(), classify_status(), DecodeSummary, FileSummary, GapEvent, load_stream_info(), maybe_append_limited() (+5 more)
-
 ### Community 340 - "Community 340"
 Cohesion: 0.21
 Nodes (11): CleanupSdkTempConfig(), CreateStableFaysHandle(), DumpCalibrationJson(), EnsureControlFifo(), FaysEventLog(), FaysReadableTimestamp(), FaysRecorder, GetFaysDeviceSerial() (+3 more)
@@ -1367,10 +1360,6 @@ Nodes (11): CleanupSdkTempConfig(), CreateStableFaysHandle(), DumpCalibrationJso
 ### Community 341 - "Community 341"
 Cohesion: 0.27
 Nodes (11): AllExpectedTimingOffsetsAvailable(), MonitorUntilStop(), audio_player_started(), IsRunning(), MaintainAudioPlayer(), MaintainDaemon(), RetryIntervalElapsed(), SendCommand() (+3 more)
-
-### Community 342 - "Community 342"
-Cohesion: 0.38
-Nodes (11): calculateCRC16(), reset(), sendConfigToEncoder(), setBaudrate(), setConfigStore(), setCurrentAsMiddle(), setCurrentAsZero(), setDeviceAddress() (+3 more)
 
 ### Community 343 - "Community 343"
 Cohesion: 0.31
@@ -1407,10 +1396,6 @@ Nodes (5): JoinArgumentsForShell(), ParseSecondsTextUs(), ProbeVideoWindowUs(), 
 ### Community 351 - "Community 351"
 Cohesion: 0.4
 Nodes (5): setLedEffect(), GripperPanelManager::setLedEffect(), GripperPanelManager::setLedEffectForSide(), HmiLedController::setState(), makeLedEffect()
-
-### Community 352 - "Community 352"
-Cohesion: 0.6
-Nodes (4): generate_tone_wav(), main(), generate_tone_wav(), main()
 
 ### Community 353 - "Community 353"
 Cohesion: 1.0

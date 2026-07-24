@@ -72,6 +72,8 @@
   - 按设备、轮次记录结果；任一路异常都会保存该轮四路原始日志和统一现场快照。
 - `test/scripts/board_encoder_cmd_ack_latency.sh`
   - 临时停止服务后左右并行发送生产 encoder 位置读取命令，统计合法 Modbus 应答的 `cmd -> ack` 延迟、超时和 CRC 错误，退出时自动恢复服务。
+- `test/scripts/test_ch9344_symlink_name.sh`
+  - 使用临时伪 sysfs 目录验证 CH9344 helper 对旧版 `.1/.2` 和四口 hub `.4` 拓扑的左右 gripper/encoder 映射，并确认同组第 3 路不会生成业务 symlink。
 
 ## 建议用法
 在仓库根目录执行：

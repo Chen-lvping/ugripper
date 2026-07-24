@@ -65,6 +65,7 @@ KERNEL=="video*", KERNELS=="[15]-1.3", ATTRS{idVendor}=="0bda", ATTRS{idProduct}
 KERNEL=="video*", KERNELS=="[15]-1.4.1", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_r"
 KERNEL=="video*", KERNELS=="[15]-1.4:1.0", ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", SYMLINK+="tcam_right_r"
 KERNEL=="video*", KERNELS=="[15]-1.5", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_r"
+KERNEL=="video*", KERNELS=="[15]-1.2", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_r"
 KERNEL=="video*", KERNELS=="9-1.4.[24]", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
 KERNEL=="video*", KERNELS=="11-1.4.[24]", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
 KERNEL=="video*", KERNELS=="9-1.3", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_l"
@@ -75,6 +76,8 @@ KERNEL=="video*", KERNELS=="9-1.4:1.0", ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_
 KERNEL=="video*", KERNELS=="11-1.4:1.0", ENV{ID_VENDOR_ID}=="0bda", ENV{ID_MODEL_ID}=="5846", ATTR{index}=="0", SYMLINK+="tcam_left_r"
 KERNEL=="video*", KERNELS=="9-1.5", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_r"
 KERNEL=="video*", KERNELS=="11-1.5", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_r"
+KERNEL=="video*", KERNELS=="9-1.2", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_r"
+KERNEL=="video*", KERNELS=="11-1.2", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_left_r"
 
 # Taobao commercial hub compatibility
 KERNEL=="video*", KERNELS=="1-1.2.3", ATTRS{idVendor}=="0bda", ATTRS{idProduct}=="5846", ATTRS{speed}=="480", ATTR{index}=="0", SYMLINK+="tcam_right_l"
@@ -86,7 +89,8 @@ GOTO="ugripper_fixed_end"
 LABEL="ugripper_fixed_tty"
 # CH9344 exposes multiple tty nodes without a stable per-port sysfs attribute.
 # Keep udev rules thin: one permission rule, then a small helper returns the
-# symlink name for group rank 1/2 only (gripper/encoder).
+# symlink name for group rank 1/2 only (gripper/encoder). The helper accepts
+# legacy/nested hub ports 1/2 and the four-port hand hub's port 4.
 KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", MODE:="0666"
 KERNEL=="ttyCH9344USB*", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d9", PROGRAM=="/usr/local/bin/ugripper_ch9344_symlink_name %p %k", SYMLINK+="%c"
 
