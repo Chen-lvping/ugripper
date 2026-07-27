@@ -51,32 +51,25 @@ if [[ -z "$TARGET" || -z "$OUTPUT" ]]; then
   exit 1
 fi
 
-if git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
-  cd "$git_root"
-else
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  cd "$(cd "$script_dir/../../../.." && pwd)"
+if ! git_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  echo "ERROR: source manifest generation requires a Git worktree" >&2
+  exit 1
 fi
+cd "$git_root"
 
 list_ugripper_inputs() {
-  find . -type f \
-    -not -path './.git/*' \
-    -not -path './.venv/*' \
-    -not -path './build/*' \
-    -not -path './temp_build_deb/*' \
-    -not -path './temp_build_usb_updater/*' \
-    -not -path './docs/*' \
-    -not -path './.codex/*' \
-    -not -path './ASR/*' \
-    -not -path './__pycache__/*' \
-    -not -name '*.pyc' \
-    -not -name '*.deb' \
-    -not -name '*.md' \
-    -not -name '*.txt' \
-    -not -name '.DS_Store' \
-    -printf '%P\n' \
-    | sed '/^$/d' \
-    | sort -u
+  local rel_path=""
+
+  git ls-files --cached --others --exclude-standard -z -- . |
+    while IFS= read -r -d '' rel_path; do
+      case "$rel_path" in
+        docs/*|.codex/*|graphify-out/*|ASR/*|.vscode/*|*/__pycache__/*|*.pyc|*.deb|*.md|*.txt|.DS_Store|*/.DS_Store)
+          continue
+          ;;
+      esac
+      [[ -f "$rel_path" ]] || continue
+      printf '%s\0' "$rel_path"
+    done | LC_ALL=C sort -zu
 }
 
 list_files_under() {
@@ -88,7 +81,7 @@ list_files_under() {
     -not -path '*/__pycache__/*' \
     -not -name '*.pyc' \
     -not -name '.DS_Store' \
-    -print
+    -print0
 }
 
 list_updater_inputs() {
@@ -96,35 +89,83 @@ list_updater_inputs() {
 
   {
     if [[ -f "usb_updater_build.sh" ]]; then
-      echo "usb_updater_build.sh"
+      printf '%s\0' "usb_updater_build.sh"
     fi
 
     if [[ -d "$das_updater_root" ]]; then
       if [[ -f "$das_updater_root/usb_updater_build.sh" ]]; then
-        echo "$das_updater_root/usb_updater_build.sh"
+        printf '%s\0' "$das_updater_root/usb_updater_build.sh"
       fi
       list_files_under "$das_updater_root/auto_update"
       list_files_under "$das_updater_root/product"
     elif [[ -d "auto_update" ]]; then
       list_files_under "auto_update"
     fi
-  } | sed '/^$/d' | sort -u
+  } | LC_ALL=C sort -zu
 }
 
 write_manifest() {
   local list_func="$1"
   local output_path="$2"
-  local tmp_file
-  tmp_file="$(mktemp)"
+  local output_dir=""
+  local paths_file=""
+  local tmp_manifest=""
+  local checksum_line=""
+  local checksum=""
+  local rel_path=""
+  local file_count="0"
+  local total_bytes="0"
+  local start_seconds="$SECONDS"
+  local duration_seconds="0"
 
-  "$list_func" | while IFS= read -r rel_path; do
-    [[ -n "$rel_path" ]] || continue
-    [[ -f "$rel_path" ]] || continue
-    printf '%s\t%s\n' "$(sha256sum -- "$rel_path" | awk '{print $1}')" "$rel_path"
-  done > "$tmp_file"
+  output_dir="$(dirname "$output_path")"
+  mkdir -p "$output_dir"
+  paths_file="$(mktemp)"
+  tmp_manifest="$(mktemp "$output_dir/.source-manifest.XXXXXX")"
 
-  mkdir -p "$(dirname "$output_path")"
-  mv "$tmp_file" "$output_path"
+  cleanup_manifest_tmp() {
+    [[ -z "$paths_file" ]] || rm -f -- "$paths_file"
+    [[ -z "$tmp_manifest" ]] || rm -f -- "$tmp_manifest"
+  }
+  trap cleanup_manifest_tmp EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+
+  if ! "$list_func" > "$paths_file"; then
+    echo "ERROR: failed to enumerate source manifest inputs for target=$TARGET" >&2
+    return 1
+  fi
+
+  file_count="$(tr -cd '\0' < "$paths_file" | wc -c | tr -d '[:space:]')"
+  if ! total_bytes="$(xargs -0 -r stat -c '%s' -- < "$paths_file" | awk '{sum += $1} END {printf "%.0f", sum + 0}')"; then
+    echo "ERROR: failed to inspect source manifest inputs for target=$TARGET" >&2
+    return 1
+  fi
+  echo "--> Source manifest inputs: target=$TARGET files=$file_count bytes=$total_bytes" >&2
+
+  if ! xargs -0 -r sha256sum -z -- < "$paths_file" |
+    while IFS= read -r -d '' checksum_line; do
+      if [[ ${#checksum_line} -lt 66 ]]; then
+        echo "ERROR: invalid sha256sum output while writing target=$TARGET manifest" >&2
+        exit 1
+      fi
+      checksum="${checksum_line:0:64}"
+      rel_path="${checksum_line:66}"
+      printf '%s\t%s\n' "$checksum" "$rel_path"
+    done > "$tmp_manifest"; then
+    echo "ERROR: failed to hash source manifest inputs for target=$TARGET" >&2
+    return 1
+  fi
+
+  mv -f -- "$tmp_manifest" "$output_path"
+  tmp_manifest=""
+  rm -f -- "$paths_file"
+  paths_file=""
+  trap - EXIT HUP INT TERM
+
+  duration_seconds=$((SECONDS - start_seconds))
+  echo "--> Source manifest written: target=$TARGET files=$file_count bytes=$total_bytes elapsed=${duration_seconds}s output=$output_path" >&2
 }
 
 case "$TARGET" in

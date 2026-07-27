@@ -13,6 +13,9 @@ INSTALL_DIR="/opt/${APP_NAME}"
 BUILD_ROOT="temp_build_deb"
 BUILD_AUX_ROOT="${BUILD_ROOT}_aux"
 PACK_SCRIPT_DIR="pack_script"
+AUTO_RELEASE_STATE_DIR="${AUTO_RELEASE_STATE_DIR:-${script_dir}/temp_build_state}"
+AUTO_RELEASE_MANIFEST_TIMEOUT_SECONDS="${AUTO_RELEASE_MANIFEST_TIMEOUT_SECONDS:-30}"
+AUTO_RELEASE_UGRIPPER_MANIFEST="${AUTO_RELEASE_STATE_DIR}/.auto_release_ugripper.manifest"
 
 # 默认行为变量
 QUICK_MODE=false
@@ -28,6 +31,7 @@ TARGET_INSTALL_ROOT=""
 ASSEMBLE_DURATION=0
 VENV_DURATION=0
 PACKAGE_DURATION=0
+MANIFEST_DURATION=0
 RESOLVED_PACKAGED_VENV_SOURCE="$PACKAGED_VENV_SOURCE"
 
 require_host_tool() {
@@ -43,6 +47,39 @@ log_duration() {
     local start="$2"
     local duration=$((SECONDS - start))
     printf -- "--> %s: %ss\n" "$label" "$duration"
+}
+
+refresh_auto_release_manifest() {
+    local manifest_writer=".codex/skills/auto-release-deb/scripts/write_source_manifest.sh"
+    local start="$SECONDS"
+    local status=0
+
+    if [ ! -x "$manifest_writer" ]; then
+        echo "WARNING: auto-release manifest writer not found; DEB was generated but baseline was not updated: $manifest_writer" >&2
+        return 0
+    fi
+    if ! command -v timeout >/dev/null 2>&1; then
+        echo "WARNING: timeout command not found; DEB was generated but baseline was not updated." >&2
+        return 0
+    fi
+
+    echo "--> Refreshing auto-release source manifest: $AUTO_RELEASE_UGRIPPER_MANIFEST"
+    if timeout --kill-after=5s "${AUTO_RELEASE_MANIFEST_TIMEOUT_SECONDS}s" \
+        bash "$manifest_writer" --target ugripper --output "$AUTO_RELEASE_UGRIPPER_MANIFEST"; then
+        MANIFEST_DURATION=$((SECONDS - start))
+        echo "--> Auto-release source manifest refreshed in ${MANIFEST_DURATION}s"
+        return 0
+    else
+        status=$?
+    fi
+
+    MANIFEST_DURATION=$((SECONDS - start))
+    if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+        echo "WARNING: auto-release source manifest timed out after ${AUTO_RELEASE_MANIFEST_TIMEOUT_SECONDS}s; DEB was generated and the previous baseline was preserved." >&2
+    else
+        echo "WARNING: auto-release source manifest failed with status $status; DEB was generated and the previous baseline was preserved." >&2
+    fi
+    return 0
 }
 
 resolve_expected_venv_machine_pattern() {
@@ -532,13 +569,8 @@ PACKAGE_DURATION=$((SECONDS - package_start))
 log_duration "dpkg-deb build" "$package_start"
 rm -rf "$BUILD_AUX_ROOT"
 
-# Refresh source baseline manifest for auto-release-deb diff detection.
-MANIFEST_WRITER=".codex/skills/auto-release-deb/scripts/write_source_manifest.sh"
-if [ -x "$MANIFEST_WRITER" ]; then
-    bash "$MANIFEST_WRITER" --target ugripper --output "$BUILD_ROOT/.auto_release_ugripper.manifest" || true
-fi
-
 echo "Build Success: ${APP_NAME}_${VERSION}_${ARCH}.deb"
+refresh_auto_release_manifest
 if [ "$QUICK_MODE" = true ]; then
     echo "Note: Quick Mode used. .env excluded. Maintained .venv synced incrementally into package."
 fi
@@ -546,3 +578,4 @@ echo "Timing summary:"
 echo "  - project staging sync: ${ASSEMBLE_DURATION}s"
 echo "  - packaged .venv sync: ${VENV_DURATION}s"
 echo "  - dpkg-deb build: ${PACKAGE_DURATION}s"
+echo "  - source manifest refresh: ${MANIFEST_DURATION}s"

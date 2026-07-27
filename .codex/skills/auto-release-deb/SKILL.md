@@ -12,9 +12,11 @@ description: 在代码修改完成后，自动确认改动影响范围，并判�
 ## 默认规则
 1. 本 skill 不修改任何版本号（`build_deb.sh` / `usb_updater_build.sh` 都不改）。
 2. 改动识别不依赖 git 提交历史，基于自动生成的源码 manifest 对比：
-   - `ugripper` 基线：`temp_build_deb/.auto_release_ugripper.manifest`
-   - `updater` 基线：`temp_build_usb_updater/.auto_release_updater.manifest`
+   - `ugripper` 基线：`temp_build_state/.auto_release_ugripper.manifest`
+   - `updater` 基线：`temp_build_state/.auto_release_updater.manifest`
    - 基线由自动判定脚本 `write_source_manifest.sh` 生成与更新。
+   - `temp_build_state/` 独立于 DEB staging；刷新失败或超时时保留上一份原子基线。
+   - manifest 生成依赖 Git worktree，只纳入已跟踪文件与未忽略的新文件。
    - 若某基线缺失，对应包按安全策略强制建议构建。
 3. 自动识别改动范围：
    - 是否影响 `ugripper` 主包。

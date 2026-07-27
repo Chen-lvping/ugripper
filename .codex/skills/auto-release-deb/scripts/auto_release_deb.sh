@@ -8,8 +8,8 @@ Usage:
 
 Options:
   --no-files                 Do not print the changed file list.
-  --ugripper-manifest PATH   Baseline manifest path for ugripper (default: temp_build_deb/.auto_release_ugripper.manifest).
-  --updater-manifest PATH    Baseline manifest path for updater (default: temp_build_usb_updater/.auto_release_updater.manifest).
+  --ugripper-manifest PATH   Baseline manifest path for ugripper (default: temp_build_state/.auto_release_ugripper.manifest).
+  --updater-manifest PATH    Baseline manifest path for updater (default: temp_build_state/.auto_release_updater.manifest).
   -h, --help                 Show this help message.
 USAGE
 }
@@ -54,8 +54,10 @@ is_full_build_trigger_file() {
 }
 
 PRINT_FILES=true
-UGRIPPER_BASELINE_MANIFEST="temp_build_deb/.auto_release_ugripper.manifest"
-UPDATER_BASELINE_MANIFEST="temp_build_usb_updater/.auto_release_updater.manifest"
+AUTO_RELEASE_STATE_DIR="${AUTO_RELEASE_STATE_DIR:-temp_build_state}"
+AUTO_RELEASE_MANIFEST_TIMEOUT_SECONDS="${AUTO_RELEASE_MANIFEST_TIMEOUT_SECONDS:-30}"
+UGRIPPER_BASELINE_MANIFEST="${AUTO_RELEASE_STATE_DIR}/.auto_release_ugripper.manifest"
+UPDATER_BASELINE_MANIFEST="${AUTO_RELEASE_STATE_DIR}/.auto_release_updater.manifest"
 UGRIPPER_ARM_BUILD_SCRIPT="./scripts/build_arm_deb_in_pp_arm_dev.sh"
 UGRIPPER_ARM_PACKAGED_BUILD_DIR="${PACKAGED_BUILD_DIR:-build/arm_container_release}"
 
@@ -105,13 +107,38 @@ if [[ ! -x "$manifest_writer" ]]; then
   echo "ERROR: manifest writer not found or not executable: $manifest_writer" >&2
   exit 1
 fi
+if ! command -v timeout >/dev/null 2>&1; then
+  echo "ERROR: timeout command is required for manifest generation" >&2
+  exit 1
+fi
 
 current_ugripper_manifest="$(mktemp)"
 current_updater_manifest="$(mktemp)"
 trap 'rm -f "$current_ugripper_manifest" "$current_updater_manifest"' EXIT
 
-bash "$manifest_writer" --target ugripper --output "$current_ugripper_manifest"
-bash "$manifest_writer" --target updater --output "$current_updater_manifest"
+generate_current_manifest() {
+  local target="$1"
+  local output="$2"
+  local status=0
+
+  echo "Generating current source manifest: target=$target timeout=${AUTO_RELEASE_MANIFEST_TIMEOUT_SECONDS}s"
+  if timeout --kill-after=5s "${AUTO_RELEASE_MANIFEST_TIMEOUT_SECONDS}s" \
+    bash "$manifest_writer" --target "$target" --output "$output"; then
+    return 0
+  else
+    status=$?
+  fi
+
+  if [[ "$status" -eq 124 || "$status" -eq 137 ]]; then
+    echo "ERROR: source manifest generation timed out for target=$target after ${AUTO_RELEASE_MANIFEST_TIMEOUT_SECONDS}s" >&2
+  else
+    echo "ERROR: source manifest generation failed for target=$target with status $status" >&2
+  fi
+  return "$status"
+}
+
+generate_current_manifest ugripper "$current_ugripper_manifest"
+generate_current_manifest updater "$current_updater_manifest"
 
 affects_ugripper=false
 affects_updater=false
@@ -189,10 +216,10 @@ if [[ "$affects_ugripper" == true ]]; then
     ugripper_reason="quick-mode binaries missing: ${missing_binaries[*]}"
   else
     ugripper_mode="quick"
-    ugripper_reason="source delta detected against temp_build_deb manifest; no C/C++/CMake changes"
+    ugripper_reason="source delta detected against auto-release state manifest; no C/C++/CMake changes"
   fi
 else
-  ugripper_reason="no source delta against temp_build_deb manifest"
+  ugripper_reason="no source delta against auto-release state manifest"
 fi
 
 updater_mode="skip"
@@ -201,10 +228,10 @@ if [[ "$affects_updater" == true ]]; then
   if [[ "$updater_baseline_status" == "missing" ]]; then
     updater_reason="baseline manifest missing: ${UPDATER_BASELINE_MANIFEST}; force updater build"
   else
-    updater_reason="source delta detected against temp_build_usb_updater manifest"
+    updater_reason="source delta detected against auto-release state manifest"
   fi
 else
-  updater_reason="no source delta against temp_build_usb_updater manifest"
+  updater_reason="no source delta against auto-release state manifest"
 fi
 
 if [[ "$affects_ugripper" == true && "$affects_updater" == true ]]; then
@@ -219,7 +246,7 @@ fi
 
 echo "Release scope analysis completed"
 echo "Version bump: not performed by auto-release-deb"
-echo "Diff base: temp_build manifests"
+echo "Diff base: auto-release state manifests"
 echo "Ugripper baseline manifest: ${UGRIPPER_BASELINE_MANIFEST} (${ugripper_baseline_status})"
 echo "Updater baseline manifest: ${UPDATER_BASELINE_MANIFEST} (${updater_baseline_status})"
 echo "Scope: ${scope}"

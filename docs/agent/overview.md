@@ -418,6 +418,7 @@
 - `build_deb.sh` 默认 `dpkg-deb` 压缩口径为 `xz -1`，兼顾构建速度与包体积；`build_deb.sh -q` 仍跳过 C++ 编译，并沿用同一默认压缩口径。如需在速度与包体积之间切换，可通过 `DPKG_DEB_COMPRESSOR`、`DPKG_DEB_LEVEL`、`DPKG_DEB_STRATEGY`、`DPKG_DEB_UNIFORM_COMPRESSION` 覆盖默认参数。
 - 主包打包当前默认优先从 Nexus raw 仓库下载并解压归档好的 `.venv` `tar.gz`，再沿用同一套 `.venv` 架构校验与 staging 同步逻辑；当前默认归档为 `ugripper-v2-uv-venv/py311_v2.1.0/ugripper_venv_20260623_102954_arm64.tar.gz`，这条入口只针对 raw 制品下载，不走 Conan recipe。
 - 若需要临时切回本地或外部目录中的 `.venv` / `build`，可显式设置 `PACKAGED_VENV_URL=''` 后再配合 `PACKAGED_VENV_SOURCE`、`PACKAGED_BUILD_DIR` 覆盖来源；若最终 `.venv` 来源不存在，脚本会同步移除 staging 中旧的 `.venv`，此时包仍可生成，但不再满足部署后直接运行的交付约束。
+- auto-release 源码基线独立保存在 `temp_build_state/`，不进入主包或 updater staging。候选文件由 Git 已跟踪文件和未忽略的新文件产生，排除文档、Codex、graphify 与构建产物；哈希采用 NUL 分隔批处理和原子替换。主包/updater 构建后的基线刷新默认限时 `30s`，失败或超时时保留上一份基线并告警，不影响已生成的 deb。
 
 ## 10. 常用检查与排障入口
 ### 10.1 服务管理

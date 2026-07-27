@@ -13,6 +13,7 @@ build/
 *.deb
 /temp_build_deb/
 /temp_build_usb_updater/
+/temp_build_state/
 # Python 缓存
 __pycache__/
 *.py[cod]
