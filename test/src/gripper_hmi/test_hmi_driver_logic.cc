@@ -10,6 +10,20 @@ namespace {
 
 using gripper_hmi::driver_logic::CalibrationWriteChunkStatusAction;
 
+TEST(GripperHmiDriverLogicTest, RetriesBothBeepEnableAndSilenceCommands)
+{
+    const GripperBeepState enabled{50, 4000};
+    const GripperBeepState silenced{0, 0};
+
+    EXPECT_FALSE(gripper_hmi::driver_logic::ShouldWriteBeepCommand(enabled, 5, 100, 119, 20));
+    EXPECT_TRUE(gripper_hmi::driver_logic::ShouldWriteBeepCommand(enabled, 5, 100, 120, 20));
+    EXPECT_FALSE(gripper_hmi::driver_logic::ShouldWriteBeepCommand(silenced, 5, 100, 119, 20));
+    EXPECT_TRUE(gripper_hmi::driver_logic::ShouldWriteBeepCommand(silenced, 5, 100, 120, 20));
+
+    EXPECT_TRUE(gripper_hmi::driver_logic::ShouldWriteBeepCommand(enabled, 0, 100, 120, 20));
+    EXPECT_FALSE(gripper_hmi::driver_logic::ShouldWriteBeepCommand(silenced, 0, 100, 120, 20));
+}
+
 TEST(GripperHmiDriverLogicTest, ClassifiesRetryableAndAbortRecoveryStatuses)
 {
     EXPECT_TRUE(gripper_hmi::driver_logic::IsRetryableCalibrationStatus(GripperHmiProtocol::kStatusMissingData));

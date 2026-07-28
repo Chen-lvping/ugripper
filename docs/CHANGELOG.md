@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 修复夹爪蜂鸣反馈偶发持续鸣响：HMI 驱动对蜂鸣开启和关闭状态切换统一执行 `5` 次、`20ms` 间隔重发，并在连接建立与驱动退出时主动重发关闭状态；Ego 绑定、任务打标等按侧反馈不再依赖单次关闭帧。
 - Fays VIKit SDK 从 `3.5.1` 更新到上游 `main` 的 `3.8.0`（`b1d74499`），同步 aarch64/x86_64 运行库与公开 API/版本头；FT602 `1.0.17` 运行库保持不变。主包版本同步提升到 `2.1.8`。
 - 扩展四口手部 USB2 hub 映射：支持 `.1=主摄/.2=tactile_r/.3=tactile_l/.4=CH9344`，并由 `.4` 自动生成左右 gripper/encoder symlink，同时保留既有 hub 拓扑兼容。
 - 新增构建期开关 `UGRIPPER_ENABLE_STEREO`，默认 `ON` 并沿用普通版本/包名；显式设为 `OFF` 时生成 `+nostereo` 包变体，运行时不启动 Fays daemon、不检查 stereo/Fays 健康、不执行双目 session/finalize，也不生成或校验 `stereo_left/right.mkv` 与 `fays_data_left/right.mcap`。该开关不提供 `/etc/environment`、`config.txt` 或命令行运行时覆盖。

@@ -109,6 +109,23 @@ struct CalibrationRangeCollectState
     uint8_t* status_code = nullptr;
 };
 
+inline bool ShouldWriteBeepCommand(const GripperBeepState& state,
+                                   uint32_t retry_writes_remaining,
+                                   uint64_t last_write_at_ms,
+                                   uint64_t now_ms,
+                                   uint64_t resend_interval_ms)
+{
+    if (retry_writes_remaining == 0 && state.duty == 0)
+    {
+        return false;
+    }
+    if (last_write_at_ms == 0 || now_ms < last_write_at_ms)
+    {
+        return true;
+    }
+    return now_ms - last_write_at_ms >= resend_interval_ms;
+}
+
 inline size_t RequiredCalibrationChunkCountFromHeader(const GripperCalibrationHeader& header);
 
 inline bool TryParseCalibrationHeader(const std::array<uint8_t, kCalibrationPayloadSize>& raw,

@@ -88,6 +88,22 @@ TEST(GripperLedEffectRendererTest, ReadyBreathStartsBright)
     EXPECT_EQ(readyHalfCycle.blue, 0);
 }
 
+TEST(GripperLedEffectRendererTest, SameMonotonicClockKeepsRecordingSidesInPhase)
+{
+    GripperLedEffectRenderer leftRenderer;
+    GripperLedEffectRenderer rightRenderer;
+    const GripperLedEffect recording{GripperLedEffectState::Recording, 0.0};
+
+    for (const uint64_t nowMs : {123400ULL, 123499ULL, 123500ULL, 123999ULL})
+    {
+        const auto left = leftRenderer.render(recording, nowMs, 0);
+        const auto right = rightRenderer.render(recording, nowMs, 0);
+        EXPECT_EQ(left.red, right.red);
+        EXPECT_EQ(left.green, right.green);
+        EXPECT_EQ(left.blue, right.blue);
+    }
+}
+
 TEST(GripperLedEffectRendererTest, StateTextKeepsCalibRunPrefix)
 {
     const auto text = GripperLedEffectRenderer::stateText(

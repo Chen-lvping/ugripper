@@ -126,14 +126,13 @@ private:
     bool pendingLedUpdate_ = false;
     GripperLedColor pendingLedColor_{};
     bool pendingBeepUpdate_ = false;
-    GripperBeepState pendingBeepState_{};
     GripperBeepState activeBeepState_{};
+    uint32_t pendingBeepRetryWrites_ = 0;
     uint64_t lastBeepWriteAtMs_ = 0;
     bool ledEffectEnabled_ = false;
     bool ledEffectDirty_ = false;
     GripperLedEffect ledEffect_{};
     GripperLedEffectRenderer ledRenderer_{};
-    uint64_t ledEffectStartedAtMs_ = 0;
     std::array<uint8_t, 3> lastRenderedColor_{255, 255, 255};
     uint64_t lastLedRenderAtMs_ = 0;
     uint64_t lastStateRequestAtMs_ = 0;
