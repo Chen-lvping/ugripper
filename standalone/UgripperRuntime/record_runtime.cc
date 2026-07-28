@@ -618,10 +618,13 @@ struct FaysMcapSummary
     uint64_t lastImuLogTimeNs = 0;
     uint64_t firstCameraLogTimeNs = 0;
     uint64_t lastCameraLogTimeNs = 0;
+    uint64_t firstCameraPublishTimeNs = 0;
+    uint64_t lastCameraPublishTimeNs = 0;
     uint64_t imuMessageCount = 0;
     uint64_t cameraMessageCount = 0;
     uint64_t spanNs = 0;
     uint64_t cameraSpanNs = 0;
+    uint64_t cameraPublishSpanNs = 0;
 };
 
 struct TailCheckTaskResult
@@ -3714,6 +3717,7 @@ bool loadFaysMcapSummary(const std::string &mcapPath,
                     (!foundFirstCamera || message.logTime < summary->firstCameraLogTimeNs))
                 {
                     summary->firstCameraLogTimeNs = message.logTime;
+                    summary->firstCameraPublishTimeNs = message.publishTime;
                     foundFirstCamera = true;
                 }
             };
@@ -3754,6 +3758,7 @@ bool loadFaysMcapSummary(const std::string &mcapPath,
                     if (!foundCamera || message.logTime > summary->lastCameraLogTimeNs)
                     {
                         summary->lastCameraLogTimeNs = message.logTime;
+                        summary->lastCameraPublishTimeNs = message.publishTime;
                         foundCamera = true;
                     }
                 }
@@ -3794,6 +3799,19 @@ bool loadFaysMcapSummary(const std::string &mcapPath,
     {
         summary->cameraSpanNs = summary->lastCameraLogTimeNs - summary->firstCameraLogTimeNs;
     }
+    if (summary->firstCameraPublishTimeNs == 0 ||
+        summary->lastCameraPublishTimeNs <= summary->firstCameraPublishTimeNs)
+    {
+        if (errorMessage != nullptr)
+        {
+            *errorMessage = "Fays camera publishTime range is invalid: first_ns=" +
+                            std::to_string(summary->firstCameraPublishTimeNs) +
+                            ", last_ns=" + std::to_string(summary->lastCameraPublishTimeNs);
+        }
+        return false;
+    }
+    summary->cameraPublishSpanNs =
+        summary->lastCameraPublishTimeNs - summary->firstCameraPublishTimeNs;
     if (summary->spanNs == 0 && !reader.chunkIndexes().empty())
     {
         uint64_t firstChunkMessageNs = std::numeric_limits<uint64_t>::max();
@@ -3851,6 +3869,7 @@ const FaysTailCheckTarget *faysTargetForStereoCamera(const std::string &cameraNa
 bool loadEffectiveVideoDurationSec(const std::string &episodeDir,
                                    const EpisodeVideoArtifact &artifact,
                                    const VideoProbeResult &probe,
+                                   const json *timingRoot,
                                    double fallbackSec,
                                    double *durationSec,
                                    std::string *source,
@@ -3877,6 +3896,24 @@ bool loadEffectiveVideoDurationSec(const std::string &episodeDir,
         return true;
     }
 
+    const std::string cachedDurationKey =
+        std::string(artifact.cameraName) + "_effective_duration_us";
+    if (timingRoot != nullptr && timingRoot->is_object() &&
+        timingRoot->contains(cachedDurationKey) &&
+        (*timingRoot)[cachedDurationKey].is_number_unsigned())
+    {
+        const uint64_t cachedDurationUs = (*timingRoot)[cachedDurationKey].get<uint64_t>();
+        if (cachedDurationUs > 0)
+        {
+            *durationSec = static_cast<double>(cachedDurationUs) / 1000000.0;
+            if (source != nullptr)
+            {
+                *source = "fays_mcap_timing_cache";
+            }
+            return true;
+        }
+    }
+
     FaysMcapSummary summary;
     std::string faysError;
     if (!loadFaysMcapSummary(
@@ -3894,7 +3931,7 @@ bool loadEffectiveVideoDurationSec(const std::string &episodeDir,
         return false;
     }
 
-    *durationSec = static_cast<double>(summary.cameraSpanNs) / 1000000000.0;
+    *durationSec = static_cast<double>(summary.cameraPublishSpanNs) / 1000000000.0;
     if (source != nullptr)
     {
         *source = std::string("fays_mcap_camera:") + target->mcapFileName;
@@ -5048,77 +5085,29 @@ bool RecordRuntime::mergeEpisodeInfo(const std::string &episodeDir, std::string 
         return true;
     }
 
-    if (stereoSessionClient_ == nullptr)
+    for (const auto &target : kFaysTailCheckTargets)
     {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "stereo session client not initialized";
-        }
-        return false;
-    }
-
-    std::string stereoSessionText;
-    if (!stereoSessionClient_->LastSessionJson(episodeDir, &stereoSessionText, errorMessage))
-    {
-        return false;
-    }
-
-    json stereoSession;
-    try
-    {
-        stereoSession = json::parse(stereoSessionText);
-    }
-    catch (const std::exception &ex)
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = std::string("failed to parse stereo session metadata: ") + ex.what();
-        }
-        return false;
-    }
-
-    if (stereoSession.value("episode_dir", std::string()) != episodeDir)
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "stereo last_session does not match episode";
-        }
-        return false;
-    }
-
-    if (!stereoSession.contains("cameras") || !stereoSession["cameras"].is_object())
-    {
-        if (errorMessage != nullptr)
-        {
-            *errorMessage = "stereo last_session missing cameras object";
-        }
-        return false;
-    }
-
-    for (const char *cameraName : {"left_stereo", "right_stereo"})
-    {
-        if (!stereoSession["cameras"].contains(cameraName))
+        FaysMcapSummary summary;
+        std::string faysError;
+        if (!loadFaysMcapSummary(
+                (fs::path(episodeDir) / target.mcapFileName).string(),
+                target.imuTopic,
+                target.cameraTopic,
+                &summary,
+                &faysError))
         {
             if (errorMessage != nullptr)
             {
-                *errorMessage = std::string("stereo last_session missing camera entry: ") + cameraName;
+                *errorMessage = std::string("failed to load Fays timing for side=") +
+                                target.side + ": " + faysError;
             }
             return false;
         }
-        const json &cameraInfo = stereoSession["cameras"][cameraName];
-        if (!cameraInfo.contains("record_time_offset_us") || !cameraInfo["record_time_offset_us"].is_number_integer())
-        {
-            if (errorMessage != nullptr)
-            {
-                *errorMessage = std::string("stereo camera info missing record_time_offset_us: ") + cameraName;
-                if (cameraInfo.contains("record_time_offset_us") && cameraInfo["record_time_offset_us"].is_null())
-                {
-                    *errorMessage += " value=null";
-                }
-            }
-            return false;
-        }
-        baseInfo[std::string(cameraName) + "_record_time_offset_us"] = cameraInfo["record_time_offset_us"];
+
+        const std::string prefix = std::string(target.side) + "_stereo";
+        baseInfo[prefix + "_record_time_offset_us"] = summary.firstCameraPublishTimeNs / 1000ULL;
+        baseInfo[prefix + "_effective_duration_us"] = summary.cameraPublishSpanNs / 1000ULL;
+        baseInfo[prefix + "_camera_frame_count"] = summary.cameraMessageCount;
     }
 
     std::ofstream output(baseInfoPath, std::ios::trunc);
@@ -9464,6 +9453,9 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
 {
     const int64_t validateStartMs = steadyNowMs();
     logPerf((::DA::utils::LogString() << "[PERF] validateEpisode begin: episode_dir=" << episodeDir).str());
+    json timingRoot = json::object();
+    std::string timingLoadError;
+    loadJsonFile(episodeTimingPath(episodeDir).string(), &timingRoot, &timingLoadError);
     const auto artifacts = activeEpisodeVideoArtifacts(chestCameraEnabled_, stereoEnabled_);
     const std::vector<std::string> requiredFiles = {
         "sensor_left.mcap",
@@ -9590,6 +9582,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                 episodeDir,
                 artifact,
                 task.probe,
+                &timingRoot,
                 task.probe.spanSec,
                 &effectiveSpanSec,
                 &effectiveSpanSource,
@@ -9734,6 +9727,7 @@ bool RecordRuntime::EpisodeManager::validateEpisode(const std::string &episodeDi
                                      << ", camera_count=" << faysSummary.cameraMessageCount
                                      << ", span_ms=" << (faysSummary.spanNs / 1000000.0)
                                      << ", camera_span_ms=" << (faysSummary.cameraSpanNs / 1000000.0)
+                                     << ", camera_publish_span_ms=" << (faysSummary.cameraPublishSpanNs / 1000000.0)
                                      << ", first_camera_ns=" << faysSummary.firstCameraLogTimeNs
                                      << ", last_camera_ns=" << faysSummary.lastCameraLogTimeNs
                                      << ", last_imu_ns=" << faysSummary.lastImuLogTimeNs
@@ -10335,6 +10329,7 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
                 episodeDir,
                 artifact,
                 probe,
+                &infoRoot,
                 probe.durationSec,
                 &detailDurationSec,
                 &durationSource,

@@ -111,10 +111,11 @@
    - 左右主摄、胸部主摄 SN 与主摄标定参数由运行时在相机 symlink 插入/目标变化时通过 Yuzhou UVC XU 异步刷新缓存，拔出时清空；episode 生成只消费缓存，不再停录后同步读 XU。若在线主摄缺少合法 `FE...` SN 或 `MCAL` 标定 payload，本条 episode 会在停录校验阶段失败。
    - 左右 stereo 与 IMU 标定由 Fays daemon 状态填充；不再把 gripper payload 或旧持久化 calibration 作为 episode `calibration.json` 的来源。
 5. `record_runtime` 不再产出最终 `info.json`；camera/stereo 录制链路只在 `/dev/shm/ugripper_recording_timing_*.json` 维护内部 timing 缓存，用于 stereo offset 合并、并行视频探测结果缓存和最终 `metadata.json.video_details[].start_offset_us/duration_s` 生成，episode 完成 rename 前会清理该内部文件。停录硬校验只面向最终媒体、MCAP、`calibration.json` 和最终 `metadata.json` 语义，不再把该 shm 缓存作为 episode 产物或硬校验对象：
-   - 内部文件顶层临时保留下面这些字段；`stereo_session` 可作为双目会话摘要存在，其他临时调试字段不得写入。
+   - 内部文件顶层临时保留下面这些字段，其他临时调试字段不得写入。
    - `boot_time_offset`
    - `boot_time_offset_us`
    - 8 路基础 `<camera>_record_time_offset_us`，启用 `chest_cam_main` 时额外包含该路 offset。
+   - 默认 stereo 额外缓存 `<camera>_effective_duration_us / <camera>_camera_frame_count`；Fays finalize 后，runtime 通过现有 MCAP reader 读取 summary、首 chunk 和尾部 chunk，取得 camera 首末 `publishTime` 与消息数。最终 metadata 只消费该缓存，不重复读取 MCAP；这些内部字段不进入最终 metadata schema。
    - `video_probes`：停录校验阶段并行 `ffprobe` 后写入的内部缓存，仅供同次 `metadata.json` 生成复用，不进入最终 episode。
    - 若现场日志出现 timing 打开失败，优先按日志里的真实 `/dev/shm/ugripper_recording_timing_*.json` 路径排查；旧字符串 `.recording_timing.json` 只保留为兼容性提示，不代表当前会在 episode 目录生成该文件。
 6. 若已准备 pre audio，则移动到本次 episode 的 `audio_pre.wav`。
@@ -155,7 +156,7 @@
 - stereo 热插拔语义：
   - 单侧设备缺失时只停止该侧 Fays recorder，保留另一侧 recorder 与 daemon 主循环；状态降为 `not-ready`，双手模式下仍要求左右都 ready 才允许录制。
   - 设备重新枚举后自动重建该侧 MJPEG warmup 取流并重新进入预热态；若掉线发生在录制中，则当前 stereo session 会被标记失败并在停录阶段显式报错，避免静默产出错位文件。
-  - recorder 会低频刷新 `/dev/shm/umi_left_fays_runtime_status.json` / `/dev/shm/umi_right_fays_runtime_status.json`，只记录最近 warmup frame 时间、最近编码 frame 时间和当前录制 session id 等事实调试变量；daemon 用最近 frame freshness 判断 warmup 拉流是否真的存活，不额外引入“session writer 确认”状态。
+  - recorder 会低频刷新 `/dev/shm/umi_left_fays_runtime_status.json` / `/dev/shm/umi_right_fays_runtime_status.json`，记录最近 warmup/编码 frame 时间和当前录制 session id。该 status 只服务进程健康和会话状态，不承载 metadata 时间；停录 finalize 后由 runtime 轻量读取 Fays MCAP summary 与首尾 chunk 生成 timing 缓存，不做完整消息扫描。
   - 录制中若某侧 recorder 工作状态异常，daemon 会立即记录当前 session 的单侧 stereo 控制错误，停录阶段快速返回失败；finalize 等待视频/MCAP 文件期间也会被已知错误打断，不再等缺失文件触发完整超时。若该侧 Fays 相机/IMU symlink 本身识别不到，仍按关键设备缺失进入 `ERROR_2`；若设备已在线但 recorder/FIFO/control 链路失效，则进入 `ERROR_4` 并提示拔插对应侧夹爪，软件复位不作为有效恢复手段。
   - 每次拉起单侧 Fays recorder 前会先等待该侧 stereo/IMU symlink 解析目标稳定，随后默认再延迟 `3s`，可通过 `FAYS_STEREO_START_DELAY_SEC` 覆盖，避免设备刚枚举完成或 videoN 仍在漂移时被 SDK 过快打开。
   - 左右 Fays recorder 不并行拉起：daemon 会按左右 stereo symlink 当前解析到的 `/dev/videoN` 顺序启动，较小 videoN 视为更早插入/枚举的一侧；单侧启动后会等待 SDK handle 完成启动（FIFO 在线、calibration serial 可读且 warmup frame fresh）或默认 `10s` 超时，再拉起另一侧，可通过 `FAYS_STEREO_START_COMPLETE_TIMEOUT_SEC` 覆盖该等待窗口。
@@ -231,8 +232,9 @@
 - `hardware_version` 默认 `v2.5`，可通过 `UGRIPPER_HARDWARE_VERSION` 覆盖；`software_version` 来自 ugripper 主包版本并带 `v` 前缀；`das_usb_updater_version` 优先读取 `das-usb-updater` 包版本。
 - `hardware_list` 保持固定 schema：左右 gripper、左右主摄、可选胸部主摄、四路 tactile 与左右 stereo 字段始终存在；默认包从 Fays 状态写 stereo SN，`+nostereo` 变体写空字符串。
 - `quality_check_status` 取值为 `success` / `fail` / 空字符串；`quality_check_err_type` 保持单字段兼容，只写本次失败的主 `error_type`。常见取值包括 `missing_file`、`collection_duration_too_short`、`frame_loss`、`finalize_error`、`stereo_control_failed`、`calibration_error`、`runtime_error`、`device_disconnected`、人工补标的 `operator_marked_failed`，以及健康监控直接上报的 `disk_mount_lost`、`disk_not_writable`、`disk_full`、`critical_devices_missing`、`stereo_not_ready`、`hmi_*` 等 fault key；无法归类时写 `unknown`。
-- `collection_duration_s` 取有效视频时长最大值；默认包包含 stereo，`+nostereo` 只统计主摄/触觉。`video_details` 时长优先复用停录校验缓存。
-- `video_details[].start_offset_us` 由内部 timing 字段折算而来，单位为微秒，字段名带 `_us` 后缀；计算时以本 episode 最早一路视频 offset 为 0。
+- `collection_duration_s` 取有效视频时长最大值；默认包包含 stereo，`+nostereo` 只统计主摄/触觉。stereo 的有效时长固定使用 Fays MCAP 中首末 camera `publishTime` 的跨度，因此 Fays 设备侧 gap 会保留在实际采集时长内，不使用被固定 `25fps` 压紧的 MKV 容器 duration；`video_details` 复用停录 timing 缓存。
+- `video_details[].start_offset_us` 由各路绝对 `record_time_offset_us` 折算而来，单位为微秒；计算时以本 episode 最早一路视频 offset 为 `0`。stereo 的绝对 offset 为首个 `c.publishTime / 1000`，其中 `publishTime` 已由 Fays IMU 时钟偏移映射到主机 Unix 时钟；禁止使用 session START 控制时间或首帧到达时重新计时。
+- stereo MKV packet 与 Fays MCAP `c` topic 通过 `frameIndex`/顺序一一对应；精确逐帧系统时间必须使用对应 `c.publishTime`。MKV 仍保持固定帧率播放时间轴，不在停录阶段重封装或改写 PTS，以免增加 writing/flush 时延。
 - 默认包的 `require_files` 包含 stereo/Fays 文件；`+nostereo` 变体只包含 metadata、calibration、左右主摄、四路 tactile 与左右 sensor。启用胸部主摄时两种变体都追加 `cam_chest.mkv`。
 
 ### 7.3 停录强校验
@@ -242,7 +244,7 @@
 - 文件存在性按构建变体决定：默认包额外要求左右 stereo 与 Fays MCAP，`+nostereo` 不要求；其他主摄、触觉、sensor、calibration 和 metadata 均必须存在且非空。
 - 内部 timing 缓存：停录收尾期间由 `/dev/shm/ugripper_recording_timing_*.json` 暂存 `boot_time_offset`、`boot_time_offset_us`、各路 `<camera>_record_time_offset_us` 和 `video_probes`，只用于生成最终 metadata；该文件不落到 episode，不作为硬校验对象，完成后清理。若 `mergeEpisodeInfo()` 提示 timing 打开失败，应优先结合 `camera_recorder` 的“wrote timing file / missing_record_time_offset_us / flush-close failed”日志一起判断根因。
 - metadata 与视频可读性：最终 `metadata.json` 必须包含当前变体全部视频的 `start_offset_us/duration_s`；默认包包含 stereo，`+nostereo` 不包含。
-- 时长合理性：每路启用视频都必须满足跨度阈值；默认包执行 Fays MCAP tail 检查，`+nostereo` 跳过。
+- 时长合理性：每路启用视频都必须满足跨度阈值；默认包的 stereo 时长复用停录时由 Fays MCAP 首尾 `publishTime` 写入的 timing 缓存，并继续执行既有 Fays MCAP footer/head-tail 检查；`+nostereo` 跳过。
 - 条件产物：若执行了 pre/post 音频录制，对应 wav 仍需存在。
 - 触觉软校验：
   - 每路 tactile 只取起录附近单帧；预处理只裁掉左侧约 `12%` 光源区域，不裁上边、右边和下边，也不做额外模糊，避免漏掉上方或右上方盖板损坏。若同 `serial` 实时参考帧缺失或处于夹爪重连待更新状态，则用本帧建立参考帧并跳过本轮实时 damaged 对比，失败则顺延到下一条 episode。已有实时参考帧时，按 baseline 对当前帧做全局亮度/对比度配准，再做直接 residual 差分；residual mask 经过 `3x3` 邻域投票、连通域过滤，以及“小连通域 + 低频变化小”的边界纹理误差过滤，单次异常不让当前 episode 失败，仅用于连续 `3` 个 episode 的损坏提示。
