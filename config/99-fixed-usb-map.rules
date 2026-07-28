@@ -9,6 +9,10 @@
 # - left USB2 hub: 9-1 or 11-1
 # - left USB3 hub: 10-1 or 12-1
 # - chest camera: 5-1 or 11-1 direct USB2 only
+# - right upper USB(bus:5/6)
+# - right lower USB(bus:1/8)
+# - left upper USB(bus:9/10)
+# - left lower USB(bus:11/12)
 
 ACTION!="add|change", GOTO="ugripper_fixed_end"
 

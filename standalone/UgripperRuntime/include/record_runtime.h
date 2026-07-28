@@ -4,6 +4,7 @@
 #include "gripper_hmi_driver.h"
 #include "gripper_hmi_led_effects.h"
 #include "record_runtime/audio_coordinator.h"
+#include "record_runtime/button_action_router.h"
 #include "record_runtime/health_monitor.h"
 #include "record_runtime/hmi_controller.h"
 #include "record_runtime/process_supervisor.h"
@@ -38,6 +39,8 @@ struct RecordRuntimeOptions
     std::string audioPlayScript = "./bin/UgripperRuntime/audio/audio_play.py";
     std::string audioRecordScript = "./bin/UgripperRuntime/audio/record_usb_audio.py";
     std::string egoRecordingScript = "./bin/UgripperRuntime/ego/ego_recording_worker.py";
+    std::string egoBindingFile = "/dev/shm/ugripper/ego_binding.json";
+    std::string egoBindingStatusFile = "/dev/shm/ugripper/ego_binding_status.json";
     std::string audioPipe = "/dev/shm/ugripper/umi_audio_pipe";
     std::string audioReadyFile = "/dev/shm/ugripper/umi_audio_ready";
     std::string audioTempDir = "/tmp/umi_audio";
@@ -130,6 +133,7 @@ private:
                                         std::string *errorMessage);
         std::vector<ConnectionEvent> consumeConnectionEvents();
         bool isSideReadyForRefresh(const std::string &side, uint64_t activeTimeoutMs) const;
+        bool setBeepStateForSide(const std::string &side, const GripperBeepState &state);
         bool setBeepEnabledForSide(const std::string &side, bool enabled);
         bool silenceBeepForSide(const std::string &side);
         void silenceBeep();
@@ -253,6 +257,8 @@ private:
         void setGripperRuntimeStates(const std::array<GripperRuntimeState, 2> &states);
         void setMainCameraRuntimeStates(const std::array<MainCameraRuntimeState, 3> &states);
         void setTactileCameraRuntimeStates(const std::array<TactileCameraRuntimeState, 4> &states);
+        void setTaskMarkers(std::optional<double> taskStartS,
+                            std::optional<double> taskStopS);
         void markTactileReferencePendingForSide(const std::string &side,
                                                 const std::string &reason);
         bool prepareEpisode(const std::string &episodeDir,
@@ -299,6 +305,8 @@ private:
         std::array<GripperRuntimeState, 2> gripperRuntimeStates_{};
         std::array<MainCameraRuntimeState, 3> mainCameraRuntimeStates_{};
         std::array<TactileCameraRuntimeState, 4> tactileCameraRuntimeStates_{};
+        std::optional<double> taskStartS_;
+        std::optional<double> taskStopS_;
     };
 
     static GripperLedEffect makeLedEffect(LedState state, double progress = 0.0);
@@ -340,6 +348,10 @@ private:
     void clearPendingPhysicalRecordShortPress(const char *reason, uint64_t nowMs);
     bool handleLongUpAction();
     bool handleLongDownAction();
+    void handleButtonAction(ugripper::runtime::ButtonAction action);
+    void resetLeftButtonTracking();
+    void handleRecordingTaskMarker();
+    void playHmiFeedback(ugripper::runtime::HmiFeedbackEvent event);
     void handleDualShutdownAction();
     bool handleLeftDualUmountAction();
     bool handleLeftSingleLongMarkFailedAction();
@@ -387,6 +399,13 @@ private:
     bool stopEgoRecording(const std::string &episodeDir, int64_t stopSystemTimeUs, std::string *errorMessage);
     bool waitForEgoFinalize(const std::string &episodeDir, int timeoutMs, std::string *errorMessage);
     bool cleanupEgoRemote(const std::string &episodeDir, std::string *errorMessage);
+    bool loadEgoBinding();
+    bool isEgoRequired() const;
+    void handleEgoBindingToggle();
+    void maintainEgoBindingAction();
+    void maintainEgoBindingHealth();
+    void setEgoBindingFault(const std::string &detail);
+    void clearEgoBindingFault();
     bool mergeEpisodeInfo(const std::string &episodeDir, std::string *errorMessage) const;
     bool syncRuntimeLogToDisk(const char *reason) const;
     bool markEpisodeOperatorFailed(const std::string &episodeDir, std::string *errorMessage) const;
@@ -457,6 +476,8 @@ private:
     bool leftDualLongHandled_ = false;
     uint64_t leftSinglePressedSinceMs_ = 0;
     bool leftSingleLongHandled_ = false;
+    uint64_t recordingRightUpPressedSinceMs_ = 0;
+    bool recordingRightUpHandled_ = false;
     utils::BufferedFifoLineReader recordControlReader_{4096};
     uint64_t lastRecordControlActionMs_ = 0;
     bool hasPendingPhysicalRecordShortPress_ = false;
@@ -560,12 +581,22 @@ private:
     std::unique_ptr<HmiLedController> ledController_;
     mutable ugripper::runtime::ProcessSupervisor processSupervisor_{};
     std::unique_ptr<ugripper::runtime::HmiController> hmiController_;
+    std::unique_ptr<ugripper::runtime::ButtonActionRouter> buttonActionRouter_;
+    ugripper::runtime::TaskMarkerTracker taskMarkerTracker_;
     std::unique_ptr<ugripper::runtime::HealthMonitor> healthMonitor_;
     std::unique_ptr<ugripper::runtime::AudioCoordinator> audioCoordinator_;
     std::unique_ptr<ugripper::runtime::StereoSessionClient> stereoSessionClient_;
     std::unique_ptr<ugripper::runtime::ShutdownRequestPort> shutdownRequestPort_;
     std::optional<ugripper::runtime::SubprocessHandle> egoRecordingWorker_;
     bool egoRecordingAttempted_ = false;
+    std::string egoBoundSerial_;
+    bool egoBoundConnected_ = true;
+    bool egoBindingFaultActive_ = false;
+    int egoProbeFailureCount_ = 0;
+    uint64_t egoLastProbeStartMs_ = 0;
+    std::string egoProbeSerial_;
+    std::future<bool> egoBindingActionFuture_;
+    std::future<bool> egoProbeFuture_;
     std::unique_ptr<ugripper::runtime::RecordingOrchestrator> recordingOrchestrator_;
 };
 

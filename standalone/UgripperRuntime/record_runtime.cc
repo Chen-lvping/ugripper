@@ -84,7 +84,11 @@ constexpr const char *kPackageStereoBuildMarker = "UGRIPPER_STEREO_BUILD=OFF";
 constexpr uint64_t kActionDebounceMs = 80;
 constexpr uint64_t kButtonPressDebounceMs = 40;
 constexpr uint64_t kButtonReleaseDebounceMs = 40;
-constexpr uint64_t kLongPressThresholdMs = 800;
+constexpr uint64_t kLongPressThresholdMs = 1000;
+constexpr uint64_t kRecordingTaskMarkThresholdMs = 800;
+constexpr uint64_t kEgoBindingChordHoldMs = 2000;
+constexpr uint64_t kEgoProbeIntervalMs = 2000;
+constexpr int kEgoProbeFailureThreshold = 2;
 constexpr uint64_t kDualLongPressThresholdMs = 4000;
 constexpr uint64_t kShutdownPromptThresholdMs = 2000;
 constexpr uint64_t kSystemActionResultWaitMs = 8000;
@@ -4146,6 +4150,8 @@ bool RecordRuntime::initialize()
         options_.gripperPorts.emplace_back("/dev/left_gripper");
     }
 
+    loadEgoBinding();
+
     std::error_code error;
     fs::create_directories(options_.audioTempDir, error);
 
@@ -4197,6 +4203,17 @@ bool RecordRuntime::initialize()
             .shutdown_prompt_threshold_ms = kShutdownPromptThresholdMs,
         },
         &utils::CurrentSteadyMs);
+    buttonActionRouter_ = std::make_unique<ugripper::runtime::ButtonActionRouter>(
+        std::vector<ugripper::runtime::ButtonChordDefinition>{
+            {
+                .action = ugripper::runtime::ButtonAction::ToggleEgoBinding,
+                .required_mask =
+                    ugripper::runtime::ButtonMask(ugripper::runtime::PhysicalButton::LeftUp) |
+                    ugripper::runtime::ButtonMask(ugripper::runtime::PhysicalButton::RightUp),
+                .hold_ms = kEgoBindingChordHoldMs,
+                .allowed_while_recording = false,
+            },
+        });
 
     std::vector<std::string> audioPlayerArguments = resolvePythonCommand();
     audioPlayerArguments.push_back(options_.audioPlayScript);
@@ -4407,6 +4424,10 @@ bool RecordRuntime::initialize()
                 [this](const std::string& episode_dir, std::string* error_message) {
                     return cleanupEgoRemote(episode_dir, error_message);
                 },
+            .is_ego_required =
+                [this]() {
+                    return isEgoRequired();
+                },
             .flush_episode_artifacts =
                 [this](const std::string& episode_dir, const char* stage) {
                     flushEpisodeArtifactsToDisk(
@@ -4421,6 +4442,9 @@ bool RecordRuntime::initialize()
                     {
                         return;
                     }
+                    episodeManager_->setTaskMarkers(
+                        taskMarkerTracker_.task_start_s(),
+                        taskMarkerTracker_.task_stop_s());
                     std::string metadataError;
                     if (!episodeManager_->writeFinalMetadata(
                             episode_dir,
@@ -4562,6 +4586,8 @@ int RecordRuntime::run()
         maintainStereoDaemon();
         maintainDataStorage();
         maintainBackgroundTactileValidation();
+        maintainEgoBindingAction();
+        maintainEgoBindingHealth();
         maintainRestoreUsbDevicePresence();
         maintainRestoreUsbRetry();
         maintainRestoreUsbFailureAlarm();
@@ -4574,11 +4600,42 @@ int RecordRuntime::run()
         const bool recordControlAccepted = pollRecordControlPipe();
         if (!recordControlAccepted)
         {
-            handleButtons(buttons);
             ButtonSnapshot leftButtons;
-            if (panelManager_.getButtonsForPortToken("left_gripper", &leftButtons))
+            const bool hasLeftButtons =
+                panelManager_.getButtonsForPortToken("left_gripper", &leftButtons);
+            ugripper::runtime::ButtonRouteResult route;
+            if (buttonActionRouter_ != nullptr && hasLeftButtons)
             {
-                handleLeftButtons(leftButtons);
+                route = buttonActionRouter_->Update(
+                    ugripper::runtime::FourButtonSnapshot{
+                        .left_up = leftButtons.upPressed,
+                        .left_down = leftButtons.downPressed,
+                        .right_up = buttons.upPressed,
+                        .right_down = buttons.downPressed,
+                    },
+                    isRecordingActive(),
+                    currentSteadyMs());
+            }
+            if (route.consumed_mask != 0)
+            {
+                clearPendingPhysicalRecordShortPress("cross_hand_chord", currentSteadyMs());
+                if (hmiController_ != nullptr)
+                {
+                    hmiController_->Reset();
+                }
+                resetLeftButtonTracking();
+            }
+            else
+            {
+                handleButtons(buttons);
+                if (hasLeftButtons)
+                {
+                    handleLeftButtons(leftButtons);
+                }
+            }
+            for (const auto action : route.actions)
+            {
+                handleButtonAction(action);
             }
         }
 
@@ -4796,7 +4853,8 @@ bool RecordRuntime::waitForStereoFinalize(const std::string &episodeDir, int tim
 std::vector<std::string> egoWorkerArgs(const std::string &script,
                                        const std::string &command,
                                        const std::string &episodeDir,
-                                       const std::string &cameraCodec = "")
+                                       const std::string &cameraCodec = "",
+                                       const std::string &serial = "")
 {
     std::vector<std::string> args = resolvePythonCommand();
     args.push_back(script);
@@ -4805,11 +4863,31 @@ std::vector<std::string> egoWorkerArgs(const std::string &script,
     args.push_back(episodeDir);
     args.push_back("--status-file");
     args.push_back((fs::path(episodeDir) / "ego" / kEgoSyncStatusFileName).string());
+    if (!serial.empty())
+    {
+        args.push_back("--serial");
+        args.push_back(serial);
+    }
     if (command == "start" && !cameraCodec.empty())
     {
         args.push_back("--codec");
         args.push_back(cameraCodec);
     }
+    return args;
+}
+
+std::vector<std::string> egoBindingWorkerArgs(const std::string &script,
+                                              const std::string &command,
+                                              const std::string &bindingFile,
+                                              const std::string &statusFile)
+{
+    std::vector<std::string> args = resolvePythonCommand();
+    args.push_back(script);
+    args.push_back(command);
+    args.push_back("--binding-file");
+    args.push_back(bindingFile);
+    args.push_back("--binding-status-file");
+    args.push_back(statusFile);
     return args;
 }
 
@@ -4832,7 +4910,11 @@ bool RecordRuntime::startEgoRecording(const std::string &episodeDir,
         DM_LOG_INFO("{}", (::DA::utils::LogString()
             << "skip ego recording sidecar: no ADB USB interface detected"
             << std::endl).str());
-        return true;
+        if (isEgoRequired() && errorMessage != nullptr)
+        {
+            *errorMessage = "bound ego ADB USB interface is not present";
+        }
+        return !isEgoRequired();
     }
 
     if (egoRecordingWorker_.has_value())
@@ -4850,7 +4932,8 @@ bool RecordRuntime::startEgoRecording(const std::string &episodeDir,
     if (!egoRecordingWorker_->Start(egoWorkerArgs(options_.egoRecordingScript,
                                                  "start",
                                                  episodeDir,
-                                                 options_.cameraCodec),
+                                                 options_.cameraCodec,
+                                                 egoBoundSerial_),
                                    {},
                                    errorMessage))
     {
@@ -4889,6 +4972,14 @@ bool RecordRuntime::startEgoRecording(const std::string &episodeDir,
             }
             if (state == "not_found")
             {
+                if (isEgoRequired())
+                {
+                    if (errorMessage != nullptr)
+                    {
+                        *errorMessage = status.value("error", std::string("bound ego not found"));
+                    }
+                    return false;
+                }
                 return true;
             }
             if (state == "start_timeout")
@@ -4901,7 +4992,7 @@ bool RecordRuntime::startEgoRecording(const std::string &episodeDir,
                     << "ego recording sidecar did not report remote episode before gripper start: "
                     << status.value("error", std::string("start_timeout"))
                     << std::endl).str());
-                return true;
+                return !isEgoRequired();
             }
             if (state == "start_failed" || state == "error")
             {
@@ -4922,7 +5013,7 @@ bool RecordRuntime::startEgoRecording(const std::string &episodeDir,
     DM_LOG_WARN("{}", (::DA::utils::LogString()
         << "ego recording sidecar did not report remote episode before gripper start"
         << std::endl).str());
-    return true;
+    return !isEgoRequired();
 }
 
 bool RecordRuntime::stopEgoRecording(const std::string &episodeDir,
@@ -4948,7 +5039,8 @@ bool RecordRuntime::stopEgoRecording(const std::string &episodeDir,
         return false;
     }
 
-    return runCommandSync(egoWorkerArgs(options_.egoRecordingScript, "stop", episodeDir));
+    return runCommandSync(egoWorkerArgs(
+        options_.egoRecordingScript, "stop", episodeDir, "", egoBoundSerial_));
 }
 
 bool RecordRuntime::cleanupEgoRemote(const std::string &episodeDir,
@@ -4966,7 +5058,199 @@ bool RecordRuntime::cleanupEgoRemote(const std::string &episodeDir,
         }
         return false;
     }
-    return runCommandSync(egoWorkerArgs(options_.egoRecordingScript, "cleanup", episodeDir));
+    return runCommandSync(egoWorkerArgs(
+        options_.egoRecordingScript, "cleanup", episodeDir, "", egoBoundSerial_));
+}
+
+bool RecordRuntime::loadEgoBinding()
+{
+    egoBoundSerial_.clear();
+    json binding = json::object();
+    std::string errorMessage;
+    if (!loadJsonFile(options_.egoBindingFile, &binding, &errorMessage) || !binding.is_object())
+    {
+        egoBoundConnected_ = true;
+        return false;
+    }
+    egoBoundSerial_ = binding.value("serial", std::string());
+    if (egoBoundSerial_.empty())
+    {
+        egoBoundConnected_ = true;
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "ignore invalid ego binding without serial: " << options_.egoBindingFile
+            << std::endl).str());
+        return false;
+    }
+    egoBoundConnected_ = false;
+    egoProbeFailureCount_ = 0;
+    egoLastProbeStartMs_ = 0;
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+        << "loaded ego binding serial=" << egoBoundSerial_ << std::endl).str());
+    return true;
+}
+
+bool RecordRuntime::isEgoRequired() const
+{
+    return !egoBoundSerial_.empty();
+}
+
+void RecordRuntime::handleEgoBindingToggle()
+{
+    if (isRecordingActive())
+    {
+        return;
+    }
+    if (egoBindingActionFuture_.valid() &&
+        egoBindingActionFuture_.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "ignore ego binding toggle while another binding action is running"
+            << std::endl).str());
+        playHmiFeedback(ugripper::runtime::HmiFeedbackEvent::EgoBindingFailed);
+        return;
+    }
+
+    if (isEgoRequired())
+    {
+        std::error_code error;
+        fs::remove(options_.egoBindingFile, error);
+        if (error)
+        {
+            DM_LOG_ERROR("{}", (::DA::utils::LogString()
+                << "failed to remove ego binding file: " << error.message() << std::endl).str());
+            playHmiFeedback(ugripper::runtime::HmiFeedbackEvent::EgoBindingFailed);
+            return;
+        }
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+            << "ego binding removed serial=" << egoBoundSerial_ << std::endl).str());
+        egoBoundSerial_.clear();
+        egoBoundConnected_ = true;
+        egoProbeFailureCount_ = 0;
+        clearEgoBindingFault();
+        playHmiFeedback(ugripper::runtime::HmiFeedbackEvent::EgoUnbound);
+        return;
+    }
+
+    const std::vector<std::string> args = egoBindingWorkerArgs(
+        options_.egoRecordingScript,
+        "bind",
+        options_.egoBindingFile,
+        options_.egoBindingStatusFile);
+    DM_LOG_INFO("{}", (::DA::utils::LogString() << "ego binding started" << std::endl).str());
+    egoBindingActionFuture_ = std::async(std::launch::async, [args]() {
+        return RecordRuntime::runCommandSync(args);
+    });
+}
+
+void RecordRuntime::maintainEgoBindingAction()
+{
+    if (!egoBindingActionFuture_.valid() ||
+        egoBindingActionFuture_.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready)
+    {
+        return;
+    }
+    const bool commandOk = egoBindingActionFuture_.get();
+    if (commandOk && loadEgoBinding())
+    {
+        egoBoundConnected_ = true;
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+            << "ego binding completed serial=" << egoBoundSerial_ << std::endl).str());
+        playHmiFeedback(ugripper::runtime::HmiFeedbackEvent::EgoBound);
+        return;
+    }
+    DM_LOG_ERROR("{}", (::DA::utils::LogString() << "ego binding failed" << std::endl).str());
+    playHmiFeedback(ugripper::runtime::HmiFeedbackEvent::EgoBindingFailed);
+}
+
+void RecordRuntime::maintainEgoBindingHealth()
+{
+    if (!isEgoRequired())
+    {
+        if (egoProbeFuture_.valid() &&
+            egoProbeFuture_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+        {
+            egoProbeFuture_.get();
+            egoProbeSerial_.clear();
+        }
+        return;
+    }
+
+    if (egoProbeFuture_.valid() &&
+        egoProbeFuture_.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready)
+    {
+        const bool connected = egoProbeFuture_.get();
+        const bool matchesCurrentBinding = egoProbeSerial_ == egoBoundSerial_;
+        egoProbeSerial_.clear();
+        if (!matchesCurrentBinding)
+        {
+            DM_LOG_INFO("{}", (::DA::utils::LogString()
+                << "ignore stale ego probe result after binding changed" << std::endl).str());
+            return;
+        }
+        if (connected)
+        {
+            egoProbeFailureCount_ = 0;
+            egoBoundConnected_ = true;
+            clearEgoBindingFault();
+        }
+        else
+        {
+            ++egoProbeFailureCount_;
+            if (egoProbeFailureCount_ >= kEgoProbeFailureThreshold)
+            {
+                egoBoundConnected_ = false;
+                setEgoBindingFault("bound ego disconnected: " + egoBoundSerial_);
+            }
+        }
+    }
+
+    const uint64_t nowMs = currentSteadyMs();
+    if (!egoProbeFuture_.valid() &&
+        (egoLastProbeStartMs_ == 0 || nowMs - egoLastProbeStartMs_ >= kEgoProbeIntervalMs))
+    {
+        egoLastProbeStartMs_ = nowMs;
+        egoProbeSerial_ = egoBoundSerial_;
+        const std::vector<std::string> args = egoBindingWorkerArgs(
+            options_.egoRecordingScript,
+            "probe",
+            options_.egoBindingFile,
+            options_.egoBindingStatusFile);
+        egoProbeFuture_ = std::async(std::launch::async, [args]() {
+            return RecordRuntime::runCommandSync(args);
+        });
+    }
+}
+
+void RecordRuntime::setEgoBindingFault(const std::string &detail)
+{
+    if (egoBindingFaultActive_)
+    {
+        return;
+    }
+    egoBindingFaultActive_ = true;
+    DM_LOG_ERROR("{}", (::DA::utils::LogString() << detail << std::endl).str());
+    if (isRecordingActive())
+    {
+        stopRecording(true, detail, ugripper::runtime::kErrorTypeEgoDisconnected);
+    }
+    setLedState(LedState::Error5);
+    setAudioRecoveryCommand("error");
+    sendAudioCommand("error");
+}
+
+void RecordRuntime::clearEgoBindingFault()
+{
+    if (!egoBindingFaultActive_)
+    {
+        return;
+    }
+    egoBindingFaultActive_ = false;
+    DM_LOG_INFO("{}", (::DA::utils::LogString()
+        << "bound ego connection recovered serial=" << egoBoundSerial_ << std::endl).str());
+    if (!isRecordingActive())
+    {
+        applyIdleState();
+    }
 }
 
 bool RecordRuntime::waitForEgoFinalize(const std::string &episodeDir,
@@ -4975,7 +5259,11 @@ bool RecordRuntime::waitForEgoFinalize(const std::string &episodeDir,
 {
     if (!egoRecordingAttempted_)
     {
-        return true;
+        if (isEgoRequired() && errorMessage != nullptr)
+        {
+            *errorMessage = "required ego recording was not attempted";
+        }
+        return !isEgoRequired();
     }
     const fs::path statusPath = fs::path(episodeDir) / "ego" / kEgoSyncStatusFileName;
     const uint64_t startMs = currentSteadyMs();
@@ -4986,8 +5274,20 @@ bool RecordRuntime::waitForEgoFinalize(const std::string &episodeDir,
         if (loadJsonFile(statusPath.string(), &status, &loadError) && status.is_object())
         {
             const std::string state = status.value("status", std::string());
-            if (state == "finalized" || state == "not_found" || state == "stop_no_remote_episode")
+            if (state == "finalized")
             {
+                return true;
+            }
+            if (state == "not_found" || state == "stop_no_remote_episode")
+            {
+                if (isEgoRequired())
+                {
+                    if (errorMessage != nullptr)
+                    {
+                        *errorMessage = status.value("error", state);
+                    }
+                    return false;
+                }
                 return true;
             }
             if (state == "finalize_timeout" || state == "error")
@@ -6122,6 +6422,11 @@ void RecordRuntime::applyIdleState()
     if (!episodeManagerInitialized_)
     {
         setLedState(LedState::WaitStorage);
+        return;
+    }
+    if (egoBindingFaultActive_)
+    {
+        setLedState(LedState::Error5);
         return;
     }
     const std::optional<ugripper::runtime::HealthFault> fault = currentHealthFault();
@@ -7297,6 +7602,14 @@ bool RecordRuntime::startRecording(bool resetRecording)
         setLedState(LedState::WaitStorage);
         return false;
     }
+    if (isEgoRequired() && !egoBoundConnected_)
+    {
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "ignore start recording while bound ego is disconnected"
+            << " serial=" << egoBoundSerial_ << std::endl).str());
+        setEgoBindingFault("bound ego is disconnected");
+        return false;
+    }
     if (isStereoStartupWaiting())
     {
         DM_LOG_WARN("{}", (::DA::utils::LogString()
@@ -7319,6 +7632,9 @@ bool RecordRuntime::startRecording(bool resetRecording)
     tactileTriggeredAudioCommand_.clear();
     activeHardwareFault_.reset();
     resetRestoreUsbErrorWindow();
+    taskMarkerTracker_.Reset();
+    recordingRightUpPressedSinceMs_ = 0;
+    recordingRightUpHandled_ = false;
     return recordingOrchestrator_->StartRecording(resetRecording, nullptr);
 }
 
@@ -7486,6 +7802,107 @@ bool RecordRuntime::handleLongDownAction()
         return false;
     }
     return recordAudioClip("post", false);
+}
+
+void RecordRuntime::handleButtonAction(ugripper::runtime::ButtonAction action)
+{
+    switch (action)
+    {
+    case ugripper::runtime::ButtonAction::ToggleEgoBinding:
+        handleEgoBindingToggle();
+        break;
+    }
+}
+
+void RecordRuntime::handleRecordingTaskMarker()
+{
+    const double unixSeconds = static_cast<double>(currentEpochMs()) / 1000.0;
+    const auto result = taskMarkerTracker_.Mark(unixSeconds);
+    switch (result)
+    {
+    case ugripper::runtime::TaskMarkerResult::StartMarked:
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+            << "recording task start marker"
+            << " task_start_s=" << unixSeconds << std::endl).str());
+        playHmiFeedback(ugripper::runtime::HmiFeedbackEvent::TaskStartMarked);
+        break;
+    case ugripper::runtime::TaskMarkerResult::StopMarked:
+        DM_LOG_INFO("{}", (::DA::utils::LogString()
+            << "recording task stop marker"
+            << " task_stop_s=" << unixSeconds << std::endl).str());
+        playHmiFeedback(ugripper::runtime::HmiFeedbackEvent::TaskStopMarked);
+        break;
+    case ugripper::runtime::TaskMarkerResult::Rejected:
+        DM_LOG_WARN("{}", (::DA::utils::LogString()
+            << "ignore recording task marker after start and stop were already marked"
+            << std::endl).str());
+        playHmiFeedback(ugripper::runtime::HmiFeedbackEvent::TaskMarkerRejected);
+        break;
+    }
+}
+
+void RecordRuntime::playHmiFeedback(ugripper::runtime::HmiFeedbackEvent event)
+{
+    const auto pattern = ugripper::runtime::FeedbackPatternFor(event);
+    const auto setEnabled = [this, &pattern](bool enabled, uint16_t frequencyHz) {
+        if (pattern.led_side == ugripper::runtime::HmiFeedbackSide::Both)
+        {
+            panelManager_.setLedColor(
+                enabled ? pattern.red : 0,
+                enabled ? pattern.green : 0,
+                enabled ? pattern.blue : 0);
+        }
+        else
+        {
+            panelManager_.setLedColorForSide(
+                "right",
+                enabled ? pattern.red : 0,
+                enabled ? pattern.green : 0,
+                enabled ? pattern.blue : 0);
+        }
+
+        const GripperBeepState beepState = enabled
+                                               ? GripperBeepState{
+                                                     GripperHmiDriver::kDefaultBeepDuty,
+                                                     frequencyHz,
+                                                 }
+                                               : GripperBeepState{0, 0};
+        if (pattern.beep_side == ugripper::runtime::HmiFeedbackSide::Both)
+        {
+            panelManager_.setBeepStateForSide("left", beepState);
+            panelManager_.setBeepStateForSide("right", beepState);
+        }
+        else
+        {
+            panelManager_.setBeepStateForSide("right", beepState);
+        }
+    };
+
+    for (int pulse = 0; pulse < pattern.pulse_count; ++pulse)
+    {
+        const uint16_t configuredFrequency =
+            pulse < static_cast<int>(pattern.beep_frequencies_hz.size())
+                ? pattern.beep_frequencies_hz[static_cast<size_t>(pulse)]
+                : 0;
+        const uint16_t frequencyHz = configuredFrequency == 0
+                                         ? GripperHmiDriver::kDefaultBeepFrequency
+                                         : configuredFrequency;
+        setEnabled(true, frequencyHz);
+        std::this_thread::sleep_for(std::chrono::milliseconds(pattern.on_ms));
+        setEnabled(false, 0);
+        if (pulse + 1 < pattern.pulse_count && pattern.off_ms > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(pattern.off_ms));
+        }
+    }
+    if (isRecordingActive())
+    {
+        setLedState(LedState::Recording);
+    }
+    else
+    {
+        applyIdleState();
+    }
 }
 
 void RecordRuntime::handleDualShutdownAction()
@@ -7828,6 +8245,35 @@ void RecordRuntime::handleButtons(const ButtonSnapshot &buttons)
         return;
     }
 
+    if (isRecordingActive() && buttons.upPressed && !buttons.downPressed)
+    {
+        const uint64_t nowMs = currentSteadyMs();
+        if (recordingRightUpPressedSinceMs_ == 0)
+        {
+            recordingRightUpPressedSinceMs_ = nowMs;
+            recordingRightUpHandled_ = false;
+        }
+        const uint64_t heldMs = nowMs >= recordingRightUpPressedSinceMs_
+                                    ? nowMs - recordingRightUpPressedSinceMs_
+                                    : 0;
+        if (!recordingRightUpHandled_ && heldMs >= kRecordingTaskMarkThresholdMs)
+        {
+            recordingRightUpHandled_ = true;
+            clearPendingPhysicalRecordShortPress("task_marker", nowMs);
+            hmiController_->Reset();
+            handleRecordingTaskMarker();
+        }
+        if (recordingRightUpHandled_)
+        {
+            return;
+        }
+    }
+    else
+    {
+        recordingRightUpPressedSinceMs_ = 0;
+        recordingRightUpHandled_ = false;
+    }
+
     if (!hasLastLoggedButtons_ ||
         lastLoggedButtons_.upPressed != buttons.upPressed ||
         lastLoggedButtons_.downPressed != buttons.downPressed)
@@ -7928,7 +8374,7 @@ void RecordRuntime::handleLeftButtons(const ButtonSnapshot &buttons)
         return;
     }
 
-    if (buttons.upPressed || buttons.downPressed)
+    if (!isRecordingActive() && buttons.upPressed && !buttons.downPressed)
     {
         const bool freshSinglePress =
             (!lastLeftButtons_.upPressed && !lastLeftButtons_.downPressed) ||
@@ -7955,6 +8401,16 @@ void RecordRuntime::handleLeftButtons(const ButtonSnapshot &buttons)
     leftSinglePressedSinceMs_ = 0;
     leftSingleLongHandled_ = false;
     lastLeftButtons_ = buttons;
+}
+
+void RecordRuntime::resetLeftButtonTracking()
+{
+    lastLeftButtons_ = {};
+    leftBothPressedSinceMs_ = 0;
+    leftDualChordActive_ = false;
+    leftDualLongHandled_ = false;
+    leftSinglePressedSinceMs_ = 0;
+    leftSingleLongHandled_ = false;
 }
 
 bool RecordRuntime::initializeRecordControlPipe()
@@ -8986,6 +9442,13 @@ bool RecordRuntime::GripperPanelManager::setBeepEnabledForSide(const std::string
                                                  GripperHmiDriver::kDefaultBeepFrequency,
                                              }
                                            : GripperBeepState{0, 0};
+    return setBeepStateForSide(side, nextState);
+}
+
+bool RecordRuntime::GripperPanelManager::setBeepStateForSide(
+    const std::string &side,
+    const GripperBeepState &state)
+{
     bool wroteAny = false;
     for (size_t index = 0; index < drivers_.size(); ++index)
     {
@@ -8993,11 +9456,11 @@ bool RecordRuntime::GripperPanelManager::setBeepEnabledForSide(const std::string
         if (index < currentDriverBeepStates_.size() &&
             sideForPort(driver != nullptr ? driver->getPort() : std::string()) == side)
         {
-            currentDriverBeepStates_[index] = nextState;
+            currentDriverBeepStates_[index] = state;
         }
         if (driver == nullptr || !driver->isConnected())
         {
-            if (!enabled && driver != nullptr &&
+            if (state.duty == 0 && driver != nullptr &&
                 sideForPort(driver->getPort()) == side)
             {
                 driver->silenceBeep();
@@ -9008,15 +9471,14 @@ bool RecordRuntime::GripperPanelManager::setBeepEnabledForSide(const std::string
         {
             continue;
         }
-        wroteAny = enabled ? (driver->setBeepState(nextState) || wroteAny)
-                           : (driver->silenceBeep() || wroteAny);
+        wroteAny = driver->setBeepState(state) || wroteAny;
     }
     return wroteAny;
 }
 
 bool RecordRuntime::GripperPanelManager::silenceBeepForSide(const std::string &side)
 {
-    return setBeepEnabledForSide(side, false);
+    return setBeepStateForSide(side, GripperBeepState{0, 0});
 }
 
 void RecordRuntime::GripperPanelManager::silenceBeep()
@@ -10392,7 +10854,7 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
     metadata["hardware_version"] = hardwareVersion_;
     metadata["software_version"] = addVersionPrefix(packageVersion_);
     metadata["das_usb_updater_version"] = updaterVersion_;
-    metadata["data_version"] = "3.0";
+    metadata["data_version"] = "3.1";
     metadata["hardware_list"] = std::move(hardwareList);
     metadata["episode_name"] = stripEpisodeTempSuffix(episodePath.filename().string());
     metadata["data_uuid"] = existingMetadata.value("data_uuid", generateUuid());
@@ -10401,6 +10863,8 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
     metadata["quality_check_err_type"] =
         qualityOk ? "" : (qualityErrorType.empty() ? ugripper::runtime::kErrorTypeUnknown : qualityErrorType);
     metadata["collection_duration_s"] = roundToOneDecimal(collectionDurationS);
+    metadata["task_start_s"] = taskStartS_.value_or(0.0);
+    metadata["task_stop_s"] = taskStopS_.value_or(0.0);
     metadata["require_files"] = std::move(requiredFiles);
     metadata["video_details"] = std::move(videoDetails);
 
@@ -10409,6 +10873,13 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
         return false;
     }
     return true;
+}
+
+void RecordRuntime::EpisodeManager::setTaskMarkers(std::optional<double> taskStartS,
+                                                   std::optional<double> taskStopS)
+{
+    taskStartS_ = taskStartS;
+    taskStopS_ = taskStopS;
 }
 
 std::string RecordRuntime::EpisodeManager::finalizeEpisodeDir(const std::string &episodeDir,

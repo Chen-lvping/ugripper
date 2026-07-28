@@ -86,6 +86,7 @@ target_link_libraries(runtime_process_boundary
 )
 
 add_library(runtime_control_plane STATIC
+    button_action_router.cc
     runtime_domain.cc
 )
 set_target_properties(runtime_control_plane PROPERTIES

@@ -109,6 +109,13 @@ def write_status(path: Path, payload: dict) -> None:
     tmp.replace(path)
 
 
+def write_json_atomic(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    tmp.replace(path)
+
+
 def compact_status(payload: dict) -> dict:
     if not isinstance(payload, dict):
         return {}
@@ -261,6 +268,85 @@ def detect_ego(preferred_serial: str = "") -> tuple[Adb | None, dict]:
         if ok:
             return adb, {"selected": detail, "candidates": details}
     return None, {"selected": None, "candidates": details}
+
+
+def detect_egos(preferred_serial: str = "") -> tuple[list[Adb], list[dict]]:
+    root_adb = Adb()
+    candidates = [preferred_serial] if preferred_serial else list_devices(root_adb)
+    devices = []
+    details = []
+    for serial in candidates:
+        if not serial:
+            continue
+        adb = Adb(serial)
+        ok, detail = is_ego_device(adb)
+        details.append(detail)
+        if ok:
+            devices.append(adb)
+    return devices, details
+
+
+def run_bind(args: argparse.Namespace) -> int:
+    status = {"status": "error", "updated_at_ms": now_ms()}
+    try:
+        devices, candidates = detect_egos(args.serial)
+        if len(devices) != 1:
+            status["error"] = (
+                "no eligible SXR ego device found"
+                if not devices
+                else "multiple eligible SXR ego devices found"
+            )
+            status["candidate_count"] = len(devices)
+            write_status(args.binding_status_file, status)
+            return 1
+
+        selected = devices[0]
+        selected_detail = next(
+            (detail for detail in candidates if detail.get("serial") == selected.serial),
+            {"serial": selected.serial},
+        )
+        binding = {
+            "serial": selected.serial,
+            "bound_at_ms": now_ms(),
+            "device": selected_detail,
+        }
+        write_json_atomic(args.binding_file, binding)
+        status.update({"status": "bound", "serial": selected.serial, "updated_at_ms": now_ms()})
+        write_status(args.binding_status_file, status)
+        return 0
+    except Exception as exc:
+        status["error"] = str(exc)
+        status["updated_at_ms"] = now_ms()
+        write_status(args.binding_status_file, status)
+        return 1
+
+
+def run_probe(args: argparse.Namespace) -> int:
+    status = {"status": "disconnected", "updated_at_ms": now_ms()}
+    try:
+        binding = read_status(args.binding_file)
+        serial = str(binding.get("serial") or "")
+        if not serial:
+            status["error"] = "ego binding serial is missing"
+            write_status(args.binding_status_file, status)
+            return 1
+        connected = serial in list_devices(Adb())
+        status.update(
+            {
+                "status": "connected" if connected else "disconnected",
+                "serial": serial,
+                "updated_at_ms": now_ms(),
+            }
+        )
+        if not connected:
+            status["error"] = "bound ego is not present in adb devices"
+        write_status(args.binding_status_file, status)
+        return 0 if connected else 1
+    except Exception as exc:
+        status["error"] = str(exc)
+        status["updated_at_ms"] = now_ms()
+        write_status(args.binding_status_file, status)
+        return 1
 
 
 def configured_remote_root() -> str:
@@ -868,7 +954,7 @@ def final_name(temp_episode: str) -> str:
 
 def run_start(args: argparse.Namespace) -> int:
     status = {
-        "status": "not_found",
+        "status": "starting",
         "phase": "start",
         "started_at_ms": now_ms(),
         "updated_at_ms": now_ms(),
@@ -877,6 +963,7 @@ def run_start(args: argparse.Namespace) -> int:
     try:
         adb, _ = detect_ego(args.serial)
         if adb is None:
+            status["status"] = "not_found"
             status["error"] = "no SXR/SXR_1 ego device found"
             write_status(args.status_file, status)
             return 0
@@ -1047,9 +1134,11 @@ def run_stop(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("start", "stop", "cleanup"))
-    parser.add_argument("--episode-dir", required=True, type=Path)
-    parser.add_argument("--status-file", required=True, type=Path)
+    parser.add_argument("command", choices=("start", "stop", "cleanup", "bind", "probe"))
+    parser.add_argument("--episode-dir", type=Path)
+    parser.add_argument("--status-file", type=Path)
+    parser.add_argument("--binding-file", type=Path)
+    parser.add_argument("--binding-status-file", type=Path)
     parser.add_argument("--serial", default=os.environ.get("UGRIPPER_EGO_SERIAL", ""))
     parser.add_argument("--interval", type=float, default=float(os.environ.get("UGRIPPER_EGO_SYNC_INTERVAL_SEC", "1")))
     parser.add_argument("--detect-timeout", type=float, default=15.0)
@@ -1060,6 +1149,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if args.command in ("bind", "probe"):
+        if args.binding_file is None or args.binding_status_file is None:
+            raise SystemExit("--binding-file and --binding-status-file are required")
+        return run_bind(args) if args.command == "bind" else run_probe(args)
+    if args.episode_dir is None or args.status_file is None:
+        raise SystemExit("--episode-dir and --status-file are required")
     args.episode_dir.mkdir(parents=True, exist_ok=True)
     if args.command == "start":
         return run_start(args)

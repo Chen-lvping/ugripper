@@ -45,6 +45,7 @@ public:
     using StopEgoRecordingFn = std::function<bool(const std::string&, int64_t, std::string*)>;
     using WaitForFinalizeFn = std::function<bool(const std::string&, int, std::string*)>;
     using CleanupEgoRemoteFn = std::function<bool(const std::string&, std::string*)>;
+    using IsEgoRequiredFn = std::function<bool()>;
     using FlushEpisodeArtifactsFn = std::function<void(const std::string&, const char*)>;
     using WriteEpisodeMetadataFn = std::function<void(const std::string&, bool, const std::string&, const std::string&)>;
     using WriteValidationErrorLogFn = std::function<void(const std::string&, const std::string&)>;
@@ -80,6 +81,7 @@ public:
         WaitForFinalizeFn wait_for_ego_finalize;
         WaitForFinalizeFn wait_for_stereo_finalize;
         CleanupEgoRemoteFn cleanup_ego_remote;
+        IsEgoRequiredFn is_ego_required;
         FlushEpisodeArtifactsFn flush_episode_artifacts;
         WriteEpisodeMetadataFn write_episode_metadata;
         WriteValidationErrorLogFn write_validation_error_log;

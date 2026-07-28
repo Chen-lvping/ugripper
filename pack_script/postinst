@@ -17,6 +17,7 @@ CH9344_SYMLINK_HELPER="/usr/local/bin/ugripper_ch9344_symlink_name"
 CALIB_PERSIST_DIR="/etc/ugripper/config/calibration"
 CALIB_PERSIST_FILE="${CALIB_PERSIST_DIR}/calibration.json"
 TACTILE_STATE_DIR="/var/lib/ugripper/tactile_state"
+LEGACY_EGO_BINDING_FILE="/var/lib/ugripper/ego/binding.json"
 DATA_MOUNT_POINT="/mnt/data_disk"
 EXFAT_SOURCE_MODULE="/home/user/lib/exfat.ko"
 EXFAT_MODULE_NAME="exfat"
@@ -347,6 +348,9 @@ if id ubuntu >/dev/null 2>&1; then
     chown -R ubuntu:ubuntu "$TACTILE_STATE_DIR" >/dev/null 2>&1 || true
     chmod -R 0775 "$TACTILE_STATE_DIR" >/dev/null 2>&1 || true
 fi
+
+# Ego 绑定改为 /dev/shm 下的开机周期状态；清理旧持久化文件，避免升级后恢复旧绑定。
+rm -f "$LEGACY_EGO_BINDING_FILE" || true
 
 # 安装时自动配置 exfat 提前加载，兼容已生产设备通过 deb 升级修复开机挂载竞态
 ensure_exfat_autoload || true

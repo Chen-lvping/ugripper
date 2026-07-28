@@ -43,6 +43,18 @@ add_host_only_runtime_gtest(test_button_event_timing
     test_button_event_timing.cc
 )
 
+add_host_only_runtime_gtest(test_button_action_router
+    test_button_action_router.cc
+)
+
+add_host_only_runtime_gtest(test_ego_binding_config
+    test_ego_binding_config.cc
+)
+target_include_directories(test_ego_binding_config
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/standalone/GripperHmiTool/include
+)
+
 add_host_only_runtime_gtest(test_gripper_refresh_logic
     test_gripper_refresh_logic.cc
 )
@@ -147,5 +159,14 @@ add_test(
             ${CMAKE_SOURCE_DIR}/test/scripts/test_summarize_episode_reports.py
 )
 set_tests_properties(test_summarize_episode_reports PROPERTIES
+    LABELS "host-only;unit;record_runtime"
+)
+
+add_test(
+    NAME test_validate_episode_profiles
+    COMMAND ${Python3_EXECUTABLE}
+            ${CMAKE_SOURCE_DIR}/test/scripts/test_validate_episode_profiles.py
+)
+set_tests_properties(test_validate_episode_profiles PROPERTIES
     LABELS "host-only;unit;record_runtime"
 )

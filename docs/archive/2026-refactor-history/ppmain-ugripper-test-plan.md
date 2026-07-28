@@ -34,9 +34,18 @@
 
 ### 0.1 最近一次板端重跑结果
 
-截至 `2026-04-28`，最新一次板端包安装后手动录制 smoke 已对接入 `pp_main` spdlog 后端后的 `1.2.8` 包完成实时复核；`2026-04-27` 的完整 release gate 仍是当前同包版本主链路基线，`2026-04-21` 的 `merge8/merge13/merge14` 结果仍保留为历史分项基线，不能与 `1.2.8` 直接混作同一 release gate 结论。
+截至 `2026-07-27`，最新一次板端录制联动检查已覆盖 `2.1.9+nostereo` 的 UGripper 起停、绑定 Ego 强校验、finalize/拉取/远端清理和录后深检；`2026-04-27` 的 `1.2.8` 完整 release gate 仍保留为历史同包版本主链路基线。
 
 本轮已确认通过的板端检查如下：
+
+- `ugripper 2.1.9+nostereo` 录制与 Ego 联动检查（`2026-07-27`）
+  - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`
+  - 结果目录：`tmp/board_results/recording_linkage_2_1_9_nostereo_20260727`
+  - 汇总：`tmp/board_results/recording_linkage_2_1_9_nostereo_20260727/test_summary.json`
+  - 样本：`/mnt/data_disk/dap921265c003003/data/episode_20260727_0003`
+  - 已证明：runtime FIFO 起停、6 路 nostereo 视频、左右 sensor、绑定 Ego 起录/finalize/拉取/大小核对/远端清理均成功；UGripper 与 Ego 全部媒体可完整解码，sensor/Ego MCAP 可解析；停录后服务 `active`、`NRestarts=0`、硬件 `15/15` 在线。
+  - 本轮未证明：现场未产生物理右上长按事件，因此 `task_start_s/task_stop_s` 均为 `0.0`；左右上键绑定组合与受控 Ego 断连到 `ERROR_5` 未主动刺激。
+  - 深检边界：当前 validator 尚未适配 `+nostereo / data_version 3.1 / task_*`，相关缺 stereo/Fays 与 schema 报告不适用；但实测 6 路视频首帧范围 `150.591ms`、sensor 到最晚视频首帧范围 `374.519ms` 属于真实偏差，超过当前深检阈值，因此本轮不能标记为完整 release gate pass。
 
 - `ugripper_1.2.8_arm64.deb` spdlog logger 手动录制 smoke（`2026-04-28`）
   - 板端：`ubuntu@192.168.2.240`，主机名 `HSD-RB1021`，架构 `aarch64`

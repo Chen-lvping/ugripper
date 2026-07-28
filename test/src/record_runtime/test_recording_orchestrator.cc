@@ -55,6 +55,10 @@ struct RecordingHarness
     int stereo_start_calls = 0;
     int stereo_stop_calls = 0;
     int stereo_finalize_calls = 0;
+    int ego_start_calls = 0;
+    int ego_stop_calls = 0;
+    int ego_finalize_calls = 0;
+    int ego_cleanup_calls = 0;
     bool stereo_enabled = true;
     bool prepare_ok = true;
     bool validate_ok = true;
@@ -62,6 +66,11 @@ struct RecordingHarness
     bool stereo_start_ok = true;
     bool stereo_stop_ok = true;
     bool wait_finalize_ok = true;
+    bool ego_required = false;
+    bool ego_start_ok = true;
+    bool ego_stop_ok = true;
+    bool ego_finalize_ok = true;
+    bool ego_cleanup_ok = true;
     bool attach_ok = true;
     bool camera_bin_exists = true;
     bool sensor_bin_exists = true;
@@ -73,6 +82,7 @@ struct RecordingHarness
     std::string merge_error = "merge episode info failed";
     std::string stereo_start_error = "stereo session start failed";
     std::string wait_finalize_error = "stereo finalize timeout";
+    std::string ego_error = "required ego operation failed";
 
     RecordingOrchestrator Make()
     {
@@ -182,6 +192,33 @@ struct RecordingHarness
                      ++stereo_stop_calls;
                      return stereo_stop_ok;
                  },
+             .start_ego_recording =
+                 [this](const std::string&, int64_t, std::string* error) {
+                     ++ego_start_calls;
+                     if (!ego_start_ok && error != nullptr)
+                     {
+                         *error = ego_error;
+                     }
+                     return ego_start_ok;
+                 },
+             .stop_ego_recording =
+                 [this](const std::string&, int64_t, std::string* error) {
+                     ++ego_stop_calls;
+                     if (!ego_stop_ok && error != nullptr)
+                     {
+                         *error = ego_error;
+                     }
+                     return ego_stop_ok;
+                 },
+             .wait_for_ego_finalize =
+                 [this](const std::string&, int, std::string* error) {
+                     ++ego_finalize_calls;
+                     if (!ego_finalize_ok && error != nullptr)
+                     {
+                         *error = ego_error;
+                     }
+                     return ego_finalize_ok;
+                 },
              .wait_for_stereo_finalize =
                  [this](const std::string&, int, std::string* error) {
                      ++stereo_finalize_calls;
@@ -190,6 +227,19 @@ struct RecordingHarness
                          *error = wait_finalize_error;
                      }
                      return wait_finalize_ok;
+                 },
+             .cleanup_ego_remote =
+                 [this](const std::string&, std::string* error) {
+                     ++ego_cleanup_calls;
+                     if (!ego_cleanup_ok && error != nullptr)
+                     {
+                         *error = ego_error;
+                     }
+                     return ego_cleanup_ok;
+                 },
+             .is_ego_required =
+                 [this]() {
+                     return ego_required;
                  },
              .flush_episode_artifacts =
                  [this](const std::string&, const char* stage) {
@@ -307,6 +357,41 @@ TEST(RecordingOrchestratorTest, StartRecordingUpdatesStateAndSignalsReadyFlow)
               ugripper::runtime::ProcessStopMode::SigTermThenKill);
 }
 
+TEST(RecordingOrchestratorTest, RequiredEgoStartFailureBlocksRecordingWithError5)
+{
+    RecordingHarness harness;
+    harness.ego_required = true;
+    harness.ego_start_ok = false;
+    auto orchestrator = harness.Make();
+
+    ASSERT_FALSE(orchestrator.StartRecording(false));
+    EXPECT_FALSE(orchestrator.state().is_recording);
+    EXPECT_TRUE(harness.started_specs.empty());
+    ASSERT_FALSE(harness.led_states.empty());
+    EXPECT_EQ(harness.led_states.back(), RuntimeLedState::Error5);
+    EXPECT_EQ(harness.audio_commands.back(), "error");
+}
+
+TEST(RecordingOrchestratorTest, RequiredEgoPullFailureMapsToError5)
+{
+    RecordingHarness harness;
+    harness.ego_required = true;
+    harness.ego_cleanup_ok = false;
+    auto orchestrator = harness.Make();
+    ASSERT_TRUE(orchestrator.StartRecording(false));
+
+    g_steady_ms += 100;
+    ASSERT_FALSE(orchestrator.StopRecording(false, "stop"));
+    EXPECT_FALSE(orchestrator.state().is_recording);
+    EXPECT_EQ(harness.ego_cleanup_calls, 1);
+    ASSERT_FALSE(harness.led_states.empty());
+    EXPECT_EQ(harness.led_states.back(), RuntimeLedState::Error5);
+    ASSERT_FALSE(harness.metadata_error_types.empty());
+    EXPECT_EQ(harness.metadata_error_types.back(),
+              ugripper::runtime::kErrorTypeEgoPullIncomplete);
+    EXPECT_NE(harness.last_validation_log.find(harness.ego_error), std::string::npos);
+}
+
 TEST(RecordingOrchestratorTest, StereoDisabledSkipsSessionControlAndFinalize)
 {
     RecordingHarness harness;
@@ -371,7 +456,7 @@ TEST(RecordingOrchestratorTest, StopRecordingSuccessSignalsWritingThenReady)
     EXPECT_EQ(orchestrator.state().last_episode_dir, "/tmp/episode_0001");
 
     EXPECT_EQ(harness.flushed_stages,
-              (std::vector<std::string>{"pre_stereo_finalize", "final"}));
+              (std::vector<std::string>{"pre_stereo_finalize", "final", "ego_cleanup"}));
     EXPECT_EQ(harness.audio_commands,
               (std::vector<std::string>{"recording_started", "recording_stop", "writing", "ready"}));
     EXPECT_EQ(harness.recovery_commands,

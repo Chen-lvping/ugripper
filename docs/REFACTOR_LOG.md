@@ -34,6 +34,26 @@
 
 ## Entries
 
+### 2026-07-27 - nostereo-ego-recording-linkage-check
+
+- 阶段：`T15/T16 board verification`
+- 范围：`UgripperRuntime / Ego / nostereo episode / docs`
+- 类型：`板端录制联动验证 / episode 深检 / 结果回填`
+- 已执行验证：
+  - 在 `192.168.2.240` 的 `ugripper 2.1.9+nostereo` 上通过 runtime control FIFO 完成一轮约 `83.1s` 起停录制，生成 `episode_20260727_0003`。
+  - metadata 为 `data_version=3.1`、`quality_check_status=success`；6 路 nostereo 视频与左右 sensor 齐全，无 `validation_error.log`。
+  - 绑定 Ego `1150063703226061200018` 完成起录、finalize、拉取、远端/本地大小核对与远端清理，`ego_sync.json` 为 `status=finalized`、`remote_cleanup.status=deleted`。
+  - 全量解码 UGripper 6 路视频、Ego 3 路视频和音频均通过；左右 encoder 分别 `83058/83069` 帧，时间戳无倒退，最大 gap `7.913/13.420ms`。
+  - `ButtonActionRouter/HmiController/RecordingOrchestrator` 共 `41` 个 gtest 和 Ego worker `8` 个 Python 测试通过。
+  - 停录后 `ugripper.service=active`、`NRestarts=0`、`hws=15/15`，未新增 health fault 或 USB restore 请求。
+- 结果目录与汇总：
+  - `tmp/board_results/recording_linkage_2_1_9_nostereo_20260727`
+  - `tmp/board_results/recording_linkage_2_1_9_nostereo_20260727/test_summary.json`
+- 覆盖边界：
+  - 现场未产生物理右上长按输入，`task_start_s/task_stop_s` 仍为 `0.0`，因此切片蜂鸣和 metadata 落点尚未真机证明。
+  - 未主动执行左右上键绑定/解绑组合，也未通过拔 Ego 主动刺激 `ERROR_5`。
+  - 当前深检脚本仍固定要求 stereo/Fays、`data_version=3.0` 且不认识 `task_*`，这些报告项属于 validator 未适配；实测视频首帧范围 `150.591ms`、全部 UGripper 流首帧范围 `374.519ms` 则是真实超阈值项，需要单独收口。
+
 ### 2026-06-24 - restore-and-fays-log-noise-cleanup
 
 - 阶段：`Post-A3 Step 9 / Scripts And Field-Test Boundary Cleanup`

@@ -16,6 +16,8 @@ inline constexpr const char* kErrorTypeDeviceDisconnected = "device_disconnected
 inline constexpr const char* kErrorTypeCollectionDurationTooShort = "collection_duration_too_short";
 inline constexpr const char* kErrorTypeFrameLoss = "frame_loss";
 inline constexpr const char* kErrorTypeOperatorMarkedFailed = "operator_marked_failed";
+inline constexpr const char* kErrorTypeEgoDisconnected = "ego_disconnected";
+inline constexpr const char* kErrorTypeEgoPullIncomplete = "ego_pull_incomplete";
 
 enum class RuntimeLedState
 {

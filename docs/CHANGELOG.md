@@ -2,11 +2,16 @@
 
 ## Unreleased
 
+- Ego 绑定改为开机周期状态：绑定文件迁移到 `/dev/shm/ugripper/ego_binding.json`，同次开机内服务重启保持绑定，整机重启或断电开机后自动解绑；升级时清理旧持久化绑定文件。
+- 提高 Ego 绑定/解绑反馈区分度：绑定成功改为双手亮黄色三闪与 `1000/2000/4000Hz` 升调，解绑成功改为双手紫色三闪与 `4000/2000/1000Hz` 降调；继续复用蜂鸣状态重试和结束静音机制。
 - 修复夹爪蜂鸣反馈偶发持续鸣响：HMI 驱动对蜂鸣开启和关闭状态切换统一执行 `5` 次、`20ms` 间隔重发，并在连接建立与驱动退出时主动重发关闭状态；Ego 绑定、任务打标等按侧反馈不再依赖单次关闭帧。
-- Fays VIKit SDK 从 `3.5.1` 更新到上游 `main` 的 `3.8.0`（`b1d74499`），同步 aarch64/x86_64 运行库与公开 API/版本头；FT602 `1.0.17` 运行库保持不变。主包版本同步提升到 `2.1.8`。
-- 扩展四口手部 USB2 hub 映射：支持 `.1=主摄/.2=tactile_r/.3=tactile_l/.4=CH9344`，并由 `.4` 自动生成左右 gripper/encoder symlink，同时保留既有 hub 拓扑兼容。
 - 修正 stereo 元数据时间基准：Fays finalize 后，runtime 通过现有 MCAP reader 轻量读取 summary 与首尾 chunk，将首末 camera `publishTime` 和消息数写入现有 timing 缓存；`video_details[].start_offset_us/duration_s` 不再使用 Ego 等待前的 session START 时间或固定帧率 MKV 的压紧时长。metadata 写入只消费 timing 缓存，不改变原有原子写入与 flush 顺序。
 - Episode 深度校验器按 `software_version` 的 `+nostereo` 构建标记动态选择产物清单，当前 schema 同步到 `data_version=3.1`，并兼容历史 `3.0` 以及缺少可选 `task_start_s/task_stop_s` 的数据；仅有开始标记时按无回环数据处理。Ego 绑定/解绑与录制任务打标新增青色灯光反馈，有效任务标记改为双手同步显示，失败和拒绝动作分别沿用红色、橙色语义；所有周期灯效统一按绝对单调时钟计算，避免左右夹爪在单侧提示恢复或重连后错相。
+- 新增 SXR Ego 显式绑定：空闲时左右上键同时长按 `2s` 可绑定唯一在线 Ego 或解除现有绑定，绑定结果通过不同蜂鸣节奏提示并持久化；绑定后断连、起录失败或停录 finalize/拉取/远端本地大小核对不完整统一进入 `ERROR_5`。普通单键长按统一调整为 `1000ms`，左上仅用于标记上一条 episode 失败，左下预留；录制中右上长按 `800ms` 依次写入 `task_start_s` / `task_stop_s`，第三次拒绝。metadata `data_version` 更新为 `3.1`，主包版本提升到 `2.1.9`。
+- 修正绑定 Ego 起录竞态：worker 在校时、编码设置和广播阶段使用非终态 `starting`，避免运行时把准备中的设备误判为 `not_found`，导致 UGripper 起录被拒绝而 Ego 已开始录制。
+- 修复 auto-release manifest 扫描构建目录和归档虚拟环境导致的长时间卡顿：基线迁移到独立状态目录，改用 Git 文件集和批量哈希，并增加原子写入与超时保护。
+- Fays VIKit SDK 从 `3.5.1` 更新到上游 `main` 的 `3.8.0`（`b1d74499`），同步 aarch64/x86_64 运行库与公开 API/版本头；FT602 `1.0.17` 运行库保持不变。主包版本同步提升到 `2.1.8`。
+- 扩展四口手部 USB2 hub 映射：支持 `.1=主摄/.2=tactile_r/.3=tactile_l/.4=CH9344`，并由 `.4` 自动生成左右 gripper/encoder symlink，同时保留既有 hub 拓扑兼容。
 - 新增构建期开关 `UGRIPPER_ENABLE_STEREO`，默认 `ON` 并沿用普通版本/包名；显式设为 `OFF` 时生成 `+nostereo` 包变体，运行时不启动 Fays daemon、不检查 stereo/Fays 健康、不执行双目 session/finalize，也不生成或校验 `stereo_left/right.mkv` 与 `fays_data_left/right.mcap`。该开关不提供 `/etc/environment`、`config.txt` 或命令行运行时覆盖。
 - HMI 物理按键在动作状态机前新增按下、松开各 `40ms` 的双向稳定滤波，过滤短暂电平毛刺；原有 `80ms` 短按动作间隔保持不变。
 - UgripperRuntime、SensorRecorder 与 encoder zeroing 的信号处理路径只设置停止标志，不再在信号上下文执行日志、子进程等待或复杂对象清理；SensorRecorder 退出时先等待编码器读写线程停止，再关闭串口，避免服务停止或停录时发生死锁、资源竞态及 sensor MCAP Footer 未封口。

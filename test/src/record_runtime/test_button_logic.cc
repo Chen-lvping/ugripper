@@ -44,7 +44,7 @@ TEST(HmiControllerTest, EmitsLongPressInsteadOfShortPress)
     g_now_ms = 100;
     EXPECT_TRUE(controller.HandleButtons(ButtonSnapshot{.down_pressed = true}).empty());
 
-    g_now_ms = 950;
+    g_now_ms = 1150;
     auto events = controller.HandleButtons(ButtonSnapshot{.down_pressed = true});
     ASSERT_EQ(events.size(), 1U);
     EXPECT_EQ(events.front().type, HmiEventType::LongDownPressed);

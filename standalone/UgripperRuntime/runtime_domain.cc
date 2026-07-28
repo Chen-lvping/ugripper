@@ -251,6 +251,8 @@ std::string SelectPrimaryErrorType(const std::vector<std::string>& error_types)
         }
     }
     for (const char* preferred : {
+             ugripper::runtime::kErrorTypeEgoDisconnected,
+             ugripper::runtime::kErrorTypeEgoPullIncomplete,
              ugripper::runtime::kErrorTypeRuntimeError,
              ugripper::runtime::kErrorTypeStereoControlFailed,
              ugripper::runtime::kErrorTypeFinalizeError,
@@ -293,7 +295,9 @@ ugripper::runtime::RuntimeLedState SelectFailureLedState(const std::vector<std::
             return ugripper::runtime::RuntimeLedState::Error4;
         }
     }
-    if (HasErrorType(error_types, ugripper::runtime::kErrorTypeRuntimeError))
+    if (HasErrorType(error_types, ugripper::runtime::kErrorTypeRuntimeError) ||
+        HasErrorType(error_types, ugripper::runtime::kErrorTypeEgoDisconnected) ||
+        HasErrorType(error_types, ugripper::runtime::kErrorTypeEgoPullIncomplete))
     {
         return ugripper::runtime::RuntimeLedState::Error5;
     }
@@ -760,6 +764,8 @@ RecordingOrchestrator::RecordingOrchestrator(RecordingOrchestratorOptions option
 
 bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* error_message)
 {
+    const bool ego_required = dependencies_.is_ego_required != nullptr &&
+                              dependencies_.is_ego_required();
     if (dependencies_.remove_recording_lock != nullptr)
     {
         dependencies_.remove_recording_lock();
@@ -849,6 +855,32 @@ bool RecordingOrchestrator::StartRecording(bool reset_recording, std::string* er
             CallLog(dependencies_.log_warn,
                     "ego recording sidecar did not start early: " +
                         (ego_error.empty() ? std::string("unknown error") : ego_error));
+            if (ego_required)
+            {
+                if (dependencies_.set_led_state != nullptr)
+                {
+                    dependencies_.set_led_state(RuntimeLedState::Error5, 0.0);
+                }
+                if (dependencies_.set_audio_recovery_command != nullptr)
+                {
+                    dependencies_.set_audio_recovery_command("error");
+                }
+                if (dependencies_.send_audio_command != nullptr)
+                {
+                    dependencies_.send_audio_command("error");
+                }
+                if (dependencies_.remove_recording_lock != nullptr)
+                {
+                    dependencies_.remove_recording_lock();
+                }
+                if (error_message != nullptr)
+                {
+                    *error_message = ego_error.empty()
+                                         ? "required ego recording sidecar did not start"
+                                         : ego_error;
+                }
+                return false;
+            }
         }
     }
 
@@ -1131,6 +1163,8 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
                                           const std::string& error_type,
                                           std::string* error_message)
 {
+    const bool ego_required = dependencies_.is_ego_required != nullptr &&
+                              dependencies_.is_ego_required();
     if (!state_.is_recording)
     {
         if (dependencies_.remove_recording_lock != nullptr)
@@ -1257,6 +1291,7 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     }
 
     bool ego_stop_ok = true;
+    std::string ego_failure_error;
     if (dependencies_.stop_ego_recording != nullptr)
     {
         std::string ego_stop_error;
@@ -1264,9 +1299,12 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
             state_.current_episode_dir, stop_system_time_us, &ego_stop_error);
         if (!ego_stop_ok)
         {
+            ego_failure_error = ego_stop_error.empty()
+                                    ? std::string("ego recording stop failed")
+                                    : ego_stop_error;
             CallLog(dependencies_.log_warn,
                     "ego recording stop failed: " +
-                        (ego_stop_error.empty() ? std::string("unknown error") : ego_stop_error));
+                        ego_failure_error);
         }
     }
 
@@ -1287,9 +1325,12 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
                 state_.current_episode_dir, options_.stereo_finalize_timeout_ms, &ego_finalize_error))
         {
             ego_stop_ok = false;
+            ego_failure_error = ego_finalize_error.empty()
+                                    ? std::string("ego recording finalize wait failed")
+                                    : ego_finalize_error;
             CallLog(dependencies_.log_warn,
                     "ego recording finalize wait failed: " +
-                        (ego_finalize_error.empty() ? std::string("unknown error") : ego_finalize_error));
+                        ego_failure_error);
         }
         CallPerfLog(dependencies_,
                 "[PERF] ego finalize wait done: ok=" + std::string(ego_stop_ok ? "true" : "false") +
@@ -1330,14 +1371,19 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     {
         dependencies_.flush_episode_artifacts(state_.current_episode_dir, "final");
     }
+    bool ego_cleanup_ok = true;
     if (ego_stop_ok && dependencies_.cleanup_ego_remote != nullptr)
     {
         std::string cleanup_error;
-        if (!dependencies_.cleanup_ego_remote(state_.current_episode_dir, &cleanup_error))
+        ego_cleanup_ok = dependencies_.cleanup_ego_remote(state_.current_episode_dir, &cleanup_error);
+        if (!ego_cleanup_ok)
         {
+            ego_failure_error = cleanup_error.empty()
+                                    ? std::string("ego pull verification or remote cleanup failed")
+                                    : cleanup_error;
             CallLog(dependencies_.log_warn,
                     "ego remote cleanup failed: " +
-                        (cleanup_error.empty() ? std::string("unknown error") : cleanup_error));
+                        ego_failure_error);
         }
         if (dependencies_.flush_episode_artifacts != nullptr)
         {
@@ -1356,6 +1402,22 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
                                                  ? reason
                                                  : recording_hardware_fault_reason)
                                           : std::string();
+    const bool ego_required_ok = !ego_required || (ego_stop_ok && ego_cleanup_ok);
+    if (!ego_required_ok)
+    {
+        AddErrorType(&error_types, kErrorTypeEgoPullIncomplete);
+        const std::string ego_error = ego_failure_error.empty()
+                                          ? std::string("required ego pull did not complete")
+                                          : ego_failure_error;
+        if (final_error_message.empty())
+        {
+            final_error_message = ego_error;
+        }
+        else
+        {
+            final_error_message += "; " + ego_error;
+        }
+    }
     HardwareFaultSide stereo_control_failure_side = HardwareFaultSide::Unknown;
     if (!stereo_stop_ok)
     {
@@ -1413,7 +1475,7 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
     {
         dependencies_.write_episode_metadata(
             state_.current_episode_dir,
-            !due_to_error && stereo_stop_ok,
+            !due_to_error && stereo_stop_ok && ego_required_ok,
             final_error_message,
             SelectPrimaryErrorType(error_types));
     }
@@ -1442,7 +1504,7 @@ bool RecordingOrchestrator::StopRecording(bool due_to_error,
             final_error_message += "; " + episode_validation_error;
         }
     }
-    const bool valid = !due_to_error && stereo_stop_ok && episode_valid;
+    const bool valid = !due_to_error && stereo_stop_ok && ego_required_ok && episode_valid;
     CallPerfLog(dependencies_,
             "[PERF] validation phase end: episode_dir=" + state_.current_episode_dir +
                 " valid=" + std::string(valid ? "true" : "false") + " elapsed_ms=" +

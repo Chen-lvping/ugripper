@@ -20,6 +20,8 @@ TEST(HmiControllerTimingTest, UsesConfiguredDebounceWindowForShortPress)
 {
     HmiController controller(
         HmiControllerOptions{
+            .press_debounce_ms = 0,
+            .release_debounce_ms = 0,
             .action_debounce_ms = 500,
             .long_press_threshold_ms = 1000,
             .dual_long_press_threshold_ms = 4000,
@@ -46,6 +48,8 @@ TEST(HmiControllerTimingTest, LongPressFiresOnceAtConfiguredThreshold)
 {
     HmiController controller(
         HmiControllerOptions{
+            .press_debounce_ms = 0,
+            .release_debounce_ms = 0,
             .action_debounce_ms = 250,
             .long_press_threshold_ms = 1200,
             .dual_long_press_threshold_ms = 4000,
@@ -75,6 +79,8 @@ TEST(HmiControllerTimingTest, UsesConfiguredShutdownPromptThreshold)
 {
     HmiController controller(
         HmiControllerOptions{
+            .press_debounce_ms = 0,
+            .release_debounce_ms = 0,
             .action_debounce_ms = 250,
             .long_press_threshold_ms = 800,
             .dual_long_press_threshold_ms = 5000,
