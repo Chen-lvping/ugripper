@@ -1,4 +1,4 @@
 interface:
   display_name: "Git Commit"
-  short_description: "按 Conventional Commits 提交，功能文档随功能一起提交"
-  default_prompt: "Use $git-commit to review the current working tree, group changes by feature-level scope, keep feature-related docs in the same commit, and commit with a Conventional Commits message. If the user did not specify scope, commit all changes unless the tree clearly contains multiple unrelated themes, then ask for confirmation first."
+  short_description: "按功能组织提交，并收纳文档、版本与 graphify 更新"
+  default_prompt: "Use $git-commit to review the current working tree, group changes by feature-level scope, keep related docs with their feature, and include version bumps and graphify outputs in the final commit instead of separate commits. Use Conventional Commits. If the user did not specify scope, commit all changes unless the tree clearly contains multiple unrelated themes, then ask for confirmation first."
