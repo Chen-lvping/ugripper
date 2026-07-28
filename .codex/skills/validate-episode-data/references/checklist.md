@@ -6,28 +6,36 @@
 - `calibration.json`
 - `cam_left.mkv`
 - `cam_right.mkv`
-- `stereo_left.mkv`
-- `stereo_right.mkv`
 - `tcam_left_l.mkv`
 - `tcam_left_r.mkv`
 - `tcam_right_l.mkv`
 - `tcam_right_r.mkv`
 - `sensor_left.mcap`
 - `sensor_right.mcap`
+
+普通构建额外必查：
+
+- `stereo_left.mkv`
+- `stereo_right.mkv`
 - `fays_data_left.mcap`
 - `fays_data_right.mcap`
+
+`software_version` 带 `+nostereo` 时不要求以上四个文件，且 `require_files` / `video_details` 不应声明它们。
 
 ## 1.1 推荐附加检查
 
 - `validation_error.log` 是否存在
 - `audio_pre.wav` / `audio_post.wav` 是否按预期出现
-- `metadata.json` 是否包含新 3.0 字段：`device_sn` / `hardware_list` / `require_files` / `video_details` / `collection_duration_s` / `quality_check_status`
+- `metadata.json` 是否符合当前 `data_version=3.1` 字段约定，并兼容历史 `3.0` 数据
+- 可选 `task_start_s/task_stop_s` 是否为非负数且顺序有效；只有开始标记时按无回环数据处理
 - `metadata.json` 顶层字段、`hardware_list` 字段和 `video_details[]` 字段顺序是否符合标准范本
 - `metadata.json` / `calibration.json` 的顶层 key 集合是否仍符合约定
 - 关键 JSON 字段类型是否仍符合约定，防止“有字段但类型偷偷变了”
 - `video_details` 是否不再重复写 `serial`，且使用 `duration_s` / `start_offset_us`
 - `calibration.json.observation.images` 是否覆盖 8 路图像
 - Fays 侧 `fays_data_left.mcap` / `fays_data_right.mcap` 是否头尾 magic 完整、可解析、包含 `i/c` 数据，且覆盖时长接近对应 stereo 视频
+- Fays `c.publishTime` 是否单调，左右首帧 `publishTime` 差是否与 metadata stereo `start_offset_us` 差一致；`c` 消息数、frameIndex 与 stereo MKV packet 数是否一一对应
+- stereo `duration_s` 是否使用首末 `c.publishTime` 跨度；MKV 固定帧率 PTS 因真实 camera gap 被压紧时，只报告 gap/缺帧，不把容器短时长误当作系统时钟偏移
 - 主摄专项扫描是否发现 `backward_dts` / `decode_non_monotonic_dts` / `decode_error`
 - 是否输出统一的首帧对齐表，覆盖 8 路 `mkv` 和左右 sensor topic
 

@@ -60,9 +60,12 @@ EXPECTED_METADATA_KEY_ORDER = [
     "quality_check_status",
     "quality_check_err_type",
     "collection_duration_s",
+    "task_start_s",
+    "task_stop_s",
     "require_files",
     "video_details",
 ]
+OPTIONAL_METADATA_KEYS = {"task_start_s", "task_stop_s"}
 REQUIRED_METADATA_FIELDS = [
     "device_sn",
     "device_type",
@@ -147,11 +150,19 @@ STEREO_CALIBRATION_KEY_ORDER = [
 STEREO_CAMERA_NODE_KEY_ORDER = ["distortion_coeffs", "intrinsics"]
 TACTILE_CALIBRATION_KEY_ORDER = ["names", "serial", "shape"]
 IMU_CALIBRATION_KEYS = {"update_rate_hz", "accelerometer", "gyroscope"}
-REQUIRED_FILES = [
+CORE_REQUIRED_FILES = [
     "metadata.json",
     "calibration.json",
-    *(file_name for _, file_name, _ in BASE_VIDEO_FILES),
+    *(
+        file_name
+        for camera_name, file_name, _ in BASE_VIDEO_FILES
+        if camera_name not in {"left_stereo", "right_stereo"}
+    ),
     *(file_name for _, file_name, _ in SENSOR_FILES),
+]
+STEREO_REQUIRED_FILES = [
+    "stereo_left.mkv",
+    "stereo_right.mkv",
     "fays_data_left.mcap",
     "fays_data_right.mcap",
 ]
@@ -362,6 +373,18 @@ class FaysMcapStats:
     first_log_time_ns: int | None = None
     last_log_time_ns: int | None = None
     span_sec: float = 0.0
+    first_camera_log_time_ns: int | None = None
+    last_camera_log_time_ns: int | None = None
+    first_camera_publish_time_ns: int | None = None
+    last_camera_publish_time_ns: int | None = None
+    camera_publish_span_sec: float = 0.0
+    max_camera_gap_ms: float = 0.0
+    camera_gap_count: int = 0
+    camera_rollback_count: int = 0
+    estimated_missing_frames: int = 0
+    first_frame_index: int | None = None
+    last_frame_index: int | None = None
+    frame_index_error_count: int = 0
 
 
 @dataclass
@@ -426,6 +449,7 @@ class EpisodeValidator:
         self.sensor_stats: dict[str, SensorTopicStats] = {}
         self.fays_mcap_stats: dict[str, FaysMcapStats] = {}
         self.artifacts: dict[str, Any] = {}
+        self.stereo_enabled = True
         self.active_video_files: list[tuple[str, str, str]] = list(BASE_VIDEO_FILES)
 
     def add_finding(self, severity: str, code: str, summary: str, **details: Any) -> None:
@@ -436,11 +460,12 @@ class EpisodeValidator:
 
     def validate(self) -> Report:
         self.check_episode_dir()
-        self.check_required_files()
         self.check_optional_artifacts()
         self.load_metadata()
         self.load_calibration()
+        self.resolve_episode_profile()
         self.resolve_active_video_files()
+        self.check_required_files()
         self.check_dynamic_required_files()
         self.validate_metadata_fields()
         self.validate_calibration_structure()
@@ -495,7 +520,10 @@ class EpisodeValidator:
             raise SystemExit(f"episode path is not a directory: {self.episode_dir}")
 
     def check_required_files(self) -> None:
-        for name in REQUIRED_FILES:
+        required_files = list(CORE_REQUIRED_FILES)
+        if self.stereo_enabled:
+            required_files.extend(STEREO_REQUIRED_FILES)
+        for name in required_files:
             path = self.episode_dir / name
             if not path.exists():
                 self.add_finding("FAIL", "missing_file", f"缺少关键文件: {name}", path=str(path))
@@ -512,8 +540,16 @@ class EpisodeValidator:
             or CHEST_VIDEO_FILE[0] in images
         )
 
+    def resolve_episode_profile(self) -> None:
+        software_version = safe_str(self.metadata.get("software_version")) or ""
+        self.stereo_enabled = "+nostereo" not in software_version.lower()
+
     def resolve_active_video_files(self) -> None:
-        self.active_video_files = list(BASE_VIDEO_FILES)
+        self.active_video_files = [
+            entry
+            for entry in BASE_VIDEO_FILES
+            if self.stereo_enabled or entry[0] not in {"left_stereo", "right_stereo"}
+        ]
         if self.chest_camera_enabled():
             self.active_video_files.insert(2, CHEST_VIDEO_FILE)
 
@@ -566,16 +602,21 @@ class EpisodeValidator:
 
     def validate_metadata_fields(self) -> None:
         metadata_key_order = list(self.metadata.keys())
-        if metadata_key_order != EXPECTED_METADATA_KEY_ORDER:
+        expected_metadata_key_order = [
+            key
+            for key in EXPECTED_METADATA_KEY_ORDER
+            if key not in OPTIONAL_METADATA_KEYS or key in self.metadata
+        ]
+        if metadata_key_order != expected_metadata_key_order:
             self.add_finding(
                 "FAIL",
                 "metadata_schema_key_order",
                 "metadata.json 顶层字段顺序不符合标准范本",
                 actual_order=metadata_key_order,
-                expected_order=EXPECTED_METADATA_KEY_ORDER,
+                expected_order=expected_metadata_key_order,
             )
         metadata_keys = set(self.metadata.keys())
-        missing_keys = sorted(EXPECTED_METADATA_KEYS - metadata_keys)
+        missing_keys = sorted((EXPECTED_METADATA_KEYS - OPTIONAL_METADATA_KEYS) - metadata_keys)
         unexpected_keys = sorted(metadata_keys - EXPECTED_METADATA_KEYS)
         if missing_keys:
             self.add_finding(
@@ -612,13 +653,20 @@ class EpisodeValidator:
             "quality_check_status": str,
             "require_files": list,
             "software_version": str,
+            "task_start_s": (int, float),
+            "task_stop_s": (int, float),
             "video_details": list,
         }
         for field_name, expected_type in expected_types.items():
             if field_name not in self.metadata:
                 continue
             value = self.metadata[field_name]
-            if not isinstance(value, expected_type):
+            numeric_bool = (
+                isinstance(value, bool)
+                and isinstance(expected_type, tuple)
+                and any(item in {int, float} for item in expected_type)
+            )
+            if numeric_bool or not isinstance(value, expected_type):
                 if isinstance(expected_type, tuple):
                     expected_type_name = "|".join(t.__name__ for t in expected_type)
                 else:
@@ -675,9 +723,9 @@ class EpisodeValidator:
                 "tactile_right_r_sn",
                 "tactile_left_l_sn",
                 "tactile_left_r_sn",
-                "stereo_right_sn",
-                "stereo_left_sn",
             ]
+            if self.stereo_enabled:
+                required_non_empty.extend(["stereo_right_sn", "stereo_left_sn"])
             if self.chest_camera_enabled():
                 required_non_empty.append("cam_chest_sn")
             for key in required_non_empty:
@@ -689,13 +737,21 @@ class EpisodeValidator:
                         f"metadata.json.hardware_list.{key} 为空",
                     )
         data_version = safe_str(self.metadata.get("data_version"))
-        if data_version is not None and data_version != "3.0":
+        if data_version == "3.0":
+            self.add_finding(
+                "INFO",
+                "metadata_data_version_legacy",
+                "metadata.json 使用兼容的历史 data_version 3.0",
+                data_version=data_version,
+            )
+        elif data_version is not None and data_version != "3.1":
             self.add_finding(
                 "WARN",
                 "metadata_data_version",
-                "metadata.json 的 data_version 不是预期值 3.0",
+                "metadata.json 的 data_version 不是当前版本 3.1",
                 data_version=data_version,
             )
+        self.validate_task_markers()
         device_type = safe_str(self.metadata.get("device_type"))
         if device_type is not None and device_type not in {"ugripper", "ego", "glove"}:
             self.add_finding("WARN", "metadata_device_type", "metadata.json 的 device_type 不是常见值", device_type=device_type)
@@ -737,7 +793,11 @@ class EpisodeValidator:
             )
         require_files = self.metadata.get("require_files")
         if isinstance(require_files, list):
-            missing_required_names = sorted(set(REQUIRED_FILES) - {str(name) for name in require_files})
+            expected_required_files = set(CORE_REQUIRED_FILES)
+            if self.stereo_enabled:
+                expected_required_files.update(STEREO_REQUIRED_FILES)
+            actual_required_files = {str(name) for name in require_files}
+            missing_required_names = sorted(expected_required_files - actual_required_files)
             if missing_required_names:
                 self.add_finding(
                     "WARN",
@@ -745,10 +805,23 @@ class EpisodeValidator:
                     "metadata.json.require_files 未覆盖校验脚本所需文件",
                     missing_names=missing_required_names,
                 )
+            if not self.stereo_enabled:
+                unexpected_stereo_names = sorted(set(STEREO_REQUIRED_FILES) & actual_required_files)
+                if unexpected_stereo_names:
+                    self.add_finding(
+                        "FAIL",
+                        "metadata_nostereo_profile",
+                        "+nostereo metadata.json.require_files 不应声明 stereo/Fays 产物",
+                        unexpected_names=unexpected_stereo_names,
+                    )
         video_details = self.metadata.get("video_details")
         if isinstance(video_details, list):
             detail_names = [detail.get("name") for detail in video_details if isinstance(detail, dict)]
-            expected_detail_names = EXPECTED_METADATA_VIDEO_DETAIL_NAMES
+            expected_detail_names = list(EXPECTED_METADATA_VIDEO_DETAIL_NAMES)
+            if not self.stereo_enabled:
+                expected_detail_names = [
+                    name for name in expected_detail_names if name not in {"stereo_left.mkv", "stereo_right.mkv"}
+                ]
             if not self.chest_camera_enabled():
                 expected_detail_names = [name for name in expected_detail_names if name != "cam_chest.mkv"]
             if detail_names != expected_detail_names:
@@ -786,6 +859,68 @@ class EpisodeValidator:
                     self.add_finding("FAIL", "metadata_video_details", f"video_details[{index}].start_offset_us 类型异常")
                 if isinstance(detail.get("name"), str) and isinstance(detail.get("start_offset_us"), int):
                     self.video_start_offsets_us[detail["name"]] = detail["start_offset_us"]
+
+    def validate_task_markers(self) -> None:
+        start_present = "task_start_s" in self.metadata
+        stop_present = "task_stop_s" in self.metadata
+        if not start_present and not stop_present:
+            return
+
+        start_value = self.metadata.get("task_start_s", 0.0)
+        stop_value = self.metadata.get("task_stop_s", 0.0)
+        if (
+            isinstance(start_value, bool)
+            or isinstance(stop_value, bool)
+            or not isinstance(start_value, (int, float))
+            or not isinstance(stop_value, (int, float))
+        ):
+            return
+
+        task_start_s = float(start_value)
+        task_stop_s = float(stop_value)
+        if not math.isfinite(task_start_s) or not math.isfinite(task_stop_s):
+            self.add_finding(
+                "FAIL",
+                "metadata_task_markers",
+                "task_start_s/task_stop_s 必须是有限数值",
+                task_start_s=task_start_s,
+                task_stop_s=task_stop_s,
+            )
+            return
+        if task_start_s < 0.0 or task_stop_s < 0.0:
+            self.add_finding(
+                "FAIL",
+                "metadata_task_markers",
+                "task_start_s/task_stop_s 不得为负数",
+                task_start_s=task_start_s,
+                task_stop_s=task_stop_s,
+            )
+            return
+        if task_stop_s > 0.0 and task_start_s <= 0.0:
+            self.add_finding(
+                "FAIL",
+                "metadata_task_markers",
+                "存在 task_stop_s 但缺少有效 task_start_s",
+                task_start_s=task_start_s,
+                task_stop_s=task_stop_s,
+            )
+            return
+        if task_start_s > 0.0 and task_stop_s <= 0.0:
+            self.add_finding(
+                "INFO",
+                "metadata_task_start_only",
+                "仅存在任务开始标记，按无回环数据处理",
+                task_start_s=task_start_s,
+            )
+            return
+        if task_stop_s > 0.0 and task_stop_s <= task_start_s:
+            self.add_finding(
+                "FAIL",
+                "metadata_task_markers",
+                "task_stop_s 必须晚于 task_start_s",
+                task_start_s=task_start_s,
+                task_stop_s=task_stop_s,
+            )
 
     def validate_calibration_structure(self) -> None:
         calibration_key_order = list(self.calibration.keys())
@@ -1269,8 +1404,8 @@ class EpisodeValidator:
                 channel = channels.get(record.channel_id)
                 if channel is None:
                     continue
-                data_size = len(getattr(record, "data", b"") or b"")
-                yield str(channel.topic), int(record.log_time), data_size
+                data = bytes(getattr(record, "data", b"") or b"")
+                yield str(channel.topic), int(record.log_time), int(record.publish_time), data
 
     def scan_sensors(self) -> None:
         if StreamReader is None:
@@ -1341,6 +1476,8 @@ class EpisodeValidator:
                 )
 
     def scan_fays_mcaps(self) -> None:
+        if not self.stereo_enabled:
+            return
         if StreamReader is None:
             self.add_finding(
                 "WARN",
@@ -1375,8 +1512,13 @@ class EpisodeValidator:
                 continue
 
             stats = FaysMcapStats(side=side, source_file=str(path))
+            previous_camera_log_ns: int | None = None
+            previous_camera_publish_ns: int | None = None
+            previous_frame_index: int | None = None
+            nominal_camera_interval_ns = 40_000_000
             try:
-                for topic, log_time_ns, data_size in self.iter_mcap_message_records(path):
+                for topic, log_time_ns, publish_time_ns, data in self.iter_mcap_message_records(path):
+                    data_size = len(data)
                     is_imu = topic == "i" or data_size == FAYS_IMU_PAYLOAD_BYTES
                     is_camera = topic == "c" or data_size == FAYS_CAMERA_PAYLOAD_BYTES
                     if not is_imu and not is_camera:
@@ -1385,6 +1527,33 @@ class EpisodeValidator:
                         stats.imu_count += 1
                     if is_camera:
                         stats.camera_count += 1
+                        frame_index = int.from_bytes(data[:4], byteorder="little", signed=False) if len(data) >= 4 else None
+                        if stats.first_camera_log_time_ns is None:
+                            stats.first_camera_log_time_ns = log_time_ns
+                            stats.first_camera_publish_time_ns = publish_time_ns
+                            stats.first_frame_index = frame_index
+                        stats.last_camera_log_time_ns = log_time_ns
+                        stats.last_camera_publish_time_ns = publish_time_ns
+                        stats.last_frame_index = frame_index
+
+                        if previous_camera_log_ns is not None and previous_camera_publish_ns is not None:
+                            if log_time_ns < previous_camera_log_ns or publish_time_ns < previous_camera_publish_ns:
+                                stats.camera_rollback_count += 1
+                            else:
+                                gap_ns = log_time_ns - previous_camera_log_ns
+                                stats.max_camera_gap_ms = max(stats.max_camera_gap_ms, gap_ns / 1_000_000.0)
+                                if gap_ns > nominal_camera_interval_ns + nominal_camera_interval_ns // 2:
+                                    stats.camera_gap_count += 1
+                                    intervals = (gap_ns + nominal_camera_interval_ns // 2) // nominal_camera_interval_ns
+                                    stats.estimated_missing_frames += max(0, intervals - 1)
+                        if (
+                            frame_index is None
+                            or (previous_frame_index is not None and frame_index != previous_frame_index + 1)
+                        ):
+                            stats.frame_index_error_count += 1
+                        previous_camera_log_ns = log_time_ns
+                        previous_camera_publish_ns = publish_time_ns
+                        previous_frame_index = frame_index
                     if stats.first_log_time_ns is None or log_time_ns < stats.first_log_time_ns:
                         stats.first_log_time_ns = log_time_ns
                     if stats.last_log_time_ns is None or log_time_ns > stats.last_log_time_ns:
@@ -1395,6 +1564,15 @@ class EpisodeValidator:
 
             if stats.first_log_time_ns is not None and stats.last_log_time_ns is not None:
                 stats.span_sec = max(0.0, (stats.last_log_time_ns - stats.first_log_time_ns) / 1_000_000_000.0)
+            if (
+                stats.first_camera_publish_time_ns is not None
+                and stats.last_camera_publish_time_ns is not None
+            ):
+                stats.camera_publish_span_sec = max(
+                    0.0,
+                    (stats.last_camera_publish_time_ns - stats.first_camera_publish_time_ns)
+                    / 1_000_000_000.0,
+                )
             self.fays_mcap_stats[file_name] = stats
 
             if stats.imu_count <= 0 or stats.camera_count <= 0:
@@ -1408,6 +1586,58 @@ class EpisodeValidator:
                 continue
 
             stereo_stats = self.video_stats.get(stereo_camera_name)
+            if stereo_stats is not None:
+                if stereo_stats.packet_count > 0 and stereo_stats.packet_count != stats.camera_count:
+                    self.add_finding(
+                        "FAIL",
+                        "fays_video_frame_count",
+                        f"{file_name} camera 消息数与对应 stereo MKV packet 数不一致",
+                        camera_count=stats.camera_count,
+                        video_packet_count=stereo_stats.packet_count,
+                    )
+                if stereo_stats.first_system_time_us is not None and stats.camera_publish_span_sec > 0:
+                    stereo_stats.last_system_time_us = (
+                        stereo_stats.first_system_time_us
+                        + sec_to_us(stats.camera_publish_span_sec)
+                    )
+
+            metadata_detail = next(
+                (
+                    detail
+                    for detail in self.metadata.get("video_details", [])
+                    if isinstance(detail, dict) and detail.get("name") == f"stereo_{side}.mkv"
+                ),
+                None,
+            )
+            metadata_duration = safe_float(metadata_detail.get("duration_s")) if metadata_detail else None
+            if metadata_duration is not None and stats.camera_publish_span_sec > 0:
+                if abs(metadata_duration - round(stats.camera_publish_span_sec, 1)) > 0.051:
+                    self.add_finding(
+                        "FAIL",
+                        "fays_metadata_duration",
+                        f"{file_name} 的 publishTime 跨度与 metadata stereo duration_s 不一致",
+                        metadata_duration_s=metadata_duration,
+                        camera_publish_span_s=round(stats.camera_publish_span_sec, 6),
+                    )
+
+            if stats.camera_rollback_count > 0 or stats.frame_index_error_count > 0:
+                self.add_finding(
+                    "FAIL",
+                    "fays_camera_timestamps",
+                    f"{file_name} camera 时间戳或 frameIndex 不单调",
+                    rollback_count=stats.camera_rollback_count,
+                    frame_index_error_count=stats.frame_index_error_count,
+                )
+            if stats.camera_gap_count > 0:
+                self.add_finding(
+                    "WARN",
+                    "fays_camera_gap",
+                    f"{file_name} 存在真实设备时间 gap，metadata duration 已按 publishTime 保留该时间洞",
+                    max_gap_ms=round(stats.max_camera_gap_ms, 3),
+                    gap_count=stats.camera_gap_count,
+                    estimated_missing_frames=stats.estimated_missing_frames,
+                )
+
             reference_duration_sec = stereo_stats.duration_sec if stereo_stats else None
             if reference_duration_sec and reference_duration_sec > 0:
                 coverage_ratio = stats.span_sec / reference_duration_sec
@@ -1421,6 +1651,34 @@ class EpisodeValidator:
                         reference_video_duration_sec=round(reference_duration_sec, 3),
                         coverage_ratio=round(coverage_ratio, 3),
                     )
+
+        left_fays = self.fays_mcap_stats.get("fays_data_left.mcap")
+        right_fays = self.fays_mcap_stats.get("fays_data_right.mcap")
+        left_metadata_offset = safe_int(self.video_start_offsets_us.get("stereo_left.mkv"))
+        right_metadata_offset = safe_int(self.video_start_offsets_us.get("stereo_right.mkv"))
+        if (
+            left_fays is not None
+            and right_fays is not None
+            and left_fays.first_camera_publish_time_ns is not None
+            and right_fays.first_camera_publish_time_ns is not None
+            and left_metadata_offset is not None
+            and right_metadata_offset is not None
+        ):
+            publish_delta_us = (
+                right_fays.first_camera_publish_time_ns
+                - left_fays.first_camera_publish_time_ns
+            ) // 1000
+            metadata_delta_us = right_metadata_offset - left_metadata_offset
+            delta_error_us = abs(metadata_delta_us - publish_delta_us)
+            if delta_error_us > 1000:
+                self.add_finding(
+                    "FAIL",
+                    "fays_metadata_start_offset",
+                    "左右 stereo metadata start_offset_us 未保持 MCAP publishTime 的真实起点差",
+                    metadata_delta_us=metadata_delta_us,
+                    publish_time_delta_us=publish_delta_us,
+                    delta_error_us=delta_error_us,
+                )
 
     def check_video_span_consistency(self) -> None:
         for stats in self.video_stats.values():
@@ -1766,7 +2024,10 @@ def print_text_report(report: Report) -> None:
             item = report.fays_mcaps[name]
             print(
                 f"- {name}: imu_count={item.imu_count} camera_count={item.camera_count} "
-                f"span_sec={round(item.span_sec, 3)}"
+                f"span_sec={round(item.span_sec, 3)} "
+                f"camera_publish_span_sec={round(item.camera_publish_span_sec, 3)} "
+                f"max_camera_gap_ms={round(item.max_camera_gap_ms, 3)} "
+                f"estimated_missing_frames={item.estimated_missing_frames}"
             )
     if report.artifacts:
         print()

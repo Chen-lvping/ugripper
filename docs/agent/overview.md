@@ -236,6 +236,7 @@
 - `video_details[].start_offset_us` 由各路绝对 `record_time_offset_us` 折算而来，单位为微秒；计算时以本 episode 最早一路视频 offset 为 `0`。stereo 的绝对 offset 为首个 `c.publishTime / 1000`，其中 `publishTime` 已由 Fays IMU 时钟偏移映射到主机 Unix 时钟；禁止使用 session START 控制时间或首帧到达时重新计时。
 - stereo MKV packet 与 Fays MCAP `c` topic 通过 `frameIndex`/顺序一一对应；精确逐帧系统时间必须使用对应 `c.publishTime`。MKV 仍保持固定帧率播放时间轴，不在停录阶段重封装或改写 PTS，以免增加 writing/flush 时延。
 - 默认包的 `require_files` 包含 stereo/Fays 文件；`+nostereo` 变体只包含 metadata、calibration、左右主摄、四路 tactile 与左右 sensor。启用胸部主摄时两种变体都追加 `cam_chest.mkv`。
+- 离线 episode 深度校验以 `software_version` 中的 `+nostereo` 为构建 profile 标记，并交叉核对 `require_files`、`video_details` 与实际文件；普通版本缺失 stereo/Fays 仍判失败，不能通过删减 `require_files` 自动降级。当前标准版本为 `3.1`，历史 `3.0` 作为兼容数据允许分析，其他未知版本给出告警。
 
 ### 7.3 停录强校验
 停录后当前按以下层次校验：
