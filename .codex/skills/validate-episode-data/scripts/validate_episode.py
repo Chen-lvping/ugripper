@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import shutil
 import subprocess
 import sys
@@ -37,6 +38,7 @@ SENSOR_FILES = [
     ("left", "sensor_left.mcap", ["encoder_left"]),
     ("right", "sensor_right.mcap", ["encoder_right"]),
 ]
+EGO_SENSOR_FILE = "ego/sensor.mcap"
 FAYS_MCAP_FILES = [
     ("left", "fays_data_left.mcap", "left_stereo"),
     ("right", "fays_data_right.mcap", "right_stereo"),
@@ -44,6 +46,8 @@ FAYS_MCAP_FILES = [
 MCAP_MAGIC = b"\x89MCAP0\r\n"
 FAYS_IMU_PAYLOAD_BYTES = 48
 FAYS_CAMERA_PAYLOAD_BYTES = 4
+MIN_UNIX_TIMESTAMP_US = 946_684_800_000_000
+DEFAULT_GLOBAL_FIRST_FRAME_FAIL_MS = 1000.0
 EXPECTED_METADATA_KEY_ORDER = [
     "device_sn",
     "device_type",
@@ -272,6 +276,9 @@ def percentile(sorted_values: list[float], p: float) -> float:
 
 
 def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    command_env = os.environ.copy()
+    if Path(command[0]).name in {"ffprobe", "ffmpeg"}:
+        command_env.pop("LD_LIBRARY_PATH", None)
     return subprocess.run(
         command,
         stdout=subprocess.PIPE,
@@ -279,6 +286,7 @@ def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
         text=True,
         errors="replace",
         check=False,
+        env=command_env,
     )
 
 
@@ -357,6 +365,11 @@ class SensorTopicStats:
     count: int = 0
     first_log_time_ns: int | None = None
     last_log_time_ns: int | None = None
+    first_publish_time_ns: int | None = None
+    last_publish_time_ns: int | None = None
+    first_system_time_us: int | None = None
+    time_alignment_method: str | None = None
+    time_offset_us: int | None = None
     median_gap_ms: float = 0.0
     p99_gap_ms: float = 0.0
     max_gap_ms: float = 0.0
@@ -372,6 +385,8 @@ class FaysMcapStats:
     camera_count: int = 0
     first_log_time_ns: int | None = None
     last_log_time_ns: int | None = None
+    first_imu_publish_time_ns: int | None = None
+    last_imu_publish_time_ns: int | None = None
     span_sec: float = 0.0
     first_camera_log_time_ns: int | None = None
     last_camera_log_time_ns: int | None = None
@@ -443,12 +458,14 @@ class EpisodeValidator:
         self.episode_dir = resolve_episode_dir(args.path, args.latest)
         self.findings: list[Finding] = []
         self.metadata: dict[str, Any] = {}
+        self.ego_metadata: dict[str, Any] = {}
         self.calibration: dict[str, Any] = {}
         self.video_start_offsets_us: dict[str, int] = {}
         self.video_stats: dict[str, VideoStats] = {}
         self.sensor_stats: dict[str, SensorTopicStats] = {}
         self.fays_mcap_stats: dict[str, FaysMcapStats] = {}
         self.artifacts: dict[str, Any] = {}
+        self.global_first_frame_sync: dict[str, Any] = {}
         self.stereo_enabled = True
         self.active_video_files: list[tuple[str, str, str]] = list(BASE_VIDEO_FILES)
 
@@ -463,6 +480,7 @@ class EpisodeValidator:
         self.check_optional_artifacts()
         self.load_metadata()
         self.load_calibration()
+        self.load_ego_metadata()
         self.resolve_episode_profile()
         self.resolve_active_video_files()
         self.check_required_files()
@@ -481,7 +499,6 @@ class EpisodeValidator:
         self.check_sensor_alignment()
         self.check_sensor_coverage()
         self.check_video_sensor_alignment()
-        self.check_video_sensor_overlap()
         self.classify_patterns()
 
         status = "PASS"
@@ -501,6 +518,7 @@ class EpisodeValidator:
             "sensor_topic_count": len(self.sensor_stats),
             "fays_mcap_count": len(self.fays_mcap_stats),
             "artifact_count": len(self.artifacts),
+            "global_first_frame_sync": self.global_first_frame_sync,
         }
         return Report(
             episode_dir=str(self.episode_dir),
@@ -599,6 +617,12 @@ class EpisodeValidator:
 
     def load_calibration(self) -> None:
         self.calibration = self.load_json_file("calibration.json")
+
+    def load_ego_metadata(self) -> None:
+        ego_sensor_path = self.episode_dir / EGO_SENSOR_FILE
+        ego_metadata_path = self.episode_dir / "ego/metadata.json"
+        if ego_sensor_path.is_file() or ego_metadata_path.is_file():
+            self.ego_metadata = self.load_json_file("ego/metadata.json")
 
     def validate_metadata_fields(self) -> None:
         metadata_key_order = list(self.metadata.keys())
@@ -855,10 +879,20 @@ class EpisodeValidator:
                 for key in ("fps", "duration_s"):
                     if key in detail and not isinstance(detail.get(key), (int, float)):
                         self.add_finding("FAIL", "metadata_video_details", f"video_details[{index}].{key} 类型异常")
-                if "start_offset_us" in detail and not isinstance(detail.get("start_offset_us"), int):
+                start_offset_us = detail.get("start_offset_us")
+                if "start_offset_us" in detail and not isinstance(start_offset_us, int):
                     self.add_finding("FAIL", "metadata_video_details", f"video_details[{index}].start_offset_us 类型异常")
-                if isinstance(detail.get("name"), str) and isinstance(detail.get("start_offset_us"), int):
-                    self.video_start_offsets_us[detail["name"]] = detail["start_offset_us"]
+                if isinstance(detail.get("name"), str) and isinstance(start_offset_us, int):
+                    self.video_start_offsets_us[detail["name"]] = start_offset_us
+                    if start_offset_us < MIN_UNIX_TIMESTAMP_US:
+                        self.add_finding(
+                            "FAIL",
+                            "metadata_video_time_domain",
+                            f"video_details[{index}].start_offset_us 不是 Unix 微秒时间",
+                            name=detail["name"],
+                            start_offset_us=start_offset_us,
+                            minimum_unix_us=MIN_UNIX_TIMESTAMP_US,
+                        )
 
     def validate_task_markers(self) -> None:
         start_present = "task_start_s" in self.metadata
@@ -1368,25 +1402,6 @@ class EpisodeValidator:
                     duplicate_dts_count=duplicate_dts_count,
                 )
 
-    def iter_mcap_messages(self, mcap_path: Path):
-        if StreamReader is None:
-            raise RuntimeError(
-                "python mcap package is unavailable; prefer running this script via `uv run python ...`"
-            )
-        with mcap_path.open("rb") as handle:
-            channels: dict[int, Any] = {}
-            for record in StreamReader(handle).records:
-                record_name = type(record).__name__
-                if record_name == "Channel":
-                    channels[record.id] = record
-                    continue
-                if record_name != "Message":
-                    continue
-                channel = channels.get(record.channel_id)
-                if channel is None:
-                    continue
-                yield str(channel.topic), int(record.log_time)
-
     def iter_mcap_message_records(self, mcap_path: Path):
         if StreamReader is None:
             raise RuntimeError(
@@ -1417,31 +1432,47 @@ class EpisodeValidator:
             )
             return
 
-        topic_times: dict[str, list[int]] = defaultdict(list)
+        topic_log_times: dict[str, list[int]] = defaultdict(list)
+        topic_publish_times: dict[str, list[int]] = defaultdict(list)
         topic_sources: dict[str, str] = {}
-        for _, file_name, expected_topics in SENSOR_FILES:
+        sensor_sources = [
+            (file_name, expected_topics, "")
+            for _, file_name, expected_topics in SENSOR_FILES
+        ]
+        if (self.episode_dir / EGO_SENSOR_FILE).is_file():
+            sensor_sources.append((EGO_SENSOR_FILE, [], "ego:"))
+
+        for file_name, expected_topics, topic_prefix in sensor_sources:
             path = self.episode_dir / file_name
             if not path.exists() or path.stat().st_size <= 0:
                 continue
             try:
-                for topic, log_time_ns in self.iter_mcap_messages(path):
-                    topic_times[topic].append(log_time_ns)
-                    topic_sources[topic] = str(path)
+                for topic, log_time_ns, publish_time_ns, _ in self.iter_mcap_message_records(path):
+                    topic_key = f"{topic_prefix}{topic}"
+                    topic_log_times[topic_key].append(log_time_ns)
+                    topic_publish_times[topic_key].append(publish_time_ns)
+                    topic_sources[topic_key] = str(path)
             except Exception as exc:
                 self.add_finding("FAIL", "mcap_read_error", f"读取 {file_name} 失败", error=str(exc))
                 continue
 
             for topic in expected_topics:
-                if topic not in topic_times:
+                topic_key = f"{topic_prefix}{topic}"
+                if topic_key not in topic_log_times:
                     self.add_finding("FAIL", "missing_sensor_topic", f"{file_name} 缺少 topic: {topic}", path=str(path))
 
-        for topic, timestamps in sorted(topic_times.items()):
+        for topic, timestamps in sorted(topic_log_times.items()):
+            publish_timestamps = topic_publish_times.get(topic, [])
             timestamps.sort()
+            publish_timestamps.sort()
             stats = SensorTopicStats(topic=topic, source_file=topic_sources.get(topic, ""))
             self.sensor_stats[topic] = stats
             stats.count = len(timestamps)
             stats.first_log_time_ns = timestamps[0]
             stats.last_log_time_ns = timestamps[-1]
+            if publish_timestamps:
+                stats.first_publish_time_ns = publish_timestamps[0]
+                stats.last_publish_time_ns = publish_timestamps[-1]
             if len(timestamps) <= 1:
                 self.add_finding("FAIL", "sensor_too_few_samples", f"{topic} 样本数过少", count=len(timestamps))
                 continue
@@ -1474,6 +1505,60 @@ class EpisodeValidator:
                     median_gap_ms=round(stats.median_gap_ms, 3),
                     large_gap_count=stats.large_gap_count,
                 )
+
+        self.align_sensor_first_frames()
+
+    def ego_head_pose_start_offset_us(self) -> int | None:
+        details = self.ego_metadata.get("head_pose_details")
+        if not isinstance(details, list):
+            return None
+        for detail in details:
+            if not isinstance(detail, dict) or detail.get("name") != "head_pose":
+                continue
+            start_offset_us = safe_int(detail.get("start_offset_us"))
+            if start_offset_us is not None and start_offset_us >= MIN_UNIX_TIMESTAMP_US:
+                return start_offset_us
+        return None
+
+    def align_sensor_first_frames(self) -> None:
+        ego_head_pose = self.sensor_stats.get("ego:head_pose")
+        ego_anchor_us = self.ego_head_pose_start_offset_us()
+        ego_raw_head_pose_us = None
+        if ego_head_pose is not None and ego_head_pose.first_publish_time_ns is not None:
+            ego_raw_head_pose_us = ego_head_pose.first_publish_time_ns // 1000
+
+        ego_offset_us = None
+        if ego_anchor_us is not None and ego_raw_head_pose_us is not None:
+            ego_offset_us = ego_anchor_us - ego_raw_head_pose_us
+
+        unaligned_ego_topics: list[str] = []
+        for topic, stats in sorted(self.sensor_stats.items()):
+            if stats.first_publish_time_ns is None:
+                continue
+            raw_publish_time_us = stats.first_publish_time_ns // 1000
+            if raw_publish_time_us >= MIN_UNIX_TIMESTAMP_US:
+                stats.first_system_time_us = raw_publish_time_us
+                stats.time_alignment_method = "mcap_publish_time_unix"
+                stats.time_offset_us = 0
+                continue
+            if topic.startswith("ego:") and ego_offset_us is not None:
+                stats.first_system_time_us = raw_publish_time_us + ego_offset_us
+                stats.time_alignment_method = "ego_head_pose_metadata_offset"
+                stats.time_offset_us = ego_offset_us
+                continue
+            stats.first_system_time_us = None
+            stats.time_alignment_method = "unresolved"
+            if topic.startswith("ego:"):
+                unaligned_ego_topics.append(topic)
+
+        if unaligned_ego_topics:
+            self.add_finding(
+                "FAIL",
+                "ego_time_alignment",
+                "Ego 单调时钟 topic 缺少可用的 head_pose metadata offset",
+                topics=unaligned_ego_topics,
+                required_field="ego/metadata.json.head_pose_details[name=head_pose].start_offset_us",
+            )
 
     def scan_fays_mcaps(self) -> None:
         if not self.stereo_enabled:
@@ -1525,16 +1610,33 @@ class EpisodeValidator:
                         continue
                     if is_imu:
                         stats.imu_count += 1
+                        if (
+                            stats.first_imu_publish_time_ns is None
+                            or publish_time_ns < stats.first_imu_publish_time_ns
+                        ):
+                            stats.first_imu_publish_time_ns = publish_time_ns
+                        if (
+                            stats.last_imu_publish_time_ns is None
+                            or publish_time_ns > stats.last_imu_publish_time_ns
+                        ):
+                            stats.last_imu_publish_time_ns = publish_time_ns
                     if is_camera:
                         stats.camera_count += 1
                         frame_index = int.from_bytes(data[:4], byteorder="little", signed=False) if len(data) >= 4 else None
-                        if stats.first_camera_log_time_ns is None:
+                        if (
+                            stats.first_camera_publish_time_ns is None
+                            or publish_time_ns < stats.first_camera_publish_time_ns
+                        ):
                             stats.first_camera_log_time_ns = log_time_ns
                             stats.first_camera_publish_time_ns = publish_time_ns
                             stats.first_frame_index = frame_index
-                        stats.last_camera_log_time_ns = log_time_ns
-                        stats.last_camera_publish_time_ns = publish_time_ns
-                        stats.last_frame_index = frame_index
+                        if (
+                            stats.last_camera_publish_time_ns is None
+                            or publish_time_ns > stats.last_camera_publish_time_ns
+                        ):
+                            stats.last_camera_log_time_ns = log_time_ns
+                            stats.last_camera_publish_time_ns = publish_time_ns
+                            stats.last_frame_index = frame_index
 
                         if previous_camera_log_ns is not None and previous_camera_publish_ns is not None:
                             if log_time_ns < previous_camera_log_ns or publish_time_ns < previous_camera_publish_ns:
@@ -1610,6 +1712,7 @@ class EpisodeValidator:
                 None,
             )
             metadata_duration = safe_float(metadata_detail.get("duration_s")) if metadata_detail else None
+            metadata_start_offset_us = safe_int(metadata_detail.get("start_offset_us")) if metadata_detail else None
             if metadata_duration is not None and stats.camera_publish_span_sec > 0:
                 if abs(metadata_duration - round(stats.camera_publish_span_sec, 1)) > 0.051:
                     self.add_finding(
@@ -1618,6 +1721,21 @@ class EpisodeValidator:
                         f"{file_name} 的 publishTime 跨度与 metadata stereo duration_s 不一致",
                         metadata_duration_s=metadata_duration,
                         camera_publish_span_s=round(stats.camera_publish_span_sec, 6),
+                    )
+            if (
+                metadata_start_offset_us is not None
+                and stats.first_camera_publish_time_ns is not None
+            ):
+                camera_publish_time_us = stats.first_camera_publish_time_ns // 1000
+                offset_error_us = abs(metadata_start_offset_us - camera_publish_time_us)
+                if offset_error_us > 1:
+                    self.add_finding(
+                        "FAIL",
+                        "fays_metadata_start_offset",
+                        f"{file_name} 首个 camera publishTime 与 metadata start_offset_us 不一致",
+                        metadata_start_offset_us=metadata_start_offset_us,
+                        camera_publish_time_us=camera_publish_time_us,
+                        offset_error_us=offset_error_us,
                     )
 
             if stats.camera_rollback_count > 0 or stats.frame_index_error_count > 0:
@@ -1864,30 +1982,145 @@ class EpisodeValidator:
                     coverage_ratio=round(coverage_ratio, 3),
                 )
 
-    def side_video_window_us(self, side: str) -> tuple[int | None, int | None]:
-        starts = [
-            stats.first_system_time_us
-            for stats in self.video_stats.values()
-            if stats.side == side and stats.first_system_time_us is not None
-        ]
-        ends = [
-            stats.last_system_time_us
-            for stats in self.video_stats.values()
-            if stats.side == side and stats.last_system_time_us is not None
-        ]
-        return (min(starts) if starts else None, max(ends) if ends else None)
-
-    def side_sensor_window_ns(self, side: str) -> tuple[int | None, int | None]:
-        topics = [self.sensor_stats.get(f"imu_{side}"), self.sensor_stats.get(f"encoder_{side}")]
-        starts = [topic.first_log_time_ns for topic in topics if topic and topic.first_log_time_ns is not None]
-        ends = [topic.last_log_time_ns for topic in topics if topic and topic.last_log_time_ns is not None]
-        return (min(starts) if starts else None, max(ends) if ends else None)
-
     def check_video_sensor_alignment(self) -> None:
-        return
+        streams: list[dict[str, Any]] = []
+        missing_streams: list[str] = []
 
-    def check_video_sensor_overlap(self) -> None:
-        return
+        def add_stream(
+            name: str,
+            kind: str,
+            timestamp_unix_us: int | None,
+            alignment_method: str,
+            time_offset_us: int | None = None,
+        ) -> None:
+            if timestamp_unix_us is None:
+                missing_streams.append(name)
+                return
+            streams.append(
+                {
+                    "name": name,
+                    "kind": kind,
+                    "timestamp_unix_us": timestamp_unix_us,
+                    "alignment_method": alignment_method,
+                    "time_offset_us": time_offset_us,
+                }
+            )
+
+        for video_name, file_name, _ in self.active_video_files:
+            stats = self.video_stats.get(video_name)
+            add_stream(
+                f"video:{file_name}",
+                "video",
+                stats.first_system_time_us if stats is not None else None,
+                "metadata_start_offset_plus_packet_pts",
+            )
+
+        expected_sensor_topics = {
+            topic
+            for _, _, expected_topics in SENSOR_FILES
+            for topic in expected_topics
+        }
+        for topic_key, stats in sorted(self.sensor_stats.items()):
+            timestamp_unix_us = stats.first_system_time_us
+            if timestamp_unix_us is None and stats.first_publish_time_ns is not None:
+                raw_publish_time_us = stats.first_publish_time_ns // 1000
+                if raw_publish_time_us >= MIN_UNIX_TIMESTAMP_US:
+                    timestamp_unix_us = raw_publish_time_us
+            kind = "ego_sensor" if topic_key.startswith("ego:") else "sensor"
+            add_stream(
+                f"sensor:{topic_key}",
+                kind,
+                timestamp_unix_us,
+                stats.time_alignment_method or "mcap_publish_time_unix",
+                stats.time_offset_us,
+            )
+        for topic in sorted(expected_sensor_topics - set(self.sensor_stats)):
+            add_stream(f"sensor:{topic}", "sensor", None, "missing")
+
+        if self.stereo_enabled:
+            for side, file_name, _ in FAYS_MCAP_FILES:
+                stats = self.fays_mcap_stats.get(file_name)
+                imu_publish_time_us = None
+                camera_publish_time_us = None
+                if stats is not None:
+                    if stats.first_imu_publish_time_ns is not None:
+                        imu_publish_time_us = stats.first_imu_publish_time_ns // 1000
+                    if stats.first_camera_publish_time_ns is not None:
+                        camera_publish_time_us = stats.first_camera_publish_time_ns // 1000
+                add_stream(f"fays:{side}:imu", "fays_imu", imu_publish_time_us, "mcap_publish_time_unix")
+                add_stream(f"fays:{side}:camera", "fays_camera", camera_publish_time_us, "mcap_publish_time_unix")
+
+        fail_threshold_ms = float(
+            getattr(
+                self.args,
+                "global_first_frame_fail_ms",
+                DEFAULT_GLOBAL_FIRST_FRAME_FAIL_MS,
+            )
+        )
+        if not streams:
+            self.global_first_frame_sync = {
+                "status": "FAIL",
+                "fail_threshold_ms": fail_threshold_ms,
+                "reference_unix_us": None,
+                "max_error_ms": None,
+                "missing_streams": missing_streams,
+                "streams": [],
+            }
+            self.add_finding(
+                "FAIL",
+                "global_first_frame_sync_incomplete",
+                "无法建立全局首帧时间轴",
+                missing_streams=missing_streams,
+            )
+            return
+
+        reference_unix_us = min(item["timestamp_unix_us"] for item in streams)
+        for item in streams:
+            item["relative_error_ms"] = round(
+                us_to_ms(item["timestamp_unix_us"] - reference_unix_us),
+                3,
+            )
+        max_error_ms = max(item["relative_error_ms"] for item in streams)
+        non_unix_streams = [
+            item["name"]
+            for item in streams
+            if item["timestamp_unix_us"] < MIN_UNIX_TIMESTAMP_US
+        ]
+        failed = bool(missing_streams or non_unix_streams or max_error_ms >= fail_threshold_ms)
+        self.global_first_frame_sync = {
+            "status": "FAIL" if failed else "PASS",
+            "fail_threshold_ms": fail_threshold_ms,
+            "reference_unix_us": reference_unix_us,
+            "max_error_ms": round(max_error_ms, 3),
+            "missing_streams": missing_streams,
+            "non_unix_streams": non_unix_streams,
+            "streams": streams,
+        }
+
+        if missing_streams:
+            self.add_finding(
+                "FAIL",
+                "global_first_frame_sync_incomplete",
+                "全局首帧同步校验缺少必要数据流",
+                missing_streams=missing_streams,
+            )
+        if non_unix_streams:
+            self.add_finding(
+                "FAIL",
+                "global_time_domain",
+                "部分数据流未使用 Unix 时间域",
+                streams=non_unix_streams,
+                minimum_unix_us=MIN_UNIX_TIMESTAMP_US,
+            )
+        if max_error_ms >= fail_threshold_ms:
+            self.add_finding(
+                "FAIL",
+                "global_first_frame_sync",
+                "全局数据流首帧同步误差达到或超过阈值",
+                max_error_ms=round(max_error_ms, 3),
+                fail_threshold_ms=fail_threshold_ms,
+                per_stream_ms={item["name"]: item["relative_error_ms"] for item in streams},
+            )
 
     def classify_patterns(self) -> None:
         starts = {
@@ -1946,21 +2179,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--video-end-warn-ms", type=float, default=1000.0)
     parser.add_argument("--video-end-fail-ms", type=float, default=1500.0)
     parser.add_argument("--first-frame-warn-ms", type=float, default=33.0)
-    parser.add_argument("--first-frame-fail-ms", type=float, default=80.0)
+    parser.add_argument("--first-frame-fail-ms", type=float, default=1000.0)
     parser.add_argument("--main-camera-first-frame-warn-ms", type=float, default=900.0)
-    parser.add_argument("--main-camera-first-frame-fail-ms", type=float, default=1200.0)
+    parser.add_argument("--main-camera-first-frame-fail-ms", type=float, default=1000.0)
     parser.add_argument("--stereo-consistency-warn-ms", type=float, default=10.0)
     parser.add_argument("--stereo-consistency-fail-ms", type=float, default=30.0)
     parser.add_argument("--sensor-lr-start-warn-ms", type=float, default=30.0)
-    parser.add_argument("--sensor-lr-start-fail-ms", type=float, default=80.0)
+    parser.add_argument("--sensor-lr-start-fail-ms", type=float, default=1000.0)
     parser.add_argument("--sensor-lr-end-warn-ms", type=float, default=50.0)
     parser.add_argument("--sensor-lr-end-fail-ms", type=float, default=120.0)
-    parser.add_argument("--video-sensor-start-warn-ms", type=float, default=120.0)
-    parser.add_argument("--video-sensor-start-fail-ms", type=float, default=300.0)
-    parser.add_argument("--video-sensor-end-warn-ms", type=float, default=1000.0)
-    parser.add_argument("--video-sensor-end-fail-ms", type=float, default=1500.0)
-    parser.add_argument("--video-sensor-overlap-warn-ratio", type=float, default=0.9)
-    parser.add_argument("--video-sensor-overlap-fail-ratio", type=float, default=0.75)
     parser.add_argument("--video-span-delta-warn-ms", type=float, default=80.0)
     parser.add_argument("--video-span-delta-fail-ms", type=float, default=150.0)
     parser.add_argument("--video-pair-start-warn-ms", type=float, default=500.0)
@@ -1971,6 +2198,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sensor-coverage-fail-ratio", type=float, default=0.75)
     parser.add_argument("--fays-mcap-coverage-warn-ratio", type=float, default=0.9)
     parser.add_argument("--fays-mcap-coverage-fail-ratio", type=float, default=0.75)
+    parser.add_argument(
+        "--global-first-frame-fail-ms",
+        type=float,
+        default=DEFAULT_GLOBAL_FIRST_FRAME_FAIL_MS,
+        help="Fail when the first-frame range across all video and sensor streams reaches this value.",
+    )
     parser.add_argument("--pattern-group-stagger-warn-ms", type=float, default=80.0)
     parser.add_argument("--pattern-group-stagger-fail-ms", type=float, default=150.0)
     parser.add_argument(
@@ -1986,6 +2219,28 @@ def print_text_report(report: Report) -> None:
     print(f"Episode: {report.episode_dir}")
     print(f"Status:  {report.status}")
     print()
+
+    global_sync = report.summary.get("global_first_frame_sync", {})
+    if global_sync:
+        print("Global First-Frame Sync:")
+        print(
+            f"- status={global_sync.get('status')} "
+            f"max_error_ms={global_sync.get('max_error_ms')} "
+            f"fail_threshold_ms={global_sync.get('fail_threshold_ms')} "
+            f"reference_unix_us={global_sync.get('reference_unix_us')}"
+        )
+        for stream in global_sync.get("streams", []):
+            print(
+                f"- {stream.get('name')}: kind={stream.get('kind')} "
+                f"timestamp_unix_us={stream.get('timestamp_unix_us')} "
+                f"relative_error_ms={stream.get('relative_error_ms')} "
+                f"alignment_method={stream.get('alignment_method')} "
+                f"time_offset_us={stream.get('time_offset_us')}"
+            )
+        missing_streams = global_sync.get("missing_streams", [])
+        if missing_streams:
+            print(f"- missing_streams={missing_streams}")
+        print()
 
     if report.findings:
         print("Findings:")

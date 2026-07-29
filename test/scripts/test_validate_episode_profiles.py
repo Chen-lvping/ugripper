@@ -34,6 +34,7 @@ STEREO_VIDEO_NAMES = [
     "tcam_right_r.mkv",
     "stereo_right.mkv",
 ]
+UNIX_BASE_US = 1_785_000_000_000_000
 
 
 def hardware_list(stereo_enabled):
@@ -54,7 +55,12 @@ def hardware_list(stereo_enabled):
 
 def video_details(names):
     return [
-        {"name": name, "fps": 60.0, "duration_s": 10.0, "start_offset_us": index}
+        {
+            "name": name,
+            "fps": 60.0,
+            "duration_s": 10.0,
+            "start_offset_us": UNIX_BASE_US + index * 1000,
+        }
         for index, name in enumerate(names)
     ]
 
@@ -110,6 +116,46 @@ class ValidateEpisodeProfileTest(unittest.TestCase):
             validator.resolve_active_video_files()
             validator.validate_metadata_fields()
             return validator
+
+    def populate_global_stats(self, validator, stereo_enabled):
+        validator.stereo_enabled = stereo_enabled
+        validator.active_video_files = [
+            entry
+            for entry in VALIDATOR.BASE_VIDEO_FILES
+            if stereo_enabled or entry[0] not in {"left_stereo", "right_stereo"}
+        ]
+        for index, (video_name, file_name, side) in enumerate(validator.active_video_files):
+            validator.video_stats[video_name] = VALIDATOR.VideoStats(
+                name=video_name,
+                side=side,
+                path=file_name,
+                first_system_time_us=UNIX_BASE_US + index * 10_000,
+            )
+        validator.sensor_stats["encoder_left"] = VALIDATOR.SensorTopicStats(
+            topic="encoder_left",
+            source_file="sensor_left.mcap",
+            first_publish_time_ns=(UNIX_BASE_US + 80_000) * 1000,
+        )
+        validator.sensor_stats["encoder_right"] = VALIDATOR.SensorTopicStats(
+            topic="encoder_right",
+            source_file="sensor_right.mcap",
+            first_publish_time_ns=(UNIX_BASE_US + 90_000) * 1000,
+        )
+        if stereo_enabled:
+            validator.fays_mcap_stats["fays_data_left.mcap"] = VALIDATOR.FaysMcapStats(
+                side="left",
+                source_file="fays_data_left.mcap",
+                first_log_time_ns=123,
+                first_imu_publish_time_ns=(UNIX_BASE_US + 100_000) * 1000,
+                first_camera_publish_time_ns=(UNIX_BASE_US + 30_000) * 1000,
+            )
+            validator.fays_mcap_stats["fays_data_right.mcap"] = VALIDATOR.FaysMcapStats(
+                side="right",
+                source_file="fays_data_right.mcap",
+                first_log_time_ns=456,
+                first_imu_publish_time_ns=(UNIX_BASE_US + 110_000) * 1000,
+                first_camera_publish_time_ns=(UNIX_BASE_US + 70_000) * 1000,
+            )
 
     def test_nostereo_profile_does_not_require_stereo_or_fays(self):
         with tempfile.TemporaryDirectory(prefix="ugripper-validator-") as tmp:
@@ -179,6 +225,157 @@ class ValidateEpisodeProfileTest(unittest.TestCase):
         validator = self.validate_metadata(metadata(data_version="3.0"))
         self.assertFalse(any(item.code == "metadata_data_version" for item in validator.findings))
         self.assertTrue(any(item.code == "metadata_data_version_legacy" for item in validator.findings))
+
+    def test_relative_video_offsets_fail_unix_time_validation(self):
+        payload = metadata()
+        for index, detail in enumerate(payload["video_details"]):
+            detail["start_offset_us"] = index
+        validator = self.validate_metadata(payload)
+        self.assertTrue(
+            any(item.code == "metadata_video_time_domain" and item.severity == "FAIL" for item in validator.findings)
+        )
+
+    def test_global_first_frame_sync_lists_all_nostereo_streams(self):
+        with tempfile.TemporaryDirectory(prefix="ugripper-validator-") as tmp:
+            episode_dir = Path(tmp) / "episode_20260727_0001"
+            episode_dir.mkdir()
+            validator = self.make_validator(episode_dir)
+            self.populate_global_stats(validator, stereo_enabled=False)
+            validator.check_video_sensor_alignment()
+
+            result = validator.global_first_frame_sync
+            self.assertEqual(result["status"], "PASS")
+            self.assertEqual(result["fail_threshold_ms"], 1000.0)
+            self.assertEqual(len(result["streams"]), len(NOSTEREO_VIDEO_NAMES) + 2)
+            self.assertFalse(result["missing_streams"])
+
+    def test_global_first_frame_sync_uses_fays_publish_time(self):
+        with tempfile.TemporaryDirectory(prefix="ugripper-validator-") as tmp:
+            episode_dir = Path(tmp) / "episode_20260727_0001"
+            episode_dir.mkdir()
+            validator = self.make_validator(episode_dir)
+            self.populate_global_stats(validator, stereo_enabled=True)
+            validator.check_video_sensor_alignment()
+
+            result = validator.global_first_frame_sync
+            self.assertEqual(result["status"], "PASS")
+            names = {item["name"] for item in result["streams"]}
+            self.assertIn("fays:left:imu", names)
+            self.assertIn("fays:right:camera", names)
+            self.assertNotIn("fays_data_left.mcap:logTime", names)
+
+    def test_global_first_frame_sync_fails_at_one_second(self):
+        with tempfile.TemporaryDirectory(prefix="ugripper-validator-") as tmp:
+            episode_dir = Path(tmp) / "episode_20260727_0001"
+            episode_dir.mkdir()
+            validator = self.make_validator(episode_dir)
+            self.populate_global_stats(validator, stereo_enabled=False)
+            validator.sensor_stats["encoder_right"].first_publish_time_ns = (UNIX_BASE_US + 1_000_000) * 1000
+            validator.check_video_sensor_alignment()
+
+            self.assertEqual(validator.global_first_frame_sync["status"], "FAIL")
+            self.assertEqual(validator.global_first_frame_sync["max_error_ms"], 1000.0)
+            self.assertTrue(
+                any(item.code == "global_first_frame_sync" and item.severity == "FAIL" for item in validator.findings)
+            )
+
+    def test_global_first_frame_sync_includes_optional_ego_topics(self):
+        with tempfile.TemporaryDirectory(prefix="ugripper-validator-") as tmp:
+            episode_dir = Path(tmp) / "episode_20260727_0001"
+            episode_dir.mkdir()
+            validator = self.make_validator(episode_dir)
+            self.populate_global_stats(validator, stereo_enabled=False)
+            validator.sensor_stats["ego:tracking"] = VALIDATOR.SensorTopicStats(
+                topic="ego:tracking",
+                source_file="ego/sensor.mcap",
+                first_publish_time_ns=(UNIX_BASE_US + 120_000) * 1000,
+            )
+            validator.check_video_sensor_alignment()
+
+            stream_names = {item["name"] for item in validator.global_first_frame_sync["streams"]}
+            self.assertIn("sensor:ego:tracking", stream_names)
+
+    def test_ego_monotonic_topics_use_head_pose_metadata_offset(self):
+        with tempfile.TemporaryDirectory(prefix="ugripper-validator-") as tmp:
+            episode_dir = Path(tmp) / "episode_20260727_0001"
+            episode_dir.mkdir()
+            validator = self.make_validator(episode_dir)
+            raw_head_pose_us = 5_522_316_243
+            head_pose_unix_us = UNIX_BASE_US + 120_000
+            validator.ego_metadata = {
+                "head_pose_details": [
+                    {"name": "head_pose", "start_offset_us": head_pose_unix_us}
+                ]
+            }
+            validator.sensor_stats["ego:head_pose"] = VALIDATOR.SensorTopicStats(
+                topic="ego:head_pose",
+                source_file="ego/sensor.mcap",
+                first_publish_time_ns=raw_head_pose_us * 1000,
+            )
+            validator.sensor_stats["ego:imu/gyro"] = VALIDATOR.SensorTopicStats(
+                topic="ego:imu/gyro",
+                source_file="ego/sensor.mcap",
+                first_publish_time_ns=(raw_head_pose_us + 13_888) * 1000,
+            )
+            validator.sensor_stats["ego:rgb_metainfo"] = VALIDATOR.SensorTopicStats(
+                topic="ego:rgb_metainfo",
+                source_file="ego/sensor.mcap",
+                first_publish_time_ns=(UNIX_BASE_US + 60_000) * 1000,
+            )
+
+            validator.align_sensor_first_frames()
+
+            self.assertEqual(
+                validator.sensor_stats["ego:head_pose"].first_system_time_us,
+                head_pose_unix_us,
+            )
+            self.assertEqual(
+                validator.sensor_stats["ego:imu/gyro"].first_system_time_us,
+                head_pose_unix_us + 13_888,
+            )
+            self.assertEqual(
+                validator.sensor_stats["ego:rgb_metainfo"].first_system_time_us,
+                UNIX_BASE_US + 60_000,
+            )
+            self.assertEqual(
+                validator.sensor_stats["ego:head_pose"].time_alignment_method,
+                "ego_head_pose_metadata_offset",
+            )
+
+    def test_global_first_frame_sync_includes_all_discovered_sensor_topics(self):
+        with tempfile.TemporaryDirectory(prefix="ugripper-validator-") as tmp:
+            episode_dir = Path(tmp) / "episode_20260727_0001"
+            episode_dir.mkdir()
+            validator = self.make_validator(episode_dir)
+            self.populate_global_stats(validator, stereo_enabled=False)
+            validator.sensor_stats["imu_left"] = VALIDATOR.SensorTopicStats(
+                topic="imu_left",
+                source_file="sensor_left.mcap",
+                first_publish_time_ns=(UNIX_BASE_US + 100_000) * 1000,
+            )
+
+            validator.check_video_sensor_alignment()
+
+            stream_names = {item["name"] for item in validator.global_first_frame_sync["streams"]}
+            self.assertIn("sensor:imu_left", stream_names)
+
+    def test_ego_monotonic_topics_fail_without_metadata_offset(self):
+        with tempfile.TemporaryDirectory(prefix="ugripper-validator-") as tmp:
+            episode_dir = Path(tmp) / "episode_20260727_0001"
+            episode_dir.mkdir()
+            validator = self.make_validator(episode_dir)
+            validator.sensor_stats["ego:head_pose"] = VALIDATOR.SensorTopicStats(
+                topic="ego:head_pose",
+                source_file="ego/sensor.mcap",
+                first_publish_time_ns=5_522_316_243_000,
+            )
+
+            validator.align_sensor_first_frames()
+
+            self.assertIsNone(validator.sensor_stats["ego:head_pose"].first_system_time_us)
+            self.assertTrue(
+                any(item.code == "ego_time_alignment" and item.severity == "FAIL" for item in validator.findings)
+            )
 
 
 if __name__ == "__main__":

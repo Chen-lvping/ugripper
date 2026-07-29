@@ -42,6 +42,11 @@
   - 递归扫描一个或多个目录中的 `cam_left.mkv` / `cam_right.mkv`，并发检查包时间戳异常、显著时间洞和可疑解码报错。
   - 默认先做快速 `ffprobe` 包级扫描，只对可疑文件追加 `ffmpeg` 解码扫描；适合批量数据排查。
   - 会按同目录左右主摄对齐“大时间洞”事件，便于判断是否存在左右同时异常。
+- `test/scripts/validate_episode_data.sh`
+  - 测试工程师离线 episode 校验入口，自动选择可用 Python 环境并调用深度校验器。
+  - 报告首先列出全部视频、本机 MCAP 中实际发现的全部 sensor topic、左右 Fays IMU/camera，以及存在时 `ego/sensor.mcap` 全部 topic 的 Unix 首帧时间、换算方式及相对最早流的误差；最大首帧误差达到 `1000ms` 时返回失败。
+  - Fays 全局时间使用 MCAP `publishTime`，设备原始 `logTime` 仅用于 gap 和回退分析；Ego 单调时钟 topic 使用 `head_pose_details.start_offset_us` 计算固定 offset，已是 Unix 时间的 metainfo 不重复换算；`+nostereo` profile 自动跳过 Fays。
+  - 主相机逐帧 Unix 时间按 `metadata.video_details[].start_offset_us + packet_pts_sec * 1000000` 计算；主相机 PTS 必须保留 V4L2 真实 gap，丢帧后不得压紧后续时间轴。Stereo 逐帧时间只使用 Fays MCAP camera `publishTime`，不使用 Stereo MKV PTS 做同步真值。
 - `test/scripts/board_gripper_hmi_link_stress.sh`
   - 停止 `ugripper.service` 后反复独占连接左右 HMI，执行 RGB、蜂鸣器开关和状态回读，统计合法回复、蜂鸣器状态确认、最大回复年龄与失败轮次。
   - 默认在整个压力窗口并行运行 `SensorRecorder`，持续记录左右 encoder，以区分 HMI 单 UART/控制板异常和整颗 CH9344 或 USB 上行链路异常。
@@ -82,6 +87,9 @@
 bash test/scripts/camera_test.sh
 bash test/scripts/camera_crash_capture.sh
 bash test/scripts/testVideoPipe.sh
+bash test/scripts/validate_episode_data.sh /path/to/episode
+bash test/scripts/validate_episode_data.sh /path/to/data --latest
+bash test/scripts/validate_episode_data.sh /path/to/episode --json > /tmp/episode-validation.json
 bash test/scripts/board_tactile_ffmpeg_streamon_soak.sh --device /dev/tcam_left_l --duration-sec 1800 --cycle-sec 5
 bash test/scripts/board_tactile_ffmpeg_parallel_soak.sh --duration-sec 1800 --cycle-sec 1
 bash test/scripts/board_encoder_cmd_ack_latency.sh --iterations 5000 --timeout-ms 20

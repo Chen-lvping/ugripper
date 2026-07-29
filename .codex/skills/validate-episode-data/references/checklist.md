@@ -31,13 +31,14 @@
 - `metadata.json` 顶层字段、`hardware_list` 字段和 `video_details[]` 字段顺序是否符合标准范本
 - `metadata.json` / `calibration.json` 的顶层 key 集合是否仍符合约定
 - 关键 JSON 字段类型是否仍符合约定，防止“有字段但类型偷偷变了”
-- `video_details` 是否不再重复写 `serial`，且使用 `duration_s` / `start_offset_us`
+- `video_details` 是否不再重复写 `serial`，且 `start_offset_us` 为视频 `PTS=0` 对应的 Unix 微秒 offset，不允许最早一路写 `0` 后按 episode 做相对归一化
 - `calibration.json.observation.images` 是否覆盖 8 路图像
 - Fays 侧 `fays_data_left.mcap` / `fays_data_right.mcap` 是否头尾 magic 完整、可解析、包含 `i/c` 数据，且覆盖时长接近对应 stereo 视频
-- Fays `c.publishTime` 是否单调，左右首帧 `publishTime` 差是否与 metadata stereo `start_offset_us` 差一致；`c` 消息数、frameIndex 与 stereo MKV packet 数是否一一对应
+- Fays `c.publishTime` 是否单调，每侧首个 `publishTime / 1000` 是否与对应 stereo metadata `start_offset_us` 一致；`c` 消息数、frameIndex 与 stereo MKV packet 数是否一一对应
 - stereo `duration_s` 是否使用首末 `c.publishTime` 跨度；MKV 固定帧率 PTS 因真实 camera gap 被压紧时，只报告 gap/缺帧，不把容器短时长误当作系统时钟偏移
 - 主摄专项扫描是否发现 `backward_dts` / `decode_non_monotonic_dts` / `decode_error`
-- 是否输出统一的首帧对齐表，覆盖 8 路 `mkv` 和左右 sensor topic
+- 是否输出统一的首帧对齐表，覆盖全部启用视频、本机 MCAP 实际发现的全部 sensor topic、左右 Fays IMU/camera 和可选 `ego/sensor.mcap` 全部 topic，并列出各流 Unix 时间、换算方法及相对最早流的误差
+- Ego `head_pose/controller_pose/imu` 等设备单调时钟 topic 是否用 `ego/metadata.json.head_pose_details[name=head_pose].start_offset_us` 计算统一 offset 后换算；已是 Unix `publishTime` 的 `*_metainfo` 是否保持原值而未二次偏移
 
 ## 2. 默认阈值建议
 
@@ -45,20 +46,17 @@
 
 - 视频起始对齐 warn/fail：`500ms / 1000ms`，即使未超阈值也必须输出各路起始偏移表
 - 视频结束对齐 warn/fail：`150ms / 300ms`
-- 首帧同步误差 warn/fail：`33ms / 80ms`
-- 全 12 路流首帧范围 warn/fail：`80ms / 150ms`
+- 全局首帧同步硬阈值：最大相对误差达到 `1000ms` 时 fail；无论是否超阈值都输出逐流相对误差表
+- 视频或同类传感器的低阈值偏差可继续作为 warn，供后续启动时序优化，不提前改变全局首帧同步的 `1000ms` fail 口径
 - 左右成对视频起始对齐 warn/fail：`500ms / 1000ms`
 - 左右成对视频结束对齐 warn/fail：`80ms / 180ms`
 - 单视频 gap 告警：`max(3 x 中位帧间隔, 80ms)`
 - 容器 duration 与包级 span 偏差 warn/fail：`80ms / 150ms`
 - 单 IMU topic gap 告警：`max(3 x 中位间隔, 20ms)`
 - 单 encoder topic gap 告警：`max(3 x 中位间隔, 30ms)`
-- 左右同类 sensor 起始同步 warn/fail：`30ms / 80ms`
+- 左右同类 sensor 起始同步 warn/fail：`30ms / 1000ms`
 - 左右同类 sensor 结束同步 warn/fail：`50ms / 120ms`
 - sensor 覆盖率相对最长视频 warn/fail：`0.90 / 0.75`
-- 单侧视频与 sensor 起始对齐 warn/fail：`120ms / 300ms`
-- 单侧视频与 sensor 结束对齐 warn/fail：`150ms / 400ms`
-- 单侧视频与 sensor 重叠比例 warn/fail：`0.90 / 0.75`
 - `stereo -> tactile -> main` 分组错峰起录 warn/fail：`80ms / 150ms`
 
 ## 3. 常见异常模式

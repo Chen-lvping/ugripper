@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- 修正 episode 深度校验器的首帧时间口径：统一表现在覆盖本机 MCAP 中实际发现的全部 sensor topic，并用 `ego/metadata.json` 的 `head_pose_details.start_offset_us` 为 Ego 单调时钟 topic 计算固定 Unix offset；已使用 Unix `publishTime` 的 Ego metainfo 保持原值。主摄专项解码扫描改为 passthrough 并显式使用微秒输出 time base，避免 FFmpeg 帧率量化产生伪 non-monotonic DTS，同时修正左右主摄文件归类。
+- 主相机 MKV 的 PTS 改为逐帧使用 V4L2 buffer 实际时间相对首个写入帧生成，`metadata.video_details[].start_offset_us + packet_pts_us` 现在对应各帧 V4L2 Unix 时间；丢帧和采集卡顿产生的真实时间洞不再被名义 `60fps` 帧序号压平，重复或回退时间戳仅做最小单调钳制并记录诊断。Stereo 逐帧同步继续以 Fays MCAP camera `publishTime` 为唯一真值，不依赖 Stereo MKV PTS。
+- 修复 HMI 端口保持连接但长期无响应时 `age_ms` 持续增长导致健康错误重复上报、USB restore 的 `6s` 稳定窗口反复重置的问题；`hmi_input_inactive` / `hmi_ports_inactive` 的故障证据现在只保留稳定的超时阈值和端口路径。
+- 修复 `metadata.json.video_details[].start_offset_us` 被最早视频归零的问题：当前 `data_version=3.1` 直接保存各视频 `PTS=0` 对应的 Unix 微秒 offset，stereo 继续使用 Fays MCAP 首个 camera `publishTime`；新增测试工程师离线 episode 校验入口，统一展示全部视频、encoder 与 Fays IMU/camera 首帧的相对误差，并在最大误差达到 `1s` 时失败。
 - Ego 绑定改为开机周期状态：绑定文件迁移到 `/dev/shm/ugripper/ego_binding.json`，同次开机内服务重启保持绑定，整机重启或断电开机后自动解绑；升级时清理旧持久化绑定文件。
 - 提高 Ego 绑定/解绑反馈区分度：绑定成功改为双手亮黄色三闪与 `1000/2000/4000Hz` 升调，解绑成功改为双手紫色三闪与 `4000/2000/1000Hz` 降调；继续复用蜂鸣状态重试和结束静音机制。
 - 修复夹爪蜂鸣反馈偶发持续鸣响：HMI 驱动对蜂鸣开启和关闭状态切换统一执行 `5` 次、`20ms` 间隔重发，并在连接建立与驱动退出时主动重发关闭状态；Ego 绑定、任务打标等按侧反馈不再依赖单次关闭帧。

@@ -242,6 +242,8 @@ Ego 绑定文件位于 `/dev/shm/ugripper/ego_binding.json`：同一次开机周
 - 文件存在性按构建变体决定：默认包额外要求左右 stereo 与 Fays MCAP，`+nostereo` 不要求；其他主摄、触觉、sensor、calibration 和 metadata 均必须存在且非空。
 - 内部 timing 缓存：停录收尾期间由 `/dev/shm/ugripper_recording_timing_*.json` 暂存 `boot_time_offset`、`boot_time_offset_us`、各路 `<camera>_record_time_offset_us` 和 `video_probes`，只用于生成最终 metadata；该文件不落到 episode，不作为硬校验对象，完成后清理。若 `mergeEpisodeInfo()` 提示 timing 打开失败，应优先结合 `camera_recorder` 的“wrote timing file / missing_record_time_offset_us / flush-close failed”日志一起判断根因。
 - metadata 与视频可读性：最终 `metadata.json` 必须包含当前变体全部视频的 `start_offset_us/duration_s`；默认包包含 stereo，`+nostereo` 不包含。
+- 全局首帧同步由仓库离线 pipeline `test/scripts/validate_episode_data.sh` 深度检查，不加入停录运行时硬校验；pipeline 将全部视频、本机 sensor MCAP 中实际出现的全部 topic、默认包左右 Fays IMU/camera，以及存在时 `ego/sensor.mcap` 中的全部 topic 首帧统一到 Unix 时间轴，以最早流为参考列出逐流相对误差，最大误差达到 `1000ms` 时判失败。普通 MCAP topic 已是 Unix 时间时直接使用 `publishTime`；Ego `head_pose/controller_pose/imu` 的 `publishTime` 属于设备单调时钟，校验器以 `ego/metadata.json.head_pose_details[name=head_pose].start_offset_us` 和 `head_pose` MCAP 首帧计算固定 offset 后统一换算，Ego 已是 Unix 时间的 `*_metainfo` topic 不重复换算；Fays 原始 `logTime` 只用于设备 gap/回退分析。
+- 主相机时间轴验收除首帧表外，还必须检查 packet PTS 严格单调、重复/回退、实际 gap 和末帧覆盖；发生人为丢帧或短时停顿时，后续包的 `start_offset_us+PTS` 不得产生累计提前。首帧最大误差只表示各 recorder 的启动错峰，不能替代逐帧 PTS 校验，也不能被解释为硬件曝光同步精度。
 - 时长合理性：每路启用视频都必须满足跨度阈值；默认包的 stereo 时长复用停录时由 Fays MCAP 首尾 `publishTime` 写入的 timing 缓存，并继续执行既有 Fays MCAP footer/head-tail 检查；`+nostereo` 跳过。
 - 条件产物：若执行了 pre/post 音频录制，对应 wav 仍需存在。
 - 触觉软校验：
@@ -511,10 +513,12 @@ PY
   - `camera_crash_capture.sh`：在 `camera_test.sh` 基础上额外持续抓取内核日志、进程、中断与内存信息，适合定位 crash / hang。
   - `testVideoPipe.sh`：快速枚举指定 `/dev/video*` 节点的视频格式能力。
   - `scan_main_camera_mkv_issues.py`：递归扫描 `cam_left.mkv` / `cam_right.mkv`，并发检查主摄 `mkv` 的包时间戳异常、显著时间洞与可疑解码错误，并对齐同目录左右主摄的异常时间点。
+  - `validate_episode_data.sh`：测试工程师离线 episode 校验入口，自动调用深度校验器检查文件、metadata、视频/MCAP gap，并优先输出全部视频、全部已发现 sensor topic、左右 Fays IMU/camera 和可选 Ego sensor topic 的 Unix 首帧时间、换算方式及相对误差；Ego 单调时钟 topic 按 `head_pose_details.start_offset_us` 固定 offset 对齐，全流最大首帧误差达到 `1000ms` 时失败。
   - `board_gripper_hmi_link_stress.sh`：停止主服务后反复独占连接左右 HMI，验证状态回复、RGB 和蜂鸣器开关回读，并并行运行 `SensorRecorder` 检查同颗 CH9344 上的 encoder UART 是否持续产出；默认将 encoder 最大相邻时间戳 gap 限制为 `100ms`，避免平均频率掩盖秒级数据洞；结果默认写入 `/dev/shm`，便于在加密环境中中转部署和回收。
   - `board_ch9344_interference_matrix.sh`：按空载、原始 open/close、termios 配置、`TCIOFLUSH`、`TIOCEXCL`、原始状态/RGB/蜂鸣器帧、完整 HMI 重连和长连接分阶段施加干扰，每阶段独立记录左右 encoder MCAP 与 gap 事件，用于定位 CH9344 多 UART 相互影响的具体触发操作。
   - `board_encoder_to_hmi_interference_matrix.sh`：反向保持左右 HMI 长连接和状态查询，同时对指定 encoder UART 高频执行 open/close、配置、flush 与真实 1Mbps 请求，统计同侧/异侧 HMI 回复年龄和 inactive 样本，确认 encoder 操作是否会触发 HMI 无响应。
 - 建议从仓库根目录显式执行 `bash test/scripts/<script>.sh`；详细参数与注意事项见 `test/README.md`。
+- 单条 episode 可执行 `bash test/scripts/validate_episode_data.sh <episode_dir>`；父目录下校验最新一条可追加 `--latest`，机器消费结果可追加 `--json`。
 - `py_script/read_ugripper_mcap.txt` 是给数据使用者参考的通用 MCAP 读取示例；文件后缀使用 `.txt`，方便在会拦截或加密 `.py` 的环境中发送，但内容仍是 Python 代码。它可直接输入单个 `.mcap` 或完整 episode 目录；episode 模式会自动读取 `sensor_left/right.mcap`、`fays_data_left/right.mcap` 与可选 `ego/sensor.mcap`，并解码当前 UGripper encoder 与 Fays `i/c` 二进制 payload。配套说明见 `py_script/README_read_ugripper_mcap.txt`。示例：
   `python3 py_script/read_ugripper_mcap.txt /mnt/data_disk/<device_sn_lower>/data/episode_<date>_<index> --json-out /tmp/ugripper_mcap_report.json`。
 - 当前 UGripper MCAP 是通用 MCAP 容器，不是 ROS 2 bag；不要用 `ros2 bag info` 或 Foxglove 的 ROS bag 可视化入口作为数据是否正常的判断依据。若要可视化，需要按脚本里的 payload 定义转换成 Foxglove/ROS 可识别 schema 后再导入。

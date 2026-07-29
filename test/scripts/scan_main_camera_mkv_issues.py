@@ -174,7 +174,11 @@ def auto_jobs() -> int:
 
 
 def side_from_name(path: Path) -> str:
-    return "left" if path.name.startswith("left_") else "right"
+    if path.name == "cam_left.mkv":
+        return "left"
+    if path.name == "cam_right.mkv":
+        return "right"
+    raise ValueError(f"unsupported main camera file name: {path.name}")
 
 
 def discover_target_files(roots: Iterable[str]) -> list[Path]:
@@ -205,6 +209,9 @@ def discover_target_files(roots: Iterable[str]) -> list[Path]:
 
 
 def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
+    command_env = os.environ.copy()
+    if Path(command[0]).name in {"ffprobe", "ffmpeg"}:
+        command_env.pop("LD_LIBRARY_PATH", None)
     return subprocess.run(
         command,
         stdout=subprocess.PIPE,
@@ -212,6 +219,7 @@ def run_command(command: list[str]) -> subprocess.CompletedProcess[str]:
         text=True,
         errors="replace",
         check=False,
+        env=command_env,
     )
 
 
@@ -300,12 +308,15 @@ def analyze_packets(
         "csv=p=0",
         str(path),
     ]
+    command_env = os.environ.copy()
+    command_env.pop("LD_LIBRARY_PATH", None)
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         errors="replace",
+        env=command_env,
     )
 
     packet_count = 0
@@ -385,6 +396,10 @@ def run_decode_scan(path: Path, event_limit: int) -> DecodeSummary:
         str(path),
         "-map",
         "0:v:0",
+        "-vsync",
+        "0",
+        "-enc_time_base",
+        "1:1000000",
         "-f",
         "null",
         "-",
