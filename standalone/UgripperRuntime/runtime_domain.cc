@@ -34,15 +34,6 @@ std::string JoinStrings(const std::vector<std::string>& items, const char* separ
     return stream.str();
 }
 
-std::string AppendHmiPortActivity(std::string detail, const std::vector<std::string>& port_activity)
-{
-    if (!port_activity.empty())
-    {
-        detail += "; port_activity=" + JoinStrings(port_activity, ", ");
-    }
-    return detail;
-}
-
 ugripper::runtime::HardwareFaultSide SideForText(const std::string& text)
 {
     const bool has_left = text.find("left") != std::string::npos ||
@@ -721,29 +712,28 @@ std::optional<HealthFault> HealthMonitor::EvaluateHealth() const
         }
         if (!hmi_health.input_active)
         {
-            std::string detail =
-                "Input HMI port inactive for more than " + std::to_string(options_.hmi_active_timeout_ms) + "ms";
-            if (hmi_health.input_last_rx_age_ms > 0)
+            const std::string inactive_ports = JoinStrings(hmi_health.inactive_ports, ", ");
+            std::string detail = "Input HMI port inactive for more than " +
+                                 std::to_string(options_.hmi_active_timeout_ms) + "ms";
+            if (!inactive_ports.empty())
             {
-                detail += " (input_age_ms=" + std::to_string(hmi_health.input_last_rx_age_ms) + ")";
+                detail += ": " + inactive_ports;
             }
             return HealthFault{
                 RuntimeLedState::Error2,
-                SideForText(AppendHmiPortActivity(detail, hmi_health.port_activity)),
+                SideForText(inactive_ports),
                 "hmi_input_inactive",
-                AppendHmiPortActivity(std::move(detail), hmi_health.port_activity),
+                std::move(detail),
             };
         }
         if (!hmi_health.inactive_ports.empty())
         {
-            const std::vector<std::string>& inactive_detail_source =
-                hmi_health.inactive_port_details.empty() ? hmi_health.inactive_ports : hmi_health.inactive_port_details;
+            const std::string inactive_ports = JoinStrings(hmi_health.inactive_ports, ", ");
             return HealthFault{
                 RuntimeLedState::Error2,
-                SideForText(JoinStrings(inactive_detail_source, ", ")),
+                SideForText(inactive_ports),
                 "hmi_ports_inactive",
-                AppendHmiPortActivity("HMI ports inactive: " + JoinStrings(inactive_detail_source, ", "),
-                                      hmi_health.port_activity),
+                "HMI ports inactive: " + inactive_ports,
             };
         }
     }

@@ -409,6 +409,7 @@ TEST(HealthMonitorTest, ReportsInputHmiInactive)
     const fs::path stereo_status = temp_dir / "stereo_status.json";
     std::ofstream(stereo_status) << R"({"ready":true,"service_state":"ready"})";
 
+    uint64_t input_age_ms = 3200;
     HealthMonitor monitor(
         {.disk_root = temp_dir.string(),
          .stereo_status_file = stereo_status.string(),
@@ -428,28 +429,42 @@ TEST(HealthMonitorTest, ReportsInputHmiInactive)
                  return ProcessStatus{.state = ProcessState::Running, .running = true, .pid = 7};
              },
          .get_hmi_health =
-             [](uint64_t) {
+             [&input_age_ms](uint64_t) {
                  return HmiHealthSnapshot{
                      .has_connected_device = true,
                      .input_connected = true,
                      .input_active = false,
-                     .input_last_rx_age_ms = 3200,
+                     .input_last_rx_age_ms = input_age_ms,
                      .inactive_ports = {"/dev/right_gripper"},
-                     .inactive_port_details = {"/dev/right_gripper(age_ms=3200,active=0)"},
-                     .port_activity = {"/dev/right_gripper(age_ms=3200,active=0)"},
+                     .inactive_port_details = {
+                         "/dev/right_gripper(age_ms=" + std::to_string(input_age_ms) + ",active=0)"},
+                     .port_activity = {
+                         "/dev/right_gripper(age_ms=" + std::to_string(input_age_ms) + ",active=0)"},
                  };
              }},
         &FakeNowMs);
 
     g_now_ms = 1500;
-    const auto result = monitor.Poll(HealthState{});
+    auto result = monitor.Poll(HealthState{});
     ASSERT_TRUE(result.checked);
     ASSERT_TRUE(result.fault.has_value());
+    EXPECT_TRUE(result.should_notify_fault);
     EXPECT_EQ(result.fault->key, "hmi_input_inactive");
     EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error2);
-    EXPECT_NE(result.fault->detail.find("input_age_ms=3200"), std::string::npos);
-    EXPECT_NE(result.fault->detail.find("port_activity=/dev/right_gripper(age_ms=3200,active=0)"),
-              std::string::npos);
+    EXPECT_EQ(result.fault->side, HardwareFaultSide::Right);
+    EXPECT_EQ(result.fault->detail,
+              "Input HMI port inactive for more than 2500ms: /dev/right_gripper");
+
+    const std::string first_error_key = result.state.last_error_key;
+    input_age_ms = 5200;
+    g_now_ms = 2600;
+    result = monitor.Poll(result.state);
+    ASSERT_TRUE(result.checked);
+    ASSERT_TRUE(result.fault.has_value());
+    EXPECT_FALSE(result.should_notify_fault);
+    EXPECT_EQ(result.state.last_error_key, first_error_key);
+    EXPECT_EQ(result.fault->detail,
+              "Input HMI port inactive for more than 2500ms: /dev/right_gripper");
 
     fs::remove_all(temp_dir);
 }
@@ -505,6 +520,8 @@ TEST(HealthMonitorTest, ReportsInactiveAuxiliaryHmiPorts)
     const fs::path stereo_status = temp_dir / "stereo_status.json";
     std::ofstream(stereo_status) << R"({"ready":true,"service_state":"ready"})";
 
+    uint64_t right_age_ms = 15;
+    uint64_t left_age_ms = 2875;
     HealthMonitor monitor(
         {.disk_root = temp_dir.string(),
          .stereo_status_file = stereo_status.string(),
@@ -524,30 +541,41 @@ TEST(HealthMonitorTest, ReportsInactiveAuxiliaryHmiPorts)
                  return ProcessStatus{.state = ProcessState::Running, .running = true, .pid = 7};
              },
          .get_hmi_health =
-             [](uint64_t) {
+             [&right_age_ms, &left_age_ms](uint64_t) {
                  return HmiHealthSnapshot{
                      .has_connected_device = true,
                      .input_connected = true,
                      .input_active = true,
                      .inactive_ports = {"/dev/left_gripper"},
-                     .inactive_port_details = {"/dev/left_gripper(age_ms=2875,active=0)"},
-                     .port_activity = {"/dev/right_gripper(age_ms=15,active=1)",
-                                       "/dev/left_gripper(age_ms=2875,active=0)"},
+                     .inactive_port_details = {
+                         "/dev/left_gripper(age_ms=" + std::to_string(left_age_ms) + ",active=0)"},
+                     .port_activity = {
+                         "/dev/right_gripper(age_ms=" + std::to_string(right_age_ms) + ",active=1)",
+                         "/dev/left_gripper(age_ms=" + std::to_string(left_age_ms) + ",active=0)"},
                  };
              }},
         &FakeNowMs);
 
     g_now_ms = 1500;
-    const auto result = monitor.Poll(HealthState{});
+    auto result = monitor.Poll(HealthState{});
     ASSERT_TRUE(result.checked);
     ASSERT_TRUE(result.fault.has_value());
+    EXPECT_TRUE(result.should_notify_fault);
     EXPECT_EQ(result.fault->key, "hmi_ports_inactive");
     EXPECT_EQ(result.fault->led_state, RuntimeLedState::Error2);
     EXPECT_EQ(result.fault->side, HardwareFaultSide::Left);
-    EXPECT_NE(result.fault->detail.find("/dev/left_gripper(age_ms=2875,active=0)"), std::string::npos);
-    EXPECT_NE(result.fault->detail.find("port_activity=/dev/right_gripper(age_ms=15,active=1), "
-                                        "/dev/left_gripper(age_ms=2875,active=0)"),
-              std::string::npos);
+    EXPECT_EQ(result.fault->detail, "HMI ports inactive: /dev/left_gripper");
+
+    const std::string first_error_key = result.state.last_error_key;
+    right_age_ms = 30;
+    left_age_ms = 4000;
+    g_now_ms = 2600;
+    result = monitor.Poll(result.state);
+    ASSERT_TRUE(result.checked);
+    ASSERT_TRUE(result.fault.has_value());
+    EXPECT_FALSE(result.should_notify_fault);
+    EXPECT_EQ(result.state.last_error_key, first_error_key);
+    EXPECT_EQ(result.fault->detail, "HMI ports inactive: /dev/left_gripper");
 
     fs::remove_all(temp_dir);
 }
