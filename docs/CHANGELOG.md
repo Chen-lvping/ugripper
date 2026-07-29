@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- 修复 Ego 解绑后 `ego_binding_status.json` 仍残留 `connected` 的问题：解绑现在不依赖 ADB 在线，Ego 已断连或拔出时仍可解除绑定、清除 `ERROR_5` 并发布不带旧 serial 的 `unbound`；服务启动发现无有效 binding 时也会归一化旧版遗留状态，probe 发布结果前重新核对当前 binding，避免解绑或重新绑定期间的在途旧探测回写过期连接状态。
 - 修正 episode 深度校验器的首帧时间口径：统一表现在覆盖本机 MCAP 中实际发现的全部 sensor topic，并用 `ego/metadata.json` 的 `head_pose_details.start_offset_us` 为 Ego 单调时钟 topic 计算固定 Unix offset；已使用 Unix `publishTime` 的 Ego metainfo 保持原值。主摄专项解码扫描改为 passthrough 并显式使用微秒输出 time base，避免 FFmpeg 帧率量化产生伪 non-monotonic DTS，同时修正左右主摄文件归类。
 - 主相机 MKV 的 PTS 改为逐帧使用 V4L2 buffer 实际时间相对首个写入帧生成，`metadata.video_details[].start_offset_us + packet_pts_us` 现在对应各帧 V4L2 Unix 时间；丢帧和采集卡顿产生的真实时间洞不再被名义 `60fps` 帧序号压平，重复或回退时间戳仅做最小单调钳制并记录诊断。Stereo 逐帧同步继续以 Fays MCAP camera `publishTime` 为唯一真值，不依赖 Stereo MKV PTS。
 - 修复 HMI 端口保持连接但长期无响应时 `age_ms` 持续增长导致健康错误重复上报、USB restore 的 `6s` 稳定窗口反复重置的问题；`hmi_input_inactive` / `hmi_ports_inactive` 的故障证据现在只保留稳定的超时阈值和端口路径。

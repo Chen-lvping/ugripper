@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import fcntl
 import json
 import os
 import shutil
@@ -7,6 +8,7 @@ import struct
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -114,6 +116,18 @@ def write_json_atomic(path: Path, payload: dict) -> None:
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     tmp.replace(path)
+
+
+@contextmanager
+def binding_state_lock(binding_file: Path):
+    binding_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = binding_file.with_suffix(".lock")
+    with lock_file.open("a", encoding="utf-8") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def compact_status(payload: dict) -> dict:
@@ -310,9 +324,10 @@ def run_bind(args: argparse.Namespace) -> int:
             "bound_at_ms": now_ms(),
             "device": selected_detail,
         }
-        write_json_atomic(args.binding_file, binding)
-        status.update({"status": "bound", "serial": selected.serial, "updated_at_ms": now_ms()})
-        write_status(args.binding_status_file, status)
+        with binding_state_lock(args.binding_file):
+            write_json_atomic(args.binding_file, binding)
+            status.update({"status": "bound", "serial": selected.serial, "updated_at_ms": now_ms()})
+            write_status(args.binding_status_file, status)
         return 0
     except Exception as exc:
         status["error"] = str(exc)
@@ -321,14 +336,49 @@ def run_bind(args: argparse.Namespace) -> int:
         return 1
 
 
+def run_unbind(args: argparse.Namespace) -> int:
+    status = {"status": "unbound", "updated_at_ms": now_ms()}
+    try:
+        with binding_state_lock(args.binding_file):
+            binding = read_status(args.binding_file)
+            try:
+                args.binding_file.unlink()
+            except FileNotFoundError:
+                pass
+            try:
+                status["updated_at_ms"] = now_ms()
+                write_status(args.binding_status_file, status)
+            except Exception:
+                if binding:
+                    write_json_atomic(args.binding_file, binding)
+                raise
+        return 0
+    except Exception:
+        return 1
+
+
+def publish_probe_status(
+    args: argparse.Namespace, expected_serial: str, status: dict
+) -> bool:
+    with binding_state_lock(args.binding_file):
+        current_serial = str(read_status(args.binding_file).get("serial") or "")
+        if current_serial != expected_serial:
+            return False
+        if not current_serial:
+            status = {"status": "unbound", "updated_at_ms": now_ms()}
+        write_status(args.binding_status_file, status)
+        return bool(current_serial)
+
+
 def run_probe(args: argparse.Namespace) -> int:
     status = {"status": "disconnected", "updated_at_ms": now_ms()}
+    serial = ""
     try:
-        binding = read_status(args.binding_file)
-        serial = str(binding.get("serial") or "")
+        with binding_state_lock(args.binding_file):
+            binding = read_status(args.binding_file)
+            serial = str(binding.get("serial") or "")
         if not serial:
-            status["error"] = "ego binding serial is missing"
-            write_status(args.binding_status_file, status)
+            publish_probe_status(args, serial, status)
             return 1
         connected = serial in list_devices(Adb())
         status.update(
@@ -340,12 +390,15 @@ def run_probe(args: argparse.Namespace) -> int:
         )
         if not connected:
             status["error"] = "bound ego is not present in adb devices"
-        write_status(args.binding_status_file, status)
-        return 0 if connected else 1
+        published = publish_probe_status(args, serial, status)
+        return 0 if published and connected else 1
     except Exception as exc:
         status["error"] = str(exc)
         status["updated_at_ms"] = now_ms()
-        write_status(args.binding_status_file, status)
+        try:
+            publish_probe_status(args, serial, status)
+        except Exception:
+            pass
         return 1
 
 
@@ -1134,7 +1187,7 @@ def run_stop(args: argparse.Namespace) -> int:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=("start", "stop", "cleanup", "bind", "probe"))
+    parser.add_argument("command", choices=("start", "stop", "cleanup", "bind", "unbind", "probe"))
     parser.add_argument("--episode-dir", type=Path)
     parser.add_argument("--status-file", type=Path)
     parser.add_argument("--binding-file", type=Path)
@@ -1149,10 +1202,14 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    if args.command in ("bind", "probe"):
+    if args.command in ("bind", "unbind", "probe"):
         if args.binding_file is None or args.binding_status_file is None:
             raise SystemExit("--binding-file and --binding-status-file are required")
-        return run_bind(args) if args.command == "bind" else run_probe(args)
+        if args.command == "bind":
+            return run_bind(args)
+        if args.command == "unbind":
+            return run_unbind(args)
+        return run_probe(args)
     if args.episode_dir is None or args.status_file is None:
         raise SystemExit("--episode-dir and --status-file are required")
     args.episode_dir.mkdir(parents=True, exist_ok=True)

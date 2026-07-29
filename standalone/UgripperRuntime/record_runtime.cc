@@ -5070,6 +5070,11 @@ bool RecordRuntime::loadEgoBinding()
     if (!loadJsonFile(options_.egoBindingFile, &binding, &errorMessage) || !binding.is_object())
     {
         egoBoundConnected_ = true;
+        if (!clearEgoBindingState())
+        {
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                << "failed to publish unbound ego status while loading binding" << std::endl).str());
+        }
         return false;
     }
     egoBoundSerial_ = binding.value("serial", std::string());
@@ -5079,6 +5084,11 @@ bool RecordRuntime::loadEgoBinding()
         DM_LOG_WARN("{}", (::DA::utils::LogString()
             << "ignore invalid ego binding without serial: " << options_.egoBindingFile
             << std::endl).str());
+        if (!clearEgoBindingState())
+        {
+            DM_LOG_WARN("{}", (::DA::utils::LogString()
+                << "failed to clear invalid ego binding state" << std::endl).str());
+        }
         return false;
     }
     egoBoundConnected_ = false;
@@ -5087,6 +5097,19 @@ bool RecordRuntime::loadEgoBinding()
     DM_LOG_INFO("{}", (::DA::utils::LogString()
         << "loaded ego binding serial=" << egoBoundSerial_ << std::endl).str());
     return true;
+}
+
+bool RecordRuntime::clearEgoBindingState()
+{
+    if (!fs::exists(options_.egoRecordingScript))
+    {
+        return false;
+    }
+    return runCommandSync(egoBindingWorkerArgs(
+        options_.egoRecordingScript,
+        "unbind",
+        options_.egoBindingFile,
+        options_.egoBindingStatusFile));
 }
 
 bool RecordRuntime::isEgoRequired() const
@@ -5112,12 +5135,10 @@ void RecordRuntime::handleEgoBindingToggle()
 
     if (isEgoRequired())
     {
-        std::error_code error;
-        fs::remove(options_.egoBindingFile, error);
-        if (error)
+        if (!clearEgoBindingState())
         {
             DM_LOG_ERROR("{}", (::DA::utils::LogString()
-                << "failed to remove ego binding file: " << error.message() << std::endl).str());
+                << "failed to remove ego binding and publish unbound status" << std::endl).str());
             playHmiFeedback(ugripper::runtime::HmiFeedbackEvent::EgoBindingFailed);
             return;
         }

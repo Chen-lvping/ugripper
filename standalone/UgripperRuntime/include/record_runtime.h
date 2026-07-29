@@ -400,6 +400,7 @@ private:
     bool waitForEgoFinalize(const std::string &episodeDir, int timeoutMs, std::string *errorMessage);
     bool cleanupEgoRemote(const std::string &episodeDir, std::string *errorMessage);
     bool loadEgoBinding();
+    bool clearEgoBindingState();
     bool isEgoRequired() const;
     void handleEgoBindingToggle();
     void maintainEgoBindingAction();

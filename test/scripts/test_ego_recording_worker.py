@@ -119,6 +119,132 @@ class EgoRecordingWorkerTest(unittest.TestCase):
             status = json.loads(args.binding_status_file.read_text(encoding="utf-8"))
             self.assertEqual(status["status"], "disconnected")
 
+    def test_unbind_disconnected_ego_without_accessing_adb(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            binding_file = root / "binding.json"
+            status_file = root / "status.json"
+            binding_file.write_text('{"serial":"ego-001"}\n', encoding="utf-8")
+            status_file.write_text(
+                '{"serial":"ego-001","status":"disconnected"}\n', encoding="utf-8"
+            )
+            args = argparse.Namespace(
+                binding_file=binding_file,
+                binding_status_file=status_file,
+            )
+
+            with mock.patch.object(WORKER, "Adb", side_effect=AssertionError("ADB must not be used")):
+                self.assertEqual(WORKER.run_unbind(args), 0)
+            self.assertFalse(binding_file.exists())
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "unbound")
+            self.assertNotIn("serial", status)
+
+            self.assertEqual(WORKER.run_unbind(args), 0)
+            self.assertEqual(
+                json.loads(status_file.read_text(encoding="utf-8"))["status"],
+                "unbound",
+            )
+
+    def test_stale_probe_cannot_restore_connected_status_after_unbind(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            binding_file = root / "binding.json"
+            status_file = root / "status.json"
+            binding_file.write_text('{"serial":"ego-001"}\n', encoding="utf-8")
+            args = argparse.Namespace(
+                binding_file=binding_file,
+                binding_status_file=status_file,
+            )
+
+            def unbind_while_probe_is_running(_adb):
+                self.assertEqual(WORKER.run_unbind(args), 0)
+                return ["ego-001"]
+
+            with mock.patch.object(WORKER, "Adb", return_value=object()), mock.patch.object(
+                WORKER, "list_devices", side_effect=unbind_while_probe_is_running
+            ):
+                self.assertEqual(WORKER.run_probe(args), 1)
+
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "unbound")
+            self.assertNotIn("serial", status)
+
+    def test_unbind_restores_binding_when_status_publish_fails(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            binding_file = root / "binding.json"
+            status_file = root / "status.json"
+            binding_file.write_text('{"serial":"ego-001"}\n', encoding="utf-8")
+            status_file.write_text(
+                '{"serial":"ego-001","status":"connected"}\n', encoding="utf-8"
+            )
+            args = argparse.Namespace(
+                binding_file=binding_file,
+                binding_status_file=status_file,
+            )
+
+            with mock.patch.object(WORKER, "write_status", side_effect=OSError("write failed")):
+                self.assertEqual(WORKER.run_unbind(args), 1)
+
+            binding = json.loads(binding_file.read_text(encoding="utf-8"))
+            self.assertEqual(binding["serial"], "ego-001")
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "connected")
+
+    def test_stale_probe_cannot_overwrite_a_new_binding(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            binding_file = root / "binding.json"
+            status_file = root / "status.json"
+            binding_file.write_text('{"serial":"ego-001"}\n', encoding="utf-8")
+            args = argparse.Namespace(
+                binding_file=binding_file,
+                binding_status_file=status_file,
+            )
+
+            def replace_binding_while_probe_is_running(_adb):
+                with WORKER.binding_state_lock(binding_file):
+                    WORKER.write_json_atomic(binding_file, {"serial": "ego-002"})
+                    WORKER.write_status(
+                        status_file,
+                        {"status": "bound", "serial": "ego-002", "updated_at_ms": WORKER.now_ms()},
+                    )
+                return ["ego-001"]
+
+            with mock.patch.object(WORKER, "Adb", return_value=object()), mock.patch.object(
+                WORKER, "list_devices", side_effect=replace_binding_while_probe_is_running
+            ):
+                self.assertEqual(WORKER.run_probe(args), 1)
+
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "bound")
+            self.assertEqual(status["serial"], "ego-002")
+
+    def test_failed_stale_probe_cannot_overwrite_unbound_status(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            binding_file = root / "binding.json"
+            status_file = root / "status.json"
+            binding_file.write_text('{"serial":"ego-001"}\n', encoding="utf-8")
+            args = argparse.Namespace(
+                binding_file=binding_file,
+                binding_status_file=status_file,
+            )
+
+            def unbind_then_fail(_adb):
+                self.assertEqual(WORKER.run_unbind(args), 0)
+                raise RuntimeError("adb devices failed")
+
+            with mock.patch.object(WORKER, "Adb", return_value=object()), mock.patch.object(
+                WORKER, "list_devices", side_effect=unbind_then_fail
+            ):
+                self.assertEqual(WORKER.run_probe(args), 1)
+
+            status = json.loads(status_file.read_text(encoding="utf-8"))
+            self.assertEqual(status["status"], "unbound")
+            self.assertNotIn("serial", status)
+
     def test_start_uses_non_terminal_status_while_preparing_bound_ego(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
