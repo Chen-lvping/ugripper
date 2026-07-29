@@ -1,0 +1,4 @@
+interface:
+  display_name: "Version Test Focus"
+  short_description: "比较两个 Git 版本并生成可追溯的测试功能关注摘要文档"
+  default_prompt: "使用 $summarize-version-test-focus 比较两个 Git 版本引用，生成简洁、可追溯的测试关注 Markdown。"
