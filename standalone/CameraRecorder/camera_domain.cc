@@ -1,5 +1,6 @@
 #include "camera_recorder/camera_command_builder.h"
 #include "camera_recorder/camera_config.h"
+#include "camera_recorder/camera_timing.h"
 #include "camera_recorder/camera_registry.h"
 #include "camera_recorder/camera_types.h"
 #include "camera_recorder/stereo_control_json.h"
@@ -20,6 +21,25 @@
 #include <yaml-cpp/yaml.h>
 
 namespace ugripper::camera {
+
+MainCameraPtsResult MainCameraPtsFromV4l2TimeUs(
+    int64_t first_frame_system_time_us,
+    int64_t current_frame_system_time_us,
+    std::optional<int64_t> last_frame_pts_us)
+{
+    MainCameraPtsResult result;
+    result.raw_pts_us = current_frame_system_time_us - first_frame_system_time_us;
+    result.pts_us = result.raw_pts_us;
+
+    if (last_frame_pts_us.has_value() && result.pts_us <= *last_frame_pts_us)
+    {
+        result.timestamp_rollback = result.pts_us < *last_frame_pts_us;
+        result.pts_us = *last_frame_pts_us + 1;
+        result.adjustment_us = result.pts_us - result.raw_pts_us;
+        result.clamped = true;
+    }
+    return result;
+}
 
 std::string ModeName(CameraRecordMode mode)
 {

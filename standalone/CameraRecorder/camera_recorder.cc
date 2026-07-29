@@ -2,6 +2,7 @@
 #include "camera_recorder/camera_command_builder.h"
 #include "camera_recorder/camera_config.h"
 #include "camera_recorder/camera_registry.h"
+#include "camera_recorder/camera_timing.h"
 #include "camera_recorder/stereo_control_json.h"
 #include "utils/logger.h"
 
@@ -771,13 +772,14 @@ int64_t TimevalToUs(const timeval& value) {
            static_cast<int64_t>(value.tv_usec);
 }
 
-std::optional<int64_t> V4l2BufferSystemTimeUs(const v4l2_buffer& buffer) {
+std::optional<int64_t> V4l2BufferSystemTimeUs(const v4l2_buffer& buffer,
+                                               int64_t boot_time_offset_us) {
     const int64_t raw_us = TimevalToUs(buffer.timestamp);
     if (raw_us <= 0) {
         return std::nullopt;
     }
     if ((buffer.flags & V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC) != 0) {
-        return BootTimeOffsetUs() + raw_us;
+        return boot_time_offset_us + raw_us;
     }
     return raw_us;
 }
@@ -1304,6 +1306,7 @@ public:
 
         started_ = true;
         running_ = true;
+        boot_time_offset_us_ = BootTimeOffsetUs();
         started_system_time_us_ = CurrentSystemTimeUs();
         stop_requested_.store(false, std::memory_order_release);
         capture_thread_done_.store(false, std::memory_order_release);
@@ -1714,7 +1717,8 @@ private:
                 continue;
             }
 
-            const int64_t system_time_us = V4l2BufferSystemTimeUs(buffer).value_or(CurrentSystemTimeUs());
+            const int64_t system_time_us =
+                V4l2BufferSystemTimeUs(buffer, boot_time_offset_us_).value_or(CurrentSystemTimeUs());
             const int64_t pts_us = UpdateFrameTimingFromCapture(system_time_us);
 
             GstBuffer* gst_buffer = gst_buffer_new_allocate(nullptr, buffer.bytesused, nullptr);
@@ -1778,7 +1782,10 @@ private:
                            << " exit_code=" << exit_code_.value_or(-1)
                            << " frame_count=" << frame_count_
                            << " last_pts_us=" << LastFramePtsUs().value_or(-1)
-                           << " last_system_time_us=" << LastFrameSystemTimeUs().value_or(-1)).str());
+                           << " last_system_time_us=" << LastFrameSystemTimeUs().value_or(-1)
+                           << " timestamp_clamp_count=" << timestamp_clamp_count_
+                           << " timestamp_rollback_count=" << timestamp_rollback_count_
+                           << " max_timestamp_adjustment_us=" << max_timestamp_adjustment_us_).str());
     }
 
     bool StartupGateAllowsBuffer(const void* data, uint32_t bytesused) {
@@ -1874,7 +1881,29 @@ private:
             return 0;
         }
 
-        const int64_t next_pts_us = static_cast<int64_t>(frame_count_) * NominalFrameDurationUs();
+        const auto timing = ugripper::camera::MainCameraPtsFromV4l2TimeUs(
+            *first_frame_system_time_us_, system_time_us, last_frame_pts_us_);
+        const int64_t next_pts_us = timing.pts_us;
+        if (timing.clamped) {
+            ++timestamp_clamp_count_;
+            if (timing.timestamp_rollback) {
+                ++timestamp_rollback_count_;
+            }
+            max_timestamp_adjustment_us_ =
+                std::max(max_timestamp_adjustment_us_, timing.adjustment_us);
+            if (timestamp_clamp_count_ == 1 ||
+                (timestamp_clamp_count_ & (timestamp_clamp_count_ - 1)) == 0) {
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                                     << "[camera_recorder][main_timestamp_clamp]"
+                                     << " name=" << config_.name
+                                     << " system_time_us=" << system_time_us
+                                     << " raw_pts_us=" << timing.raw_pts_us
+                                     << " assigned_pts_us=" << timing.pts_us
+                                     << " adjustment_us=" << timing.adjustment_us
+                                     << " clamp_count=" << timestamp_clamp_count_
+                                     << " rollback_count=" << timestamp_rollback_count_).str());
+            }
+        }
         last_frame_system_time_us_ = system_time_us;
         last_frame_pts_us_ = next_pts_us;
         ++frame_count_;
@@ -2207,6 +2236,7 @@ private:
     std::string last_error_;
     std::chrono::steady_clock::time_point last_queue_diag_log_{};
     int64_t started_system_time_us_ = 0;
+    int64_t boot_time_offset_us_ = 0;
     mutable std::mutex timing_mutex_;
     std::optional<int64_t> first_frame_pts_us_;
     std::optional<int64_t> first_frame_system_time_us_;
@@ -2214,6 +2244,9 @@ private:
     std::optional<int64_t> last_frame_system_time_us_;
     std::optional<int64_t> record_time_offset_us_;
     uint64_t frame_count_ = 0;
+    uint64_t timestamp_clamp_count_ = 0;
+    uint64_t timestamp_rollback_count_ = 0;
+    int64_t max_timestamp_adjustment_us_ = 0;
     bool startup_gate_open_ = false;
     int startup_gate_checked_frames_ = 0;
     int startup_gate_dropped_frames_ = 0;
@@ -2261,6 +2294,7 @@ public:
 
         started_ = true;
         running_ = true;
+        boot_time_offset_us_ = BootTimeOffsetUs();
         started_system_time_us_ = CurrentSystemTimeUs();
         stop_requested_.store(false, std::memory_order_release);
         capture_thread_ = std::thread([this]() { CaptureLoop(); });
@@ -2545,7 +2579,7 @@ private:
             }
 
             const int64_t system_time_us =
-                V4l2BufferSystemTimeUs(buffer).value_or(CurrentSystemTimeUs());
+                V4l2BufferSystemTimeUs(buffer, boot_time_offset_us_).value_or(CurrentSystemTimeUs());
             const int64_t pts_us = UpdateFrameTimingFromCapture(system_time_us);
 
             GstBuffer* gst_buffer = gst_buffer_new_allocate(nullptr, buffer.bytesused, nullptr);
@@ -2604,7 +2638,29 @@ private:
             return 0;
         }
 
-        const int64_t next_pts_us = frame_count_ * NominalFrameDurationUs();
+        const auto timing = ugripper::camera::MainCameraPtsFromV4l2TimeUs(
+            *first_frame_system_time_us_, system_time_us, last_frame_pts_us_);
+        const int64_t next_pts_us = timing.pts_us;
+        if (timing.clamped) {
+            ++timestamp_clamp_count_;
+            if (timing.timestamp_rollback) {
+                ++timestamp_rollback_count_;
+            }
+            max_timestamp_adjustment_us_ =
+                std::max(max_timestamp_adjustment_us_, timing.adjustment_us);
+            if (timestamp_clamp_count_ == 1 ||
+                (timestamp_clamp_count_ & (timestamp_clamp_count_ - 1)) == 0) {
+                DM_LOG_WARN("{}", (::DA::utils::LogString()
+                                     << "[camera_recorder][main_timestamp_clamp]"
+                                     << " name=" << config_.name
+                                     << " system_time_us=" << system_time_us
+                                     << " raw_pts_us=" << timing.raw_pts_us
+                                     << " assigned_pts_us=" << timing.pts_us
+                                     << " adjustment_us=" << timing.adjustment_us
+                                     << " clamp_count=" << timestamp_clamp_count_
+                                     << " rollback_count=" << timestamp_rollback_count_).str());
+            }
+        }
         last_frame_system_time_us_ = system_time_us;
         last_frame_pts_us_ = next_pts_us;
         ++frame_count_;
@@ -2730,6 +2786,7 @@ private:
     GstBus* bus_ = nullptr;
     std::string last_error_;
     int64_t started_system_time_us_ = 0;
+    int64_t boot_time_offset_us_ = 0;
     mutable std::mutex timing_mutex_;
     std::optional<int64_t> first_frame_pts_us_;
     std::optional<int64_t> first_frame_system_time_us_;
@@ -2737,6 +2794,9 @@ private:
     std::optional<int64_t> last_frame_system_time_us_;
     std::optional<int64_t> record_time_offset_us_;
     uint64_t frame_count_ = 0;
+    uint64_t timestamp_clamp_count_ = 0;
+    uint64_t timestamp_rollback_count_ = 0;
+    int64_t max_timestamp_adjustment_us_ = 0;
 };
 #endif
 

@@ -23,6 +23,10 @@ add_host_only_camera_gtest(test_camera_command_builder
     test_camera_command_builder.cc
 )
 
+add_host_only_camera_gtest(test_camera_timing
+    test_camera_timing.cc
+)
+
 add_host_only_camera_gtest(test_stereo_control_json
     test_stereo_control_json.cc
 )

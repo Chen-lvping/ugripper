@@ -10722,7 +10722,6 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
     json infoRoot = json::object();
     loadJsonFile(episodeTimingPath(episodePath).string(), &infoRoot, &ignoredError);
     std::map<std::string, int64_t> offsetByCamera;
-    int64_t minOffsetUs = std::numeric_limits<int64_t>::max();
     for (const auto &artifact : metadataVideoArtifacts(chestCameraEnabled_, stereoEnabled_))
     {
         const std::string key = std::string(artifact.cameraName) + "_record_time_offset_us";
@@ -10732,13 +10731,8 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
             if (offsetUs > 0)
             {
                 offsetByCamera[artifact.cameraName] = offsetUs;
-                minOffsetUs = std::min(minOffsetUs, offsetUs);
             }
         }
-    }
-    if (minOffsetUs == std::numeric_limits<int64_t>::max())
-    {
-        minOffsetUs = 0;
     }
 
     if (qualityOk)
@@ -10805,9 +10799,7 @@ bool RecordRuntime::EpisodeManager::writeFinalMetadata(const std::string &episod
 
         const auto offsetIt = offsetByCamera.find(artifact.cameraName);
         const int64_t startOffsetUs =
-            offsetIt != offsetByCamera.end() && minOffsetUs > 0
-                ? std::max<int64_t>(0, offsetIt->second - minOffsetUs)
-                : 0;
+            offsetIt != offsetByCamera.end() ? offsetIt->second : 0;
 
         ordered_json detail = ordered_json::object();
         detail["name"] = artifact.fileName;
